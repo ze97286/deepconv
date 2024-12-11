@@ -151,7 +151,7 @@ class DeconvolutionModel(nn.Module):
         concentration_confidence = torch.sigmoid(5 * estimated_concentrations)
         final_predictions = predictions * concentration_confidence
         
-        return final_predictions, estimated_concentrations, marker_weights
+        return final_predictions, estimated_concentrations, marker_weights  
 
 class ConcentrationAwareLoss(nn.Module):
     def __init__(self, distinguishability_df, num_markers, num_cell_types, concentration_weight=0.4, distinguishability_weight=0.1):
