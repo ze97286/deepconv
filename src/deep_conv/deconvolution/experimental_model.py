@@ -293,29 +293,38 @@ def train_model(
         all_predictions = []
         all_targets = []
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]"):
-            start = time.time()
+            t_start = time.time()
             X, coverage, y = (
                 batch["X"].to(device),
                 batch["coverage"].to(device),
                 batch["y"].to(device),
             )
+            t1 = time.time()
+            print(f"Data loading: {t1 - t_start:.3f}s")
             optimizer.zero_grad()
-            print("forward pass")
+            t2 = time.time()
+            print(f"Optimizer zero_grad: {t2 - t1:.3f}s")
             predictions, estimated_concentrations, marker_weights = model(X, coverage)
-            # Store predictions and targets for visualization
+            t3 = time.time()
+            print(f"Forward pass: {t3 - t2:.3f}s")
+             # Store predictions and targets for visualization
             all_predictions.append(predictions.detach())
             all_targets.append(y.detach())
-            print("calculating loss")
             loss = criterion(predictions, estimated_concentrations, marker_weights, y)
-            print("calculated loss")
+            t4 = time.time()
+            print(f"Loss computation: {t4 - t3:.3f}s")
             loss.backward()
-            print("finished back pass")
-            # Gradient clipping to prevent exploding gradients
+            t5 = time.time()
+            print(f"Backward pass: {t5 - t4:.3f}s")
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            t6 = time.time()
+            print(f"Gradient clipping: {t6 - t5:.3f}s")
             optimizer.step()
-            print("finished optimisation step")
+            t7 = time.time()
+            print(f"Optimizer step: {t7 - t6:.3f}s")
             train_loss += loss.item()
-            print("batch took", time.time()-start)
+            print(f"Total batch time: {t7 - t_start:.3f}s")
+
         train_loss /= len(train_loader)
         # Validation phase
         model.eval()
