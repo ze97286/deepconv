@@ -35,6 +35,12 @@ class ConcentrationAwareLoss(nn.Module):
         self.concentration_weight = concentration_weight
         self.distinguishability_weight = distinguishability_weight
         
+        # Get total number of markers for consistent tensor sizes
+        self.num_markers = max(
+            max(eval(row['top_markers']) if isinstance(row['top_markers'], str) else row['top_markers'])
+            for _, row in distinguishability_df.iterrows()
+        ) + 1
+        
         # Pre-compute lookup tables
         self.concentrations = torch.tensor(sorted(distinguishability_df['concentration'].unique()))
         self.expected_weights = {}
@@ -44,11 +50,11 @@ class ConcentrationAwareLoss(nn.Module):
             for _, row in cell_data.iterrows():
                 markers = eval(row['top_markers']) if isinstance(row['top_markers'], str) else row['top_markers']
                 n_distinguishable = row['n_distinguishable']
-                weights = torch.zeros(max(markers) + 1 if markers else 1)
+                weights = torch.zeros(self.num_markers) 
                 if n_distinguishable > 0:
                     weights[markers] = 1.0
                 self.expected_weights[cell_type][row['concentration']] = weights
-    
+
     def _calculate_distinguishability_loss(self, marker_weights, true_concentrations):
         batch_size = true_concentrations.shape[0]
         device = marker_weights.device
@@ -98,7 +104,7 @@ class ConcentrationAwareLoss(nn.Module):
                 self.concentration_weight * concentration_loss + 
                 self.distinguishability_weight * distinguishability_loss)
     
-    
+
 class DeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, distinguishability_df):
         super().__init__()
