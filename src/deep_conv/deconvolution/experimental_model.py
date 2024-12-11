@@ -170,24 +170,51 @@ class DeconvolutionModel(nn.Module):
         return weights
     
     def forward(self, X, coverage):
+        start = time.time()
         batch_size = X.shape[0]
+        
+        # Handle missing values
+        t1 = time.time()
         valid_mask = ~torch.isnan(X)
         X = torch.where(valid_mask, X, torch.zeros_like(X))
         coverage = coverage * valid_mask.float()
+        print(f"Missing values handling: {time.time() - t1:.3f}s")
+
+        # First estimate concentrations
+        t1 = time.time()
         combined_input = torch.cat([X, coverage], dim=1)
         estimated_concentrations = torch.sigmoid(self.concentration_estimator(combined_input))
+        print(f"Concentration estimation: {time.time() - t1:.3f}s")
+        
+        # Get marker importance
+        t1 = time.time()
         learned_weights = self.marker_importance(combined_input)
         learned_weights = learned_weights.view(batch_size, self.num_cell_types, self.num_markers)
         learned_weights = torch.sigmoid(learned_weights)
+        print(f"Marker importance: {time.time() - t1:.3f}s")
+        
+        # Get distinguishability weights
+        t1 = time.time()
         distinguishability_weights = self.get_marker_weights(estimated_concentrations.detach())
         distinguishability_weights = distinguishability_weights.to(learned_weights.device)
+        print(f"Distinguishability weights: {time.time() - t1:.3f}s")
+        
+        # Apply weights
+        t1 = time.time()
         marker_weights = learned_weights * distinguishability_weights
         weighted_input = X.unsqueeze(1) * marker_weights
         weighted_input = weighted_input.view(batch_size, -1)
+        print(f"Weight application: {time.time() - t1:.3f}s")
+        
+        # Main pathway
+        t1 = time.time()
         features = self.features(torch.cat([weighted_input, coverage], dim=1))
         logits = self.output(features)
         predictions = self.softmax(logits)
         final_predictions = (predictions + estimated_concentrations) / 2
+        print(f"Main pathway: {time.time() - t1:.3f}s")
+        
+        print(f"Total forward pass: {time.time() - start:.3f}s")
         return final_predictions, estimated_concentrations, marker_weights
 
 
