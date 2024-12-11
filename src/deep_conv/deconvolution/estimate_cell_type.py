@@ -7,9 +7,9 @@ from deep_conv.deconvolution.preprocess_pats import pats_to_homog
 # python -m deep_conv.deconvolution.estimate_cell_type \
 # --model_path /users/zetzioni/sharedscratch/deconvolution_model.pt \
 # --cell_type CD4-T-cells \
-# --atlas_path /mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/Atlas_blood+gi+tum.U100.l4.bed \
+# --atlas_path /mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/Atlas_dmr_by_read.blood+gi+tum.U100.l4.bed \
 # --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools \
-# --pats_path /mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/Benchmark/pat/blood+gi+tum.U100/Song/mixed/CD4 \
+# --pats_path /mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/Benchmark/pat/dmr_by_read.blood+gi+tum.U100/Song/mixed/CD4 \
 # --output_path /users/zetzioni/sharedscratch/cd4 
 def main():
     parser = argparse.ArgumentParser(description="DeepConv")
@@ -21,7 +21,7 @@ def main():
     parser.add_argument("--wgbs_tools_exec_path",help="path to wgbs_tools executable",required=True)
     inputs = parser.parse_args()    
 
-    sf, counts = pats_to_homog(
+    marker_read_proportions, counts = pats_to_homog(
             atlas_path=inputs.atlas_path,
             pats_path=inputs.pats_path,
             wgbs_tools_exec_path=inputs.wgbs_tools_exec_path,
@@ -29,7 +29,7 @@ def main():
 
     predict(
         model_path=inputs.model_path,
-        marker_read_proportions=sf,
+        marker_read_proportions=marker_read_proportions,
         marker_read_coverage=counts,
         cell_type=inputs.cell_type,
         atlas_path=inputs.atlas_path,
