@@ -27,74 +27,7 @@ class TissueDeconvolutionDataset(Dataset):
         return self.X.size(0)
     def __getitem__(self, idx):
         return {"X": self.X[idx], "coverage": self.coverage[idx], "y": self.y[idx]}
-
-
-class ConcentrationAwareLoss(nn.Module):
-    def __init__(self, distinguishability_df, num_markers, concentration_weight=0.3, distinguishability_weight=0.2):
-        super().__init__()
-        self.concentration_weight = concentration_weight
-        self.distinguishability_weight = distinguishability_weight
-        self.num_markers = num_markers  # Use actual number of markers from the data
-        
-        # Pre-compute lookup tables
-        self.concentrations = torch.tensor(sorted(distinguishability_df['concentration'].unique()))
-        self.expected_weights = {}
-        for cell_type in distinguishability_df['cell_type'].unique():
-            cell_data = distinguishability_df[distinguishability_df['cell_type'] == cell_type]
-            self.expected_weights[cell_type] = {}
-            for _, row in cell_data.iterrows():
-                markers = eval(row['top_markers']) if isinstance(row['top_markers'], str) else row['top_markers']
-                n_distinguishable = row['n_distinguishable']
-                weights = torch.zeros(num_markers)  # Use passed in number of markers
-                if n_distinguishable > 0 and markers:  # Check if markers exist
-                    valid_markers = [m for m in markers if m < num_markers]  # Only use valid marker indices
-                    weights[valid_markers] = 1.0
-                self.expected_weights[cell_type][row['concentration']] = weights
-
-    def _calculate_distinguishability_loss(self, marker_weights, true_concentrations):
-        batch_size = true_concentrations.shape[0]
-        device = marker_weights.device
-        
-        if self.concentrations.device != device:
-            self.concentrations = self.concentrations.to(device)
-        
-        conc_expanded = true_concentrations.unsqueeze(-1)
-        conc_diff = torch.abs(conc_expanded - self.concentrations)
-        closest_conc_idx = torch.argmin(conc_diff, dim=-1)
-        
-        loss = 0.0
-        for cell_type in range(true_concentrations.shape[1]):
-            cell_weights = marker_weights[:, cell_type]  # [batch, num_markers]
-            
-            expected_batch = []
-            for b in range(batch_size):
-                conc = self.concentrations[closest_conc_idx[b, cell_type]].item()
-                expected = self.expected_weights[cell_type][conc].to(device)
-                expected_batch.append(expected)
-            
-            expected_weights = torch.stack(expected_batch)  # [batch, num_markers]
-            
-            concs = self.concentrations[closest_conc_idx[:, cell_type]]
-            n_distinguishable = torch.tensor([
-                self.expected_weights[cell_type][c.item()].sum().item()  # Count number of ones
-                for c in concs
-            ], device=device)
-            importance_factor = torch.log1p(n_distinguishable).unsqueeze(-1)
-            
-            cell_loss = torch.mean((cell_weights - expected_weights)**2 * importance_factor)
-            loss += cell_loss
-            
-        return loss / true_concentrations.shape[1]
-
-    def forward(self, predictions, estimated_concentrations, marker_weights, true_concentrations):
-        prediction_loss = nn.MSELoss()(predictions, true_concentrations)
-        concentration_loss = nn.MSELoss()(estimated_concentrations, true_concentrations)
-        distinguishability_loss = self._calculate_distinguishability_loss(marker_weights, true_concentrations)
-        
-        return (prediction_loss + 
-                self.concentration_weight * concentration_loss + 
-                self.distinguishability_weight * distinguishability_loss)
-    
+ 
 
 class DeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, distinguishability_df):
@@ -103,117 +36,201 @@ class DeconvolutionModel(nn.Module):
         self.num_cell_types = num_cell_types
         self.distinguishability_df = distinguishability_df
         self.concentrations = sorted(distinguishability_df["concentration"].unique())
-        # These layers remain the same
-        self.concentration_estimator = nn.Sequential(
-            nn.Linear(num_markers * 2, 128), 
-            nn.LayerNorm(128),
-            nn.ReLU(),
-            nn.Dropout(0.3), 
-            nn.Linear(128, 32),
-            nn.LayerNorm(32),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(32, num_cell_types),
-        )
-        self.marker_importance = nn.Sequential(
-            nn.Linear(num_markers * 2, 128),
-            nn.LayerNorm(128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, num_markers * num_cell_types),
-        )
-        # Update features layer to accept correct input size
-        input_size = num_markers * num_cell_types + num_markers  # weighted_input + coverage
-        self.features = nn.Sequential(
-            nn.Linear(num_markers * 2, 256),  # Reduced from 512
-            nn.LayerNorm(256),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(256, 128),  # Reduced from 256
-            nn.LayerNorm(128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-        )
-        self.output = nn.Linear(128, num_cell_types)
-        self.softmax = nn.Softmax(dim=1)
+        
+        # Pre-compute weight lookup table during initialization
         self.weight_lookup = {}
+        weight_tensors = []
         for cell_type in range(num_cell_types):
             cell_type_data = distinguishability_df[distinguishability_df["cell_type"] == cell_type]
-            self.weight_lookup[cell_type] = {}
-            for _, row in cell_type_data.iterrows():
-                conc = row["concentration"]
+            weights_for_type = []
+            for conc in self.concentrations:
+                row = cell_type_data[cell_type_data["concentration"] == conc].iloc[0]
                 top_markers = eval(row["top_markers"]) if isinstance(row["top_markers"], str) else row["top_markers"]
                 n_distinguishable = row["n_distinguishable"]
-                
-                weights = torch.zeros(num_markers)
+                weights = torch.zeros(self.num_markers)
                 if n_distinguishable > 0:
                     importance = n_distinguishable / len(top_markers)
                     weights[top_markers] = importance
-                
-                self.weight_lookup[cell_type][conc] = weights
-    
-    # Pre-compute device tensors and expected weights in batches
+                weights_for_type.append(weights)
+            weight_tensors.append(torch.stack(weights_for_type))
+        self.weight_lookup = torch.stack(weight_tensors)  # [num_cell_types, num_concentrations, num_markers]
+        
+        # Much smaller concentration estimator
+        self.concentration_estimator = nn.Sequential(
+            nn.Linear(num_markers * 2, 64),  # Reduced from 128
+            nn.LayerNorm(64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, num_cell_types),
+        )
+        
+        # Simplified marker importance network
+        self.marker_importance = nn.Sequential(
+            nn.Linear(num_markers * 2, 64),  # Reduced from 128
+            nn.LayerNorm(64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, num_cell_types * 32),  # Reduced intermediate representation
+            nn.LayerNorm(32 * num_cell_types),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(num_cell_types * 32, num_markers * num_cell_types),
+        )
+        
+        # Reduced main feature pathway
+        self.features = nn.Sequential(
+            nn.Linear(num_markers * 2, 128),  # Reduced from 256
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 64),  # Reduced from 128
+            nn.LayerNorm(64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+        )
+        
+        self.output = nn.Linear(64, num_cell_types)  # Matches features output size
+        self.softmax = nn.Softmax(dim=1)
+
     def get_marker_weights(self, estimated_concentrations):
-        batch_size = estimated_concentrations.shape[0]
         device = estimated_concentrations.device
         
-        # Pre-compute all possible weights once
-        if not hasattr(self, 'precomputed_weights'):
-            self.precomputed_weights = {}
-            for cell_type in range(self.num_cell_types):
-                self.precomputed_weights[cell_type] = torch.stack([
-                    self.expected_weights[cell_type][c] 
-                    for c in sorted(self.expected_weights[cell_type].keys())
-                ]).to(device)
-
+        # Move lookup table to correct device if needed
+        if self.weight_lookup.device != device:
+            self.weight_lookup = self.weight_lookup.to(device)
+        
+        # Move concentrations to correct device if needed
+        if not hasattr(self, 'concentration_values') or self.concentration_values.device != device:
+            self.concentration_values = torch.tensor(self.concentrations, device=device)
+        
         # Vectorized closest concentration finding
-        conc_values = torch.tensor(sorted(self.expected_weights[0].keys()), device=device)
-        conc_expanded = estimated_concentrations.unsqueeze(-1)
-        conc_diff = torch.abs(conc_expanded - conc_values)
-        closest_indices = torch.argmin(conc_diff, dim=-1)
+        conc_expanded = estimated_concentrations.unsqueeze(-1)  # [batch, cell_types, 1]
+        conc_diff = torch.abs(conc_expanded - self.concentration_values)  # [batch, cell_types, num_concs]
+        closest_indices = torch.argmin(conc_diff, dim=-1)  # [batch, cell_types]
         
-        # Get weights for all cell types at once
-        weights = torch.stack([
-            self.precomputed_weights[cell_type][closest_indices[:, cell_type]]
-            for cell_type in range(self.num_cell_types)
-        ], dim=1)
+        # Batch gather operation
+        batch_size = estimated_concentrations.size(0)
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, self.num_cell_types)
+        cell_indices = torch.arange(self.num_cell_types, device=device).expand(batch_size, -1)
         
+        # Gather weights for the closest concentrations [batch, cell_types, num_markers]
+        weights = self.weight_lookup[cell_indices, closest_indices]
         return weights
 
     def forward(self, X, coverage):
-        start = time.time()
         batch_size = X.shape[0]
         
         # Handle missing values
         valid_mask = ~torch.isnan(X)
         X = torch.where(valid_mask, X, torch.zeros_like(X))
         coverage = coverage * valid_mask.float()
-
-        # First estimate concentrations
+        
+        # Combine input features once
         combined_input = torch.cat([X, coverage], dim=1)
+        
+        # Estimate concentrations
         estimated_concentrations = torch.sigmoid(self.concentration_estimator(combined_input))
         
-        # Get marker importance
+        # Get marker importance with simplified pathway
         learned_weights = self.marker_importance(combined_input)
         learned_weights = learned_weights.view(batch_size, self.num_cell_types, self.num_markers)
         learned_weights = torch.sigmoid(learned_weights)
         
-        # Get distinguishability weights
+        # Get distinguishability weights (now fully vectorized)
         distinguishability_weights = self.get_marker_weights(estimated_concentrations.detach())
-        distinguishability_weights = distinguishability_weights.to(learned_weights.device)
-        
-        # Apply weights
         marker_weights = learned_weights * distinguishability_weights
-        weighted_input = X.unsqueeze(1) * marker_weights
-        weighted_input = weighted_input.view(batch_size, -1)
         
-        # Main pathway
+        # Apply weighted features more efficiently
+        weighted_input = torch.bmm(marker_weights, X.unsqueeze(-1)).squeeze(-1)
+        
+        # Process through reduced main pathway
         features = self.features(torch.cat([weighted_input, coverage], dim=1))
         logits = self.output(features)
         predictions = self.softmax(logits)
+        
         final_predictions = (predictions + estimated_concentrations) / 2
+        
         return final_predictions, estimated_concentrations, marker_weights
 
+
+class ConcentrationAwareLoss(nn.Module):
+    def __init__(self, distinguishability_df, num_markers, concentration_weight=0.4, distinguishability_weight=0.1):
+        super().__init__()
+        self.concentration_weight = concentration_weight
+        self.distinguishability_weight = distinguishability_weight
+        self.num_markers = num_markers
+        
+        # Pre-compute all weights as a single tensor
+        self.concentrations = torch.tensor(sorted(distinguishability_df['concentration'].unique()))
+        cell_types = sorted(distinguishability_df['cell_type'].unique())
+        
+        # Initialize tensors for pre-computed weights and n_distinguishable
+        weights_tensor = []
+        n_dist_tensor = []
+        
+        for cell_type in cell_types:
+            cell_weights = []
+            cell_n_dist = []
+            cell_data = distinguishability_df[distinguishability_df['cell_type'] == cell_type]
+            
+            for conc in self.concentrations:
+                row = cell_data[cell_data['concentration'] == conc].iloc[0]
+                markers = eval(row['top_markers']) if isinstance(row['top_markers'], str) else row['top_markers']
+                n_distinguishable = row['n_distinguishable']
+                
+                weights = torch.zeros(num_markers)
+                if n_distinguishable > 0:
+                    weights[markers] = 1.0
+                
+                cell_weights.append(weights)
+                cell_n_dist.append(n_distinguishable)
+            
+            weights_tensor.append(torch.stack(cell_weights))
+            n_dist_tensor.append(torch.tensor(cell_n_dist))
+        
+        self.weights_lookup = torch.stack(weights_tensor)  # [num_cell_types, num_concentrations, num_markers]
+        self.n_dist_lookup = torch.stack(n_dist_tensor)    # [num_cell_types, num_concentrations]
+    
+    def _calculate_distinguishability_loss(self, marker_weights, true_concentrations):
+        device = marker_weights.device
+        
+        # Move tensors to correct device
+        if self.weights_lookup.device != device:
+            self.weights_lookup = self.weights_lookup.to(device)
+            self.n_dist_lookup = self.n_dist_lookup.to(device)
+            self.concentrations = self.concentrations.to(device)
+        
+        # Vectorized concentration matching
+        conc_expanded = true_concentrations.unsqueeze(-1)  # [batch, cell_types, 1]
+        conc_diff = torch.abs(conc_expanded - self.concentrations)  # [batch, cell_types, num_concs]
+        closest_indices = torch.argmin(conc_diff, dim=-1)  # [batch, cell_types]
+        
+        # Batch gather operations
+        batch_size = true_concentrations.size(0)
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, self.num_cell_types)
+        cell_indices = torch.arange(self.num_cell_types, device=device).expand(batch_size, -1)
+        
+        # Gather expected weights and n_distinguishable values
+        expected_weights = self.weights_lookup[cell_indices, closest_indices]  # [batch, cell_types, num_markers]
+        n_dist = self.n_dist_lookup[cell_indices, closest_indices]  # [batch, cell_types]
+        
+        # Calculate importance factors
+        importance_factor = torch.log1p(n_dist).unsqueeze(-1)  # [batch, cell_types, 1]
+        
+        # Calculate loss using broadcasting
+        loss = torch.mean((marker_weights - expected_weights)**2 * importance_factor)
+        
+        return loss
+    
+    def forward(self, predictions, estimated_concentrations, marker_weights, true_concentrations):
+        prediction_loss = F.mse_loss(predictions, true_concentrations)
+        concentration_loss = F.mse_loss(estimated_concentrations, true_concentrations)
+        distinguishability_loss = self._calculate_distinguishability_loss(marker_weights, true_concentrations)
+        
+        return (prediction_loss + 
+                self.concentration_weight * concentration_loss + 
+                self.distinguishability_weight * distinguishability_loss)
+    
 
 def visualise_predictions(epoch, predictions, targets, concentrations):
     """
