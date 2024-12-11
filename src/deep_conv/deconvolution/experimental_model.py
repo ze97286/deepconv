@@ -5,6 +5,7 @@ import torch.optim as optim
 import numpy as np
 from typing import Dict, List, Optional, Tuple
 from torch.utils.data import Dataset
+import time 
 
 from deep_conv.deconvolution.preprocess_pats import pats_to_homog
 from deep_conv.benchmark.benchmark_utils import *
@@ -260,6 +261,7 @@ def train_model(
         all_predictions = []
         all_targets = []
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]"):
+            start = time.time()
             X, coverage, y = (
                 batch["X"].to(device),
                 batch["coverage"].to(device),
@@ -279,7 +281,9 @@ def train_model(
             # Gradient clipping to prevent exploding gradients
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             optimizer.step()
+            print("finished optimisation step")
             train_loss += loss.item()
+            print("batch took", time.time()-start)
         train_loss /= len(train_loader)
         # Validation phase
         model.eval()
