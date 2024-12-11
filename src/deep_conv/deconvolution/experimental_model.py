@@ -177,47 +177,33 @@ class DeconvolutionModel(nn.Module):
         batch_size = X.shape[0]
         
         # Handle missing values
-        t1 = time.time()
         valid_mask = ~torch.isnan(X)
         X = torch.where(valid_mask, X, torch.zeros_like(X))
         coverage = coverage * valid_mask.float()
-        print(f"Missing values handling: {time.time() - t1:.3f}s")
 
         # First estimate concentrations
-        t1 = time.time()
         combined_input = torch.cat([X, coverage], dim=1)
         estimated_concentrations = torch.sigmoid(self.concentration_estimator(combined_input))
-        print(f"Concentration estimation: {time.time() - t1:.3f}s")
         
         # Get marker importance
-        t1 = time.time()
         learned_weights = self.marker_importance(combined_input)
         learned_weights = learned_weights.view(batch_size, self.num_cell_types, self.num_markers)
         learned_weights = torch.sigmoid(learned_weights)
-        print(f"Marker importance: {time.time() - t1:.3f}s")
         
         # Get distinguishability weights
-        t1 = time.time()
         distinguishability_weights = self.get_marker_weights(estimated_concentrations.detach())
         distinguishability_weights = distinguishability_weights.to(learned_weights.device)
-        print(f"Distinguishability weights: {time.time() - t1:.3f}s")
         
         # Apply weights
-        t1 = time.time()
         marker_weights = learned_weights * distinguishability_weights
         weighted_input = X.unsqueeze(1) * marker_weights
         weighted_input = weighted_input.view(batch_size, -1)
-        print(f"Weight application: {time.time() - t1:.3f}s")
         
         # Main pathway
-        t1 = time.time()
         features = self.features(torch.cat([weighted_input, coverage], dim=1))
         logits = self.output(features)
         predictions = self.softmax(logits)
         final_predictions = (predictions + estimated_concentrations) / 2
-        print(f"Main pathway: {time.time() - t1:.3f}s")
-        
-        print(f"Total forward pass: {time.time() - start:.3f}s")
         return final_predictions, estimated_concentrations, marker_weights
 
 
@@ -284,44 +270,25 @@ def train_model(
     patience_counter = 0
     device = next(model.parameters()).device
     for epoch in range(num_epochs):
-        # Training phase
         model.train()
         train_loss = 0
-        # Store predictions for visualization
         all_predictions = []
         all_targets = []
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]"):
-            t_start = time.time()
             X, coverage, y = (
                 batch["X"].to(device),
                 batch["coverage"].to(device),
                 batch["y"].to(device),
             )
-            t1 = time.time()
-            print(f"Data loading: {t1 - t_start:.3f}s")
             optimizer.zero_grad()
-            t2 = time.time()
-            print(f"Optimizer zero_grad: {t2 - t1:.3f}s")
             predictions, estimated_concentrations, marker_weights = model(X, coverage)
-            t3 = time.time()
-            print(f"Forward pass: {t3 - t2:.3f}s")
-             # Store predictions and targets for visualization
             all_predictions.append(predictions.detach())
             all_targets.append(y.detach())
             loss = criterion(predictions, estimated_concentrations, marker_weights, y)
-            t4 = time.time()
-            print(f"Loss computation: {t4 - t3:.3f}s")
             loss.backward()
-            t5 = time.time()
-            print(f"Backward pass: {t5 - t4:.3f}s")
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-            t6 = time.time()
-            print(f"Gradient clipping: {t6 - t5:.3f}s")
             optimizer.step()
-            t7 = time.time()
-            print(f"Optimizer step: {t7 - t6:.3f}s")
             train_loss += loss.item()
-            print(f"Total batch time: {t7 - t_start:.3f}s")
 
         train_loss /= len(train_loader)
         # Validation phase
