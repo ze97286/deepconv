@@ -136,6 +136,21 @@ class DeconvolutionModel(nn.Module):
         )
         self.output = nn.Linear(256, num_cell_types)
         self.softmax = nn.Softmax(dim=1)
+        self.weight_lookup = {}
+        for cell_type in range(num_cell_types):
+            cell_type_data = distinguishability_df[distinguishability_df["cell_type"] == cell_type]
+            self.weight_lookup[cell_type] = {}
+            for _, row in cell_type_data.iterrows():
+                conc = row["concentration"]
+                top_markers = eval(row["top_markers"]) if isinstance(row["top_markers"], str) else row["top_markers"]
+                n_distinguishable = row["n_distinguishable"]
+                
+                weights = torch.zeros(num_markers)
+                if n_distinguishable > 0:
+                    importance = n_distinguishable / len(top_markers)
+                    weights[top_markers] = importance
+                
+                self.weight_lookup[cell_type][conc] = weights
     
     def get_marker_weights(self, estimated_concentrations):
         batch_size = estimated_concentrations.shape[0]
@@ -145,30 +160,20 @@ class DeconvolutionModel(nn.Module):
             self.num_markers,
             device=estimated_concentrations.device,
         )
+        
+        # Convert concentrations lookup table to tensor for faster operations
+        concentrations = torch.tensor(self.concentrations, device=estimated_concentrations.device)
+        
         for i in range(batch_size):
             for cell_type in range(self.num_cell_types):
                 conc = estimated_concentrations[i, cell_type].item()
-                # Find closest concentration in data
-                cell_type_data = self.distinguishability_df[
-                    self.distinguishability_df["cell_type"] == cell_type
-                ]
-                closest_conc_idx = (
-                    (cell_type_data["concentration"] - conc).abs().idxmin()
-                )
-                row = cell_type_data.loc[closest_conc_idx]
-                # Get top markers and convert string representation to list if needed
-                top_markers = row["top_markers"]
-                if isinstance(top_markers, str):
-                    top_markers = eval(
-                        top_markers
-                    )  # Convert string representation to list
-                n_distinguishable = row["n_distinguishable"]
-                if n_distinguishable > 0:
-                    # Weight importance by number of distinguishable markers
-                    importance = n_distinguishable / len(top_markers)
-                    weights[i, cell_type, top_markers] = importance
-        return weights
+                # Find closest concentration using tensor operations
+                closest_conc = concentrations[torch.abs(concentrations - conc).argmin()]
+                weights[i, cell_type] = self.weight_lookup[cell_type][closest_conc.item()].to(estimated_concentrations.device)
     
+        return weights
+
+
     def forward(self, X, coverage):
         start = time.time()
         batch_size = X.shape[0]
