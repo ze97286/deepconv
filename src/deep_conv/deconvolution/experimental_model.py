@@ -77,13 +77,13 @@ class DeconvolutionModel(nn.Module):
             nn.Linear(num_cell_types * 32, num_markers * num_cell_types),
         )
         
-        # Reduced main feature pathway
+        input_size = num_cell_types + num_markers  # weighted_input size + coverage size
         self.features = nn.Sequential(
-            nn.Linear(num_markers * 2, 128),  # Reduced from 256
+            nn.Linear(input_size, 128),
             nn.LayerNorm(128),
             nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(128, 64),  # Reduced from 128
+            nn.Linear(128, 64),
             nn.LayerNorm(64),
             nn.ReLU(),
             nn.Dropout(0.3),
@@ -141,17 +141,19 @@ class DeconvolutionModel(nn.Module):
         marker_weights = learned_weights * distinguishability_weights
         
         # Apply weighted features more efficiently
-        weighted_input = torch.bmm(marker_weights, X.unsqueeze(-1)).squeeze(-1)
+        weighted_input = (X.unsqueeze(1) * marker_weights).sum(dim=2)  # Shape: [batch, num_cell_types]
+        
+        # Combine with coverage for feature processing
+        feature_input = torch.cat([weighted_input, coverage], dim=1)  # Shape: [batch, num_cell_types + num_markers]
         
         # Process through reduced main pathway
-        features = self.features(torch.cat([weighted_input, coverage], dim=1))
+        features = self.features(feature_input)
         logits = self.output(features)
         predictions = self.softmax(logits)
         
         final_predictions = (predictions + estimated_concentrations) / 2
         
         return final_predictions, estimated_concentrations, marker_weights
-
 
 class ConcentrationAwareLoss(nn.Module):
     def __init__(self, distinguishability_df, num_markers, concentration_weight=0.4, distinguishability_weight=0.1):
