@@ -94,6 +94,7 @@ class DeconvolutionModel(nn.Module):
 
     def get_marker_weights(self, estimated_concentrations):
         device = estimated_concentrations.device
+        batch_size = estimated_concentrations.size(0)  
         
         # Move lookup table to correct device if needed
         if self.weight_lookup.device != device:
@@ -108,11 +109,7 @@ class DeconvolutionModel(nn.Module):
         conc_diff = torch.abs(conc_expanded - self.concentration_values)  # [batch, cell_types, num_concs]
         closest_indices = torch.argmin(conc_diff, dim=-1)  # [batch, cell_types]
         
-        # Batch gather operation
-        batch_size = estimated_concentrations.size(0)
-        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, self.num_cell_types)
         cell_indices = torch.arange(self.num_cell_types, device=device).expand(batch_size, -1)
-        
         # Gather weights for the closest concentrations [batch, cell_types, num_markers]
         weights = self.weight_lookup[cell_indices, closest_indices]
         return weights
@@ -156,11 +153,12 @@ class DeconvolutionModel(nn.Module):
         return final_predictions, estimated_concentrations, marker_weights
 
 class ConcentrationAwareLoss(nn.Module):
-    def __init__(self, distinguishability_df, num_markers, concentration_weight=0.4, distinguishability_weight=0.1):
+    def __init__(self, distinguishability_df, num_markers, num_cell_types, concentration_weight=0.4, distinguishability_weight=0.1):
         super().__init__()
         self.concentration_weight = concentration_weight
         self.distinguishability_weight = distinguishability_weight
         self.num_markers = num_markers
+        self.num_cell_types = num_cell_types  # Add this
         
         # Pre-compute all weights as a single tensor
         self.concentrations = torch.tensor(sorted(distinguishability_df['concentration'].unique()))
@@ -199,8 +197,10 @@ class ConcentrationAwareLoss(nn.Module):
         self.weights_lookup = torch.stack(weights_tensor)  # [num_cell_types, num_concentrations, num_markers]
         self.n_dist_lookup = torch.stack(n_dist_tensor)    # [num_cell_types, num_concentrations]
 
+    
     def _calculate_distinguishability_loss(self, marker_weights, true_concentrations):
         device = marker_weights.device
+        batch_size = true_concentrations.size(0)  # Get batch size from input
         
         # Move tensors to correct device
         if self.weights_lookup.device != device:
@@ -209,27 +209,22 @@ class ConcentrationAwareLoss(nn.Module):
             self.concentrations = self.concentrations.to(device)
         
         # Vectorized concentration matching
-        conc_expanded = true_concentrations.unsqueeze(-1)  # [batch, cell_types, 1]
-        conc_diff = torch.abs(conc_expanded - self.concentrations)  # [batch, cell_types, num_concs]
-        closest_indices = torch.argmin(conc_diff, dim=-1)  # [batch, cell_types]
+        conc_expanded = true_concentrations.unsqueeze(-1)
+        conc_diff = torch.abs(conc_expanded - self.concentrations)
+        closest_indices = torch.argmin(conc_diff, dim=-1)
         
-        # Batch gather operations
-        batch_size = true_concentrations.size(0)
-        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, self.num_cell_types)
         cell_indices = torch.arange(self.num_cell_types, device=device).expand(batch_size, -1)
         
         # Gather expected weights and n_distinguishable values
-        expected_weights = self.weights_lookup[cell_indices, closest_indices]  # [batch, cell_types, num_markers]
-        n_dist = self.n_dist_lookup[cell_indices, closest_indices]  # [batch, cell_types]
+        expected_weights = self.weights_lookup[cell_indices, closest_indices]
+        n_dist = self.n_dist_lookup[cell_indices, closest_indices]
         
-        # Calculate importance factors
-        importance_factor = torch.log1p(n_dist).unsqueeze(-1)  # [batch, cell_types, 1]
-        
-        # Calculate loss using broadcasting
+        importance_factor = torch.log1p(n_dist).unsqueeze(-1)
         loss = torch.mean((marker_weights - expected_weights)**2 * importance_factor)
         
         return loss
-    
+
+
     def forward(self, predictions, estimated_concentrations, marker_weights, true_concentrations):
         prediction_loss = F.mse_loss(predictions, true_concentrations)
         concentration_loss = F.mse_loss(estimated_concentrations, true_concentrations)
