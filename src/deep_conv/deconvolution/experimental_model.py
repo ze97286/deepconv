@@ -105,34 +105,36 @@ class DeconvolutionModel(nn.Module):
         self.concentrations = sorted(distinguishability_df["concentration"].unique())
         # These layers remain the same
         self.concentration_estimator = nn.Sequential(
-            nn.Linear(num_markers * 2, 256),
-            nn.LayerNorm(256),
+            nn.Linear(num_markers * 2, 128), 
+            nn.LayerNorm(128),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(256, 64),
-            nn.LayerNorm(64),
+            nn.Dropout(0.3), 
+            nn.Linear(128, 32),
+            nn.LayerNorm(32),
             nn.ReLU(),
-            nn.Linear(64, num_cell_types),
+            nn.Dropout(0.3),
+            nn.Linear(32, num_cell_types),
         )
         self.marker_importance = nn.Sequential(
-            nn.Linear(num_markers * 2, 256),
-            nn.LayerNorm(256),
+            nn.Linear(num_markers * 2, 128),
+            nn.LayerNorm(128),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(256, num_markers * num_cell_types),
+            nn.Dropout(0.3),
+            nn.Linear(128, num_markers * num_cell_types),
         )
         # Update features layer to accept correct input size
         input_size = num_markers * num_cell_types + num_markers  # weighted_input + coverage
         self.features = nn.Sequential(
-            nn.Linear(input_size, 512),  # Modified this line
-            nn.LayerNorm(512),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(512, 256),
+            nn.Linear(num_markers * 2, 256),  # Reduced from 512
             nn.LayerNorm(256),
             nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 128),  # Reduced from 256
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
         )
-        self.output = nn.Linear(256, num_cell_types)
+        self.output = nn.Linear(128, num_cell_types)
         self.softmax = nn.Softmax(dim=1)
         self.weight_lookup = {}
         for cell_type in range(num_cell_types):
@@ -150,27 +152,33 @@ class DeconvolutionModel(nn.Module):
                 
                 self.weight_lookup[cell_type][conc] = weights
     
+    # Pre-compute device tensors and expected weights in batches
     def get_marker_weights(self, estimated_concentrations):
         batch_size = estimated_concentrations.shape[0]
-        weights = torch.zeros(
-            batch_size,
-            self.num_cell_types,
-            self.num_markers,
-            device=estimated_concentrations.device,
-        )
+        device = estimated_concentrations.device
         
-        # Convert concentrations lookup table to tensor for faster operations
-        concentrations = torch.tensor(self.concentrations, device=estimated_concentrations.device)
-        
-        for i in range(batch_size):
+        # Pre-compute all possible weights once
+        if not hasattr(self, 'precomputed_weights'):
+            self.precomputed_weights = {}
             for cell_type in range(self.num_cell_types):
-                conc = estimated_concentrations[i, cell_type].item()
-                # Find closest concentration using tensor operations
-                closest_conc = concentrations[torch.abs(concentrations - conc).argmin()]
-                weights[i, cell_type] = self.weight_lookup[cell_type][closest_conc.item()].to(estimated_concentrations.device)
-    
-        return weights
+                self.precomputed_weights[cell_type] = torch.stack([
+                    self.expected_weights[cell_type][c] 
+                    for c in sorted(self.expected_weights[cell_type].keys())
+                ]).to(device)
 
+        # Vectorized closest concentration finding
+        conc_values = torch.tensor(sorted(self.expected_weights[0].keys()), device=device)
+        conc_expanded = estimated_concentrations.unsqueeze(-1)
+        conc_diff = torch.abs(conc_expanded - conc_values)
+        closest_indices = torch.argmin(conc_diff, dim=-1)
+        
+        # Get weights for all cell types at once
+        weights = torch.stack([
+            self.precomputed_weights[cell_type][closest_indices[:, cell_type]]
+            for cell_type in range(self.num_cell_types)
+        ], dim=1)
+        
+        return weights
 
     def forward(self, X, coverage):
         start = time.time()
@@ -260,7 +268,7 @@ def train_model(
         patience: Early stopping patience
         lr: Learning rate
     """
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=5, verbose=True
     )
