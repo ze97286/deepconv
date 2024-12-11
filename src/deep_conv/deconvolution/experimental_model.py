@@ -174,9 +174,15 @@ class ConcentrationAwareLoss(nn.Module):
             cell_data = distinguishability_df[distinguishability_df['cell_type'] == cell_type]
             
             for conc in self.concentrations:
-                row = cell_data[cell_data['concentration'] == conc].iloc[0]
-                markers = eval(row['top_markers']) if isinstance(row['top_markers'], str) else row['top_markers']
-                n_distinguishable = row['n_distinguishable']
+                matching_rows = cell_data[cell_data['concentration'] == conc]
+                if len(matching_rows) > 0:
+                    row = matching_rows.iloc[0]
+                    markers = eval(row['top_markers']) if isinstance(row['top_markers'], str) else row['top_markers']
+                    n_distinguishable = row['n_distinguishable']
+                else:
+                    # Handle missing concentration for this cell type
+                    markers = []
+                    n_distinguishable = 0
                 
                 weights = torch.zeros(num_markers)
                 if n_distinguishable > 0:
@@ -190,7 +196,7 @@ class ConcentrationAwareLoss(nn.Module):
         
         self.weights_lookup = torch.stack(weights_tensor)  # [num_cell_types, num_concentrations, num_markers]
         self.n_dist_lookup = torch.stack(n_dist_tensor)    # [num_cell_types, num_concentrations]
-    
+
     def _calculate_distinguishability_loss(self, marker_weights, true_concentrations):
         device = marker_weights.device
         
