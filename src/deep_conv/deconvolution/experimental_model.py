@@ -30,16 +30,11 @@ class TissueDeconvolutionDataset(Dataset):
 
 
 class ConcentrationAwareLoss(nn.Module):
-    def __init__(self, distinguishability_df, concentration_weight=0.3, distinguishability_weight=0.2):
+    def __init__(self, distinguishability_df, num_markers, concentration_weight=0.3, distinguishability_weight=0.2):
         super().__init__()
         self.concentration_weight = concentration_weight
         self.distinguishability_weight = distinguishability_weight
-        
-        # Get total number of markers for consistent tensor sizes
-        self.num_markers = max(
-            max(eval(row['top_markers']) if isinstance(row['top_markers'], str) else row['top_markers'])
-            for _, row in distinguishability_df.iterrows()
-        ) + 1
+        self.num_markers = num_markers  # Use actual number of markers from the data
         
         # Pre-compute lookup tables
         self.concentrations = torch.tensor(sorted(distinguishability_df['concentration'].unique()))
@@ -50,29 +45,27 @@ class ConcentrationAwareLoss(nn.Module):
             for _, row in cell_data.iterrows():
                 markers = eval(row['top_markers']) if isinstance(row['top_markers'], str) else row['top_markers']
                 n_distinguishable = row['n_distinguishable']
-                weights = torch.zeros(self.num_markers) 
-                if n_distinguishable > 0:
-                    weights[markers] = 1.0
+                weights = torch.zeros(num_markers)  # Use passed in number of markers
+                if n_distinguishable > 0 and markers:  # Check if markers exist
+                    valid_markers = [m for m in markers if m < num_markers]  # Only use valid marker indices
+                    weights[valid_markers] = 1.0
                 self.expected_weights[cell_type][row['concentration']] = weights
 
     def _calculate_distinguishability_loss(self, marker_weights, true_concentrations):
         batch_size = true_concentrations.shape[0]
         device = marker_weights.device
         
-        # Move concentrations tensor to correct device if needed
         if self.concentrations.device != device:
             self.concentrations = self.concentrations.to(device)
         
-        # Vectorized operation to find closest concentrations
-        conc_expanded = true_concentrations.unsqueeze(-1)  # [batch, cell_types, 1]
-        conc_diff = torch.abs(conc_expanded - self.concentrations)  # [batch, cell_types, num_concs]
-        closest_conc_idx = torch.argmin(conc_diff, dim=-1)  # [batch, cell_types]
+        conc_expanded = true_concentrations.unsqueeze(-1)
+        conc_diff = torch.abs(conc_expanded - self.concentrations)
+        closest_conc_idx = torch.argmin(conc_diff, dim=-1)
         
         loss = 0.0
         for cell_type in range(true_concentrations.shape[1]):
             cell_weights = marker_weights[:, cell_type]  # [batch, num_markers]
             
-            # Get expected weights for each sample based on closest concentration
             expected_batch = []
             for b in range(batch_size):
                 conc = self.concentrations[closest_conc_idx[b, cell_type]].item()
@@ -81,20 +74,18 @@ class ConcentrationAwareLoss(nn.Module):
             
             expected_weights = torch.stack(expected_batch)  # [batch, num_markers]
             
-            # Compute importance factor
             concs = self.concentrations[closest_conc_idx[:, cell_type]]
             n_distinguishable = torch.tensor([
-                len(self.expected_weights[cell_type][c.item()].nonzero()) 
+                self.expected_weights[cell_type][c.item()].sum().item()  # Count number of ones
                 for c in concs
             ], device=device)
             importance_factor = torch.log1p(n_distinguishable).unsqueeze(-1)
             
-            # Compute weighted MSE
             cell_loss = torch.mean((cell_weights - expected_weights)**2 * importance_factor)
             loss += cell_loss
             
         return loss / true_concentrations.shape[1]
-    
+
     def forward(self, predictions, estimated_concentrations, marker_weights, true_concentrations):
         prediction_loss = nn.MSELoss()(predictions, true_concentrations)
         concentration_loss = nn.MSELoss()(estimated_concentrations, true_concentrations)
@@ -264,7 +255,7 @@ def train_model(
     model,
     train_loader,
     val_loader,
-    distinguishability_df,
+    criterion,    
     model_path,
     num_epochs=100,
     patience=10,
@@ -287,7 +278,7 @@ def train_model(
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=5, verbose=True
     )
-    criterion = ConcentrationAwareLoss(distinguishability_df)
+    
     os.makedirs(model_path, exist_ok=True)
     best_val_loss = float("inf")
     patience_counter = 0
