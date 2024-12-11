@@ -147,8 +147,9 @@ class DeconvolutionModel(nn.Module):
         features = self.features(feature_input)
         logits = self.output(features)
         predictions = self.softmax(logits)
-        
-        final_predictions = (predictions + estimated_concentrations) / 2
+        estimated_concentrations = torch.sigmoid(self.concentration_estimator(combined_input))
+        concentration_confidence = torch.sigmoid(5 * estimated_concentrations)
+        final_predictions = predictions * concentration_confidence
         
         return final_predictions, estimated_concentrations, marker_weights
 
