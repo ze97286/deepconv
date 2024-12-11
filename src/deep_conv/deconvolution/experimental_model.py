@@ -266,12 +266,16 @@ def train_model(
                 batch["y"].to(device),
             )
             optimizer.zero_grad()
+            print("forward pass")
             predictions, estimated_concentrations, marker_weights = model(X, coverage)
             # Store predictions and targets for visualization
             all_predictions.append(predictions.detach())
             all_targets.append(y.detach())
+            print("calculating loss")
             loss = criterion(predictions, estimated_concentrations, marker_weights, y)
+            print("calculated loss")
             loss.backward()
+            print("finished back pass")
             # Gradient clipping to prevent exploding gradients
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             optimizer.step()
