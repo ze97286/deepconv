@@ -44,14 +44,21 @@ class ConcentrationAwareLoss(nn.Module):
     def forward(
         self, predictions, estimated_concentrations, marker_weights, true_concentrations
     ):
+        t1 = time.time()
         # Main prediction loss
         prediction_loss = nn.MSELoss()(predictions, true_concentrations)
+        print(f"Prediction loss time: {time.time() - t1:.3f}s")
+        t2 = time.time()
         # Concentration estimation loss
         concentration_loss = nn.MSELoss()(estimated_concentrations, true_concentrations)
+        print(f"Concentration loss time: {time.time() - t2:.3f}s")
+
         # Marker weight consistency loss
+        t3 = time.time()
         distinguishability_loss = self._calculate_distinguishability_loss(
             marker_weights, true_concentrations
         )
+        print(f"Distinguishability loss time: {time.time() - t3:.3f}s")
         total_loss = (
             prediction_loss
             + self.concentration_weight * concentration_loss
