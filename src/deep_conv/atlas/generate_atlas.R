@@ -37,7 +37,7 @@ load_cpg_info <- function(cpg_file) {
 }
 
 # Core functions for region detection
-check_region_coverage <- function(region, reads, min_coverage=3, min_cpg_per_read=4, max_gap=1, verbose=TRUE) {
+check_region_coverage <- function(region, reads, min_coverage=3, min_cpg_per_read=4, verbose=TRUE) {
   if(verbose) {
     cat(sprintf("\nChecking region %s:%d-%d\n", region$chr[1], region$start[1], region$end[1]))
   }
@@ -52,55 +52,50 @@ check_region_coverage <- function(region, reads, min_coverage=3, min_cpg_per_rea
     return(FALSE)
   }
   
-  if(verbose) {
-    cat("Initial read counts by group:\n")
-    print(region_reads[, .N, by=group])
-  }
-  
-  # For each read, check if it has enough consecutive CpGs
-  reads_by_group <- region_reads[order(pos), .(
-    has_consecutive = {
-      cpg_pos = sort(unique(pos))
-      run_lengths = rle(c(TRUE, diff(cpg_pos) <= max_gap))$lengths
-      max_consecutive = max(run_lengths)
-      if(verbose) {
-        cat(sprintf("Read %s: %d CpGs, longest run: %d\n", 
-                   read_id[1], length(cpg_pos), max_consecutive))
-      }
-      max_consecutive >= min_cpg_per_read
-    },
-    total_cpgs = length(unique(pos))
+  # Count CpGs per read - this is the key change
+  reads_with_cpgs <- region_reads[, .(
+    cpg_count = uniqueN(pos)  # Count unique CpG positions per read
   ), by=.(group, read_id)]
   
-  # Count qualifying reads per group
-  sufficient_coverage <- reads_by_group[, .(
-    qualifying_reads = sum(has_consecutive),
-    total_reads = .N,
-    avg_cpgs = mean(total_cpgs)
-  ), by=group]
+  # Count reads with sufficient CpGs per group
+  qualifying_reads <- reads_with_cpgs[cpg_count >= min_cpg_per_read, 
+                                    .N, 
+                                    by=group]
   
   if(verbose) {
-    cat("\nCoverage summary by group:\n")
-    print(sufficient_coverage)
+    cat("\nQualifying reads (≥4 CpGs) by group:\n")
+    print(qualifying_reads)
   }
   
-  # Make sure we have data for all groups
+  # Check we have data for all groups
   all_groups <- unique(reads$group)
-  missing_groups <- setdiff(all_groups, sufficient_coverage$group)
-  if(length(missing_groups) > 0) {
-    if(verbose) {
-      cat("\nMissing groups:", paste(missing_groups, collapse=", "), "\n")
-    }
-    return(FALSE)
+  coverage_status <- data.table(group = all_groups)[
+    qualifying_reads, 
+    on="group"
+  ][, N := ifelse(is.na(N), 0, N)]
+  
+  if(verbose) {
+    cat("\nCoverage status for all groups:\n")
+    print(coverage_status)
   }
   
-  # Check if all groups have enough qualifying reads
-  result <- all(sufficient_coverage$qualifying_reads >= min_coverage)
+  # All groups must have sufficient coverage
+  result <- all(coverage_status$N >= min_coverage)
+  
   if(verbose) {
+    if(!result) {
+      cat("\nFailing groups:\n")
+      print(coverage_status[N < min_coverage])
+    }
     cat(sprintf("\nFinal decision: %s\n", ifelse(result, "PASS", "FAIL")))
   }
   
   return(result)
+}
+
+# Helper function to check if a read covers enough CpGs
+verify_read_coverage <- function(read_pos, min_cpgs) {
+  length(unique(read_pos)) >= min_cpgs
 }
 
 
@@ -207,9 +202,11 @@ scores_per_pos <- function(groups, successes, totals, p=NULL) {
   return(scores)
 }
 
-collapse_to_regions <- function(dmrs, cpg_info, reads=NULL, max_gap=1, max_dist=1e3, 
+collapse_to_regions <- function(dmrs, cpg_info, reads, max_gap=1, max_dist=1e3, 
                               min_logp=-20, min_length=100, mad=0.1, 
-                              min_coverage=3, min_cpg_per_read=3) {
+                              min_coverage=3, min_cpg_per_read=4,
+                              verbose=FALSE) {
+
   n_groups = length(unique(dmrs$group))
   
   if (!identical(key(dmrs), c("chr", "pos"))) {
@@ -234,12 +231,17 @@ collapse_to_regions <- function(dmrs, cpg_info, reads=NULL, max_gap=1, max_dist=
   # Check read coverage only if reads are provided
   if (!is.null(reads)) {
     sign.regions[, has_coverage := check_region_coverage(.SD, reads, 
-                                                        min_coverage = min_coverage, 
-                                                        min_cpg_per_read = min_cpg_per_read,
-                                                        max_gap = max_gap), 
-                by=.(chr, start, end)]
+                                                       min_coverage = min_coverage, 
+                                                       min_cpg_per_read = min_cpg_per_read,
+                                                       verbose = verbose), 
+                 by=.(chr, start, end)]
     
-    # Filter regions without sufficient coverage
+    if(verbose) {
+      cat(sprintf("Found %d regions with sufficient coverage out of %d total regions\n",
+                 sum(sign.regions$has_coverage), nrow(sign.regions)))
+    }
+    
+    # Keep only regions with sufficient coverage
     sign.regions <- sign.regions[has_coverage == TRUE]
   }
   
