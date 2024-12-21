@@ -407,6 +407,10 @@ main <- function() {
   bed2type <- load_sample2group(params$map_file)
   cpg_info <- load_cpg_info(params$cpg_file)
   
+  # Get file paths from bed2type
+  files <- as.character(bed2type$name)
+  names(files) <- as.character(bed2type$sample)
+  
   # Set up parallel processing
   plan(multisession, workers = params$threads)
   
@@ -414,6 +418,7 @@ main <- function() {
   with_progress({
     p <- progressor(steps=22)
     pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
+      # Load per-position methylation data
       res <- fread(paste0(params$base_dir, "/dmr_by_read/blood+tum+gi_scores-by-position_", 
                          chrom, ".txt.gz"), 
                    header=TRUE, stringsAsFactors = TRUE)
@@ -424,29 +429,23 @@ main <- function() {
   pval.all <- rbindlist(pval.all)
   
   if (params$verbose) {
-    message(Sys.time(), " Finding unique regions...")
+    message(Sys.time(), " Loading reads and finding unique regions...")
   }
   
-  # Find unique regions
-  unique.regions <- collapse_to_regions(pval.all, cpg_info, 
+  # Load reads for all cell types
+  reads <- load_reads(files, cpg_info, bed2type, min_cpg_per_read=4, verbose=params$verbose)
+  
+  # Find unique regions with coverage check
+  unique.regions <- collapse_to_regions(pval.all, cpg_info, reads,
                                       max_gap = 1, max_dist = 1000, 
-                                      min_logp = -30, min_length = 150)
+                                      min_logp = -30, min_length = 150,
+                                      min_cpg_per_read = 4,
+                                      verbose = params$verbose)
   
   if (params$verbose) {
-    message(Sys.time(), " Processing regions and checking coverage...")
+    message(Sys.time(), " Writing marker file...")
   }
   
-  # Process regions with debug output
-  unique.regions.stat <- find_unique_regions(unique.regions, cpg_info, verbose=TRUE)
-  
-  if (params$verbose) {
-    # Final check for NaN values
-    nan_count <- unique.regions.stat[, sum(is.na(tg_mean)), by=target]
-    message("\nFinal NaN count by target:")
-    print(nan_count)
-  }
-
-
   # Write marker file for uxm build
   write_marker_file(unique.regions, cpg_info, params$out_file, params$top_n)
   
