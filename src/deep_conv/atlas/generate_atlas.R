@@ -5,7 +5,7 @@
 #   --cpg_file /users/zetzioni/sharedscratch/wgbs_tools/references/hg38/CpG.bed.gz \
 #   --map_file /users/zetzioni/sharedscratch/atlas/per-read-bed2class.csv \
 #   --base_dir /users/zetzioni/sharedscratch/atlas/ \
-#   --out_file /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.1500.l4.bed \
+#   --out_file /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.100.l4.bed \
 #   --top_n 100 \
 #   --threads 32 \
 #   --verbose
@@ -124,7 +124,7 @@ scores_per_pos <- function(groups, successes, totals, p=NULL) {
   return(scores)
 }
 
-collapse_to_regions <- function(dmrs, cpg_info, reads, max_gap=1, max_dist=1e3, 
+collapse_to_regions <- function(dmrs, cpg_info, reads=NULL, max_gap=1, max_dist=1e3, 
                               min_logp=-20, min_length=100, mad=0.1, 
                               min_coverage=3, min_cpg_per_read=3) {
   n_groups = length(unique(dmrs$group))
@@ -148,7 +148,7 @@ collapse_to_regions <- function(dmrs, cpg_info, reads, max_gap=1, max_dist=1e3,
   
   setkey(sign.regions, chr, start, end)
   
-  # Check read coverage for each candidate region
+  # Check read coverage only if reads are provided
   if (!is.null(reads)) {
     sign.regions[, has_coverage := check_region_coverage(.SD, reads, 
                                                        min_coverage, 
