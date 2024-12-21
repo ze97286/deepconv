@@ -37,43 +37,108 @@ load_cpg_info <- function(cpg_file) {
 }
 
 # Core functions for region detection
-check_region_coverage <- function(region, reads, min_coverage=3, min_cpg_per_read=4, max_gap=1) {
+check_region_coverage <- function(region, reads, min_coverage=3, min_cpg_per_read=4, max_gap=1, verbose=TRUE) {
+  if(verbose) {
+    cat(sprintf("\nChecking region %s:%d-%d\n", region$chr[1], region$start[1], region$end[1]))
+  }
+  
   # Get reads overlapping this region
   region_reads <- reads[chr == region$chr & 
                        pos >= region$start & 
                        pos <= region$end]
   
   if(nrow(region_reads) == 0) {
+    if(verbose) cat("No reads found in region\n")
     return(FALSE)
+  }
+  
+  if(verbose) {
+    cat("Initial read counts by group:\n")
+    print(region_reads[, .N, by=group])
   }
   
   # For each read, check if it has enough consecutive CpGs
   reads_by_group <- region_reads[order(pos), .(
     has_consecutive = {
-      # Get CpG positions for this read
       cpg_pos = sort(unique(pos))
-      # Find runs of consecutive CpGs (allowing for small gaps)
       run_lengths = rle(c(TRUE, diff(cpg_pos) <= max_gap))$lengths
-      # Check if any run is long enough
-      max(run_lengths) >= min_cpg_per_read
-    }
+      max_consecutive = max(run_lengths)
+      if(verbose) {
+        cat(sprintf("Read %s: %d CpGs, longest run: %d\n", 
+                   read_id[1], length(cpg_pos), max_consecutive))
+      }
+      max_consecutive >= min_cpg_per_read
+    },
+    total_cpgs = length(unique(pos))
   ), by=.(group, read_id)]
   
   # Count qualifying reads per group
   sufficient_coverage <- reads_by_group[, .(
-    qualifying_reads = sum(has_consecutive)
+    qualifying_reads = sum(has_consecutive),
+    total_reads = .N,
+    avg_cpgs = mean(total_cpgs)
   ), by=group]
+  
+  if(verbose) {
+    cat("\nCoverage summary by group:\n")
+    print(sufficient_coverage)
+  }
   
   # Make sure we have data for all groups
   all_groups <- unique(reads$group)
   missing_groups <- setdiff(all_groups, sufficient_coverage$group)
   if(length(missing_groups) > 0) {
+    if(verbose) {
+      cat("\nMissing groups:", paste(missing_groups, collapse=", "), "\n")
+    }
     return(FALSE)
   }
   
   # Check if all groups have enough qualifying reads
-  return(all(sufficient_coverage$qualifying_reads >= min_coverage))
+  result <- all(sufficient_coverage$qualifying_reads >= min_coverage)
+  if(verbose) {
+    cat(sprintf("\nFinal decision: %s\n", ifelse(result, "PASS", "FAIL")))
+  }
+  
+  return(result)
 }
+
+
+find_unique_regions <- function(unique.regions, cpg_info, verbose=TRUE) {
+  setkey(unique.regions, chr, start, end)
+  setkey(cpg_info, chr, start, end)
+  
+  # Calculate statistics for unique regions
+  unique.regions.stat <- foverlaps(
+    cpg_info, 
+    unique.regions[fully_covered==TRUE], 
+    nomatch=NULL)[
+      , {
+        if(verbose) {
+          cat(sprintf("\nProcessing region %s:%d-%d\n", 
+                     chr[1], start[1], end[1]))
+        }
+        .(startCpG=min(index), 
+          endCpG=max(index), 
+          r_len=mean(r_len), 
+          p_len=mean(p_len), 
+          tg_mean=mean(avg_min_ci), 
+          ttest=mean(med_logp), 
+          delta_means=mean(avg_min_alpha_dist))
+      }, by=.(chr, start=start-1, end=end, target=group)]
+  
+  if(verbose) {
+    # Check for NaN values
+    nan_regions <- unique.regions.stat[is.na(tg_mean), .(chr, start, end, target)]
+    if(nrow(nan_regions) > 0) {
+      cat("\nFound regions with NaN values:\n")
+      print(nan_regions)
+    }
+  }
+  
+  return(unique.regions.stat)
+}
+
 
 scores_per_pos <- function(groups, successes, totals, p=NULL) {
   if (length(groups)==0) {
@@ -169,9 +234,10 @@ collapse_to_regions <- function(dmrs, cpg_info, reads=NULL, max_gap=1, max_dist=
   # Check read coverage only if reads are provided
   if (!is.null(reads)) {
     sign.regions[, has_coverage := check_region_coverage(.SD, reads, 
-                                                       min_coverage, 
-                                                       min_cpg_per_read), 
-                 by=.(chr, start, end)]
+                                                        min_coverage = min_coverage, 
+                                                        min_cpg_per_read = min_cpg_per_read,
+                                                        max_gap = max_gap), 
+                by=.(chr, start, end)]
     
     # Filter regions without sufficient coverage
     sign.regions <- sign.regions[has_coverage == TRUE]
@@ -365,9 +431,20 @@ main <- function() {
                                       min_logp = -30, min_length = 150)
   
   if (params$verbose) {
-    message(Sys.time(), " Writing marker file...")
+    message(Sys.time(), " Processing regions and checking coverage...")
   }
   
+  # Process regions with debug output
+  unique.regions.stat <- find_unique_regions(unique.regions, cpg_info, verbose=TRUE)
+  
+  if (params$verbose) {
+    # Final check for NaN values
+    nan_count <- unique.regions.stat[, sum(is.na(tg_mean)), by=target]
+    message("\nFinal NaN count by target:")
+    print(nan_count)
+  }
+
+
   # Write marker file for uxm build
   write_marker_file(unique.regions, cpg_info, params$out_file, params$top_n)
   
