@@ -2,11 +2,11 @@
 
 
 # R_LIBS_USER=~/R/library Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/generate_atlas.R \
-#   --cpg-file /users/zetzioni/sharedscratch/wgbs_tools/references/hg38/CpG.bed.gz \
-#   --map-file /users/zetzioni/sharedscratch/atlas/per-read-bed2class.csv \
-#   --base-dir /users/zetzioni/sharedscratch/atlas/ \
-#   --out-file /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.1500.l4.bed \
-#   --top-n 100 \
+#   --cpg_file /users/zetzioni/sharedscratch/wgbs_tools/references/hg38/CpG.bed.gz \
+#   --map_file /users/zetzioni/sharedscratch/atlas/per-read-bed2class.csv \
+#   --base_dir /users/zetzioni/sharedscratch/atlas/ \
+#   --out_file /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.1500.l4.bed \
+#   --top_n 100 \
 #   --threads 32 \
 #   --verbose
 
@@ -282,22 +282,21 @@ write_marker_file <- function(regions, cpg_info, outfile, top_n = 100) {
     row.names=FALSE)
 }
 
-# Main function with added top_n parameter
 main <- function() {
   option_list <- list(
-    make_option(c("-c", "--cpg-file"), type="character",
+    make_option(c("-c", "--cpg_file"), type="character",
                 help="List of all cpG positions with pos and unique index [REQUIRED]",
                 metavar="cpg_map.txt"),
-    make_option(c("-m", "--map-file"), type="character",
+    make_option(c("-m", "--map_file"), type="character",
                 help="Map of per-read .bed files and their associated group [REQUIRED]",
                 metavar="bed2group.txt"),
-    make_option(c("-d", "--base-dir"), type="character", default=".",
+    make_option(c("-d", "--base_dir"), type="character", default=".",
                 help="Base directory containing input files and for output [default %default]",
                 metavar="path"),
-    make_option(c("-o", "--out-file"), type="character",
+    make_option(c("-o", "--out_file"), type="character",
                 help="Output file path for markers [REQUIRED]",
                 metavar="markers.bed"),
-    make_option(c("-n", "--top-n"), type="integer", default=100,
+    make_option(c("-n", "--top_n"), type="integer", default=100,
                 help="Number of top markers to keep per target [default %default]"),
     make_option(c("-t", "--threads"), type="integer", default=8,
                 help="Number of threads [default %default]"),
@@ -307,12 +306,9 @@ main <- function() {
   
   parser <- OptionParser(option_list=option_list)
   params <- parse_args(parser)
-
-  print("Parsed parameters:")
-  print(params)
   
   # Check required arguments
-  if (is.null(params$`cpg-file`) || is.null(params$`map-file`) || is.null(params$`out-file`)) {
+  if (is.null(params$cpg_file) || is.null(params$map_file) || is.null(params$out_file)) {
     print_help(parser)
     stop("Missing required arguments")
   }
@@ -322,8 +318,8 @@ main <- function() {
   }
   
   # Load required data
-  bed2type <- load_sample2group(params$map-file)
-  cpg_info <- load_cpg_info(params$cpg-file)
+  bed2type <- load_sample2group(params$map_file)
+  cpg_info <- load_cpg_info(params$cpg_file)
   
   # Set up parallel processing
   plan(multisession, workers = params$threads)
@@ -332,7 +328,7 @@ main <- function() {
   with_progress({
     p <- progressor(steps=22)
     pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
-      res <- fread(paste0(params$base-dir, "/dmr_by_read/blood+tum+gi_scores-by-position_", 
+      res <- fread(paste0(params$base_dir, "/dmr_by_read/blood+tum+gi_scores-by-position_", 
                          chrom, ".txt.gz"), 
                    header=TRUE, stringsAsFactors = TRUE)
       p()
@@ -354,8 +350,8 @@ main <- function() {
     message(Sys.time(), " Writing marker file...")
   }
   
-  # Write marker file for uxm build with specified top_n
-  write_marker_file(unique.regions, cpg_info, params$out-file, params$top-n)
+  # Write marker file for uxm build
+  write_marker_file(unique.regions, cpg_info, params$out_file, params$top_n)
   
   if (params$verbose) {
     message(Sys.time(), " Done.")
