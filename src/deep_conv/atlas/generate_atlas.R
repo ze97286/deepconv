@@ -312,7 +312,7 @@ main <- function() {
   print(params)
   
   # Check required arguments
-  if (is.null(params$cpg_file) || is.null(params$map_file) || is.null(params$out_file)) {
+  if (is.null(params$`cpg-file`) || is.null(params$`map-file`) || is.null(params$`out-file`)) {
     print_help(parser)
     stop("Missing required arguments")
   }
@@ -322,8 +322,8 @@ main <- function() {
   }
   
   # Load required data
-  bed2type <- load_sample2group(params$map_file)
-  cpg_info <- load_cpg_info(params$cpg_file)
+  bed2type <- load_sample2group(params$map-file)
+  cpg_info <- load_cpg_info(params$cpg-file)
   
   # Set up parallel processing
   plan(multisession, workers = params$threads)
@@ -332,7 +332,7 @@ main <- function() {
   with_progress({
     p <- progressor(steps=22)
     pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
-      res <- fread(paste0(params$base_dir, "/dmr_by_read/blood+tum+gi_scores-by-position_", 
+      res <- fread(paste0(params$base-dir, "/dmr_by_read/blood+tum+gi_scores-by-position_", 
                          chrom, ".txt.gz"), 
                    header=TRUE, stringsAsFactors = TRUE)
       p()
@@ -355,7 +355,7 @@ main <- function() {
   }
   
   # Write marker file for uxm build with specified top_n
-  write_marker_file(unique.regions, cpg_info, params$out_file, params$top_n)
+  write_marker_file(unique.regions, cpg_info, params$out-file, params$top-n)
   
   if (params$verbose) {
     message(Sys.time(), " Done.")
