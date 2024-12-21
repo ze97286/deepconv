@@ -37,7 +37,8 @@ load_cpg_info <- function(cpg_file) {
 }
 
 # Core functions for region detection
-check_region_coverage <- function(region, reads, min_coverage=3, min_cpg_per_read=4) {
+check_region_coverage <- function(region, reads, min_coverage=3, min_cpg_per_read=4, max_gap=1) {
+  # Get reads overlapping this region
   region_reads <- reads[chr == region$chr & 
                        pos >= region$start & 
                        pos <= region$end]
@@ -46,15 +47,32 @@ check_region_coverage <- function(region, reads, min_coverage=3, min_cpg_per_rea
     return(FALSE)
   }
   
-  reads_by_group <- region_reads[, .(
-    n_qualifying_reads = sum(.N >= min_cpg_per_read)
+  # For each read, check if it has enough consecutive CpGs
+  reads_by_group <- region_reads[order(pos), .(
+    has_consecutive = {
+      # Get CpG positions for this read
+      cpg_pos = sort(unique(pos))
+      # Find runs of consecutive CpGs (allowing for small gaps)
+      run_lengths = rle(c(TRUE, diff(cpg_pos) <= max_gap))$lengths
+      # Check if any run is long enough
+      max(run_lengths) >= min_cpg_per_read
+    }
   ), by=.(group, read_id)]
   
+  # Count qualifying reads per group
   sufficient_coverage <- reads_by_group[, .(
-    has_coverage = sum(n_qualifying_reads > 0) >= min_coverage
+    qualifying_reads = sum(has_consecutive)
   ), by=group]
   
-  return(all(sufficient_coverage$has_coverage))
+  # Make sure we have data for all groups
+  all_groups <- unique(reads$group)
+  missing_groups <- setdiff(all_groups, sufficient_coverage$group)
+  if(length(missing_groups) > 0) {
+    return(FALSE)
+  }
+  
+  # Check if all groups have enough qualifying reads
+  return(all(sufficient_coverage$qualifying_reads >= min_coverage))
 }
 
 scores_per_pos <- function(groups, successes, totals, p=NULL) {
