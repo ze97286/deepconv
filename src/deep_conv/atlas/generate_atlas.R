@@ -1,22 +1,15 @@
 #!/usr/bin/env Rscript
 
-# Rscript generate_atlas.R \
+
+# R_LIBS_USER=~/R/library Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/generate_atlas.R \
 #   --cpg-file /users/zetzioni/sharedscratch/wgbs_tools/references/hg38/CpG.bed.gz \
 #   --map-file /users/zetzioni/sharedscratch/atlas/per-read-bed2class.csv \
 #   --base-dir /users/zetzioni/sharedscratch/atlas/ \
-#   --out-dir /users/zetzioni/sharedscratch/atlas \
-#   --prefix blood_gi_tum \
+#   --out-file /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.1500.l4.bed \
 #   --top-n 100 \
-#   --min-isize 130 \
-#   --max-isize 2000 \
-#   --min-mapq 5 \
-#   --min-cpg-count 4 \
-#   --min-coverage 3 \
-#   --min-alpha-dist 0.2 \
 #   --threads 32 \
-#   --include-flags 3 \
-#   --exclude-flags 3852 \
 #   --verbose
+
 
 # Required libraries
 suppressPackageStartupMessages({
@@ -314,6 +307,9 @@ main <- function() {
   
   parser <- OptionParser(option_list=option_list)
   params <- parse_args(parser)
+
+  print("Parsed parameters:")
+  print(params)
   
   # Check required arguments
   if (is.null(params$cpg_file) || is.null(params$map_file) || is.null(params$out_file)) {
