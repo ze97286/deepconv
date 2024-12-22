@@ -122,84 +122,91 @@ get_pat_files <- function(class_file, base_dir, verbose=FALSE) {
   return(result)
 }
 
-# Check if a region has sufficient coverage in all groups
-verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_coverage=3, verbose=TRUE) {
+build_coverage_index <- function(pat_files, min_cpgs=4, verbose=FALSE) {
     if(verbose) {
-        cat(sprintf("\n====== Checking region %s (CpG indices %d-%d) ======\n", 
-                   region$chr[1], region$startCpG, region$endCpG))
+        message("Building coverage index...")
     }
     
-    # Function to count CpGs within index range from a pattern
-    count_cpgs_in_range <- function(start_idx, pattern, start_range, end_range) {
-        # Convert pattern to character vector
-        chars <- strsplit(pattern, "")[[1]]
-        # Get positions for each character
-        positions <- start_idx + cumsum(chars != ".")
-        # Count C/T that fall within our range
-        sum(chars %in% c("C", "T") & positions >= start_range & positions <= end_range)
-    }
+    # Will store chr, pos, count for all positions
+    all_coverage <- list()
     
-    # Store results for each group
-    coverage_data <- list()
-    
-    # Check each cell type
+    # Process each group's files
     for(group in names(pat_files)) {
-        group_files <- pat_files[[group]]
         if(verbose) {
-            cat(sprintf("\n--- Group: %s (%d files) ---\n", group, length(group_files)))
+            message(sprintf("Processing group %s (%d files)...", 
+                          group, length(pat_files[[group]])))
         }
         
-        # Accumulate qualifying reads across all files
-        total_qualifying_reads <- 0
-        
-        for(file in group_files) {
-            if(verbose) {
-                cat(sprintf("Reading file: %s\n", file))
-            }
+        for(file in pat_files[[group]]) {
+            # Read pat file
+            reads <- fread(file, select=1:4, 
+                         col.names=c("chr", "start_idx", "pattern", "count"))
             
-            # Read relevant chromosome from pat file
-            reads <- fread(file, select=1:4, col.names=c("chr", "start_idx", "pattern", "count"))
-            
-            # Filter for matching chromosome and relevant starting positions
-            region_reads <- reads[chr == region$chr[1] & 
-                                start_idx <= region$endCpG]
-            
-            if(nrow(region_reads) > 0) {
-                # For each read, count CpGs in our range
-                for(i in 1:nrow(region_reads)) {
-                    cpgs_in_range <- count_cpgs_in_range(
-                        region_reads$start_idx[i],
-                        region_reads$pattern[i],
-                        region$startCpG,
-                        region$endCpG
-                    )
-                    if(cpgs_in_range >= min_cpg_per_read) {
-                        total_qualifying_reads <- total_qualifying_reads + region_reads$count[i]
+            # Process each read
+            for(i in 1:nrow(reads)) {
+                pattern <- reads$pattern[i]
+                chars <- strsplit(pattern, "")[[1]]
+                ct_positions <- which(chars %in% c("C", "T"))
+                
+                # For each possible starting position
+                for(j in 1:length(ct_positions)) {
+                    # Check if we still have enough C/Ts ahead
+                    if(length(ct_positions) - j + 1 >= min_cpgs) {
+                        # Calculate actual CpG index for this position
+                        pos <- reads$start_idx[i] + ct_positions[j] - 1
+                        
+                        # Add to coverage
+                        key <- sprintf("%s_%d", reads$chr[i], pos)
+                        if(is.null(all_coverage[[key]])) {
+                            all_coverage[[key]] <- reads$count[i]
+                        } else {
+                            all_coverage[[key]] <- all_coverage[[key]] + reads$count[i]
+                        }
                     }
                 }
             }
         }
-        
-        if(verbose) {
-            cat(sprintf("Qualifying reads (>=%d CpGs in range %d-%d): %d\n", 
-                       min_cpg_per_read, region$startCpG, region$endCpG, 
-                       total_qualifying_reads))
-            cat(sprintf("Meets requirement (>=%d reads): %s\n", 
-                       min_coverage, total_qualifying_reads >= min_coverage))
-        }
-        
-        coverage_data[[group]] <- total_qualifying_reads
     }
     
-    # Check if all groups have sufficient coverage
-    has_coverage <- all(unlist(coverage_data) >= min_coverage)
+    # Convert to data.table
+    coverage_dt <- data.table(
+        key = names(all_coverage),
+        count = unlist(all_coverage)
+    )
+    coverage_dt[, c("chr", "pos") := tstrsplit(key, "_")]
+    coverage_dt[, pos := as.integer(pos)]
+    coverage_dt[, key := NULL]
+    setkey(coverage_dt, chr, pos)
     
-    if(verbose && !has_coverage) {
-        cat("\nFailed groups:\n")
-        for(group in names(coverage_data)) {
-            if(coverage_data[[group]] < min_coverage) {
-                cat(sprintf("%s: %d reads\n", group, coverage_data[[group]]))
-            }
+    if(verbose) {
+        message(sprintf("Built index with %d positions", nrow(coverage_dt)))
+    }
+    
+    return(coverage_dt)
+}
+
+verify_region_coverage <- function(region, coverage_index, min_coverage=3, verbose=FALSE) {
+    if(verbose) {
+        cat(sprintf("\nChecking coverage for region %s:%d-%d\n", 
+                   region$chr[1], region$startCpG, region$endCpG))
+    }
+    
+    # Get coverage for all positions in the region
+    region_coverage <- coverage_index[chr == region$chr[1] & 
+                                    pos >= region$startCpG & 
+                                    pos <= region$endCpG]
+    
+    # Each position in range needs to have enough coverage
+    has_coverage <- nrow(region_coverage) > 0 && 
+                   all(region_coverage$count >= min_coverage)
+    
+    if(verbose) {
+        if(nrow(region_coverage) == 0) {
+            cat("No coverage data found for region\n")
+        } else {
+            cat("Coverage by position:\n")
+            print(region_coverage)
+            cat(sprintf("Has sufficient coverage: %s\n", has_coverage))
         }
     }
     
@@ -420,12 +427,22 @@ main <- function() {
   # Get pat files
   pat_files <- get_pat_files(params$class_file, params$base_dir)
   
-  if(params$verbose) {
-    message(sprintf("Found %d pat files to process", length(pat_files)))
+  if (params$verbose) {
+    total_files <- sum(sapply(pat_files, length))
+    message(sprintf("Found %d cell types with total of %d pat files:", 
+                   length(pat_files), total_files))
     for(group in names(pat_files)) {
-        message(sprintf("%s: %s", group, pat_files[group]))
+      message(sprintf("  %s: %d files", group, length(pat_files[[group]])))
     }
-}
+  }
+  
+  # Build coverage index once at startup
+  if (params$verbose) {
+    message(Sys.time(), " Building coverage index...")
+  }
+  coverage_index <- build_coverage_index(pat_files, 
+                                       min_cpgs=params$min_cpgs,
+                                       verbose=params$verbose)
   
   # Load required data
   bed2type <- load_sample2group(params$map_file)
@@ -434,11 +451,11 @@ main <- function() {
   # Set up parallel processing
   plan(multisession, workers = params$threads)
   
-  # Load and process methylation data for all chromosomes
   if (params$verbose) {
     message(Sys.time(), " Loading methylation data...")
   }
   
+  # Load and process methylation data for all chromosomes
   with_progress({
     p <- progressor(steps=22)
     pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
@@ -457,7 +474,7 @@ main <- function() {
   
   # Find candidate regions
   unique.regions <- collapse_to_regions(pval.all, cpg_info)
-
+  
   # Set keys before foverlaps
   setkey(unique.regions, chr, start, end)
   setkey(cpg_info, chr, start, end)
@@ -487,12 +504,11 @@ main <- function() {
     message(sprintf("Found %d candidate regions before coverage check", nrow(candidate_regions)))
   }
   
-  # Check read coverage for each region using specified parameters
-  candidate_regions[, has_coverage := verify_region_coverage(.SD, pat_files, 
-                                                           min_cpg_per_read=params$min_cpgs,
+  # Check coverage for candidate regions
+  candidate_regions[, has_coverage := verify_region_coverage(.SD, coverage_index,
                                                            min_coverage=params$min_reads,
                                                            verbose=params$verbose), 
-                   by=.(chr, start, end)]
+                   by=.(chr, startCpG, endCpG)]
   
   if (params$verbose) {
     message(sprintf("Found %d regions with sufficient coverage (≥%d reads with ≥%d CpGs)", 
@@ -510,7 +526,7 @@ main <- function() {
   if (params$verbose) {
     message(sprintf("Selected top %d regions per target (total %d regions)", 
                    params$top_n, nrow(top_regions)))
-    # Show distribution of regions per target
+    message("\nDistribution by target:")
     print(top_regions[, .N, by=target])
   }
   
