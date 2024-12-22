@@ -6,7 +6,7 @@
 #   --map_file /users/zetzioni/sharedscratch/atlas/per-read-bed2class.csv \
 #   --base_dir /users/zetzioni/sharedscratch/atlas/ \
 #   --out_file /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.100.l4.bed \
-#   --class_file $CLASS_CSV \
+#   --class_file /users/zetzioni/sharedscratch/atlas/taps_atlas_class.csv \
 #   --top_n 100 \
 #   --threads 32 \
 #   --verbose
@@ -184,11 +184,8 @@ filter_regions_by_coverage <- function(regions, pat_files, min_cpg_per_read=4,
 }
 
 
-collapse_to_regions <- function(dmrs, cpg_info, reads, max_gap=1, max_dist=1e3, 
-                              min_logp=-20, min_length=100, mad=0.1, 
-                              min_coverage=3, min_cpg_per_read=4,
-                              verbose=FALSE) {
-
+collapse_to_regions <- function(dmrs, cpg_info, max_gap=1, max_dist=1e3, 
+                              min_logp=-20, min_length=100, mad=0.1) {
   n_groups = length(unique(dmrs$group))
   
   if (!identical(key(dmrs), c("chr", "pos"))) {
@@ -209,23 +206,6 @@ collapse_to_regions <- function(dmrs, cpg_info, reads, max_gap=1, max_dist=1e3,
     by=.(chr, group, region_index)]
   
   setkey(sign.regions, chr, start, end)
-  
-  # Check read coverage only if reads are provided
-  if (!is.null(reads)) {
-    sign.regions[, has_coverage := check_region_coverage(.SD, reads, 
-                                                       min_coverage = min_coverage, 
-                                                       min_cpg_per_read = min_cpg_per_read,
-                                                       verbose = verbose), 
-                 by=.(chr, start, end)]
-    
-    if(verbose) {
-      cat(sprintf("Found %d regions with sufficient coverage out of %d total regions\n",
-                 sum(sign.regions$has_coverage), nrow(sign.regions)))
-    }
-    
-    # Keep only regions with sufficient coverage
-    sign.regions <- sign.regions[has_coverage == TRUE]
-  }
   
   overlapping.regions <- foverlaps(sign.regions, sign.regions)[group != i.group]
   setkey(overlapping.regions, group, chr, start, end, region_index)
