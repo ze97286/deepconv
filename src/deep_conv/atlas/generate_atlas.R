@@ -96,30 +96,38 @@ check_region_coverage <- function(region, reads, min_coverage=3, min_cpg_per_rea
 
 # Get pat files from class file using same logic as UXM command
 get_pat_files <- function(class_file, base_dir, verbose=FALSE) {
-  # Read the class file - it has no header and comma separator
-  classes <- fread(class_file, header=FALSE, sep=",")
+  # Read the class file with header
+  classes <- fread(class_file, sep=",", header=TRUE)
   if (verbose) {
     message(sprintf("Read %d lines from class file", nrow(classes)))
+    message("First few entries:")
+    print(head(classes))
   }
   
   # Get file paths and convert to pat paths
-  pat_files <- classes$V1
+  pat_files <- classes$name
   pat_files <- gsub("\\.beta$", ".pat.gz", pat_files)  # replace .beta at end
   pat_files <- gsub("/beta/", "/pat/Tissue/", pat_files)  # replace /beta/ with /pat/Tissue/
   pat_files <- gsub("\\.calls\\.all", "", pat_files)
   
-  # Create named vector mapping to groups
-  names(pat_files) <- classes$V2
+  # Create named vector mapping to groups, make sure groups are unique
+  unique_groups <- unique(classes$group)
+  result <- character()
   
-  # Verify each file exists
-  if (verbose) {
-    for (f in pat_files) {
-      message(sprintf("Looking for file: %s", f))
-      message(sprintf("File exists: %s", file.exists(f)))
+  for(group in unique_groups) {
+    # For each group, take the first file path associated with that group
+    result[group] <- pat_files[classes$group == group][1]
+  }
+  
+  if(verbose) {
+    message("\nFinal pat files mapping:")
+    for(group in names(result)) {
+      message(sprintf("%s -> %s", group, result[group]))
+      message(sprintf("File exists: %s", file.exists(result[group])))
     }
   }
   
-  return(pat_files)
+  return(result)
 }
 
 # Check if a region has sufficient coverage in all groups
