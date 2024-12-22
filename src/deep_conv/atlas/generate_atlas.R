@@ -114,52 +114,54 @@ get_pat_files <- function(class_file, base_dir) {
 }
 
 # Check if a region has sufficient coverage in all groups
-verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_coverage=3, verbose=FALSE) {
-  if(verbose) {
-    cat(sprintf("\nChecking coverage for region %s:%d-%d\n", region$chr, region$start, region$end))
-  }
-  
-  # Get tabix region string
-  region_str <- sprintf("%s:%d-%d", region$chr, region$start, region$end)
-  
-  # Check coverage for each group
-  coverage_by_group <- lapply(names(pat_files), function(group) {
-    file <- pat_files[group]
+verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_coverage=3, verbose=TRUE) {
+    cat(sprintf("\nChecking region %s:%d-%d for target %s\n", 
+                region$chr[1], region$start[1], region$end[1], region$target[1]))
     
-    # Read region from pat file
-    cmd <- sprintf("tabix %s %s", file, region_str)
-    reads <- fread(cmd=cmd)
+    # Get tabix region string
+    region_str <- sprintf("%s:%d-%d", region$chr[1], region$start[1], region$end[1])
     
-    if(nrow(reads) == 0) {
-      if(verbose) cat(sprintf("No reads for group %s\n", group))
-      return(data.table(group=group, qualifying_reads=0))
-    }
+    # Check each file
+    reads_by_group <- lapply(names(pat_files), function(group) {
+        file <- pat_files[group]
+        cat(sprintf("\nChecking file for group %s: %s\n", group, file))
+        
+        # Read region from pat file
+        cmd <- sprintf("tabix %s %s", file, region_str)
+        cat("Running command:", cmd, "\n")
+        reads <- try(fread(cmd=cmd))
+        
+        if(inherits(reads, "try-error")) {
+            cat("Error reading file\n")
+            return(data.table(group=group, reads=0, qualifying_reads=0))
+        }
+        
+        if(nrow(reads) == 0) {
+            cat("No reads found\n")
+            return(data.table(group=group, reads=0, qualifying_reads=0))
+        }
+        
+        # Count CpGs per read in region
+        read_cpgs <- reads[, .N, by=V4]  # V4 should be read ID
+        qualifying_reads <- sum(read_cpgs$N >= min_cpg_per_read)
+        
+        cat(sprintf("Found %d total reads, %d with >= %d CpGs\n", 
+                   nrow(read_cpgs), qualifying_reads, min_cpg_per_read))
+        
+        return(data.table(group=group, 
+                         reads=nrow(read_cpgs), 
+                         qualifying_reads=qualifying_reads))
+    })
     
-    # Count CpGs per read in region
-    reads_with_sufficient_cpgs <- reads[, .(cpg_count = .N), by=V4][cpg_count >= min_cpg_per_read, .N]
+    coverage_summary <- rbindlist(reads_by_group)
+    cat("\nCoverage summary:\n")
+    print(coverage_summary)
     
-    if(verbose) {
-      cat(sprintf("Group %s: %d reads with ≥%d CpGs\n", 
-                 group, reads_with_sufficient_cpgs, min_cpg_per_read))
-    }
+    # Did all groups pass?
+    has_coverage <- all(coverage_summary$qualifying_reads >= min_coverage)
     
-    return(data.table(group=group, qualifying_reads=reads_with_sufficient_cpgs))
-  })
-  
-  coverage_summary <- rbindlist(coverage_by_group)
-  
-  # Check if all groups have sufficient coverage
-  has_coverage <- all(coverage_summary$qualifying_reads >= min_coverage)
-  
-  if(verbose) {
-    if(!has_coverage) {
-      cat("\nGroups with insufficient coverage:\n")
-      print(coverage_summary[qualifying_reads < min_coverage])
-    }
-    cat(sprintf("\nRegion coverage check: %s\n", ifelse(has_coverage, "PASS", "FAIL")))
-  }
-  
-  return(has_coverage)
+    cat(sprintf("\nFinal result: %s\n", ifelse(has_coverage, "PASS", "FAIL")))
+    return(has_coverage)
 }
 
 # Filter regions based on coverage requirements
@@ -377,7 +379,10 @@ main <- function() {
   
   if(params$verbose) {
     message(sprintf("Found %d pat files to process", length(pat_files)))
-  }
+    for(group in names(pat_files)) {
+        message(sprintf("%s: %s", group, pat_files[group]))
+    }
+}
   
   # Load required data
   bed2type <- load_sample2group(params$map_file)
