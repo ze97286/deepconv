@@ -289,7 +289,7 @@ write_marker_file <- function(regions, cpg_info, outfile, top_n = 100) {
     regions[fully_covered==TRUE], 
     nomatch=NULL)[
       , .(startCpG=min(index), 
-          endCpG=max(index) + 1,  # Add 1 to make endCpG exclusive
+          endCpG=max(index) + 1,  # Add 1 to make endCpG exclusive 
           r_len=mean(r_len), 
           p_len=mean(p_len), 
           tg_mean=mean(avg_min_ci), 
@@ -297,7 +297,7 @@ write_marker_file <- function(regions, cpg_info, outfile, top_n = 100) {
           delta_means=mean(avg_min_alpha_dist)), 
       by=.(chr, start=start-1, end=end, target=group)]
   
-  # Add direction and select top n hypomethylated regions per target
+  # Add direction and select top N regions per target
   unique.regions.stat[, direction := fifelse(tg_mean>0, "M", "U")]
   top_n_regions <- unique.regions.stat[
     direction=="U" & r_len>5, 
@@ -375,6 +375,10 @@ main <- function() {
   # Get pat files
   pat_files <- get_pat_files(params$class_file, params$base_dir)
   
+  if(params$verbose) {
+    message(sprintf("Found %d pat files to process", length(pat_files)))
+  }
+  
   # Load required data
   bed2type <- load_sample2group(params$map_file)
   cpg_info <- load_cpg_info(params$cpg_file)
@@ -383,6 +387,10 @@ main <- function() {
   plan(multisession, workers = params$threads)
   
   # Load and process methylation data for all chromosomes
+  if (params$verbose) {
+    message(Sys.time(), " Loading methylation data...")
+  }
+  
   with_progress({
     p <- progressor(steps=22)
     pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
@@ -396,32 +404,90 @@ main <- function() {
   pval.all <- rbindlist(pval.all)
   
   if (params$verbose) {
-    message(Sys.time(), " Finding candidate regions...")
+    message(Sys.time(), " Finding unique regions...")
   }
   
   # Find candidate regions
-  unique.regions <- collapse_to_regions(pval.all, cpg_info, max_gap = 1, 
-                                      max_dist = 1000, min_logp = -30, min_length = 150)
+  unique.regions <- collapse_to_regions(pval.all, cpg_info)
+  
+  # Calculate initial stats and add direction
+  unique.regions.stat <- foverlaps(
+    cpg_info, 
+    unique.regions[fully_covered==TRUE], 
+    nomatch=NULL)[
+      , .(startCpG=min(index), 
+          endCpG=max(index) + 1,  # Make endCpG exclusive
+          r_len=mean(r_len), 
+          p_len=mean(p_len), 
+          tg_mean=mean(avg_min_ci), 
+          ttest=mean(med_logp), 
+          delta_means=mean(avg_min_alpha_dist)), 
+      by=.(chr, start=start-1, end=end, target=group)]
+  
+  unique.regions.stat[, direction := fifelse(tg_mean>0, "M", "U")]
+  
+  # Get candidate hypomethylated regions for each target
+  candidate_regions <- unique.regions.stat[direction=="U" & r_len>5, 
+                                         .SD[order(delta_means, -ttest, decreasing = TRUE)], 
+                                         by=target]
   
   if (params$verbose) {
-    message(Sys.time(), " Verifying read coverage...")
+    message(sprintf("Found %d candidate regions before coverage check", nrow(candidate_regions)))
   }
   
-  # Filter regions based on read coverage
-  verified_regions <- filter_regions_by_coverage(unique.regions, pat_files, 
-                                               min_cpg_per_read = params$min_cpgs,
-                                               min_coverage = params$min_reads, 
-                                               verbose = params$verbose)
+  # Check read coverage for each region using specified parameters
+  candidate_regions[, has_coverage := verify_region_coverage(.SD, pat_files, 
+                                                           min_cpg_per_read=params$min_cpgs,
+                                                           min_coverage=params$min_reads,
+                                                           verbose=params$verbose), 
+                   by=.(chr, start, end)]
   
   if (params$verbose) {
-    message(Sys.time(), " Writing marker file...")
+    message(sprintf("Found %d regions with sufficient coverage (≥%d reads with ≥%d CpGs)", 
+                   sum(candidate_regions$has_coverage), 
+                   params$min_reads, 
+                   params$min_cpgs))
   }
   
-  # Write marker file for uxm build
-  write_marker_file(verified_regions, cpg_info, params$out_file, params$top_n)
+  # Get top N passing regions per target
+  top_regions <- candidate_regions[has_coverage==TRUE, 
+                                 head(.SD[order(delta_means, -ttest, decreasing=TRUE)], 
+                                      n=params$top_n), 
+                                 by=target]
   
   if (params$verbose) {
-    message(Sys.time(), " Done.")
+    message(sprintf("Selected top %d regions per target (total %d regions)", 
+                   params$top_n, nrow(top_regions)))
+    # Show distribution of regions per target
+    print(top_regions[, .N, by=target])
+  }
+  
+  # Write output file
+  fwrite(top_regions[, .(
+    `#chr`=chr, 
+    start, 
+    end, 
+    startCpG, 
+    endCpG, 
+    target, 
+    region=paste0(chr,":",start+1,"-",end), 
+    lenCpG=paste0(r_len, "CpGs"), 
+    bp=paste0(p_len,"bp"), 
+    tg_mean, 
+    bg_mean=0.0, 
+    dela_means=0.0, 
+    delta_quants=0.0, 
+    delta_maxmin=0.0, 
+    ttest, 
+    direction)], 
+    params$out_file, 
+    sep="\t", 
+    quote=FALSE, 
+    col.names=TRUE, 
+    row.names=FALSE)
+  
+  if (params$verbose) {
+    message(Sys.time(), " Done. Marker file written to ", params$out_file)
   }
 }
 
