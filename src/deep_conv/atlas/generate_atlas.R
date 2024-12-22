@@ -127,16 +127,20 @@ build_coverage_index <- function(pat_files, min_cpgs=4, verbose=FALSE) {
         message("Building coverage index...")
     }
     
-    # Will store chr, pos, count for all positions
-    all_coverage <- list()
+    # Will store coverage by cell type
+    coverage_by_group <- list()
     
-    # Process each group's files
+    # Process each cell type
     for(group in names(pat_files)) {
         if(verbose) {
             message(sprintf("Processing group %s (%d files)...", 
                           group, length(pat_files[[group]])))
         }
         
+        # Store coverage for this group
+        group_coverage <- list()
+        
+        # Process all files for this group
         for(file in pat_files[[group]]) {
             # Read pat file
             reads <- fread(file, select=1:4, 
@@ -155,31 +159,40 @@ build_coverage_index <- function(pat_files, min_cpgs=4, verbose=FALSE) {
                         # Calculate actual CpG index for this position
                         pos <- reads$start_idx[i] + ct_positions[j] - 1
                         
-                        # Add to coverage
+                        # Add to group coverage
                         key <- sprintf("%s_%d", reads$chr[i], pos)
-                        if(is.null(all_coverage[[key]])) {
-                            all_coverage[[key]] <- reads$count[i]
+                        if(is.null(group_coverage[[key]])) {
+                            group_coverage[[key]] <- reads$count[i]
                         } else {
-                            all_coverage[[key]] <- all_coverage[[key]] + reads$count[i]
+                            group_coverage[[key]] <- group_coverage[[key]] + reads$count[i]
                         }
                     }
                 }
             }
         }
+        
+        # Convert group coverage to data.table
+        if(length(group_coverage) > 0) {
+            dt <- data.table(
+                key = names(group_coverage),
+                count = unlist(group_coverage)
+            )
+            dt[, c("chr", "pos") := tstrsplit(key, "_")]
+            dt[, pos := as.integer(pos)]
+            dt[, key := NULL]
+            dt[, group := group]
+            coverage_by_group[[group]] <- dt
+        }
     }
     
-    # Convert to data.table
-    coverage_dt <- data.table(
-        key = names(all_coverage),
-        count = unlist(all_coverage)
-    )
-    coverage_dt[, c("chr", "pos") := tstrsplit(key, "_")]
-    coverage_dt[, pos := as.integer(pos)]
-    coverage_dt[, key := NULL]
-    setkey(coverage_dt, chr, pos)
+    # Combine all groups
+    coverage_dt <- rbindlist(coverage_by_group)
+    setkey(coverage_dt, chr, pos, group)
     
     if(verbose) {
-        message(sprintf("Built index with %d positions", nrow(coverage_dt)))
+        message(sprintf("Built index with %d positions across %d groups", 
+                       uniqueN(coverage_dt[, .(chr, pos)]), 
+                       uniqueN(coverage_dt$group)))
     }
     
     return(coverage_dt)
@@ -196,16 +209,17 @@ verify_region_coverage <- function(region, coverage_index, min_coverage=3, verbo
                                     pos >= region$startCpG & 
                                     pos <= region$endCpG]
     
-    # Each position in range needs to have enough coverage
-    has_coverage <- nrow(region_coverage) > 0 && 
-                   all(region_coverage$count >= min_coverage)
+    # Check if all groups have sufficient coverage
+    group_coverage <- region_coverage[, .(min_count = min(count)), by=group]
+    has_coverage <- nrow(group_coverage) == uniqueN(coverage_index$group) && 
+                   all(group_coverage$min_count >= min_coverage)
     
     if(verbose) {
         if(nrow(region_coverage) == 0) {
             cat("No coverage data found for region\n")
         } else {
-            cat("Coverage by position:\n")
-            print(region_coverage)
+            cat("Coverage by group:\n")
+            print(group_coverage)
             cat(sprintf("Has sufficient coverage: %s\n", has_coverage))
         }
     }
