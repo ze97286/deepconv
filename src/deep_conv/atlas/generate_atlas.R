@@ -37,63 +37,6 @@ load_cpg_info <- function(cpg_file) {
   return(cpg_info)
 }
 
-# Core functions for region detection
-check_region_coverage <- function(region, reads, min_coverage=3, min_cpg_per_read=4, verbose=TRUE) {
-  if(verbose) {
-    cat(sprintf("\nChecking region %s:%d-%d\n", region$chr[1], region$start[1], region$end[1]))
-  }
-  
-  # Get reads overlapping this region
-  region_reads <- reads[chr == region$chr & 
-                       pos >= region$start & 
-                       pos <= region$end]
-  
-  if(nrow(region_reads) == 0) {
-    if(verbose) cat("No reads found in region\n")
-    return(FALSE)
-  }
-  
-  # Count CpGs per read - this is the key change
-  reads_with_cpgs <- region_reads[, .(
-    cpg_count = uniqueN(pos)  # Count unique CpG positions per read
-  ), by=.(group, read_id)]
-  
-  # Count reads with sufficient CpGs per group
-  qualifying_reads <- reads_with_cpgs[cpg_count >= min_cpg_per_read, 
-                                    .N, 
-                                    by=group]
-  
-  if(verbose) {
-    cat("\nQualifying reads (≥4 CpGs) by group:\n")
-    print(qualifying_reads)
-  }
-  
-  # Check we have data for all groups
-  all_groups <- unique(reads$group)
-  coverage_status <- data.table(group = all_groups)[
-    qualifying_reads, 
-    on="group"
-  ][, N := ifelse(is.na(N), 0, N)]
-  
-  if(verbose) {
-    cat("\nCoverage status for all groups:\n")
-    print(coverage_status)
-  }
-  
-  # All groups must have sufficient coverage
-  result <- all(coverage_status$N >= min_coverage)
-  
-  if(verbose) {
-    if(!result) {
-      cat("\nFailing groups:\n")
-      print(coverage_status[N < min_coverage])
-    }
-    cat(sprintf("\nFinal decision: %s\n", ifelse(result, "PASS", "FAIL")))
-  }
-  
-  return(result)
-}
-
 # Get pat files from class file using same logic as UXM command
 get_pat_files <- function(class_file, base_dir, verbose=FALSE) {
   # Read the class file with header
@@ -127,66 +70,54 @@ build_coverage_index <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE
         message("Building coverage index...")
     }
     
-    # Set up parallel processing
     plan(multisession, workers = threads)
     
-    # Process each cell type in parallel
-    coverage_by_group <- future_map(names(pat_files), function(group) {
-        if(verbose) {
-            message(sprintf("Processing group %s (%d files)...", 
-                          group, length(pat_files[[group]])))
-        }
-        
-        # Store coverage for this group
-        group_coverage <- list()
-        
-        # Process all files for this group
-        for(file in pat_files[[group]]) {
-            # Read pat file
-            reads <- fread(file, select=1:4, 
-                         col.names=c("chr", "start_idx", "pattern", "count"))
+    with_progress({
+        p <- progressor(steps=length(names(pat_files)))
+        coverage_by_group <- future_map(names(pat_files), function(group) {
+            if(verbose) {
+                message(sprintf("Processing group %s (%d files)...", 
+                              group, length(pat_files[[group]])))
+            }
             
-            # Process each read
-            for(i in 1:nrow(reads)) {
-                pattern <- reads$pattern[i]
-                chars <- strsplit(pattern, "")[[1]]
-                ct_positions <- which(chars %in% c("C", "T"))
+            group_coverage <- list()
+            for(file in pat_files[[group]]) {
+                reads <- fread(file, select=1:4, 
+                             col.names=c("chr", "start_idx", "pattern", "count"))
                 
-                # For each possible starting position
-                for(j in 1:length(ct_positions)) {
-                    # Check if we still have enough C/Ts ahead
-                    if(length(ct_positions) - j + 1 >= min_cpgs) {
-                        # Calculate actual CpG index for this position
-                        pos <- reads$start_idx[i] + ct_positions[j] - 1
-                        
-                        # Add to group coverage
-                        key <- sprintf("%s_%d", reads$chr[i], pos)
-                        if(is.null(group_coverage[[key]])) {
-                            group_coverage[[key]] <- reads$count[i]
-                        } else {
-                            group_coverage[[key]] <- group_coverage[[key]] + reads$count[i]
+                for(i in 1:nrow(reads)) {
+                    pattern <- reads$pattern[i]
+                    chars <- strsplit(pattern, "")[[1]]
+                    ct_positions <- which(chars %in% c("C", "T"))
+                    
+                    for(j in 1:length(ct_positions)) {
+                        if(length(ct_positions) - j + 1 >= min_cpgs) {
+                            pos <- reads$start_idx[i] + ct_positions[j] - 1
+                            key <- sprintf("%s_%d", reads$chr[i], pos)
+                            group_coverage[[key]] <- (if(is.null(group_coverage[[key]])) 0 else group_coverage[[key]]) + 
+                                                   reads$count[i]
                         }
                     }
                 }
             }
-        }
-        
-        # Convert group coverage to data.table
-        if(length(group_coverage) > 0) {
-            dt <- data.table(
-                key = names(group_coverage),
-                count = unlist(group_coverage)
-            )
-            dt[, c("chr", "pos") := tstrsplit(key, "_")]
-            dt[, pos := as.integer(pos)]
-            dt[, key := NULL]
-            dt[, group := group]
-            return(dt)
-        }
-        return(NULL)
+            
+            if(length(group_coverage) > 0) {
+                dt <- data.table(
+                    key = names(group_coverage),
+                    count = unlist(group_coverage)
+                )
+                dt[, c("chr", "pos") := tstrsplit(key, "_")]
+                dt[, pos := as.integer(pos)]
+                dt[, key := NULL]
+                dt[, group := group]
+                p()
+                return(dt)
+            }
+            p()
+            return(NULL)
+        })
     })
     
-    # Clean up any NULL results and combine all groups
     coverage_dt <- rbindlist(Filter(Negate(is.null), coverage_by_group))
     setkey(coverage_dt, chr, pos, group)
     
@@ -198,6 +129,75 @@ build_coverage_index <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE
     
     return(coverage_dt)
 }
+
+save_coverage_index <- function(coverage_index, params, outfile, verbose=FALSE) {
+    # Save both the index and the parameters used to create it
+    metadata <- list(
+        min_cpgs = params$min_cpgs,
+        pat_files_hash = digest::digest(params$class_file, file=TRUE),
+        creation_time = Sys.time(),
+        version = "1.0"
+    )
+    
+    to_save <- list(
+        metadata = metadata,
+        coverage_index = coverage_index
+    )
+    
+    saveRDS(to_save, file=outfile)
+    
+    if(verbose) {
+        message(sprintf("Saved coverage index to %s", outfile))
+    }
+}
+
+load_coverage_index <- function(infile, params, verbose=FALSE) {
+    if(!file.exists(infile)) {
+        if(verbose) message("No existing index file found")
+        return(NULL)
+    }
+    
+    if(verbose) message(sprintf("Loading coverage index from %s", infile))
+    
+    data <- readRDS(infile)
+    
+    # Verify metadata matches current parameters
+    current_hash <- digest::digest(params$class_file, file=TRUE)
+    if(data$metadata$min_cpgs != params$min_cpgs || 
+       data$metadata$pat_files_hash != current_hash) {
+        if(verbose) {
+            message("Existing index was built with different parameters or input files")
+        }
+        return(NULL)
+    }
+    
+    return(data$coverage_index)
+}
+
+get_coverage_index <- function(pat_files, params, verbose=FALSE) {
+    # Construct index filename based on input files
+    index_file <- file.path(params$base_dir, 
+                           sprintf("coverage_index_minCpg%d.rds", params$min_cpgs))
+    
+    # Try to load existing index
+    coverage_index <- load_coverage_index(index_file, params, verbose)
+    
+    if(is.null(coverage_index)) {
+        if(verbose) message("Building new coverage index...")
+        
+        # Build new index
+        coverage_index <- build_coverage_index(pat_files, 
+                                             min_cpgs=params$min_cpgs,
+                                             threads=params$threads,
+                                             verbose=verbose)
+        
+        # Save for future use
+        save_coverage_index(coverage_index, params, index_file, verbose)
+    }
+    
+    return(coverage_index)
+}
+
 
 verify_region_coverage <- function(region, coverage_index, min_coverage=3, verbose=FALSE) {
     if(verbose) {
@@ -227,29 +227,6 @@ verify_region_coverage <- function(region, coverage_index, min_coverage=3, verbo
     
     return(has_coverage)
 }
-
-
-# Filter regions based on coverage requirements
-filter_regions_by_coverage <- function(regions, pat_files, min_cpg_per_read=4, 
-                                     min_coverage=3, verbose=FALSE) {
-  if(verbose) {
-    message("Checking coverage for ", nrow(regions), " candidate regions...")
-  }
-  
-  regions[, has_coverage := verify_region_coverage(.BY, pat_files, min_cpg_per_read, 
-                                                 min_coverage, verbose), 
-          by=.(chr, start, end)]
-  
-  passing_regions <- regions[has_coverage == TRUE]
-  
-  if(verbose) {
-    message(sprintf("Found %d regions with sufficient coverage out of %d candidates", 
-                   nrow(passing_regions), nrow(regions)))
-  }
-  
-  return(passing_regions)
-}
-
 
 collapse_to_regions <- function(dmrs, cpg_info, max_gap=1, max_dist=1e3, 
                               min_logp=-20, min_length=100, mad=0.1) {
@@ -346,54 +323,29 @@ collapse_to_regions <- function(dmrs, cpg_info, max_gap=1, max_dist=1e3,
   return(unique.sign.regions.stats)
 }
 
-write_marker_file <- function(regions, cpg_info, outfile, top_n = 100) {
-  setkey(regions, chr, start, end)
-  setkey(cpg_info, chr, start, end)
-  
-  # Calculate statistics for unique regions
-  unique.regions.stat <- foverlaps(
-    cpg_info, 
-    regions[fully_covered==TRUE], 
-    nomatch=NULL)[
-      , .(startCpG=min(index), 
-          endCpG=max(index) + 1,  # Add 1 to make endCpG exclusive 
-          r_len=mean(r_len), 
-          p_len=mean(p_len), 
-          tg_mean=mean(avg_min_ci), 
-          ttest=mean(med_logp), 
-          delta_means=mean(avg_min_alpha_dist)), 
-      by=.(chr, start=start-1, end=end, target=group)]
-  
-  # Add direction and select top N regions per target
-  unique.regions.stat[, direction := fifelse(tg_mean>0, "M", "U")]
-  top_n_regions <- unique.regions.stat[
-    direction=="U" & r_len>5, 
-    .SD[order(delta_means, -ttest, decreasing = TRUE)][1:top_n], 
-    by=target]
-  
-  # Write the output file
-  fwrite(top_n_regions[, .(
-    `#chr`=chr, 
-    start, 
-    end, 
-    startCpG, 
-    endCpG, 
-    target, 
-    region=paste0(chr,":",start+1,"-",end), 
-    lenCpG=paste0(r_len, "CpGs"), 
-    bp=paste0(p_len,"bp"), 
-    tg_mean, 
-    bg_mean=0.0, 
-    dela_means=0.0, 
-    delta_quants=0.0, 
-    delta_maxmin=0.0, 
-    ttest, 
-    direction)], 
-    outfile, 
-    sep="\t", 
-    quote=FALSE, 
-    col.names=TRUE, 
-    row.names=FALSE)
+write_marker_file <- function(regions, outfile) {
+    fwrite(regions[, .(
+        `#chr`=chr, 
+        start, 
+        end, 
+        startCpG, 
+        endCpG, 
+        target, 
+        region=paste0(chr,":",start+1,"-",end), 
+        lenCpG=paste0(r_len, "CpGs"), 
+        bp=paste0(p_len,"bp"), 
+        tg_mean, 
+        bg_mean=0.0, 
+        dela_means=0.0, 
+        delta_quants=0.0, 
+        delta_maxmin=0.0, 
+        ttest, 
+        direction)], 
+        outfile, 
+        sep="\t", 
+        quote=FALSE, 
+        col.names=TRUE, 
+        row.names=FALSE)
 }
 
 main <- function() {
@@ -451,14 +403,8 @@ main <- function() {
     }
   }
   
-  # Build coverage index once at startup
-  if (params$verbose) {
-    message(Sys.time(), " Building coverage index...")
-  }
-  coverage_index <- build_coverage_index(pat_files, 
-                                     min_cpgs=params$min_cpgs,
-                                     threads=params$threads,
-                                     verbose=params$verbose)
+  # Get or build coverage index
+  coverage_index <- get_coverage_index(pat_files, params, verbose=params$verbose)
   
   # Load required data
   bed2type <- load_sample2group(params$map_file)
@@ -468,111 +414,89 @@ main <- function() {
   plan(multisession, workers = params$threads)
   
   if (params$verbose) {
-    message(Sys.time(), " Loading methylation data...")
-  }
-  
-  # Load and process methylation data for all chromosomes
-  with_progress({
-    p <- progressor(steps=22)
-    pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
-      res <- fread(paste0(params$base_dir, "/dmr_by_read/blood+tum+gi_scores-by-position_", 
-                         chrom, ".txt.gz"), 
-                   header=TRUE, stringsAsFactors = TRUE)
-      p()
-      return(res)
-    }) 
-  })
-  pval.all <- rbindlist(pval.all)
-  
-  if (params$verbose) {
-    message(Sys.time(), " Finding unique regions...")
-  }
-  
-  # Find candidate regions
-  unique.regions <- collapse_to_regions(pval.all, cpg_info)
-  
-  # Set keys before foverlaps
-  setkey(unique.regions, chr, start, end)
-  setkey(cpg_info, chr, start, end)
-  
-  # Calculate initial stats and add direction
-  unique.regions.stat <- foverlaps(
-    cpg_info, 
-    unique.regions[fully_covered==TRUE], 
-    nomatch=NULL)[
-      , .(startCpG=min(index), 
-          endCpG=max(index) + 1,  # Make endCpG exclusive
-          r_len=mean(r_len), 
-          p_len=mean(p_len), 
-          tg_mean=mean(avg_min_ci), 
-          ttest=mean(med_logp), 
-          delta_means=mean(avg_min_alpha_dist)), 
-      by=.(chr, start=start-1, end=end, target=group)]
-  
-  unique.regions.stat[, direction := fifelse(tg_mean>0, "M", "U")]
-  
-  # Get candidate hypomethylated regions for each target
-  candidate_regions <- unique.regions.stat[direction=="U" & r_len>5, 
-                                         .SD[order(delta_means, -ttest, decreasing = TRUE)], 
-                                         by=target]
-  
-  if (params$verbose) {
-    message(sprintf("Found %d candidate regions before coverage check", nrow(candidate_regions)))
-  }
-  
-  # Check coverage for candidate regions
-  candidate_regions[, has_coverage := verify_region_coverage(.SD, coverage_index,
-                                                           min_coverage=params$min_reads,
-                                                           verbose=params$verbose), 
-                   by=.(chr, startCpG, endCpG)]
-  
-  if (params$verbose) {
-    message(sprintf("Found %d regions with sufficient coverage (≥%d reads with ≥%d CpGs)", 
-                   sum(candidate_regions$has_coverage), 
-                   params$min_reads, 
-                   params$min_cpgs))
-  }
-  
-  # Get top N passing regions per target
-  top_regions <- candidate_regions[has_coverage==TRUE, 
-                                 head(.SD[order(delta_means, -ttest, decreasing=TRUE)], 
-                                      n=params$top_n), 
-                                 by=target]
-  
-  if (params$verbose) {
-    message(sprintf("Selected top %d regions per target (total %d regions)", 
-                   params$top_n, nrow(top_regions)))
-    message("\nDistribution by target:")
-    print(top_regions[, .N, by=target])
-  }
-  
-  # Write output file
-  fwrite(top_regions[, .(
-    `#chr`=chr, 
-    start, 
-    end, 
-    startCpG, 
-    endCpG, 
-    target, 
-    region=paste0(chr,":",start+1,"-",end), 
-    lenCpG=paste0(r_len, "CpGs"), 
-    bp=paste0(p_len,"bp"), 
-    tg_mean, 
-    bg_mean=0.0, 
-    dela_means=0.0, 
-    delta_quants=0.0, 
-    delta_maxmin=0.0, 
-    ttest, 
-    direction)], 
-    params$out_file, 
-    sep="\t", 
-    quote=FALSE, 
-    col.names=TRUE, 
-    row.names=FALSE)
-  
-  if (params$verbose) {
-    message(Sys.time(), " Done. Marker file written to ", params$out_file)
-  }
+        message(Sys.time(), " Loading methylation data...")
+    }
+    
+    with_progress({
+        p <- progressor(steps=22)
+        pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
+            res <- fread(paste0(params$base_dir, "/dmr_by_read/blood+tum+gi_scores-by-position_", 
+                             chrom, ".txt.gz"), 
+                       header=TRUE, stringsAsFactors = TRUE)
+            p()
+            return(res)
+        }) 
+    })
+    pval.all <- rbindlist(pval.all)
+    
+    if (params$verbose) {
+        message(Sys.time(), " Finding unique regions...")
+    }
+    
+    # Find candidate regions
+    unique.regions <- collapse_to_regions(pval.all, cpg_info)
+    
+    # Calculate region statistics once
+    setkey(unique.regions, chr, start, end)
+    setkey(cpg_info, chr, start, end)
+    
+    unique.regions.stat <- foverlaps(
+        cpg_info, 
+        unique.regions[fully_covered==TRUE], 
+        nomatch=NULL)[
+            , .(startCpG=min(index), 
+                endCpG=max(index) + 1,  # Make endCpG exclusive
+                r_len=mean(r_len), 
+                p_len=mean(p_len), 
+                tg_mean=mean(avg_min_ci), 
+                ttest=mean(med_logp), 
+                delta_means=mean(avg_min_alpha_dist)), 
+            by=.(chr, start=start-1, end=end, target=group)]
+    
+    unique.regions.stat[, direction := fifelse(tg_mean>0, "M", "U")]
+    
+    # Get candidate hypomethylated regions
+    candidate_regions <- unique.regions.stat[direction=="U" & r_len>5, 
+                                           .SD[order(delta_means, -ttest, decreasing = TRUE)], 
+                                           by=target]
+    
+    if (params$verbose) {
+        message(sprintf("Found %d candidate regions before coverage check", 
+                       nrow(candidate_regions)))
+    }
+    
+    # Check coverage
+    candidate_regions[, has_coverage := verify_region_coverage(.SD, coverage_index,
+                                                             min_coverage=params$min_reads,
+                                                             verbose=params$verbose), 
+                     by=.(chr, startCpG, endCpG)]
+    
+    if (params$verbose) {
+        message(sprintf("Found %d regions with sufficient coverage (≥%d reads with ≥%d CpGs)", 
+                       sum(candidate_regions$has_coverage), 
+                       params$min_reads, 
+                       params$min_cpgs))
+    }
+    
+    # Select top N regions that pass coverage
+    top_regions <- candidate_regions[has_coverage==TRUE, 
+                                   head(.SD[order(delta_means, -ttest, decreasing=TRUE)], 
+                                        n=params$top_n), 
+                                   by=target]
+    
+    if (params$verbose) {
+        message(sprintf("Selected top %d regions per target (total %d regions)", 
+                       params$top_n, nrow(top_regions)))
+        message("\nDistribution by target:")
+        print(top_regions[, .N, by=target])
+    }
+    
+    # Write final marker file
+    write_marker_file(top_regions, params$out_file)
+    
+    if (params$verbose) {
+        message(Sys.time(), " Done. Marker file written to ", params$out_file)
+    }
 }
 
 # Run main function if script is run directly
