@@ -149,7 +149,7 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
             }
             
             # Read region from pat file
-            cmd <- sprintf("tabix '%s' '%s'", file, region_str)
+            cmd <- paste("tabix", file, region_str)
             reads <- try(fread(cmd=cmd))
             
             if(!inherits(reads, "try-error") && nrow(reads) > 0) {
