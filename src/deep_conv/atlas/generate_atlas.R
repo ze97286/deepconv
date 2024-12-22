@@ -124,52 +124,86 @@ get_pat_files <- function(class_file, base_dir, verbose=FALSE) {
 
 # Check if a region has sufficient coverage in all groups
 verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_coverage=3, verbose=TRUE) {
-    cat(sprintf("\nChecking region %s:%d-%d for target %s\n", 
-                region$chr[1], region$start[1], region$end[1], region$target[1]))
-    
-    # Get tabix region string
     region_str <- sprintf("%s:%d-%d", region$chr[1], region$start[1], region$end[1])
+    if(verbose) {
+        cat(sprintf("\n====== Checking region %s (target: %s) ======\n", 
+                   region_str, region$target[1]))
+    }
     
-    # Check each file
-    reads_by_group <- lapply(names(pat_files), function(group) {
+    # Store all results
+    coverage_data <- list()
+    
+    # Check each cell type
+    for(group in names(pat_files)) {
         file <- pat_files[group]
-        cat(sprintf("\nChecking file for group %s: %s\n", group, file))
+        if(verbose) {
+            cat(sprintf("\n--- Group: %s ---\n", group))
+            cat(sprintf("File: %s\n", file))
+        }
         
-        # Read region from pat file
-        cmd <- sprintf("tabix %s %s", file, region_str)
-        cat("Running command:", cmd, "\n")
+        # Read region from pat file - fixed tabix command
+        cmd <- sprintf("tabix '%s' '%s'", file, region_str)
+        if(verbose) {
+            cat("Running command:", cmd, "\n")
+        }
+        
         reads <- try(fread(cmd=cmd))
         
         if(inherits(reads, "try-error")) {
-            cat("Error reading file\n")
-            return(data.table(group=group, reads=0, qualifying_reads=0))
+            if(verbose) cat("Error reading file!\n")
+            coverage_data[[group]] <- list(reads=0, cpgs_per_read=numeric(0), qualifying_reads=0)
+            next
         }
         
         if(nrow(reads) == 0) {
-            cat("No reads found\n")
-            return(data.table(group=group, reads=0, qualifying_reads=0))
+            if(verbose) cat("No reads found\n")
+            coverage_data[[group]] <- list(reads=0, cpgs_per_read=numeric(0), qualifying_reads=0)
+            next
         }
         
-        # Count CpGs per read in region
+        # Count CpGs per read
         read_cpgs <- reads[, .N, by=V4]  # V4 should be read ID
         qualifying_reads <- sum(read_cpgs$N >= min_cpg_per_read)
         
-        cat(sprintf("Found %d total reads, %d with >= %d CpGs\n", 
-                   nrow(read_cpgs), qualifying_reads, min_cpg_per_read))
+        coverage_data[[group]] <- list(
+            reads=nrow(read_cpgs),
+            cpgs_per_read=read_cpgs$N,
+            qualifying_reads=qualifying_reads
+        )
         
-        return(data.table(group=group, 
-                         reads=nrow(read_cpgs), 
-                         qualifying_reads=qualifying_reads))
-    })
+        if(verbose) {
+            cat(sprintf("Total reads: %d\n", nrow(read_cpgs)))
+            cat("CpGs per read: ", paste(read_cpgs$N, collapse=", "), "\n")
+            cat(sprintf("Qualifying reads (>=%d CpGs): %d\n", min_cpg_per_read, qualifying_reads))
+            cat(sprintf("Meets coverage requirement (>=%d reads): %s\n", 
+                       min_coverage, qualifying_reads >= min_coverage))
+        }
+    }
     
-    coverage_summary <- rbindlist(reads_by_group)
-    cat("\nCoverage summary:\n")
-    print(coverage_summary)
+    # Summarize results
+    coverage_summary <- data.table(
+        group = names(coverage_data),
+        reads = sapply(coverage_data, function(x) x$reads),
+        qualifying_reads = sapply(coverage_data, function(x) x$qualifying_reads)
+    )
     
-    # Did all groups pass?
+    if(verbose) {
+        cat("\n=== Summary ===\n")
+        print(coverage_summary)
+    }
+    
+    # Check if all groups pass
     has_coverage <- all(coverage_summary$qualifying_reads >= min_coverage)
     
-    cat(sprintf("\nFinal result: %s\n", ifelse(has_coverage, "PASS", "FAIL")))
+    if(verbose) {
+        cat(sprintf("\nFinal decision: %s\n", ifelse(has_coverage, "PASS", "FAIL")))
+        if(!has_coverage) {
+            cat("Failed groups:\n")
+            print(coverage_summary[qualifying_reads < min_coverage])
+        }
+        cat("======================\n\n")
+    }
+    
     return(has_coverage)
 }
 
