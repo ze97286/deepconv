@@ -6,6 +6,7 @@
 #   --map_file /users/zetzioni/sharedscratch/atlas/per-read-bed2class.csv \
 #   --base_dir /users/zetzioni/sharedscratch/atlas/ \
 #   --out_file /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.100.l4.bed \
+#   --class_file $CLASS_CSV \
 #   --top_n 100 \
 #   --threads 32 \
 #   --verbose
@@ -93,114 +94,95 @@ check_region_coverage <- function(region, reads, min_coverage=3, min_cpg_per_rea
   return(result)
 }
 
-# Helper function to check if a read covers enough CpGs
-verify_read_coverage <- function(read_pos, min_cpgs) {
-  length(unique(read_pos)) >= min_cpgs
+# Get pat files from class file using same logic as UXM command
+get_pat_files <- function(class_file, base_dir) {
+  # Read the class file
+  classes <- fread(class_file)
+  
+  # Transform file paths using the same logic as UXM command
+  pat_files <- gsub("\\.beta", ".pat.gz", classes$V1)
+  pat_files <- gsub("beta", "pat/Tissue", pat_files)
+  pat_files <- gsub("\\.calls\\.all", "", pat_files)
+  
+  # Add base directory
+  pat_files <- file.path(base_dir, pat_files)
+  
+  # Create mapping to groups
+  names(pat_files) <- classes$V2
+  
+  return(pat_files)
 }
 
-
-find_unique_regions <- function(unique.regions, cpg_info, verbose=TRUE) {
-  setkey(unique.regions, chr, start, end)
-  setkey(cpg_info, chr, start, end)
+# Check if a region has sufficient coverage in all groups
+verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_coverage=3, verbose=FALSE) {
+  if(verbose) {
+    cat(sprintf("\nChecking coverage for region %s:%d-%d\n", region$chr, region$start, region$end))
+  }
   
-  # Calculate statistics for unique regions
-  unique.regions.stat <- foverlaps(
-    cpg_info, 
-    unique.regions[fully_covered==TRUE], 
-    nomatch=NULL)[
-      , {
-        if(verbose) {
-          cat(sprintf("\nProcessing region %s:%d-%d\n", 
-                     chr[1], start[1], end[1]))
-        }
-        .(startCpG=min(index), 
-          endCpG=max(index), 
-          r_len=mean(r_len), 
-          p_len=mean(p_len), 
-          tg_mean=mean(avg_min_ci), 
-          ttest=mean(med_logp), 
-          delta_means=mean(avg_min_alpha_dist))
-      }, by=.(chr, start=start-1, end=end, target=group)]
+  # Get tabix region string
+  region_str <- sprintf("%s:%d-%d", region$chr, region$start, region$end)
+  
+  # Check coverage for each group
+  coverage_by_group <- lapply(names(pat_files), function(group) {
+    file <- pat_files[group]
+    
+    # Read region from pat file
+    cmd <- sprintf("tabix %s %s", file, region_str)
+    reads <- fread(cmd=cmd)
+    
+    if(nrow(reads) == 0) {
+      if(verbose) cat(sprintf("No reads for group %s\n", group))
+      return(data.table(group=group, qualifying_reads=0))
+    }
+    
+    # Count CpGs per read in region
+    reads_with_sufficient_cpgs <- reads[, .(cpg_count = .N), by=V4][cpg_count >= min_cpg_per_read, .N]
+    
+    if(verbose) {
+      cat(sprintf("Group %s: %d reads with ≥%d CpGs\n", 
+                 group, reads_with_sufficient_cpgs, min_cpg_per_read))
+    }
+    
+    return(data.table(group=group, qualifying_reads=reads_with_sufficient_cpgs))
+  })
+  
+  coverage_summary <- rbindlist(coverage_by_group)
+  
+  # Check if all groups have sufficient coverage
+  has_coverage <- all(coverage_summary$qualifying_reads >= min_coverage)
   
   if(verbose) {
-    # Check for NaN values
-    nan_regions <- unique.regions.stat[is.na(tg_mean), .(chr, start, end, target)]
-    if(nrow(nan_regions) > 0) {
-      cat("\nFound regions with NaN values:\n")
-      print(nan_regions)
+    if(!has_coverage) {
+      cat("\nGroups with insufficient coverage:\n")
+      print(coverage_summary[qualifying_reads < min_coverage])
     }
+    cat(sprintf("\nRegion coverage check: %s\n", ifelse(has_coverage, "PASS", "FAIL")))
   }
   
-  return(unique.regions.stat)
+  return(has_coverage)
 }
 
-
-scores_per_pos <- function(groups, successes, totals, p=NULL) {
-  if (length(groups)==0) {
-    return(NULL)
-  }
-  else if (length(groups)==1) {
-    return(list(group=as.character(groups[1]), pval.mean=1.0, pval.med=1.0, pval.min=1.0, pval.max=1.0, pval.iqr=0.0, ci.min=0.0, ci.max=1.0, outgroup_count=as.integer(0), coverage.in=totals, coverage.out=as.integer(0), mean_alpha_dist=0.0, min_alpha_dist=0.0))
+# Filter regions based on coverage requirements
+filter_regions_by_coverage <- function(regions, pat_files, min_cpg_per_read=4, 
+                                     min_coverage=3, verbose=FALSE) {
+  if(verbose) {
+    message("Checking coverage for ", nrow(regions), " candidate regions...")
   }
   
-  cache_names <- as.data.table(expand.grid(groups, groups, stringsAsFactors = FALSE))[Var1!=Var2, paste0(Var1,':',Var2)]
-  is_cached <- vector(mode="logical", length=length(cache_names))
-  names(is_cached) <- cache_names
-  pval_cache <- vector(mode="double", length=length(cache_names))
-  names(pval_cache) <- cache_names
-  ci_cache <- vector(mode="double", length=length(cache_names))
-  names(ci_cache) <- cache_names
-  alpha_dist_cache <- vector(mode="double", length=length(cache_names))
-  names(alpha_dist_cache) <- cache_names
+  regions[, has_coverage := verify_region_coverage(.BY, pat_files, min_cpg_per_read, 
+                                                 min_coverage, verbose), 
+          by=.(chr, start, end)]
   
-  scores <- lapply(groups, function(g) {
-    pvals <- vector(mode="double", length=length(groups)-1)
-    names(pvals) <- groups[groups != g]
-    cis <- vector(mode="double", length=length(groups)-1)
-    names(cis) <- groups[groups != g]
-    alpha_dist <- vector(mode="double", length=length(groups)-1)
-    names(alpha_dist) <- groups[groups != g]
-    
-    for (g2 in groups[groups!=g]) {
-      id_str <- paste0(g, ":", g2)
-      if (is_cached[id_str]) {
-        p <- pval_cache[id_str]
-        ci <- ci_cache[id_str]
-        alpha_delta <- alpha_dist_cache[id_str]
-      } else {
-        x <- c(successes[groups==g], successes[groups == g2])
-        n <- c(totals[groups==g], totals[groups == g2])
-        test.p <- suppressWarnings(prop.test(x, n))
-        p <- ifelse(is.na(test.p$p.value), 1, test.p$p.value)
-        ci <- ifelse(test.p$conf.int[1]>=0, test.p$conf.int[1], test.p$conf.int[2])
-        pval_cache[id_str] <- p
-        ci_cache[id_str] <- ci
-        rev_str <- paste0(g2, ":", g)
-        pval_cache[rev_str] <- pval_cache[id_str]
-        ci_cache[rev_str] <- ci_cache[id_str]
-        alpha_delta <- abs(x[1]/n[1]-x[2]/n[2])
-        alpha_dist_cache[id_str] <- alpha_delta
-        alpha_dist_cache[rev_str] <- alpha_delta
-      }
-      pvals[g2] <- p
-      cis[g2] <- ci
-      alpha_dist[g2] <- alpha_delta
-    }
-    
-    return(list(pval.mean=mean(pvals), pval.med=median(pvals), pval.min=min(pvals), 
-                pval.max=min(pvals), pval.iqr=IQR(pvals), ci.min=min(cis), ci.max=max(cis),
-                outgroup_count=sum(groups != g), coverage.in=totals[groups==g], 
-                coverage.out=sum(totals[groups != g]), mean_alpha_dist=mean(alpha_dist),
-                min_alpha_dist=min(alpha_dist)))
-  })
-  names(scores) <- as.character(groups)
-  scores <- rbindlist(scores, idcol = "group")
+  passing_regions <- regions[has_coverage == TRUE]
   
-  if (!is.null(p)) {
-    p()
+  if(verbose) {
+    message(sprintf("Found %d regions with sufficient coverage out of %d candidates", 
+                   nrow(passing_regions), nrow(regions)))
   }
-  return(scores)
+  
+  return(passing_regions)
 }
+
 
 collapse_to_regions <- function(dmrs, cpg_info, reads, max_gap=1, max_dist=1e3, 
                               min_logp=-20, min_length=100, mad=0.1, 
@@ -317,7 +299,6 @@ collapse_to_regions <- function(dmrs, cpg_info, reads, max_gap=1, max_dist=1e3,
   return(unique.sign.regions.stats)
 }
 
-
 write_marker_file <- function(regions, cpg_info, outfile, top_n = 100) {
   setkey(regions, chr, start, end)
   setkey(cpg_info, chr, start, end)
@@ -379,6 +360,9 @@ main <- function() {
     make_option(c("-d", "--base_dir"), type="character", default=".",
                 help="Base directory containing input files and for output [default %default]",
                 metavar="path"),
+    make_option(c("-l", "--class_file"), type="character",
+                help="Class file for pat files [REQUIRED]",
+                metavar="taps_atlas_class.csv"),
     make_option(c("-o", "--out_file"), type="character",
                 help="Output file path for markers [REQUIRED]",
                 metavar="markers.bed"),
@@ -386,6 +370,10 @@ main <- function() {
                 help="Number of top markers to keep per target [default %default]"),
     make_option(c("-t", "--threads"), type="integer", default=8,
                 help="Number of threads [default %default]"),
+    make_option(c("-r", "--min_reads"), type="integer", default=3,
+                help="Minimum number of qualifying reads per group [default %default]"),
+    make_option(c("-g", "--min_cpgs"), type="integer", default=4,
+                help="Minimum CpGs per read [default %default]"),
     make_option(c("-v", "--verbose"), action="store_true", default=FALSE,
                 help="Print progress information")
   )
@@ -394,7 +382,8 @@ main <- function() {
   params <- parse_args(parser)
   
   # Check required arguments
-  if (is.null(params$cpg_file) || is.null(params$map_file) || is.null(params$out_file)) {
+  if (is.null(params$cpg_file) || is.null(params$map_file) || 
+      is.null(params$out_file) || is.null(params$class_file)) {
     print_help(parser)
     stop("Missing required arguments")
   }
@@ -403,13 +392,12 @@ main <- function() {
     message(Sys.time(), " Starting DMR detection...")
   }
   
+  # Get pat files
+  pat_files <- get_pat_files(params$class_file, params$base_dir)
+  
   # Load required data
   bed2type <- load_sample2group(params$map_file)
   cpg_info <- load_cpg_info(params$cpg_file)
-  
-  # Get file paths from bed2type
-  files <- as.character(bed2type$name)
-  names(files) <- as.character(bed2type$sample)
   
   # Set up parallel processing
   plan(multisession, workers = params$threads)
@@ -418,7 +406,6 @@ main <- function() {
   with_progress({
     p <- progressor(steps=22)
     pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
-      # Load per-position methylation data
       res <- fread(paste0(params$base_dir, "/dmr_by_read/blood+tum+gi_scores-by-position_", 
                          chrom, ".txt.gz"), 
                    header=TRUE, stringsAsFactors = TRUE)
@@ -429,25 +416,29 @@ main <- function() {
   pval.all <- rbindlist(pval.all)
   
   if (params$verbose) {
-    message(Sys.time(), " Loading reads and finding unique regions...")
+    message(Sys.time(), " Finding candidate regions...")
   }
   
-  # Load reads for all cell types
-  reads <- load_reads(files, cpg_info, bed2type, min_cpg_per_read=4, verbose=params$verbose)
+  # Find candidate regions
+  unique.regions <- collapse_to_regions(pval.all, cpg_info, max_gap = 1, 
+                                      max_dist = 1000, min_logp = -30, min_length = 150)
   
-  # Find unique regions with coverage check
-  unique.regions <- collapse_to_regions(pval.all, cpg_info, reads,
-                                      max_gap = 1, max_dist = 1000, 
-                                      min_logp = -30, min_length = 150,
-                                      min_cpg_per_read = 4,
-                                      verbose = params$verbose)
+  if (params$verbose) {
+    message(Sys.time(), " Verifying read coverage...")
+  }
+  
+  # Filter regions based on read coverage
+  verified_regions <- filter_regions_by_coverage(unique.regions, pat_files, 
+                                               min_cpg_per_read = params$min_cpgs,
+                                               min_coverage = params$min_reads, 
+                                               verbose = params$verbose)
   
   if (params$verbose) {
     message(Sys.time(), " Writing marker file...")
   }
   
   # Write marker file for uxm build
-  write_marker_file(unique.regions, cpg_info, params$out_file, params$top_n)
+  write_marker_file(verified_regions, cpg_info, params$out_file, params$top_n)
   
   if (params$verbose) {
     message(Sys.time(), " Done.")
