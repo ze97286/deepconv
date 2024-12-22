@@ -95,20 +95,29 @@ check_region_coverage <- function(region, reads, min_coverage=3, min_cpg_per_rea
 }
 
 # Get pat files from class file using same logic as UXM command
-get_pat_files <- function(class_file, base_dir) {
-  # Read the class file
-  classes <- fread(class_file)
+get_pat_files <- function(class_file, base_dir, verbose=FALSE) {
+  # Read the class file - it has no header and comma separator
+  classes <- fread(class_file, header=FALSE, sep=",")
+  if (verbose) {
+    message(sprintf("Read %d lines from class file", nrow(classes)))
+  }
   
-  # Transform file paths using the same logic as UXM command
-  pat_files <- gsub("\\.beta", ".pat.gz", classes$V1)
-  pat_files <- gsub("beta", "pat/Tissue", pat_files)
+  # Get file paths and convert to pat paths
+  pat_files <- classes$V1
+  pat_files <- gsub("\\.beta$", ".pat.gz", pat_files)  # replace .beta at end
+  pat_files <- gsub("/beta/", "/pat/Tissue/", pat_files)  # replace /beta/ with /pat/Tissue/
   pat_files <- gsub("\\.calls\\.all", "", pat_files)
   
-  # Add base directory
-  pat_files <- file.path(base_dir, pat_files)
-  
-  # Create mapping to groups
+  # Create named vector mapping to groups
   names(pat_files) <- classes$V2
+  
+  # Verify each file exists
+  if (verbose) {
+    for (f in pat_files) {
+      message(sprintf("Looking for file: %s", f))
+      message(sprintf("File exists: %s", file.exists(f)))
+    }
+  }
   
   return(pat_files)
 }
