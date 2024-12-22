@@ -122,16 +122,16 @@ get_pat_files <- function(class_file, base_dir, verbose=FALSE) {
   return(result)
 }
 
-build_coverage_index <- function(pat_files, min_cpgs=4, verbose=FALSE) {
+build_coverage_index <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE) {
     if(verbose) {
         message("Building coverage index...")
     }
     
-    # Will store coverage by cell type
-    coverage_by_group <- list()
+    # Set up parallel processing
+    plan(multisession, workers = threads)
     
-    # Process each cell type
-    for(group in names(pat_files)) {
+    # Process each cell type in parallel
+    coverage_by_group <- future_map(names(pat_files), function(group) {
         if(verbose) {
             message(sprintf("Processing group %s (%d files)...", 
                           group, length(pat_files[[group]])))
@@ -181,12 +181,13 @@ build_coverage_index <- function(pat_files, min_cpgs=4, verbose=FALSE) {
             dt[, pos := as.integer(pos)]
             dt[, key := NULL]
             dt[, group := group]
-            coverage_by_group[[group]] <- dt
+            return(dt)
         }
-    }
+        return(NULL)
+    })
     
-    # Combine all groups
-    coverage_dt <- rbindlist(coverage_by_group)
+    # Clean up any NULL results and combine all groups
+    coverage_dt <- rbindlist(Filter(Negate(is.null), coverage_by_group))
     setkey(coverage_dt, chr, pos, group)
     
     if(verbose) {
@@ -455,8 +456,9 @@ main <- function() {
     message(Sys.time(), " Building coverage index...")
   }
   coverage_index <- build_coverage_index(pat_files, 
-                                       min_cpgs=params$min_cpgs,
-                                       verbose=params$verbose)
+                                     min_cpgs=params$min_cpgs,
+                                     threads=params$threads,
+                                     verbose=params$verbose)
   
   # Load required data
   bed2type <- load_sample2group(params$map_file)
