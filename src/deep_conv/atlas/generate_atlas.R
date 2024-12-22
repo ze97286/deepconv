@@ -409,6 +409,10 @@ main <- function() {
   
   # Find candidate regions
   unique.regions <- collapse_to_regions(pval.all, cpg_info)
+
+  # Set keys before foverlaps
+  setkey(unique.regions, chr, start, end)
+  setkey(cpg_info, chr, start, end)
   
   # Calculate initial stats and add direction
   unique.regions.stat <- foverlaps(
