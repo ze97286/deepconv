@@ -129,6 +129,19 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
                    region$chr[1], region$start[1], region$end[1], region$target[1]))
     }
     
+    # Function to count CpGs in region from a pattern
+    count_cpgs_in_region <- function(start_pos, pattern, region_start, region_end) {
+        # Convert pattern to vector of positions
+        cpg_positions <- start_pos + cumsum(pattern != ".")
+        pattern_trimmed <- pattern[pattern != "."]
+        
+        # Find which CpGs fall in our region
+        in_region <- cpg_positions >= region_start & cpg_positions <= region_end
+        
+        # Return count of C/T in region
+        return(sum(pattern_trimmed[in_region] %in% c("C", "T")))
+    }
+    
     # Store results for each group
     coverage_data <- list()
     
@@ -139,7 +152,7 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
             cat(sprintf("\n--- Group: %s (%d files) ---\n", group, length(group_files)))
         }
         
-        # Accumulate reads from all files for this group
+        # Count qualifying reads across all files for this group
         total_qualifying_reads <- 0
         
         for(file in group_files) {
@@ -147,24 +160,32 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
                 cat(sprintf("Reading file: %s\n", file))
             }
             
-            # Read the gzipped file
+            # Read pat file for chromosome and nearby region
             reads <- fread(file)
             
-            # Filter reads for this region
+            # Look at reads that might overlap our region
+            # We need to look at reads starting before our region that might extend into it
             region_reads <- reads[V1 == region$chr[1] & 
-                                V2 >= region$start[1] & 
-                                V3 <= region$end[1]]
+                                V2 <= region$end[1]]
             
             if(nrow(region_reads) > 0) {
-                # Count CpGs per read in this region
-                read_cpgs <- region_reads[, .N, by=V4]  # V4 should be read ID
+                # For each read, count CpGs in our region
+                cpgs_in_region <- mapply(count_cpgs_in_region,
+                                       region_reads$V2,        # start positions
+                                       region_reads$V3,        # patterns
+                                       MoreArgs=list(
+                                           region_start=region$start[1],
+                                           region_end=region$end[1]
+                                       ))
+                
+                # Count reads that have enough CpGs in our region
                 total_qualifying_reads <- total_qualifying_reads + 
-                                       sum(read_cpgs$N >= min_cpg_per_read)
+                                       sum(cpgs_in_region >= min_cpg_per_read)
             }
         }
         
         if(verbose) {
-            cat(sprintf("Qualifying reads (>=%d CpGs): %d\n", 
+            cat(sprintf("Qualifying reads (>=%d CpGs in region): %d\n", 
                        min_cpg_per_read, total_qualifying_reads))
             cat(sprintf("Meets requirement (>=%d reads): %s\n", 
                        min_coverage, total_qualifying_reads >= min_coverage))
