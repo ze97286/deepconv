@@ -100,8 +100,6 @@ get_pat_files <- function(class_file, base_dir, verbose=FALSE) {
   classes <- fread(class_file, sep=",", header=TRUE)
   if (verbose) {
     message(sprintf("Read %d lines from class file", nrow(classes)))
-    message("First few entries:")
-    print(head(classes))
   }
   
   # Get file paths and convert to pat paths
@@ -110,20 +108,14 @@ get_pat_files <- function(class_file, base_dir, verbose=FALSE) {
   pat_files <- gsub("/beta/", "/pat/Tissue/", pat_files)  # replace /beta/ with /pat/Tissue/
   pat_files <- gsub("\\.calls\\.all", "", pat_files)
   
-  # Create named vector mapping to groups, make sure groups are unique
-  unique_groups <- unique(classes$group)
-  result <- character()
-  
-  for(group in unique_groups) {
-    # For each group, take the first file path associated with that group
-    result[group] <- pat_files[classes$group == group][1]
-  }
+  # Create list where each group has all its files
+  result <- split(pat_files, classes$group)
   
   if(verbose) {
-    message("\nFinal pat files mapping:")
+    message("\nPat files by group:")
     for(group in names(result)) {
-      message(sprintf("%s -> %s", group, result[group]))
-      message(sprintf("File exists: %s", file.exists(result[group])))
+      message(sprintf("\n%s (%d files):", group, length(result[[group]])))
+      message(paste("  ", result[[group]], collapse="\n"))
     }
   }
   
@@ -143,34 +135,39 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
     
     # Check each cell type
     for(group in names(pat_files)) {
-        file <- pat_files[group]
+        group_files <- pat_files[[group]]
         if(verbose) {
-            cat(sprintf("\n--- Group: %s ---\n", group))
-            cat(sprintf("File: %s\n", file))
+            cat(sprintf("\n--- Group: %s (%d files) ---\n", group, length(group_files)))
         }
         
-        # Read region from pat file - fixed tabix command
-        cmd <- sprintf("tabix '%s' '%s'", file, region_str)
-        if(verbose) {
-            cat("Running command:", cmd, "\n")
+        # Accumulate reads from all files for this group
+        group_reads <- list()
+        
+        for(file in group_files) {
+            if(verbose) {
+                cat(sprintf("\nChecking file: %s\n", file))
+            }
+            
+            # Read region from pat file
+            cmd <- sprintf("tabix '%s' '%s'", file, region_str)
+            reads <- try(fread(cmd=cmd))
+            
+            if(!inherits(reads, "try-error") && nrow(reads) > 0) {
+                group_reads[[length(group_reads) + 1]] <- reads
+            }
         }
         
-        reads <- try(fread(cmd=cmd))
-        
-        if(inherits(reads, "try-error")) {
-            if(verbose) cat("Error reading file!\n")
+        # Combine all reads for this group
+        if(length(group_reads) == 0) {
+            if(verbose) cat("No reads found in any file\n")
             coverage_data[[group]] <- list(reads=0, cpgs_per_read=numeric(0), qualifying_reads=0)
             next
         }
         
-        if(nrow(reads) == 0) {
-            if(verbose) cat("No reads found\n")
-            coverage_data[[group]] <- list(reads=0, cpgs_per_read=numeric(0), qualifying_reads=0)
-            next
-        }
+        all_reads <- rbindlist(group_reads)
         
         # Count CpGs per read
-        read_cpgs <- reads[, .N, by=V4]  # V4 should be read ID
+        read_cpgs <- all_reads[, .N, by=V4]  # V4 should be read ID
         qualifying_reads <- sum(read_cpgs$N >= min_cpg_per_read)
         
         coverage_data[[group]] <- list(
@@ -180,8 +177,9 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
         )
         
         if(verbose) {
-            cat(sprintf("Total reads: %d\n", nrow(read_cpgs)))
-            cat("CpGs per read: ", paste(read_cpgs$N, collapse=", "), "\n")
+            cat(sprintf("Total reads across all files: %d\n", nrow(read_cpgs)))
+            cat("CpGs per read: ", paste(head(read_cpgs$N), collapse=", "), 
+                if(length(read_cpgs$N) > 6) "..." else "", "\n")
             cat(sprintf("Qualifying reads (>=%d CpGs): %d\n", min_cpg_per_read, qualifying_reads))
             cat(sprintf("Meets coverage requirement (>=%d reads): %s\n", 
                        min_coverage, qualifying_reads >= min_coverage))
