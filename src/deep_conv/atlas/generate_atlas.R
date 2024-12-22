@@ -124,10 +124,9 @@ get_pat_files <- function(class_file, base_dir, verbose=FALSE) {
 
 # Check if a region has sufficient coverage in all groups
 verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_coverage=3, verbose=TRUE) {
-    region_str <- sprintf("%s:%d-%d", region$chr[1], region$start[1], region$end[1])
     if(verbose) {
-        cat(sprintf("\n====== Checking region %s (target: %s) ======\n", 
-                   region_str, region$target[1]))
+        cat(sprintf("\n====== Checking region %s:%d-%d (target: %s) ======\n", 
+                   region$chr[1], region$start[1], region$end[1], region$target[1]))
     }
     
     # Store results for each group
@@ -141,65 +140,49 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
         }
         
         # Accumulate reads from all files for this group
-        group_reads <- list()
+        total_qualifying_reads <- 0
         
         for(file in group_files) {
             if(verbose) {
-                cat(sprintf("Checking file: %s\n", file))
+                cat(sprintf("Reading file: %s\n", file))
             }
             
-            reads <- data.table::fread(cmd=paste("tabix", file, region_str))
+            # Read the gzipped file
+            reads <- fread(file)
             
-            if(nrow(reads) > 0) {
-                group_reads[[length(group_reads) + 1]] <- reads
+            # Filter reads for this region
+            region_reads <- reads[V1 == region$chr[1] & 
+                                V2 >= region$start[1] & 
+                                V3 <= region$end[1]]
+            
+            if(nrow(region_reads) > 0) {
+                # Count CpGs per read in this region
+                read_cpgs <- region_reads[, .N, by=V4]  # V4 should be read ID
+                total_qualifying_reads <- total_qualifying_reads + 
+                                       sum(read_cpgs$N >= min_cpg_per_read)
             }
         }
-        
-        # If no reads found in any file
-        if(length(group_reads) == 0) {
-            if(verbose) cat("No reads found for this group\n")
-            coverage_data[[group]] <- list(reads=0, qualifying_reads=0)
-            next
-        }
-        
-        # Combine all reads for this group
-        all_reads <- rbindlist(group_reads)
-        
-        # Count CpGs per read
-        read_cpgs <- all_reads[, .N, by=V4]  # V4 is read ID
-        qualifying_reads <- sum(read_cpgs$N >= min_cpg_per_read)
-        
-        coverage_data[[group]] <- list(
-            reads=nrow(read_cpgs),
-            qualifying_reads=qualifying_reads
-        )
         
         if(verbose) {
-            cat(sprintf("Total reads: %d\n", nrow(read_cpgs)))
-            cat(sprintf("Qualifying reads (>=%d CpGs): %d\n", min_cpg_per_read, qualifying_reads))
+            cat(sprintf("Qualifying reads (>=%d CpGs): %d\n", 
+                       min_cpg_per_read, total_qualifying_reads))
             cat(sprintf("Meets requirement (>=%d reads): %s\n", 
-                       min_coverage, qualifying_reads >= min_coverage))
+                       min_coverage, total_qualifying_reads >= min_coverage))
         }
-    }
-    
-    # Summarize results
-    coverage_summary <- data.table(
-        group = names(coverage_data),
-        total_reads = sapply(coverage_data, function(x) x$reads),
-        qualifying_reads = sapply(coverage_data, function(x) x$qualifying_reads)
-    )
-    
-    if(verbose) {
-        cat("\n=== Summary ===\n")
-        print(coverage_summary)
+        
+        coverage_data[[group]] <- total_qualifying_reads
     }
     
     # Check if all groups have sufficient coverage
-    has_coverage <- all(coverage_summary$qualifying_reads >= min_coverage)
+    has_coverage <- all(unlist(coverage_data) >= min_coverage)
     
     if(verbose && !has_coverage) {
         cat("\nFailed groups:\n")
-        print(coverage_summary[qualifying_reads < min_coverage])
+        for(group in names(coverage_data)) {
+            if(coverage_data[[group]] < min_coverage) {
+                cat(sprintf("%s: %d reads\n", group, coverage_data[[group]]))
+            }
+        }
     }
     
     return(has_coverage)
