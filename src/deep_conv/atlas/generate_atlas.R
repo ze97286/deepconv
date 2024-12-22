@@ -130,7 +130,7 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
                    region_str, region$target[1]))
     }
     
-    # Store all results
+    # Store results for each group
     coverage_data <- list()
     
     # Check each cell type
@@ -145,43 +145,39 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
         
         for(file in group_files) {
             if(verbose) {
-                cat(sprintf("\nChecking file: %s\n", file))
+                cat(sprintf("Checking file: %s\n", file))
             }
             
-            # Read region from pat file
-            cmd <- paste("tabix", file, region_str)
-            reads <- try(fread(cmd=cmd))
+            reads <- data.table::fread(cmd=paste("tabix", file, region_str))
             
-            if(!inherits(reads, "try-error") && nrow(reads) > 0) {
+            if(nrow(reads) > 0) {
                 group_reads[[length(group_reads) + 1]] <- reads
             }
         }
         
-        # Combine all reads for this group
+        # If no reads found in any file
         if(length(group_reads) == 0) {
-            if(verbose) cat("No reads found in any file\n")
-            coverage_data[[group]] <- list(reads=0, cpgs_per_read=numeric(0), qualifying_reads=0)
+            if(verbose) cat("No reads found for this group\n")
+            coverage_data[[group]] <- list(reads=0, qualifying_reads=0)
             next
         }
         
+        # Combine all reads for this group
         all_reads <- rbindlist(group_reads)
         
         # Count CpGs per read
-        read_cpgs <- all_reads[, .N, by=V4]  # V4 should be read ID
+        read_cpgs <- all_reads[, .N, by=V4]  # V4 is read ID
         qualifying_reads <- sum(read_cpgs$N >= min_cpg_per_read)
         
         coverage_data[[group]] <- list(
             reads=nrow(read_cpgs),
-            cpgs_per_read=read_cpgs$N,
             qualifying_reads=qualifying_reads
         )
         
         if(verbose) {
-            cat(sprintf("Total reads across all files: %d\n", nrow(read_cpgs)))
-            cat("CpGs per read: ", paste(head(read_cpgs$N), collapse=", "), 
-                if(length(read_cpgs$N) > 6) "..." else "", "\n")
+            cat(sprintf("Total reads: %d\n", nrow(read_cpgs)))
             cat(sprintf("Qualifying reads (>=%d CpGs): %d\n", min_cpg_per_read, qualifying_reads))
-            cat(sprintf("Meets coverage requirement (>=%d reads): %s\n", 
+            cat(sprintf("Meets requirement (>=%d reads): %s\n", 
                        min_coverage, qualifying_reads >= min_coverage))
         }
     }
@@ -189,7 +185,7 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
     # Summarize results
     coverage_summary <- data.table(
         group = names(coverage_data),
-        reads = sapply(coverage_data, function(x) x$reads),
+        total_reads = sapply(coverage_data, function(x) x$reads),
         qualifying_reads = sapply(coverage_data, function(x) x$qualifying_reads)
     )
     
@@ -198,16 +194,12 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
         print(coverage_summary)
     }
     
-    # Check if all groups pass
+    # Check if all groups have sufficient coverage
     has_coverage <- all(coverage_summary$qualifying_reads >= min_coverage)
     
-    if(verbose) {
-        cat(sprintf("\nFinal decision: %s\n", ifelse(has_coverage, "PASS", "FAIL")))
-        if(!has_coverage) {
-            cat("Failed groups:\n")
-            print(coverage_summary[qualifying_reads < min_coverage])
-        }
-        cat("======================\n\n")
+    if(verbose && !has_coverage) {
+        cat("\nFailed groups:\n")
+        print(coverage_summary[qualifying_reads < min_coverage])
     }
     
     return(has_coverage)
