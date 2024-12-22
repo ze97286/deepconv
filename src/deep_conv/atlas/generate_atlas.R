@@ -125,21 +125,18 @@ get_pat_files <- function(class_file, base_dir, verbose=FALSE) {
 # Check if a region has sufficient coverage in all groups
 verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_coverage=3, verbose=TRUE) {
     if(verbose) {
-        cat(sprintf("\n====== Checking region %s:%d-%d (target: %s) ======\n", 
-                   region$chr[1], region$start[1], region$end[1], region$target[1]))
+        cat(sprintf("\n====== Checking region %s (CpG indices %d-%d) ======\n", 
+                   region$chr[1], region$startCpG, region$endCpG))
     }
     
-    # Function to count CpGs in region from a pattern
-    count_cpgs_in_region <- function(start_pos, pattern, region_start, region_end) {
-        # Convert pattern to vector of positions
-        cpg_positions <- start_pos + cumsum(pattern != ".")
-        pattern_trimmed <- pattern[pattern != "."]
-        
-        # Find which CpGs fall in our region
-        in_region <- cpg_positions >= region_start & cpg_positions <= region_end
-        
-        # Return count of C/T in region
-        return(sum(pattern_trimmed[in_region] %in% c("C", "T")))
+    # Function to count CpGs within index range from a pattern
+    count_cpgs_in_range <- function(start_idx, pattern, start_range, end_range) {
+        # Convert pattern to character vector
+        chars <- strsplit(pattern, "")[[1]]
+        # Get positions for each character
+        positions <- start_idx + cumsum(chars != ".")
+        # Count C/T that fall within our range
+        sum(chars %in% c("C", "T") & positions >= start_range & positions <= end_range)
     }
     
     # Store results for each group
@@ -152,7 +149,7 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
             cat(sprintf("\n--- Group: %s (%d files) ---\n", group, length(group_files)))
         }
         
-        # Count qualifying reads across all files for this group
+        # Accumulate qualifying reads across all files
         total_qualifying_reads <- 0
         
         for(file in group_files) {
@@ -160,33 +157,33 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
                 cat(sprintf("Reading file: %s\n", file))
             }
             
-            # Read pat file for chromosome and nearby region
-            reads <- fread(file)
+            # Read relevant chromosome from pat file
+            reads <- fread(file, select=1:4, col.names=c("chr", "start_idx", "pattern", "count"))
             
-            # Look at reads that might overlap our region
-            # We need to look at reads starting before our region that might extend into it
-            region_reads <- reads[V1 == region$chr[1] & 
-                                V2 <= region$end[1]]
+            # Filter for matching chromosome and relevant starting positions
+            region_reads <- reads[chr == region$chr[1] & 
+                                start_idx <= region$endCpG]
             
             if(nrow(region_reads) > 0) {
-                # For each read, count CpGs in our region
-                cpgs_in_region <- mapply(count_cpgs_in_region,
-                                       region_reads$V2,        # start positions
-                                       region_reads$V3,        # patterns
-                                       MoreArgs=list(
-                                           region_start=region$start[1],
-                                           region_end=region$end[1]
-                                       ))
-                
-                # Count reads that have enough CpGs in our region
-                total_qualifying_reads <- total_qualifying_reads + 
-                                       sum(cpgs_in_region >= min_cpg_per_read)
+                # For each read, count CpGs in our range
+                for(i in 1:nrow(region_reads)) {
+                    cpgs_in_range <- count_cpgs_in_range(
+                        region_reads$start_idx[i],
+                        region_reads$pattern[i],
+                        region$startCpG,
+                        region$endCpG
+                    )
+                    if(cpgs_in_range >= min_cpg_per_read) {
+                        total_qualifying_reads <- total_qualifying_reads + region_reads$count[i]
+                    }
+                }
             }
         }
         
         if(verbose) {
-            cat(sprintf("Qualifying reads (>=%d CpGs in region): %d\n", 
-                       min_cpg_per_read, total_qualifying_reads))
+            cat(sprintf("Qualifying reads (>=%d CpGs in range %d-%d): %d\n", 
+                       min_cpg_per_read, region$startCpG, region$endCpG, 
+                       total_qualifying_reads))
             cat(sprintf("Meets requirement (>=%d reads): %s\n", 
                        min_coverage, total_qualifying_reads >= min_coverage))
         }
@@ -208,6 +205,7 @@ verify_region_coverage <- function(region, pat_files, min_cpg_per_read=4, min_co
     
     return(has_coverage)
 }
+
 
 # Filter regions based on coverage requirements
 filter_regions_by_coverage <- function(regions, pat_files, min_cpg_per_read=4, 
