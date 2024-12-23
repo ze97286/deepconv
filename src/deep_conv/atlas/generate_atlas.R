@@ -72,7 +72,7 @@ load_pat_data <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE) {
     # Process groups sequentially for better stability
     pat_data <- lapply(names(pat_files), function(group) {
         if(verbose) {
-            message(sprintf("Processing group %s (%d files)...", 
+            message(sprintf("\nProcessing group %s (%d files)...", 
                           group, length(pat_files[[group]])))
         }
         
@@ -81,20 +81,57 @@ load_pat_data <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE) {
         
         tryCatch({
             group_files <- future_map(pat_files[[group]], function(file) {
+                if(verbose) {
+                    message(sprintf("  Reading file: %s", basename(file)))
+                }
+                
+                # Read file
+                t1 <- Sys.time()
                 reads <- fread(file, select=1:4, 
                              col.names=c("chr", "start_idx", "pattern", "count"))
+                t2 <- Sys.time()
+                if(verbose) {
+                    message(sprintf("    Read %d rows in %.2f seconds", 
+                                  nrow(reads), difftime(t2, t1, units="secs")))
+                }
                 
-                # Filter to keep only patterns with enough C/Ts
+                # Count C/Ts
+                if(verbose) message("    Counting C/Ts...")
+                t1 <- Sys.time()
                 reads[, ct_count := lengths(regmatches(pattern, gregexpr("[CT]", pattern)))]
+                t2 <- Sys.time()
+                if(verbose) {
+                    message(sprintf("    Counted C/Ts in %.2f seconds", 
+                                  difftime(t2, t1, units="secs")))
+                }
+                
+                # Filter
+                if(verbose) message("    Filtering patterns...")
+                t1 <- Sys.time()
+                orig_rows <- nrow(reads)
                 reads <- reads[ct_count >= min_cpgs]
                 reads[, ct_count := NULL]  # Remove temporary column
+                t2 <- Sys.time()
+                if(verbose) {
+                    message(sprintf("    Filtered to %d/%d rows (%.1f%%) in %.2f seconds", 
+                                  nrow(reads), orig_rows, 
+                                  100 * nrow(reads)/orig_rows,
+                                  difftime(t2, t1, units="secs")))
+                }
                 
                 return(reads)
-            }, .progress = verbose)
+            }, .progress = FALSE)  # Disable default progress bar as we have detailed reporting
             
-            # Combine files for this group
+            if(verbose) message("  Combining files...")
+            t1 <- Sys.time()
             group_data <- rbindlist(group_files)
             group_data[, group := group]
+            t2 <- Sys.time()
+            if(verbose) {
+                message(sprintf("  Combined %d files into %d rows in %.2f seconds", 
+                              length(pat_files[[group]]), nrow(group_data),
+                              difftime(t2, t1, units="secs")))
+            }
             
             return(group_data)
             
@@ -105,12 +142,16 @@ load_pat_data <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE) {
     })
     
     # Remove any NULL results and combine all groups
+    if(verbose) message("\nCombining all groups...")
+    t1 <- Sys.time()
     pat_data <- rbindlist(Filter(Negate(is.null), pat_data))
     setkey(pat_data, chr, start_idx)
+    t2 <- Sys.time()
     
     if(verbose) {
-        message(sprintf("Loaded %d qualifying reads across %d groups", 
-                       nrow(pat_data), uniqueN(pat_data$group)))
+        message(sprintf("Loaded %d qualifying reads across %d groups in %.2f seconds", 
+                       nrow(pat_data), uniqueN(pat_data$group),
+                       difftime(t2, t1, units="secs")))
     }
     
     return(pat_data)
