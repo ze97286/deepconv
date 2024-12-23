@@ -37,18 +37,16 @@ load_cpg_info <- function(cpg_file) {
   return(cpg_info)
 }
 
-verify_region_coverage <- function(region, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
+verify_region_coverage <- function(chr, startCpG, endCpG, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
     if(verbose) {
-        cat(sprintf("\nChecking coverage for region %s:%d-%d\n", 
-                   region[, "chr"], region[, "startCpG"], region[, "endCpG"]))
+        cat(sprintf("\nChecking coverage for region %s:%d-%d\n", chr, startCpG, endCpG))
     }
     
     # Look at positions that could contribute min_cpgs CpGs to this region
-    valid_start_range <- region[, "startCpG"]:(region[, "endCpG"] - min_cpgs + 1)
+    valid_start_range <- startCpG:(endCpG - min_cpgs + 1)
     
     # Get coverage for valid starting positions
-    region_coverage <- coverage_index[chr == region[, "chr"] & 
-                                    start_idx %in% valid_start_range]
+    region_coverage <- coverage_index[chr == chr & start_idx %in% valid_start_range]
     
     if(nrow(region_coverage) == 0) {
         if(verbose) cat("No coverage found for region\n")
@@ -373,9 +371,12 @@ main <- function() {
     start_time <- Sys.time()
   }
   
-  candidate_regions <- unique.regions.stat[direction=="U" & r_len>5, 
-                                         .SD[order(delta_means, -ttest, decreasing = TRUE)], 
-                                         by=target]
+  candidate_regions[, has_coverage := verify_region_coverage(chr, startCpG, endCpG,
+                                                           coverage_index,
+                                                           min_coverage=params$min_reads,
+                                                           min_cpgs=params$min_cpgs,
+                                                           verbose=params$verbose), 
+                   by=.(chr, startCpG, endCpG)]
   
   if (params$verbose) {
     end_time <- Sys.time()
