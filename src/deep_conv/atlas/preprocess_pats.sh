@@ -1,12 +1,13 @@
 #!/bin/bash
 
+# src/deep_conv/atlas/preprocess_pats.sh 4 /users/zetzioni/sharedscratch/atlas/taps_atlas_class.csv /users/zetzioni/sharedscratch/atlas/pats/ 32
+
 # Arguments
 min_cpgs=$1
 class_file=$2
 output_dir=$3
 threads=${4:-32}  # Default to 32 threads
 
-# Ensure output directory
 mkdir -p $output_dir/tmp
 
 # Create task list for GNU parallel
