@@ -40,14 +40,14 @@ load_cpg_info <- function(cpg_file) {
 verify_region_coverage <- function(region, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
     if(verbose) {
         cat(sprintf("\nChecking coverage for region %s:%d-%d\n", 
-                   region$chr[1], region$startCpG[1], region$endCpG[1]))
+                   region[1, chr], region[1, startCpG], region[1, endCpG]))
     }
     
     # Look at positions that could contribute min_cpgs CpGs to this region
-    valid_start_range <- region$startCpG[1]:(region$endCpG[1] - min_cpgs + 1)
+    valid_start_range <- region[1, startCpG]:(region[1, endCpG] - min_cpgs + 1)
     
     # Get coverage for valid starting positions
-    region_coverage <- coverage_index[chr == region$chr[1] & 
+    region_coverage <- coverage_index[chr == region[1, chr] & 
                                     start_idx %in% valid_start_range]
     
     if(nrow(region_coverage) == 0) {
@@ -384,6 +384,15 @@ main <- function() {
                    difftime(end_time, start_time, units="secs")))
     message("\nCandidates per target:")
     print(candidate_regions[, .N, by=target])
+  }
+  
+  if (params$verbose) {
+    message("\nCandidate regions structure:")
+    print(str(candidate_regions))
+    message("\nFirst few rows of candidate regions:")
+    print(head(candidate_regions))
+    message("\nColumn names:")
+    print(names(candidate_regions))
   }
   
   # Check coverage
