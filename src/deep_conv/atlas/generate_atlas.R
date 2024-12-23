@@ -239,37 +239,65 @@ main <- function() {
     message(Sys.time(), " Starting DMR detection...")
   }
   
-  # Load coverage index
+  # Load coverage index with details
   if (params$verbose) {
     message(Sys.time(), " Loading coverage index...")
+    start_time <- Sys.time()
   }
+  
   coverage_index <- fread(params$index_file, 
-                         col.names=c("chr", "start_idx", "group", "count"))
+                         col.names=c("chr", "start_idx", "group", "read_count"))
   setkey(coverage_index, chr, start_idx, group)
   
   if (params$verbose) {
-    message(sprintf("Loaded index with %d positions across %d groups", 
-                   nrow(coverage_index), uniqueN(coverage_index$group)))
+    end_time <- Sys.time()
+    message(sprintf("Loaded index with %d positions across %d groups (%.1f seconds)", 
+                   nrow(coverage_index), 
+                   uniqueN(coverage_index$group),
+                   difftime(end_time, start_time, units="secs")))
+    
+    message("\nCoverage index statistics:")
+    message(sprintf("Positions per chromosome:"))
+    print(coverage_index[, .N, by=chr])
+    message(sprintf("\nPositions per group:"))
+    print(coverage_index[, .N, by=group])
   }
   
   # Load required data
+  if (params$verbose) {
+    message(Sys.time(), " Loading sample and CpG mappings...")
+    start_time <- Sys.time()
+  }
+  
   bed2type <- load_sample2group(params$map_file)
   cpg_info <- load_cpg_info(params$cpg_file)
+  
+  if (params$verbose) {
+    end_time <- Sys.time()
+    message(sprintf("Loaded mappings (%.1f seconds)", 
+                   difftime(end_time, start_time, units="secs")))
+    message(sprintf("Found %d CpG positions", nrow(cpg_info)))
+  }
   
   # Set up parallel processing
   plan(multisession, workers = params$threads)
   
   if (params$verbose) {
     message(Sys.time(), " Loading methylation data...")
+    message("Processing chromosomes:")
+    start_time <- Sys.time()
   }
   
   # Load and process methylation data for all chromosomes
+  chrom_sizes <- numeric(22)
   with_progress({
     p <- progressor(steps=22)
     pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
+      if (params$verbose) message(sprintf("  Reading %s...", chrom))
       res <- fread(paste0(params$base_dir, "/dmr_by_read/blood+tum+gi_scores-by-position_", 
                          chrom, ".txt.gz"), 
                    header=TRUE, stringsAsFactors = TRUE)
+      chrom_sizes[as.numeric(sub("chr", "", chrom))] <<- nrow(res)
       p()
       return(res)
     }) 
@@ -277,13 +305,36 @@ main <- function() {
   pval.all <- rbindlist(pval.all)
   
   if (params$verbose) {
+    end_time <- Sys.time()
+    message(sprintf("Loaded %d methylation positions in %.1f seconds", 
+                   nrow(pval.all), 
+                   difftime(end_time, start_time, units="secs")))
+    message("\nPositions per chromosome:")
+    names(chrom_sizes) <- paste0("chr", 1:22)
+    print(chrom_sizes)
+  }
+  
+  if (params$verbose) {
     message(Sys.time(), " Finding unique regions...")
+    start_time <- Sys.time()
   }
   
   # Find candidate regions
   unique.regions <- collapse_to_regions(pval.all, cpg_info)
   
-  # Calculate region statistics once
+  if (params$verbose) {
+    end_time <- Sys.time()
+    message(sprintf("Found %d initial regions in %.1f seconds", 
+                   nrow(unique.regions),
+                   difftime(end_time, start_time, units="secs")))
+  }
+  
+  # Calculate region statistics
+  if (params$verbose) {
+    message(Sys.time(), " Calculating region statistics...")
+    start_time <- Sys.time()
+  }
+  
   setkey(unique.regions, chr, start, end)
   setkey(cpg_info, chr, start, end)
   
@@ -292,7 +343,7 @@ main <- function() {
     unique.regions[fully_covered==TRUE], 
     nomatch=NULL)[
       , .(startCpG=min(index), 
-          endCpG=max(index) + 1,  # Make endCpG exclusive
+          endCpG=max(index) + 1,
           r_len=mean(r_len), 
           p_len=mean(p_len), 
           tg_mean=mean(avg_min_ci), 
@@ -302,17 +353,38 @@ main <- function() {
   
   unique.regions.stat[, direction := fifelse(tg_mean>0, "M", "U")]
   
-  # Get candidate hypomethylated regions
+  if (params$verbose) {
+    end_time <- Sys.time()
+    message(sprintf("Calculated statistics for %d regions in %.1f seconds", 
+                   nrow(unique.regions.stat),
+                   difftime(end_time, start_time, units="secs")))
+  }
+  
+  # Get candidate regions
+  if (params$verbose) {
+    message(Sys.time(), " Selecting candidate regions...")
+    start_time <- Sys.time()
+  }
+  
   candidate_regions <- unique.regions.stat[direction=="U" & r_len>5, 
                                          .SD[order(delta_means, -ttest, decreasing = TRUE)], 
                                          by=target]
   
   if (params$verbose) {
-    message(sprintf("Found %d candidate regions before coverage check", 
-                   nrow(candidate_regions)))
+    end_time <- Sys.time()
+    message(sprintf("Found %d candidate regions in %.1f seconds", 
+                   nrow(candidate_regions),
+                   difftime(end_time, start_time, units="secs")))
+    message("\nCandidates per target:")
+    print(candidate_regions[, .N, by=target])
   }
   
-  # Check coverage using index
+  # Check coverage
+  if (params$verbose) {
+    message(Sys.time(), " Checking coverage...")
+    start_time <- Sys.time()
+  }
+  
   candidate_regions[, has_coverage := verify_region_coverage(.SD, 
                                                            coverage_index,
                                                            min_coverage=params$min_reads,
@@ -321,26 +393,39 @@ main <- function() {
                    by=.(chr, startCpG, endCpG)]
   
   if (params$verbose) {
-    message(sprintf("Found %d regions with sufficient coverage (≥%d reads with ≥%d CpGs)", 
+    end_time <- Sys.time()
+    message(sprintf("\nFound %d regions with sufficient coverage (≥%d reads with ≥%d CpGs) in %.1f seconds", 
                    sum(candidate_regions$has_coverage), 
                    params$min_reads, 
-                   params$min_cpgs))
+                   params$min_cpgs,
+                   difftime(end_time, start_time, units="secs")))
+    
+    message("\nPassing regions per target:")
+    print(candidate_regions[has_coverage==TRUE, .N, by=target])
   }
   
-  # Select top N regions that pass coverage
+  # Select final regions
+  if (params$verbose) {
+    message(Sys.time(), " Selecting final regions...")
+  }
+  
   top_regions <- candidate_regions[has_coverage==TRUE, 
                                  head(.SD[order(delta_means, -ttest, decreasing=TRUE)], 
                                       n=params$top_n), 
                                  by=target]
   
   if (params$verbose) {
-    message(sprintf("Selected top %d regions per target (total %d regions)", 
+    message(sprintf("\nSelected top %d regions per target (total %d regions)", 
                    params$top_n, nrow(top_regions)))
-    message("\nDistribution by target:")
+    message("\nFinal distribution by target:")
     print(top_regions[, .N, by=target])
   }
   
-  # Write final marker file
+  # Write output
+  if (params$verbose) {
+    message(Sys.time(), " Writing output...")
+  }
+  
   write_marker_file(top_regions, params$out_file)
   
   if (params$verbose) {
