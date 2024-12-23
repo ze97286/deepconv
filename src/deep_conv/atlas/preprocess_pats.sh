@@ -22,6 +22,9 @@ done < $class_file > $output_dir/tmp/tasks.txt
 # Process task
 process_file() {
     IFS=, read pat_file group chr <<< "$1"
+    echo "Input line: $1" >&2
+    echo "Resolved: pat_file=$pat_file, group=$group, chr=$chr" >&2
+
     awk -v chr="$chr" -v group="$group" -v min_cpgs=$min_cpgs '
         BEGIN { FS="\t"; OFS="\t" }
         $1 == chr {
@@ -39,6 +42,12 @@ process_file() {
             }
         }
     ' <(zcat "$pat_file") > "$output_dir/tmp/${group}_chr${chr}_index.txt"
+
+    if [[ -f "$output_dir/tmp/${group}_chr${chr}_index.txt" ]]; then
+        echo "File written successfully: $output_dir/tmp/${group}_chr${chr}_index.txt" >&2
+    else
+        echo "Failed to write file for: $pat_file $group $chr" >&2
+    fi
 }
 export -f process_file
 
