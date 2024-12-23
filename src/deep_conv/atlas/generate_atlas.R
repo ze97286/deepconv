@@ -37,20 +37,11 @@ load_cpg_info <- function(cpg_file) {
   return(cpg_info)
 }
 
-verify_region_coverage <- function(dt, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
-    # Print the entire dt to debug what's actually in it
-    if(verbose) {
-        cat("\nDebug: Structure of input data:\n")
-        print(str(dt))
-        cat("\nDebug: First row of input data:\n")
-        print(dt[1])
-    }
-    
-    # Since we're using by=.(chr, startCpG, endCpG), these values are available directly
-    # in the parent environment - we don't need to extract them from .SD
-    chr <- chr  # This refers to the chr value in the current group
-    startCpG <- startCpG  # This refers to the startCpG value in the current group
-    endCpG <- endCpG  # This refers to the endCpG value in the current group
+verify_region_coverage <- function(dt, groups, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
+    # groups will be a list containing chr, startCpG, and endCpG
+    chr <- groups$chr
+    startCpG <- groups$startCpG
+    endCpG <- groups$endCpG
     
     if(verbose) {
         cat(sprintf("\nChecking coverage for region %s:%d-%d\n", chr, startCpG, endCpG))
@@ -415,23 +406,24 @@ main <- function() {
   }
   
   candidate_regions[, has_coverage := verify_region_coverage(.SD, 
-                                                           coverage_index,
-                                                           min_coverage=params$min_reads,
-                                                           min_cpgs=params$min_cpgs,
-                                                           verbose=params$verbose), 
-                   by=.(chr, startCpG, endCpG)]
-  
-  if (params$verbose) {
-    end_time <- Sys.time()
-    message(sprintf("\nFound %d regions with sufficient coverage (≥%d reads with ≥%d CpGs) in %.1f seconds", 
-                   sum(candidate_regions$has_coverage), 
-                   params$min_reads, 
-                   params$min_cpgs,
-                   difftime(end_time, start_time, units="secs")))
+                                                             .BY, 
+                                                             coverage_index,
+                                                             min_coverage=params$min_reads,
+                                                             min_cpgs=params$min_cpgs,
+                                                             verbose=params$verbose), 
+                     by=.(chr, startCpG, endCpG)]
     
-    message("\nPassing regions per target:")
-    print(candidate_regions[has_coverage==TRUE, .N, by=target])
-  }
+    if (params$verbose) {
+        end_time <- Sys.time()
+        message(sprintf("\nFound %d regions with sufficient coverage (≥%d reads with ≥%d CpGs) in %.1f seconds", 
+                       sum(candidate_regions$has_coverage), 
+                       params$min_reads, 
+                       params$min_cpgs,
+                       difftime(end_time, start_time, units="secs")))
+        
+        message("\nPassing regions per target:")
+        print(candidate_regions[has_coverage==TRUE, .N, by=target])
+    }
   
   # Select final regions
   if (params$verbose) {
