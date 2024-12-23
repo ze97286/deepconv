@@ -371,12 +371,9 @@ main <- function() {
     start_time <- Sys.time()
   }
   
-  candidate_regions[, has_coverage := verify_region_coverage(chr, startCpG, endCpG,
-                                                           coverage_index,
-                                                           min_coverage=params$min_reads,
-                                                           min_cpgs=params$min_cpgs,
-                                                           verbose=params$verbose), 
-                   by=.(chr, startCpG, endCpG)]
+  candidate_regions <- unique.regions.stat[direction=="U" & r_len>5, 
+                                         .SD[order(delta_means, -ttest, decreasing = TRUE)], 
+                                         by=target]
   
   if (params$verbose) {
     end_time <- Sys.time()
