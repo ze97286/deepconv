@@ -70,88 +70,89 @@ load_pat_data <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE) {
     }
     
     # Process groups sequentially for better stability
-    pat_data <- lapply(names(pat_files), function(group) {
+    all_groups_data <- list()
+    
+    for(group in names(pat_files)) {
         if(verbose) {
-            message(sprintf("\nProcessing group %s (%d files)...", 
-                          group, length(pat_files[[group]])))
+            message(sprintf("\nStarting group %s", group))
+            message(sprintf("Group has %d files", length(pat_files[[group]])))
         }
         
-        # Process files within a group in parallel
+        # Set up parallel processing for this group
+        if(verbose) message("Setting up parallel processing...")
         plan(multisession, workers = threads)
         
         tryCatch({
-            group_files <- future_map(pat_files[[group]], function(file) {
-                if(verbose) {
-                    message(sprintf("  Reading file: %s", basename(file)))
-                }
+            if(verbose) message("Starting parallel file processing...")
+            
+            # Process each file in parallel
+            file_results <- future_map(seq_along(pat_files[[group]]), function(i) {
+                file <- pat_files[[group]][i]
+                
+                if(verbose) message(sprintf("Reading file %d/%d: %s", 
+                                          i, length(pat_files[[group]]), basename(file)))
                 
                 # Read file
-                t1 <- Sys.time()
                 reads <- fread(file, select=1:4, 
                              col.names=c("chr", "start_idx", "pattern", "count"))
-                t2 <- Sys.time()
-                if(verbose) {
-                    message(sprintf("    Read %d rows in %.2f seconds", 
-                                  nrow(reads), difftime(t2, t1, units="secs")))
-                }
+                
+                if(verbose) message(sprintf("File %d: Read %d rows", i, nrow(reads)))
                 
                 # Count C/Ts
-                if(verbose) message("    Counting C/Ts...")
-                t1 <- Sys.time()
-                reads[, ct_count := lengths(regmatches(pattern, gregexpr("[CT]", pattern)))]
-                t2 <- Sys.time()
-                if(verbose) {
-                    message(sprintf("    Counted C/Ts in %.2f seconds", 
-                                  difftime(t2, t1, units="secs")))
-                }
+                if(verbose) message(sprintf("File %d: Counting C/Ts...", i))
+                reads[, ct_count := nchar(pattern) - nchar(gsub("[CT]", "", pattern))]
                 
                 # Filter
-                if(verbose) message("    Filtering patterns...")
-                t1 <- Sys.time()
+                if(verbose) message(sprintf("File %d: Filtering patterns...", i))
                 orig_rows <- nrow(reads)
                 reads <- reads[ct_count >= min_cpgs]
-                reads[, ct_count := NULL]  # Remove temporary column
-                t2 <- Sys.time()
-                if(verbose) {
-                    message(sprintf("    Filtered to %d/%d rows (%.1f%%) in %.2f seconds", 
-                                  nrow(reads), orig_rows, 
-                                  100 * nrow(reads)/orig_rows,
-                                  difftime(t2, t1, units="secs")))
-                }
+                reads[, ct_count := NULL]
+                
+                if(verbose) message(sprintf("File %d: Filtered to %d/%d rows", 
+                                          i, nrow(reads), orig_rows))
                 
                 return(reads)
-            }, .progress = FALSE)  # Disable default progress bar as we have detailed reporting
+            }, .progress = verbose)
             
-            if(verbose) message("  Combining files...")
-            t1 <- Sys.time()
-            group_data <- rbindlist(group_files)
+            # Combine files for this group
+            if(verbose) message(sprintf("Combining %d files for group %s...", 
+                                      length(file_results), group))
+            
+            group_data <- rbindlist(file_results)
             group_data[, group := group]
-            t2 <- Sys.time()
-            if(verbose) {
-                message(sprintf("  Combined %d files into %d rows in %.2f seconds", 
-                              length(pat_files[[group]]), nrow(group_data),
-                              difftime(t2, t1, units="secs")))
-            }
             
-            return(group_data)
+            if(verbose) message(sprintf("Group %s complete: %d total rows", 
+                                      group, nrow(group_data)))
+            
+            all_groups_data[[group]] <- group_data
             
         }, error = function(e) {
             warning(sprintf("Error processing group %s: %s", group, e$message))
             return(NULL)
         })
-    })
+    }
     
-    # Remove any NULL results and combine all groups
+    # Combine all groups
     if(verbose) message("\nCombining all groups...")
-    t1 <- Sys.time()
-    pat_data <- rbindlist(Filter(Negate(is.null), pat_data))
-    setkey(pat_data, chr, start_idx)
-    t2 <- Sys.time()
+    
+    # Filter out any NULL results from errors
+    valid_groups <- Filter(Negate(is.null), all_groups_data)
     
     if(verbose) {
-        message(sprintf("Loaded %d qualifying reads across %d groups in %.2f seconds", 
-                       nrow(pat_data), uniqueN(pat_data$group),
-                       difftime(t2, t1, units="secs")))
+        message(sprintf("Successfully processed %d/%d groups", 
+                       length(valid_groups), length(pat_files)))
+    }
+    
+    if(length(valid_groups) == 0) {
+        stop("No valid data loaded from any group")
+    }
+    
+    pat_data <- rbindlist(valid_groups)
+    setkey(pat_data, chr, start_idx)
+    
+    if(verbose) {
+        message(sprintf("Final dataset: %d rows across %d groups", 
+                       nrow(pat_data), uniqueN(pat_data$group)))
     }
     
     return(pat_data)
