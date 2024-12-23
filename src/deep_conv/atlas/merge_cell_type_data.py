@@ -89,7 +89,7 @@ def merge_all_cell_types(cell_types, output_dir):
     if df_list:
         merged_df = pd.concat(df_list, ignore_index=True)
         merged_df = merged_df.sort_values(["chr", "pos", "group"])
-        merged_df.to_csv(merged_file, sep="\t", index=False, compression="gzip")
+        merged_df[["chr", "pos", "group","count"]].to_csv(merged_file, sep="\t", index=False, compression="gzip")
         print(f"Merged all cell types into {merged_file}")
     else:
         print("No cell type files found to merge.")
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     df = pd.read_csv(args.class_file)
     cell_types = sorted(df.group.unique())
     parallel_merge(cell_types, range(1, 23), args.input_dir, args.output_dir)
-    final_df = pd.read_csv(args.output_dir+"cell_type_pat_index_l4.csv.gz", sep="\t")
+    final_df = pd.read_csv(args.output_dir+"/cell_type_pat_index_l4.csv.gz", sep="\t")
     print(final_df.head())
     print(final_df.info())
     nan_rows = final_df[final_df.isna().sum(axis=1)]
