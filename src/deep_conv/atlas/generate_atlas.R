@@ -244,7 +244,7 @@ main <- function() {
     message(Sys.time(), " Loading coverage index...")
   }
   coverage_index <- fread(params$index_file, 
-                         col.names=c("chr", "pos", "group", "count"))
+                         col.names=c("chr", "start_idx", "group", "count"))
   setkey(coverage_index, chr, start_idx, group)
   
   if (params$verbose) {
