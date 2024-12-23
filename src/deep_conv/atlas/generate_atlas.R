@@ -38,9 +38,19 @@ load_cpg_info <- function(cpg_file) {
 }
 
 verify_region_coverage <- function(dt, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
-    chr <- dt$chr[1]
-    startCpG <- dt$startCpG[1]
-    endCpG <- dt$endCpG[1]
+    # Print the entire dt to debug what's actually in it
+    if(verbose) {
+        cat("\nDebug: Structure of input data:\n")
+        print(str(dt))
+        cat("\nDebug: First row of input data:\n")
+        print(dt[1])
+    }
+    
+    # Since we're using by=.(chr, startCpG, endCpG), these values are available directly
+    # in the parent environment - we don't need to extract them from .SD
+    chr <- chr  # This refers to the chr value in the current group
+    startCpG <- startCpG  # This refers to the startCpG value in the current group
+    endCpG <- endCpG  # This refers to the endCpG value in the current group
     
     if(verbose) {
         cat(sprintf("\nChecking coverage for region %s:%d-%d\n", chr, startCpG, endCpG))
@@ -83,6 +93,7 @@ verify_region_coverage <- function(dt, coverage_index, min_coverage=3, min_cpgs=
     
     return(has_coverage)
 }
+
 
 # Region processing functions
 collapse_to_regions <- function(dmrs, cpg_info, max_gap=1, max_dist=1e3, 
