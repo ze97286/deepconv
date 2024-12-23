@@ -69,7 +69,7 @@ load_pat_data <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE) {
         message("Loading pat files...")
     }
     
-    # Process groups sequentially for better stability
+    # Process groups sequentially
     all_groups_data <- list()
     
     for(group in names(pat_files)) {
@@ -78,38 +78,33 @@ load_pat_data <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE) {
             message(sprintf("Group has %d files", length(pat_files[[group]])))
         }
         
-        # Set up parallel processing for this group
-        if(verbose) message("Setting up parallel processing...")
+        # Process files in parallel
         plan(multisession, workers = threads)
         
         tryCatch({
-            if(verbose) message("Starting parallel file processing...")
-            
-            # Process each file in parallel
             file_results <- future_map(seq_along(pat_files[[group]]), function(i) {
                 file <- pat_files[[group]][i]
                 
-                if(verbose) message(sprintf("Reading file %d/%d: %s", 
+                if(verbose) message(sprintf("Processing file %d/%d: %s", 
                                           i, length(pat_files[[group]]), basename(file)))
                 
-                # Read file
-                reads <- fread(file, select=1:4, 
+                # Create a command that filters while reading
+                cmd <- sprintf("zcat %s | awk -F'\\t' '
+                    function count_ct(str) {
+                        gsub(/[^CT]/, \"\", str)
+                        return length(str)
+                    }
+                    {
+                        ct = count_ct($3)
+                        if(ct >= %d) 
+                            print $1\"\\t\"$2\"\\t\"$3\"\\t\"$4
+                    }'", file, min_cpgs)
+                
+                reads <- fread(cmd=cmd, 
                              col.names=c("chr", "start_idx", "pattern", "count"))
                 
-                if(verbose) message(sprintf("File %d: Read %d rows", i, nrow(reads)))
-                
-                # Count C/Ts
-                if(verbose) message(sprintf("File %d: Counting C/Ts...", i))
-                reads[, ct_count := nchar(pattern) - nchar(gsub("[CT]", "", pattern))]
-                
-                # Filter
-                if(verbose) message(sprintf("File %d: Filtering patterns...", i))
-                orig_rows <- nrow(reads)
-                reads <- reads[ct_count >= min_cpgs]
-                reads[, ct_count := NULL]
-                
-                if(verbose) message(sprintf("File %d: Filtered to %d/%d rows", 
-                                          i, nrow(reads), orig_rows))
+                if(verbose) message(sprintf("File %d: Loaded %d qualifying reads", 
+                                          i, nrow(reads)))
                 
                 return(reads)
             }, .progress = verbose)
@@ -132,10 +127,8 @@ load_pat_data <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE) {
         })
     }
     
-    # Combine all groups
     if(verbose) message("\nCombining all groups...")
     
-    # Filter out any NULL results from errors
     valid_groups <- Filter(Negate(is.null), all_groups_data)
     
     if(verbose) {
