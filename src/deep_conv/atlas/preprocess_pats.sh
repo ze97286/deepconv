@@ -41,7 +41,7 @@ process_file() {
                     print chr, pos+i-1, group, $4
             }
         }
-    ' <(zcat "$pat_file") > "$output_dir/tmp/${group}_chr${chr}_index.txt"
+    ' <(zcat "$pat_file") > "$output_dir/tmp/${group}_${chr}_index.txt"
 
     if [[ -f "$output_dir/tmp/${group}_${chr}_index.txt" ]]; then
         echo "File written successfully: $output_dir/tmp/${group}_${chr}_index.txt" >&2
