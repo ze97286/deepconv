@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# ./preprocess_pats.sh 4 /users/zetzioni/sharedscratch/atlas/taps_atlas_class.csv /users/zetzioni/sharedscratch/atlas/pats/ 32
+# src/deep_conv/atlas/preprocess_pats.sh 4 /users/zetzioni/sharedscratch/atlas/taps_atlas_class.csv /users/zetzioni/sharedscratch/atlas/pats/ 32
 
 # Arguments
 min_cpgs=$1
@@ -25,37 +25,27 @@ process_file() {
     awk -v chr="$chr" -v group="$group" -v min_cpgs=$min_cpgs '
         BEGIN { FS="\t"; OFS="\t" }
         $1 == chr {
-            ct = gsub(/[CT]/, "&", $3)
-            if (ct >= min_cpgs) {
-                pos = $2
-                n = split($3, chars, "")
+            pos = $2
+            n = split($3, chars, "")
+            for (i=1; i<=n; i++) {
                 ct_count = 0
-                for (i=1; i<=n; i++) {
-                    if (chars[i] ~ /[CT]/) {
+                for (j=i; j<=n; j++) {
+                    if (chars[j] ~ /[CT]/) {
                         ct_count++
-                        if (ct_count >= min_cpgs)
-                            print chr, pos+i-1, group, $4
                     }
                 }
+                if (ct_count >= min_cpgs)
+                    print chr, pos+i-1, group, $4
             }
         }
-    ' <(zcat "$pat_file")
+    ' <(zcat "$pat_file") > "$output_dir/tmp/${group}_chr${chr}_index.txt"
 }
 export -f process_file
 
 # Run all tasks in parallel
-cat $output_dir/tmp/tasks.txt | parallel -j $threads --progress \
-    "process_file {} > $output_dir/tmp/index.{#}.txt"
+cat $output_dir/tmp/tasks.txt | parallel -j $threads --progress process_file {}
 
-# Merge results per chromosome
-for chr in {1..22}; do
-    echo "Merging chromosome $chr..."
-    find $output_dir/tmp -name "index.*.txt" -exec grep -h "^chr$chr" {} \; | \
-        sort -k1,1 -k2,2n -k3,3 | \
-        gzip > $output_dir/coverage_index_chr${chr}.txt.gz
-done
+# Cleanup temporary task list
+rm $output_dir/tmp/tasks.txt
 
-# Cleanup
-rm -rf $output_dir/tmp
-
-echo "Done!"
+echo "Index generation complete! All files are saved with the format: <group>_chr<chr>_index.txt in $output_dir/tmp"
