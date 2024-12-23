@@ -7,6 +7,7 @@
 #   --base_dir /users/zetzioni/sharedscratch/atlas/ \
 #   --out_file /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.100.l4.bed \
 #   --class_file /users/zetzioni/sharedscratch/atlas/taps_atlas_class.csv \
+#   --index_file /users/zetzioni/sharedscratch/atlas/pats/cell_type_pat_index_l4.csv.gz
 #   --top_n 100 \
 #   --threads 32 \
 #   --verbose
@@ -151,47 +152,38 @@ load_pat_data <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE) {
     return(pat_data)
 }
 
-verify_region_coverage <- function(region, pat_data, min_cpgs=4, min_coverage=3, 
-                                 window_size=200, verbose=FALSE) {
+verify_region_coverage <- function(region, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
     if(verbose) {
         cat(sprintf("\nChecking coverage for region %s:%d-%d\n", 
                    region$chr[1], region$startCpG, region$endCpG))
     }
     
-    # Look for reads starting from window_size before region start
-    region_reads <- pat_data[chr == region$chr[1] & 
-                            start_idx >= (region$startCpG - window_size) & 
-                            start_idx <= region$endCpG]
+    # Look at positions that could contribute min_cpgs CpGs to this region
+    valid_start_range <- region$startCpG:(region$endCpG - min_cpgs + 1)
     
-    if(nrow(region_reads) == 0) {
-        if(verbose) cat("No reads found for region\n")
+    # Get coverage for valid starting positions
+    region_coverage <- coverage_index[chr == region$chr[1] & 
+                                    start_idx %in% valid_start_range]
+    
+    if(nrow(region_coverage) == 0) {
+        if(verbose) cat("No coverage found for region\n")
         return(FALSE)
     }
     
-    # Count qualifying reads per group
-    coverage_by_group <- region_reads[, {
-        # For each read, count C/Ts that fall in our region
-        qualifying_reads = sum(sapply(seq_len(.N), function(i) {
-            chars <- strsplit(pattern[i], "")[[1]]
-            ct_pos <- which(chars %in% c("C", "T"))
-            positions <- start_idx[i] + ct_pos - 1
-            sum(positions >= region$startCpG & 
-                positions <= region$endCpG) >= min_cpgs
-        }) * count)
-        
-        .(qualifying_reads = qualifying_reads)
-    }, by=group]
+    # Sum reads by group
+    group_coverage <- region_coverage[, .(total_reads = sum(read_count)), by=group]
     
-    # Check if all groups have sufficient coverage
-    has_coverage <- nrow(coverage_by_group) == uniqueN(pat_data$group) &&
-                   all(coverage_by_group$qualifying_reads >= min_coverage)
+    # Check if we have data for all groups and they all meet minimum coverage
+    has_coverage <- nrow(group_coverage) == uniqueN(coverage_index$group) && 
+                   all(group_coverage$total_reads >= min_coverage)
     
     if(verbose) {
-        if(nrow(coverage_by_group) < uniqueN(pat_data$group)) {
-            cat("Missing coverage for some groups\n")
+        if(nrow(group_coverage) < uniqueN(coverage_index$group)) {
+            missing_groups <- setdiff(unique(coverage_index$group), group_coverage$group)
+            cat("Missing coverage for groups:", paste(missing_groups, collapse=", "), "\n")
         }
         cat("Coverage by group:\n")
-        print(coverage_by_group)
+        print(group_coverage)
         cat(sprintf("Has sufficient coverage: %s\n", has_coverage))
     }
     
@@ -330,20 +322,20 @@ main <- function() {
     make_option(c("-d", "--base_dir"), type="character", default=".",
                 help="Base directory containing input files and for output [default %default]",
                 metavar="path"),
-    make_option(c("-l", "--class_file"), type="character",
-                help="Class file for pat files [REQUIRED]",
-                metavar="taps_atlas_class.csv"),
+    make_option(c("-i", "--index_file"), type="character",
+                help="Coverage index file [REQUIRED]",
+                metavar="coverage_index.csv"),
     make_option(c("-o", "--out_file"), type="character",
                 help="Output file path for markers [REQUIRED]",
                 metavar="markers.bed"),
     make_option(c("-n", "--top_n"), type="integer", default=100,
                 help="Number of top markers to keep per target [default %default]"),
-    make_option(c("-t", "--threads"), type="integer", default=8,
-                help="Number of threads [default %default]"),
     make_option(c("-r", "--min_reads"), type="integer", default=3,
                 help="Minimum number of qualifying reads per group [default %default]"),
     make_option(c("-g", "--min_cpgs"), type="integer", default=4,
                 help="Minimum CpGs per read [default %default]"),
+    make_option(c("-t", "--threads"), type="integer", default=8,
+                help="Number of threads [default %default]"),
     make_option(c("-v", "--verbose"), action="store_true", default=FALSE,
                 help="Print progress information")
   )
@@ -353,7 +345,7 @@ main <- function() {
   
   # Check required arguments
   if (is.null(params$cpg_file) || is.null(params$map_file) || 
-      is.null(params$out_file) || is.null(params$class_file)) {
+      is.null(params$out_file) || is.null(params$index_file)) {
     print_help(parser)
     stop("Missing required arguments")
   }
@@ -362,17 +354,18 @@ main <- function() {
     message(Sys.time(), " Starting DMR detection...")
   }
   
-  # Get pat files mapping
-  pat_files <- get_pat_files(params$class_file, params$base_dir, params$verbose)
-  
-  # Load filtered pat data
+  # Load coverage index
   if (params$verbose) {
-    message(Sys.time(), " Loading pat data...")
+    message(Sys.time(), " Loading coverage index...")
   }
-  pat_data <- load_pat_data(pat_files, 
-                           min_cpgs=params$min_cpgs, 
-                           threads=params$threads, 
-                           verbose=params$verbose)
+  coverage_index <- fread(params$index_file, 
+                         col.names=c("chr", "pos", "group", "count"))
+  setkey(coverage_index, chr, start_idx, group)
+  
+  if (params$verbose) {
+    message(sprintf("Loaded index with %d positions across %d groups", 
+                   nrow(coverage_index), uniqueN(coverage_index$group)))
+  }
   
   # Load required data
   bed2type <- load_sample2group(params$map_file)
@@ -434,10 +427,11 @@ main <- function() {
                    nrow(candidate_regions)))
   }
   
-  # Check coverage using pat_data
-  candidate_regions[, has_coverage := verify_region_coverage(.SD, pat_data,
-                                                           min_cpgs=params$min_cpgs,
+  # Check coverage using index
+  candidate_regions[, has_coverage := verify_region_coverage(.SD, 
+                                                           coverage_index,
                                                            min_coverage=params$min_reads,
+                                                           min_cpgs=params$min_cpgs,
                                                            verbose=params$verbose), 
                    by=.(chr, startCpG, endCpG)]
   
