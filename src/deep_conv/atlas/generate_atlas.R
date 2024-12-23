@@ -69,36 +69,43 @@ load_pat_data <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE) {
         message("Loading pat files...")
     }
     
-    plan(multisession, workers = threads)
-    
-    with_progress({
-        p <- progressor(steps=length(names(pat_files)))
-        pat_data <- future_map(names(pat_files), function(group) {
-            if(verbose) {
-                message(sprintf("Processing group %s (%d files)...", 
-                              group, length(pat_files[[group]])))
-            }
-            
-            # Load and combine data from all files for this group
-            group_data <- rbindlist(lapply(pat_files[[group]], function(file) {
+    # Process groups sequentially for better stability
+    pat_data <- lapply(names(pat_files), function(group) {
+        if(verbose) {
+            message(sprintf("Processing group %s (%d files)...", 
+                          group, length(pat_files[[group]])))
+        }
+        
+        # Process files within a group in parallel
+        plan(multisession, workers = threads)
+        
+        tryCatch({
+            group_files <- future_map(pat_files[[group]], function(file) {
                 reads <- fread(file, select=1:4, 
                              col.names=c("chr", "start_idx", "pattern", "count"))
                 
                 # Filter to keep only patterns with enough C/Ts
                 reads[, ct_count := lengths(regmatches(pattern, gregexpr("[CT]", pattern)))]
                 reads <- reads[ct_count >= min_cpgs]
+                reads[, ct_count := NULL]  # Remove temporary column
                 
                 return(reads)
-            }))
+            }, .progress = verbose)
             
+            # Combine files for this group
+            group_data <- rbindlist(group_files)
             group_data[, group := group]
-            p()
+            
             return(group_data)
+            
+        }, error = function(e) {
+            warning(sprintf("Error processing group %s: %s", group, e$message))
+            return(NULL)
         })
     })
     
-    # Combine all groups and set keys
-    pat_data <- rbindlist(pat_data)
+    # Remove any NULL results and combine all groups
+    pat_data <- rbindlist(Filter(Negate(is.null), pat_data))
     setkey(pat_data, chr, start_idx)
     
     if(verbose) {
