@@ -40,11 +40,11 @@ load_cpg_info <- function(cpg_file) {
 verify_region_coverage <- function(region, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
     if(verbose) {
         cat(sprintf("\nChecking coverage for region %s:%d-%d\n", 
-                   region$chr[1], region$startCpG, region$endCpG))
+                   region$chr[1], region$startCpG[1], region$endCpG[1]))
     }
     
     # Look at positions that could contribute min_cpgs CpGs to this region
-    valid_start_range <- region$startCpG:(region$endCpG - min_cpgs + 1)
+    valid_start_range <- region$startCpG[1]:(region$endCpG[1] - min_cpgs + 1)
     
     # Get coverage for valid starting positions
     region_coverage <- coverage_index[chr == region$chr[1] & 
@@ -59,16 +59,23 @@ verify_region_coverage <- function(region, coverage_index, min_coverage=3, min_c
     group_coverage <- region_coverage[, .(total_reads = sum(read_count)), by=group]
     
     # Check if we have data for all groups and they all meet minimum coverage
-    has_coverage <- nrow(group_coverage) == uniqueN(coverage_index$group) && 
-                   all(group_coverage$total_reads >= min_coverage)
+    all_groups <- unique(coverage_index$group)
+    missing_groups <- setdiff(all_groups, group_coverage$group)
+    
+    # Add missing groups with 0 reads
+    if(length(missing_groups) > 0) {
+        missing_dt <- data.table(group = missing_groups, total_reads = 0)
+        group_coverage <- rbind(group_coverage, missing_dt)
+    }
+    
+    has_coverage <- all(group_coverage$total_reads >= min_coverage)
     
     if(verbose) {
-        if(nrow(group_coverage) < uniqueN(coverage_index$group)) {
-            missing_groups <- setdiff(unique(coverage_index$group), group_coverage$group)
-            cat("Missing coverage for groups:", paste(missing_groups, collapse=", "), "\n")
+        if(length(missing_groups) > 0) {
+            cat("Groups with no coverage:", paste(missing_groups, collapse=", "), "\n")
         }
         cat("Coverage by group:\n")
-        print(group_coverage)
+        print(group_coverage[order(-total_reads)])
         cat(sprintf("Has sufficient coverage: %s\n", has_coverage))
     }
     
