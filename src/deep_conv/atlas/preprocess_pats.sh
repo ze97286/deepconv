@@ -43,12 +43,13 @@ process_file() {
         }
     ' <(zcat "$pat_file") > "$output_dir/tmp/${group}_chr${chr}_index.txt"
 
-    if [[ -f "$output_dir/tmp/${group}_chr${chr}_index.txt" ]]; then
-        echo "File written successfully: $output_dir/tmp/${group}_chr${chr}_index.txt" >&2
+    if [[ -f "$output_dir/tmp/${group}_${chr}_index.txt" ]]; then
+        echo "File written successfully: $output_dir/tmp/${group}_${chr}_index.txt" >&2
     else
         echo "Failed to write file for: $pat_file $group $chr" >&2
     fi
 }
+export output_dir="${output_dir%/}"
 export -f process_file
 
 # Run all tasks in parallel
