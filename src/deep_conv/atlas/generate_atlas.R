@@ -37,7 +37,11 @@ load_cpg_info <- function(cpg_file) {
   return(cpg_info)
 }
 
-verify_region_coverage <- function(chr, startCpG, endCpG, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
+verify_region_coverage <- function(dt, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
+    chr <- dt$chr[1]
+    startCpG <- dt$startCpG[1]
+    endCpG <- dt$endCpG[1]
+    
     if(verbose) {
         cat(sprintf("\nChecking coverage for region %s:%d-%d\n", chr, startCpG, endCpG))
     }
