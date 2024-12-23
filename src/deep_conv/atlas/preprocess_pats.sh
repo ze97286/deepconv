@@ -1,13 +1,12 @@
 #!/bin/bash
 
-# src/deep_conv/atlas/preprocess_pats.sh 4 /users/zetzioni/sharedscratch/atlas/taps_atlas_class.csv /users/zetzioni/sharedscratch/atlas/pats/ 32
-
 # Arguments
 min_cpgs=$1
 class_file=$2
 output_dir=$3
 threads=${4:-32}  # Default to 32 threads
 
+# Ensure output directory
 mkdir -p $output_dir/tmp
 
 # Create task list for GNU parallel
@@ -26,7 +25,7 @@ process_file() {
     echo "Resolved: pat_file=$pat_file, group=$group, chr=$chr" >&2
 
     awk -v chr="$chr" -v group="$group" -v min_cpgs=$min_cpgs '
-        BEGIN { FS="\t"; OFS="\t" }
+        BEGIN { FS="\t"; OFS="\t"; print "pos\tcount" }
         $1 == chr {
             pos = $2
             n = split($3, chars, "")
@@ -38,10 +37,16 @@ process_file() {
                     }
                 }
                 if (ct_count >= min_cpgs)
-                    print chr, pos+i-1, group, $4
+                    print pos+i-1, $4
             }
         }
     ' <(zcat "$pat_file") > "$output_dir/tmp/${group}_${chr}_index.txt"
+
+    # Sanity check: Ensure no rows with NaN or invalid values
+    if grep -q 'NaN' "$output_dir/tmp/${group}_${chr}_index.txt"; then
+        echo "Error: File contains NaN values - $output_dir/tmp/${group}_${chr}_index.txt" >&2
+        exit 1
+    fi
 
     if [[ -f "$output_dir/tmp/${group}_${chr}_index.txt" ]]; then
         echo "File written successfully: $output_dir/tmp/${group}_${chr}_index.txt" >&2
@@ -58,4 +63,4 @@ cat $output_dir/tmp/tasks.txt | parallel -j $threads --progress process_file {}
 # Cleanup temporary task list
 rm $output_dir/tmp/tasks.txt
 
-echo "Index generation complete! All files are saved with the format: <group>_chr<chr>_index.txt in $output_dir/tmp"
+echo "Index generation complete! All files are saved with the format: <group>_<chr>_index.txt in $output_dir/tmp"
