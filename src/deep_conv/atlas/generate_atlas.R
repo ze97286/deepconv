@@ -6,8 +6,7 @@
 #   --map_file /users/zetzioni/sharedscratch/atlas/per-read-bed2class.csv \
 #   --base_dir /users/zetzioni/sharedscratch/atlas/ \
 #   --out_file /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.100.l4.bed \
-#   --class_file /users/zetzioni/sharedscratch/atlas/taps_atlas_class.csv \
-#   --index_file /users/zetzioni/sharedscratch/atlas/pats/cell_type_pat_index_l4.csv.gz
+#   --index_file /users/zetzioni/sharedscratch/atlas/pats/cell_type_pat_index_l4.csv.gz \
 #   --top_n 100 \
 #   --threads 32 \
 #   --verbose
@@ -36,120 +35,6 @@ load_cpg_info <- function(cpg_file) {
   cpg_info[, end:=start]
   setkey(cpg_info, chr, start, end)
   return(cpg_info)
-}
-
-get_pat_files <- function(class_file, base_dir, verbose=FALSE) {
-  # Read the class file with header
-  classes <- fread(class_file, sep=",", header=TRUE)
-  if (verbose) {
-    message(sprintf("Read %d lines from class file", nrow(classes)))
-  }
-  
-  # Get file paths and convert to pat paths
-  pat_files <- classes$name
-  pat_files <- gsub("\\.beta$", ".pat.gz", pat_files)  # replace .beta at end
-  pat_files <- gsub("/beta/", "/pat/Tissue/", pat_files)  # replace /beta/ with /pat/Tissue/
-  pat_files <- gsub("\\.calls\\.all", "", pat_files)
-  
-  # Create list where each group has all its files
-  result <- split(pat_files, classes$group)
-  
-  if(verbose) {
-    message("\nPat files by group:")
-    for(group in names(result)) {
-      message(sprintf("\n%s (%d files):", group, length(result[[group]])))
-      message(paste("  ", result[[group]], collapse="\n"))
-    }
-  }
-  
-  return(result)
-}
-
-load_pat_data <- function(pat_files, min_cpgs=4, threads=8, verbose=FALSE) {
-    if(verbose) {
-        message("Loading pat files...")
-    }
-    
-    # Process groups sequentially
-    all_groups_data <- list()
-    
-    for(group in names(pat_files)) {
-        if(verbose) {
-            message(sprintf("\nStarting group %s", group))
-            message(sprintf("Group has %d files", length(pat_files[[group]])))
-        }
-        
-        # Process files in parallel
-        plan(multisession, workers = threads)
-        
-        tryCatch({
-            file_results <- future_map(seq_along(pat_files[[group]]), function(i) {
-                file <- pat_files[[group]][i]
-                
-                if(verbose) message(sprintf("Processing file %d/%d: %s", 
-                                          i, length(pat_files[[group]]), basename(file)))
-                
-                # Create a command that filters while reading
-                cmd <- sprintf("zcat %s | awk -F'\\t' '
-                    function count_ct(str) {
-                        gsub(/[^CT]/, \"\", str)
-                        return length(str)
-                    }
-                    {
-                        ct = count_ct($3)
-                        if(ct >= %d) 
-                            print $1\"\\t\"$2\"\\t\"$3\"\\t\"$4
-                    }'", file, min_cpgs)
-                
-                reads <- fread(cmd=cmd, 
-                             col.names=c("chr", "start_idx", "pattern", "count"))
-                
-                if(verbose) message(sprintf("File %d: Loaded %d qualifying reads", 
-                                          i, nrow(reads)))
-                
-                return(reads)
-            }, .progress = verbose)
-            
-            # Combine files for this group
-            if(verbose) message(sprintf("Combining %d files for group %s...", 
-                                      length(file_results), group))
-            
-            group_data <- rbindlist(file_results)
-            group_data[, group := group]
-            
-            if(verbose) message(sprintf("Group %s complete: %d total rows", 
-                                      group, nrow(group_data)))
-            
-            all_groups_data[[group]] <- group_data
-            
-        }, error = function(e) {
-            warning(sprintf("Error processing group %s: %s", group, e$message))
-            return(NULL)
-        })
-    }
-    
-    if(verbose) message("\nCombining all groups...")
-    
-    valid_groups <- Filter(Negate(is.null), all_groups_data)
-    
-    if(verbose) {
-        message(sprintf("Successfully processed %d/%d groups", 
-                       length(valid_groups), length(pat_files)))
-    }
-    
-    if(length(valid_groups) == 0) {
-        stop("No valid data loaded from any group")
-    }
-    
-    pat_data <- rbindlist(valid_groups)
-    setkey(pat_data, chr, start_idx)
-    
-    if(verbose) {
-        message(sprintf("Final dataset: %d rows across %d groups", 
-                       nrow(pat_data), uniqueN(pat_data$group)))
-    }
-    
-    return(pat_data)
 }
 
 verify_region_coverage <- function(region, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
