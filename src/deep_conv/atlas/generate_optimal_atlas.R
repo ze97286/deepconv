@@ -299,7 +299,7 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
                           min_delta_means, nrow(candidates)))
         }
         
-        if(nrow(candidates) == 0) continue
+        if(nrow(candidates) == 0) next
         
         # Sort candidates by delta_means and ttest
         setorder(candidates, -delta_means, ttest)
