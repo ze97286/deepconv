@@ -57,12 +57,17 @@ verify_region_coverage <- function(regions, coverage_index, min_coverage=3, min_
         # Create start positions table
         positions_dt <- data.table(
             region_id = rep(chr_idx, 
-                          times = pmax(0, chr_regions$endCpG - chr_regions$startCpG - min_cpgs + 2)),
+                          times = pmax(0, chr_regions$endCpG - chr_regions$startCpG - min_cpgs + 1)),
             start_idx = unlist(mapply(function(start, end) {
-                seq(start, end - min_cpgs + 1)
+                seq(start, end - min_cpgs)
             }, chr_regions$startCpG, chr_regions$endCpG, 
             SIMPLIFY = FALSE))
         )
+        
+        if(verbose && nrow(positions_dt) == 0) {
+            message(sprintf("  No valid positions for %s", current_chr))
+            next
+        }
         
         # Get coverage for these positions
         chr_coverage <- coverage_index[chr == current_chr & 
@@ -104,6 +109,25 @@ verify_region_coverage <- function(regions, coverage_index, min_coverage=3, min_
     if(verbose) {
         message(sprintf("Found %d regions with sufficient coverage (≥%d reads with ≥%d CpGs)", 
                        sum(results), min_coverage, min_cpgs))
+    }
+    
+    # Add debug info if verbose
+    if(verbose) {
+        # Randomly sample a few passing regions to verify ranges
+        passing_regions <- which(results)
+        if(length(passing_regions) > 0) {
+            sample_size <- min(5, length(passing_regions))
+            sample_idx <- sample(passing_regions, sample_size)
+            message("\nSample of passing regions for verification:")
+            for(idx in sample_idx) {
+                region <- regions[idx]
+                message(sprintf("Region %s:%d-%d [startCpG=%d, endCpG=%d]", 
+                              region$chr, region$start, region$end, 
+                              region$startCpG, region$endCpG))
+                message(sprintf("Valid coverage range: %d-%d", 
+                              region$startCpG, region$endCpG - min_cpgs))
+            }
+        }
     }
     
     return(results)
