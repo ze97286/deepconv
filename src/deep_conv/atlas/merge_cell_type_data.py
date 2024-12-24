@@ -110,5 +110,3 @@ if __name__ == "__main__":
     final_df = pd.read_csv(args.output_dir+"/cell_type_pat_index_l4.csv.gz", sep="\t")
     print(final_df.head())
     print(final_df.info())
-    nan_rows = final_df[final_df.isna().sum(axis=1)]
-    print("nan rows",nan_rows.head())
