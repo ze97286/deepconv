@@ -257,8 +257,8 @@ write_marker_file <- function(regions, outfile) {
 select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_cpgs=4, 
                                  top_n=100, 
                                  max_correlation=0.3,      # Maximum allowed correlation between markers
-                                 min_delta_means=0.5,      # Minimum required delta_means
-                                 delta_weight=0.7,         # Weight for delta_means in scoring (correlation weight will be 1-delta_weight)
+                                 min_delta_means=0.1,      # Lowered default minimum delta_means
+                                 delta_weight=0.7,         # Weight for delta_means in scoring
                                  correlation_penalty=2,     # Exponential penalty for high correlations
                                  verbose=FALSE) {
     if(verbose) {
@@ -291,7 +291,17 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
                             ][order(delta_means, -ttest, decreasing = TRUE)]
         
         if(nrow(candidates) == 0) {
-            if(verbose) message("No candidates found meeting criteria")
+            if(verbose) {
+                message(sprintf("No candidates found meeting criteria (min_delta_means >= %.2f)", 
+                              min_delta_means))
+                # Add diagnostic info
+                all_candidates <- regions[target == target_group & has_coverage == TRUE]
+                if(nrow(all_candidates) > 0) {
+                    message(sprintf("Range of delta_means for this target: %.3f to %.3f", 
+                                  min(all_candidates$delta_means), 
+                                  max(all_candidates$delta_means)))
+                }
+            }
             next
         }
         
@@ -371,17 +381,21 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
     # Combine all selected markers
     result <- rbindlist(selected_markers)
     
-    if(verbose) {
+    if(verbose && nrow(result) > 0) {  # Only calculate correlations if we have markers
         message("\nFinal marker counts by target:")
         print(result[, .N, by=target])
         
         # Calculate and report final correlation matrix
         message("\nCalculating final correlation matrix...")
         patterns <- result[, get_methylation_pattern(.SD, coverage_index), by=1:nrow(result)]
-        cor_matrix <- cor(t(as.matrix(patterns[, -1])))
-        message("\nSummary of absolute correlations between selected markers:")
-        cor_summary <- abs(cor_matrix[upper.tri(cor_matrix)])
-        print(summary(cor_summary))
+        if(nrow(patterns) > 1) {  # Need at least 2 patterns for correlation
+            cor_matrix <- cor(t(as.matrix(patterns[, -1])))
+            message("\nSummary of absolute correlations between selected markers:")
+            cor_summary <- abs(cor_matrix[upper.tri(cor_matrix)])
+            print(summary(cor_summary))
+        }
+    } else if(verbose) {
+        message("\nNo markers were selected for any target")
     }
     
     return(result)
@@ -428,9 +442,9 @@ main <- function() {
                 help="Number of threads [default %default]"),
     make_option(c("-v", "--verbose"), action="store_true", default=FALSE,
                 help="Print progress information"),
-    make_option(c("--max-correlation"), type="double", default=0.25,
+    make_option(c("--max-correlation"), type="double", default=0.3,
                 help="Maximum allowed correlation between markers [default %default]"),
-    make_option(c("--min-delta-means"), type="double", default=0.5,
+    make_option(c("--min-delta-means"), type="double", default=0.1,
                 help="Minimum required delta_means [default %default]"),
     make_option(c("--delta-weight"), type="double", default=0.7,
                 help="Weight for delta_means in scoring (correlation = 1-weight) [default %default]"),
