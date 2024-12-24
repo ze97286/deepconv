@@ -1,15 +1,15 @@
 #!/usr/bin/env Rscript
 
 
-# R_LIBS_USER=~/R/library Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/generate_optimal_atlas.R \
-#   --cpg_file /users/zetzioni/sharedscratch/wgbs_tools/references/hg38/CpG.bed.gz \
-#   --map_file /users/zetzioni/sharedscratch/atlas/per-read-bed2class.csv \
-#   --base_dir /users/zetzioni/sharedscratch/atlas/ \
-#   --out_file /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.100.l4.bed \
-#   --index_file /users/zetzioni/sharedscratch/atlas/pats/cell_type_pat_index_l4.csv.gz \
-#   --top_n 100 \
-#   --threads 32 \
-#   --verbose
+R_LIBS_USER=~/R/library Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/generate_optimal_atlas.R \ # nolint
+  --cpg_file /users/zetzioni/sharedscratch/wgbs_tools/references/hg38/CpG.bed.gz \
+  --map_file /users/zetzioni/sharedscratch/atlas/per-read-bed2class.csv \
+  --base_dir /users/zetzioni/sharedscratch/atlas/ \
+  --out_file /users/zetzioni/sharedscratch/atlas/optimal_dmr_by_read.blood+gi+tum.100.l4.bed \
+  --index_file /users/zetzioni/sharedscratch/atlas/pats/cell_type_pat_index_l4.csv.gz \
+  --top_n 100 \
+  --threads 32 \
+  --verbose
 
 
 # Required libraries
