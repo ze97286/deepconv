@@ -42,51 +42,71 @@ verify_region_coverage <- function(regions, coverage_index, min_coverage=3, min_
         message("Starting batch coverage verification...")
     }
     
-    # Create a mapping of all possible CpG positions needed for each region
-    expanded_positions <- regions[, {
-        # For each region, create sequence from startCpG to endCpG - min_cpgs + 1
-        positions <- startCpG:(endCpG - min_cpgs + 1)
-        .(
-            start_idx = positions,
-            region_id = .I  # Keep track of which region this belongs to
+    # Process each chromosome separately to manage memory
+    results <- vector("logical", nrow(regions))
+    
+    for(current_chr in unique(regions$chr)) {
+        if(verbose) {
+            message(sprintf("Processing chromosome %s...", current_chr))
+        }
+        
+        # Get regions for current chromosome
+        chr_idx <- which(regions$chr == current_chr)
+        chr_regions <- regions[chr_idx]
+        
+        # Create start positions table
+        positions_dt <- data.table(
+            region_id = rep(chr_idx, 
+                          times = pmax(0, chr_regions$endCpG - chr_regions$startCpG - min_cpgs + 2)),
+            start_idx = unlist(mapply(function(start, end) {
+                seq(start, end - min_cpgs + 1)
+            }, chr_regions$startCpG, chr_regions$endCpG, 
+            SIMPLIFY = FALSE))
         )
-    }, by=.(chr)]
-    
-    # Join with coverage data
-    region_coverage <- coverage_index[expanded_positions, on=.(chr, start_idx)]
-    
-    if(verbose) {
-        message(sprintf("Processing coverage for %d regions...", nrow(regions)))
+        
+        # Get coverage for these positions
+        chr_coverage <- coverage_index[chr == current_chr & 
+                                     start_idx %in% unique(positions_dt$start_idx)]
+        
+        if(nrow(chr_coverage) > 0) {
+            # Join positions with coverage
+            region_coverage <- positions_dt[chr_coverage, 
+                                         on = .(start_idx), 
+                                         allow.cartesian=TRUE]
+            
+            # Calculate coverage per region and group
+            coverage_summary <- region_coverage[
+                !is.na(read_count), 
+                .(total_reads = sum(read_count)),
+                by = .(region_id, group)
+            ]
+            
+            # Reshape to wide format
+            coverage_matrix <- dcast(coverage_summary, 
+                                   region_id ~ group, 
+                                   value.var = "total_reads",
+                                   fill = 0)
+            
+            # Check coverage requirements
+            results[coverage_matrix$region_id] <- 
+                apply(coverage_matrix[, -1, with=FALSE], 1, 
+                     function(x) all(x >= min_coverage))
+        }
+        
+        if(verbose) {
+            n_processed <- length(chr_idx)
+            n_passing <- sum(results[chr_idx])
+            message(sprintf("  %s: %d/%d regions pass coverage criteria", 
+                          current_chr, n_passing, n_processed))
+        }
     }
     
-    # Calculate coverage per region and group
-    coverage_summary <- region_coverage[
-        !is.na(read_count),  # Only keep matches
-        .(total_reads = sum(read_count)),
-        by=.(region_id, group)
-    ]
-    
-    # Reshape to wide format to check coverage for all groups at once
-    coverage_matrix <- dcast(coverage_summary, region_id ~ group, 
-                           value.var="total_reads", fill=0)
-    
-    # Mark regions that meet minimum coverage for all groups
-    has_coverage <- apply(coverage_matrix[, -1, with=FALSE], 1, 
-                         function(x) all(x >= min_coverage))
-    
-    # Create result with region IDs
-    result <- data.table(
-        region_id = coverage_matrix$region_id,
-        has_coverage = has_coverage
-    )
-    
     if(verbose) {
-        n_passing <- sum(has_coverage)
         message(sprintf("Found %d regions with sufficient coverage (≥%d reads with ≥%d CpGs)", 
-                       n_passing, min_coverage, min_cpgs))
+                       sum(results), min_coverage, min_cpgs))
     }
     
-    return(result$has_coverage[match(1:nrow(regions), result$region_id)])
+    return(results)
 }
 
 # Region processing functions
