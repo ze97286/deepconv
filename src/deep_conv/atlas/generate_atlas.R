@@ -37,54 +37,57 @@ load_cpg_info <- function(cpg_file) {
   return(cpg_info)
 }
 
-verify_region_coverage <- function(dt, groups, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
-    # groups will be a list containing chr, startCpG, and endCpG
-    chr <- groups$chr
-    startCpG <- groups$startCpG
-    endCpG <- groups$endCpG
+verify_region_coverage <- function(regions, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
+    if(verbose) {
+        message("Starting batch coverage verification...")
+    }
+    
+    # Create a mapping of all possible CpG positions needed for each region
+    expanded_positions <- regions[, {
+        # For each region, create sequence from startCpG to endCpG - min_cpgs + 1
+        positions <- startCpG:(endCpG - min_cpgs + 1)
+        .(
+            start_idx = positions,
+            region_id = .I  # Keep track of which region this belongs to
+        )
+    }, by=.(chr)]
+    
+    # Join with coverage data
+    region_coverage <- coverage_index[expanded_positions, on=.(chr, start_idx)]
     
     if(verbose) {
-        cat(sprintf("\nChecking coverage for region %s:%d-%d\n", chr, startCpG, endCpG))
+        message(sprintf("Processing coverage for %d regions...", nrow(regions)))
     }
     
-    # Look at positions that could contribute min_cpgs CpGs to this region
-    valid_start_range <- startCpG:(endCpG - min_cpgs + 1)
+    # Calculate coverage per region and group
+    coverage_summary <- region_coverage[
+        !is.na(read_count),  # Only keep matches
+        .(total_reads = sum(read_count)),
+        by=.(region_id, group)
+    ]
     
-    # Get coverage for valid starting positions
-    region_coverage <- coverage_index[chr == chr & start_idx %in% valid_start_range]
+    # Reshape to wide format to check coverage for all groups at once
+    coverage_matrix <- dcast(coverage_summary, region_id ~ group, 
+                           value.var="total_reads", fill=0)
     
-    if(nrow(region_coverage) == 0) {
-        if(verbose) cat("No coverage found for region\n")
-        return(FALSE)
-    }
+    # Mark regions that meet minimum coverage for all groups
+    has_coverage <- apply(coverage_matrix[, -1, with=FALSE], 1, 
+                         function(x) all(x >= min_coverage))
     
-    # Sum reads by group
-    group_coverage <- region_coverage[, .(total_reads = sum(read_count)), by=group]
-    
-    # Check if we have data for all groups and they all meet minimum coverage
-    all_groups <- unique(coverage_index$group)
-    missing_groups <- setdiff(all_groups, group_coverage$group)
-    
-    # Add missing groups with 0 reads
-    if(length(missing_groups) > 0) {
-        missing_dt <- data.table(group = missing_groups, total_reads = 0)
-        group_coverage <- rbind(group_coverage, missing_dt)
-    }
-    
-    has_coverage <- all(group_coverage$total_reads >= min_coverage)
+    # Create result with region IDs
+    result <- data.table(
+        region_id = coverage_matrix$region_id,
+        has_coverage = has_coverage
+    )
     
     if(verbose) {
-        if(length(missing_groups) > 0) {
-            cat("Groups with no coverage:", paste(missing_groups, collapse=", "), "\n")
-        }
-        cat("Coverage by group:\n")
-        print(group_coverage[order(-total_reads)])
-        cat(sprintf("Has sufficient coverage: %s\n", has_coverage))
+        n_passing <- sum(has_coverage)
+        message(sprintf("Found %d regions with sufficient coverage (≥%d reads with ≥%d CpGs)", 
+                       n_passing, min_coverage, min_cpgs))
     }
     
-    return(has_coverage)
+    return(result$has_coverage[match(1:nrow(regions), result$region_id)])
 }
-
 
 # Region processing functions
 collapse_to_regions <- function(dmrs, cpg_info, max_gap=1, max_dist=1e3, 
@@ -406,19 +409,15 @@ main <- function() {
   }
   
   candidate_regions[, has_coverage := verify_region_coverage(.SD, 
-                                                             .BY, 
                                                              coverage_index,
                                                              min_coverage=params$min_reads,
                                                              min_cpgs=params$min_cpgs,
-                                                             verbose=params$verbose), 
-                     by=.(chr, startCpG, endCpG)]
+                                                             verbose=params$verbose)]
     
     if (params$verbose) {
         end_time <- Sys.time()
-        message(sprintf("\nFound %d regions with sufficient coverage (≥%d reads with ≥%d CpGs) in %.1f seconds", 
+        message(sprintf("\nFound %d regions with sufficient coverage in %.1f seconds", 
                        sum(candidate_regions$has_coverage), 
-                       params$min_reads, 
-                       params$min_cpgs,
                        difftime(end_time, start_time, units="secs")))
         
         message("\nPassing regions per target:")
