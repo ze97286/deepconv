@@ -18,6 +18,8 @@ def merge_chromosome(cell_type, chr_num, input_dir, output_dir):
     output_path.mkdir(parents=True, exist_ok=True)
     # Collect all files for this cell type and chromosome
     files = list(input_path.glob(f"{cell_type}_*_chr{chr_num}_index.txt"))
+    print("merging cell type",cell_type,"from",files)
+
     if not files:
         print(f"No files found for {cell_type}, chr{chr_num}")
         return
