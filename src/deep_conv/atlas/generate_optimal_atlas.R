@@ -266,13 +266,14 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
                                  delta_weight=0.7,
                                  correlation_penalty=2,
                                  verbose=FALSE) {
+    # Print parameters at start
     if(verbose) {
-        message("\nMarker selection parameters:")
-        message(sprintf("  max_correlation: %.2f", max_correlation))
-        message(sprintf("  min_delta_means: %.2f", min_delta_means))
-        message(sprintf("  delta_weight: %.2f", delta_weight))
-        message(sprintf("  correlation_penalty: %.2f", correlation_penalty))
-        message(sprintf("  top_n: %d", top_n))
+        cat("\nMarker selection parameters:\n")
+        cat(sprintf("  max_correlation: %.2f\n", max_correlation))
+        cat(sprintf("  min_delta_means: %.2f\n", min_delta_means))
+        cat(sprintf("  delta_weight: %.2f\n", delta_weight))
+        cat(sprintf("  correlation_penalty: %.2f\n", correlation_penalty))
+        cat(sprintf("  top_n: %d\n", top_n))
     }
     
     selected_markers <- list()
@@ -295,18 +296,28 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         n_before <- nrow(candidates)
         pre_filter_range <- range(candidates$delta_means)
         
-        # Debug delta_means values
+        # Debug delta_means filtering
         if(verbose) {
-            message("\nSample of delta_means values before filter:")
+            cat("\nSample of delta_means values before filter:\n")
             print(head(candidates$delta_means))
-            message(sprintf("Class of delta_means: %s", class(candidates$delta_means)))
-            message(sprintf("Is numeric: %s", is.numeric(candidates$delta_means)))
-            message(sprintf("Any NA: %s", any(is.na(candidates$delta_means))))
+            cat(sprintf("Class of delta_means: %s\n", class(candidates$delta_means)))
+            cat(sprintf("Is numeric: %s\n", is.numeric(candidates$delta_means)))
+            cat(sprintf("Any NA: %s\n", any(is.na(candidates$delta_means))))
+            cat(sprintf("min_delta_means value: %s (class: %s)\n", 
+                       min_delta_means, class(min_delta_means)))
+            
+            # Test filter on first few values
+            test_vals <- head(candidates$delta_means)
+            cat("\nTesting filter on first few values:\n")
+            for(val in test_vals) {
+                cat(sprintf("%.3f >= %.3f : %s\n", 
+                          val, min_delta_means, val >= min_delta_means))
+            }
         }
         
         filter_result <- candidates$delta_means >= min_delta_means
         if(verbose) {
-            message(sprintf("Number passing filter: %d", sum(filter_result, na.rm=TRUE)))
+            cat(sprintf("\nNumber passing filter: %d\n", sum(filter_result, na.rm=TRUE)))
         }
         
         candidates <- candidates[delta_means >= min_delta_means]
