@@ -291,20 +291,26 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
                        min(candidates$delta_means), max(candidates$delta_means)))
         }
         
-        # Filter by minimum delta_means
-        n_before <- nrow(candidates)
-        candidates <- candidates[delta_means >= min_delta_means]
-        n_after <- nrow(candidates)
-        
+        # Filter by minimum delta_means and sort by delta_means and ttest
+        candidates <- candidates[delta_means >= min_delta_means
+                               ][order(-delta_means, ttest)]
+
         if(verbose) {
             cat(sprintf("After delta_means filter (>= %.2f): %d candidates\n", 
-                       min_delta_means, n_after))
+                       min_delta_means, nrow(candidates)))
+        }
+        
+        # Take top 1000 candidates to start with
+        initial_pool_size <- 1000
+        if(nrow(candidates) > initial_pool_size) {
+            if(verbose) {
+                cat(sprintf("Taking top %d candidates by delta_means for efficiency\n", 
+                           initial_pool_size))
+            }
+            candidates <- head(candidates, initial_pool_size)
         }
         
         if(nrow(candidates) == 0) next
-        
-        # Sort candidates by delta_means and ttest
-        setorder(candidates, -delta_means, ttest)
         
         # Initialize with best candidate
         selected <- candidates[1]
