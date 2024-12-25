@@ -302,12 +302,19 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         
         # Try progressively relaxed thresholds
         selected <- NULL
-        target_achieved <- FALSE
         
         for(t in thresholds) {
+            if(!is.null(selected) && nrow(selected) >= top_n) break
+            
             if(verbose) {
-                cat(sprintf("\nTrying thresholds: delta_means >= %.2f, correlation <= %.2f\n", 
-                           t$delta, t$corr))
+                if(is.null(selected)) {
+                    cat(sprintf("\nTrying thresholds: delta_means >= %.2f, correlation <= %.2f\n", 
+                               t$delta, t$corr))
+                } else {
+                    cat(sprintf("\nContinuing with relaxed thresholds: delta_means >= %.2f, correlation <= %.2f\n", 
+                               t$delta, t$corr))
+                    cat(sprintf("Currently have %d markers\n", nrow(selected)))
+                }
             }
             
             # Filter and sort candidates
@@ -329,13 +336,37 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
                 candidates <- head(candidates, initial_pool_size)
             }
             
-            # Initialize with best candidate
-            selected <- candidates[1]
-            candidates <- candidates[-1]
-            
-            if(verbose) {
-                cat(sprintf("Selected first marker: delta_means=%.3f, ttest=%.3f\n", 
-                           selected$delta_means[1], selected$ttest[1]))
+            # Initialize selection if needed
+            if(is.null(selected)) {
+                selected <- candidates[1]
+                candidates <- candidates[-1]
+                
+                if(verbose) {
+                    cat(sprintf("Selected first marker: delta_means=%.3f, ttest=%.3f\n", 
+                               selected$delta_means[1], selected$ttest[1]))
+                }
+            } else {
+                # Remove any candidates too similar to already selected markers
+                to_remove <- integer(0)
+                for(i in 1:nrow(candidates)) {
+                    candidate_pattern <- get_methylation_pattern(candidates[i], coverage_index)
+                    for(j in 1:nrow(selected)) {
+                        selected_pattern <- get_methylation_pattern(selected[j], coverage_index)
+                        corr <- cor(candidate_pattern, selected_pattern)
+                        if(abs(corr) > t$corr) {
+                            to_remove <- c(to_remove, i)
+                            break
+                        }
+                    }
+                }
+                if(length(to_remove) > 0) {
+                    candidates <- candidates[-to_remove]
+                }
+                if(verbose) {
+                    cat(sprintf("Removed %d candidates too similar to existing markers\n", 
+                               length(to_remove)))
+                }
+                if(nrow(candidates) == 0) next
             }
             
             # Process remaining candidates in batches
