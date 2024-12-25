@@ -262,82 +262,43 @@ write_marker_file <- function(regions, outfile) {
 select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_cpgs=4, 
                                  top_n=100, 
                                  max_correlation=0.3,
-                                 min_delta_means=0.01,  # Lowered this significantly
+                                 min_delta_means=0.01,
                                  delta_weight=0.7,
                                  correlation_penalty=2,
                                  verbose=FALSE) {
-    params <- list(
-        max_correlation = max_correlation,
-        min_delta_means = min_delta_means,
-        delta_weight = delta_weight,
-        correlation_penalty = correlation_penalty,
-        top_n = top_n
-    )
-    
     if(verbose) {
-        print("Marker selection parameters:")
-        for(name in names(params)) {
-            print(sprintf("  %s: %s", name, params[[name]]))
-        }
-        print("")  # empty line
+        cat("\nMarker selection parameters:\n")
+        cat(sprintf("  max_correlation: %.2f\n", max_correlation))
+        cat(sprintf("  min_delta_means: %.2f\n", min_delta_means))
+        cat(sprintf("  delta_weight: %.2f\n", delta_weight))
+        cat(sprintf("  correlation_penalty: %.2f\n", correlation_penalty))
+        cat(sprintf("  top_n: %d\n", top_n))
     }
     
     selected_markers <- list()
     
     for(target_group in unique(regions$target)) {
         if(verbose) {
-            message(sprintf("\n=== Processing target: %s ===", target_group))
+            cat(sprintf("\n=== Processing target: %s ===\n", target_group))
         }
         
         # Get candidates for this target with coverage
         candidates <- regions[target == target_group & has_coverage == TRUE]
         
         if(verbose) {
-            message(sprintf("Initial candidates with coverage: %d", nrow(candidates)))
-            message(sprintf("Delta means range: %.3f to %.3f", 
-                          min(candidates$delta_means), max(candidates$delta_means)))
+            cat(sprintf("Initial candidates with coverage: %d\n", nrow(candidates)))
+            cat(sprintf("Delta means range: %.3f to %.3f\n", 
+                       min(candidates$delta_means), max(candidates$delta_means)))
         }
         
         # Filter by minimum delta_means
         n_before <- nrow(candidates)
-        pre_filter_range <- range(candidates$delta_means)
-        
-        # Debug delta_means filtering
-        if(verbose) {
-            print("\nSample of delta_means values before filter:")
-            print(head(candidates$delta_means))
-            print(sprintf("Class of delta_means: %s", class(candidates$delta_means)))
-            print(sprintf("Is numeric: %s", is.numeric(candidates$delta_means)))
-            print(sprintf("Any NA: %s", any(is.na(candidates$delta_means))))
-            
-            # Test filter on first few values explicitly
-            print("\nTesting filter on first few values:")
-            test_vals <- head(candidates$delta_means)
-            test_results <- test_vals >= min_delta_means
-            print(data.frame(
-                value = test_vals,
-                threshold = min_delta_means,
-                passes = test_results
-            ))
-        }
-        
-        # Try filtering another way
-        keep_idx <- which(candidates$delta_means >= min_delta_means)
-        candidates <- candidates[keep_idx]
-        
-        n_after <- nrow(candidates)
+        candidates <- candidates[delta_means >= min_delta_means]
         n_after <- nrow(candidates)
         
         if(verbose) {
-            message(sprintf("\nDelta means filter (>= %.2f):", min_delta_means))
-            message(sprintf("  Before: %d candidates (range: %.3f to %.3f)", 
-                          n_before, pre_filter_range[1], pre_filter_range[2]))
-            message(sprintf("  After:  %d candidates", n_after))
-            if(n_after > 0) {
-                post_filter_range <- range(candidates$delta_means)
-                message(sprintf("  Remaining range: %.3f to %.3f", 
-                              post_filter_range[1], post_filter_range[2]))
-            }
+            cat(sprintf("After delta_means filter (>= %.2f): %d candidates\n", 
+                       min_delta_means, n_after))
         }
         
         if(nrow(candidates) == 0) next
@@ -345,29 +306,19 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         # Sort candidates by delta_means and ttest
         setorder(candidates, -delta_means, ttest)
         
-        if(verbose) {
-            message("\nTop 5 candidates by delta_means:")
-            print(candidates[1:min(5,nrow(candidates)), .(chr, start, end, delta_means, ttest)])
-        }
-        
         # Initialize with best candidate
         selected <- candidates[1]
         candidates <- candidates[-1]
         
         if(verbose) {
-            message(sprintf("\nSelected first marker: delta_means=%.3f, ttest=%.3f", 
-                          selected$delta_means[1], selected$ttest[1]))
-            message(sprintf("Remaining candidates: %d", nrow(candidates)))
-            
-            # Get pattern for first selected marker
-            first_pattern <- get_methylation_pattern(selected[1], coverage_index)
-            message("\nFirst marker methylation pattern:")
-            print(first_pattern)
+            cat(sprintf("\nSelected first marker: delta_means=%.3f, ttest=%.3f\n", 
+                       selected$delta_means[1], selected$ttest[1]))
+            cat(sprintf("Remaining candidates: %d\n", nrow(candidates)))
         }
         
         while(nrow(selected) < top_n && nrow(candidates) > 0) {
             if(verbose && nrow(selected) %% 10 == 0) {
-                message(sprintf("\nSelection round %d/%d", nrow(selected) + 1, top_n))
+                cat(sprintf("\nSelection round %d/%d\n", nrow(selected) + 1, top_n))
             }
             
             # Calculate correlations for each candidate with selected markers
@@ -385,7 +336,7 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
                 correlations[i] <- max_corr
                 
                 if(verbose && i %% 1000 == 0) {
-                    message(sprintf("Processed %d/%d candidates", i, nrow(candidates)))
+                    cat(sprintf("Processed %d/%d candidates\n", i, nrow(candidates)))
                 }
             }
             
@@ -393,8 +344,8 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
             valid_idx <- which(correlations <= max_correlation)
             
             if(verbose && nrow(selected) %% 10 == 0) {
-                message(sprintf("Candidates passing correlation filter (<= %.2f): %d", 
-                              max_correlation, length(valid_idx)))
+                cat(sprintf("Candidates passing correlation filter (<= %.2f): %d\n", 
+                          max_correlation, length(valid_idx)))
             }
             
             if(length(valid_idx) == 0) break
@@ -402,10 +353,21 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
             # Score remaining candidates
             scores <- numeric(nrow(candidates))
             scores[] <- -Inf
+            
+            # Calculate scores for valid candidates
             scores[valid_idx] <- delta_weight * scale_to_01(candidates$delta_means[valid_idx]) - 
                                (1 - delta_weight) * (scale_to_01(correlations[valid_idx])^correlation_penalty)
             
+            # Select best candidate
             best_idx <- which.max(scores)
+            
+            if(verbose && nrow(selected) %% 10 == 0) {
+                cat(sprintf("Selected marker: delta_means=%.3f, max_corr=%.3f, score=%.3f\n", 
+                          candidates$delta_means[best_idx],
+                          correlations[best_idx],
+                          scores[best_idx]))
+            }
+            
             selected <- rbind(selected, candidates[best_idx])
             candidates <- candidates[-best_idx]
         }
@@ -413,8 +375,8 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         selected_markers[[target_group]] <- selected
         
         if(verbose) {
-            message(sprintf("\nFinished %s: selected %d markers", 
-                          target_group, nrow(selected)))
+            cat(sprintf("\nFinished %s: selected %d markers\n", 
+                       target_group, nrow(selected)))
         }
     }
     
@@ -423,25 +385,24 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
     
     if(verbose) {
         if(nrow(result) > 0) {
-            message("\nFinal marker counts by target:")
+            cat("\nFinal marker counts by target:\n")
             print(result[, .N, by=target])
             
-            message("\nCorrelation statistics for selected markers:")
+            cat("\nCorrelation statistics for selected markers:\n")
             patterns <- result[, get_methylation_pattern(.SD, coverage_index), by=1:nrow(result)]
             if(nrow(patterns) > 1) {
                 cor_matrix <- cor(t(as.matrix(patterns[, -1])))
-                message("Absolute correlation summary:")
+                cat("Absolute correlation summary:\n")
                 print(summary(abs(cor_matrix[upper.tri(cor_matrix)])))
             }
         } else {
-            message("\nNo markers were selected for any target")
+            cat("\nNo markers were selected for any target\n")
         }
     }
     
     return(result)
 }
 
-# Helper function for scaling to 0-1 range
 scale_to_01 <- function(x) {
     if(length(x) <= 1) return(rep(1, length(x)))
     rng <- range(x, na.rm=TRUE)
@@ -449,7 +410,6 @@ scale_to_01 <- function(x) {
     return((x - rng[1]) / diff(rng))
 }
 
-# Helper function for getting methylation pattern
 get_methylation_pattern <- function(region, coverage_index) {
     # Get coverage for the region
     region_coverage <- coverage_index[chr == region$chr & 
@@ -471,39 +431,39 @@ get_methylation_pattern <- function(region, coverage_index) {
 
 main <- function() {
   option_list <- list(
-    make_option(c("-c", "--cpg_file"), type="character",
-                help="List of all cpG positions with pos and unique index [REQUIRED]",
-                metavar="cpg_map.txt"),
-    make_option(c("-m", "--map_file"), type="character",
-                help="Map of per-read .bed files and their associated group [REQUIRED]",
-                metavar="bed2group.txt"),
-    make_option(c("-d", "--base_dir"), type="character", default=".",
-                help="Base directory containing input files and for output [default %default]",
-                metavar="path"),
-    make_option(c("-i", "--index_file"), type="character",
-                help="Coverage index file [REQUIRED]",
-                metavar="coverage_index.csv"),
-    make_option(c("-o", "--out_file"), type="character",
-                help="Output file path for markers [REQUIRED]",
-                metavar="markers.bed"),
-    make_option(c("-n", "--top_n"), type="integer", default=100,
-                help="Number of top markers to keep per target [default %default]"),
-    make_option(c("-r", "--min_reads"), type="integer", default=3,
-                help="Minimum number of qualifying reads per group [default %default]"),
-    make_option(c("-g", "--min_cpgs"), type="integer", default=4,
-                help="Minimum CpGs per read [default %default]"),
-    make_option(c("-t", "--threads"), type="integer", default=8,
-                help="Number of threads [default %default]"),
-    make_option(c("-v", "--verbose"), action="store_true", default=FALSE,
-                help="Print progress information"),
-    make_option(c("--max-correlation"), type="double", default=0.3,
-                help="Maximum allowed correlation between markers [default %default]"),
-    make_option(c("--min-delta-means"), type="double", default=0.01,
-                help="Minimum required delta_means [default %default]"),
-    make_option(c("--delta-weight"), type="double", default=0.7,
-                help="Weight for delta_means in scoring (correlation = 1-weight) [default %default]"),
-    make_option(c("--correlation-penalty"), type="double", default=2,
-                help="Exponential penalty for correlations [default %default]")
+      make_option(c("-c", "--cpg_file"), type="character",
+              help="List of all cpG positions with pos and unique index [REQUIRED]",
+              metavar="cpg_map.txt"),
+      make_option(c("-m", "--map_file"), type="character",
+              help="Map of per-read .bed files and their associated group [REQUIRED]",
+              metavar="bed2group.txt"),
+      make_option(c("-d", "--base_dir"), type="character", default=".",
+              help="Base directory containing input files and for output [default %default]",
+              metavar="path"),
+      make_option(c("-i", "--index_file"), type="character",
+              help="Coverage index file [REQUIRED]",
+              metavar="coverage_index.csv"),
+      make_option(c("-o", "--out_file"), type="character",
+              help="Output file path for markers [REQUIRED]",
+              metavar="markers.bed"),
+      make_option(c("-n", "--top_n"), type="integer", default=100,
+              help="Number of top markers to keep per target [default %default]"),
+      make_option(c("-r", "--min_reads"), type="integer", default=3,
+              help="Minimum number of qualifying reads per group [default %default]"),
+      make_option(c("-g", "--min_cpgs"), type="integer", default=4,
+              help="Minimum CpGs per read [default %default]"),
+      make_option(c("-t", "--threads"), type="integer", default=8,
+              help="Number of threads [default %default]"),
+      make_option("--max_correlation", type="double", default=0.3,
+              help="Maximum allowed correlation between markers [default %default]"),
+      make_option("--min_delta_means", type="double", default=0.1,
+              help="Minimum required delta_means [default %default]"),
+      make_option("--delta_weight", type="double", default=0.7,
+              help="Weight for delta_means in scoring (correlation = 1-weight) [default %default]"),
+      make_option("--correlation_penalty", type="double", default=2,
+              help="Exponential penalty for correlations [default %default]"),
+      make_option(c("-v", "--verbose"), action="store_true", default=FALSE,
+              help="Print progress information")
   )
   
   parser <- OptionParser(option_list=option_list)
