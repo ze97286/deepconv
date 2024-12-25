@@ -294,6 +294,21 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         # Filter by minimum delta_means
         n_before <- nrow(candidates)
         pre_filter_range <- range(candidates$delta_means)
+        
+        # Debug delta_means values
+        if(verbose) {
+            message("\nSample of delta_means values before filter:")
+            print(head(candidates$delta_means))
+            message(sprintf("Class of delta_means: %s", class(candidates$delta_means)))
+            message(sprintf("Is numeric: %s", is.numeric(candidates$delta_means)))
+            message(sprintf("Any NA: %s", any(is.na(candidates$delta_means))))
+        }
+        
+        filter_result <- candidates$delta_means >= min_delta_means
+        if(verbose) {
+            message(sprintf("Number passing filter: %d", sum(filter_result, na.rm=TRUE)))
+        }
+        
         candidates <- candidates[delta_means >= min_delta_means]
         n_after <- nrow(candidates)
         
@@ -467,7 +482,7 @@ main <- function() {
                 help="Print progress information"),
     make_option(c("--max-correlation"), type="double", default=0.3,
                 help="Maximum allowed correlation between markers [default %default]"),
-    make_option(c("--min-delta-means"), type="double", default=0.1,
+    make_option(c("--min-delta-means"), type="double", default=0.01,
                 help="Minimum required delta_means [default %default]"),
     make_option(c("--delta-weight"), type="double", default=0.7,
                 help="Weight for delta_means in scoring (correlation = 1-weight) [default %default]"),
