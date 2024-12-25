@@ -272,6 +272,7 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         message(sprintf("  min_delta_means: %.2f", min_delta_means))
         message(sprintf("  delta_weight: %.2f", delta_weight))
         message(sprintf("  correlation_penalty: %.2f", correlation_penalty))
+        message(sprintf("  top_n: %d", top_n))
     }
     
     # For each target cell type
@@ -304,111 +305,120 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         # Sort candidates by delta_means and ttest
         setorder(candidates, -delta_means, ttest)
         
+        if(verbose) {
+            message("\nTop 5 candidates by delta_means:")
+            print(candidates[1:min(5,nrow(candidates)), .(chr, start, end, delta_means, ttest)])
+        }
+        
         # Initialize with best candidate
         selected <- candidates[1]
         candidates <- candidates[-1]
         
         if(verbose) {
-            message(sprintf("Selected first marker: delta_means=%.3f, ttest=%.3f", 
+            message(sprintf("\nSelected first marker: delta_means=%.3f, ttest=%.3f", 
                           selected$delta_means[1], selected$ttest[1]))
             message(sprintf("Remaining candidates: %d", nrow(candidates)))
+            
+            # Get pattern for first selected marker
+            pattern <- get_methylation_pattern(selected[1], coverage_index)
+            message("\nFirst marker methylation pattern:")
+            print(pattern)
         }
         
-        # Debug helper function
-        debug_pattern <- function(pattern, label) {
-            if(verbose) {
-                message(sprintf("\nPattern for %s:", label))
-                print(head(pattern))
-                message(sprintf("Length: %d", length(pattern)))
-                message(sprintf("Range: %.2f to %.2f", min(pattern), max(pattern)))
-            }
-        }
-        
-        while(nrow(selected) < top_n && nrow(candidates) > 0) {
-            if(verbose) {
-                message(sprintf("\nSelection round %d/%d", nrow(selected) + 1, top_n))
-            }
-            
-            # Calculate correlations for each candidate with selected markers
-            correlations <- numeric(nrow(candidates))
-            
-            for(i in 1:nrow(candidates)) {
-                candidate_pattern <- get_methylation_pattern(candidates[i], coverage_index)
-                
-                if(verbose && i == 1) {
-                    debug_pattern(candidate_pattern, "first candidate")
+        tryCatch({
+            while(nrow(selected) < top_n && nrow(candidates) > 0) {
+                if(verbose) {
+                    message(sprintf("\nSelection round %d/%d", nrow(selected) + 1, top_n))
                 }
                 
-                max_corr <- -1
-                for(j in 1:nrow(selected)) {
-                    selected_pattern <- get_methylation_pattern(selected[j], coverage_index)
+                # Calculate correlations for each candidate with selected markers
+                correlations <- numeric(nrow(candidates))
+                
+                for(i in 1:nrow(candidates)) {
+                    candidate_pattern <- get_methylation_pattern(candidates[i], coverage_index)
+                    max_corr <- -1
                     
-                    if(verbose && i == 1 && j == 1) {
-                        debug_pattern(selected_pattern, "first selected")
+                    for(j in 1:nrow(selected)) {
+                        selected_pattern <- get_methylation_pattern(selected[j], coverage_index)
+                        tryCatch({
+                            corr <- cor(candidate_pattern, selected_pattern)
+                            max_corr <- max(max_corr, abs(corr))
+                        }, error = function(e) {
+                            if(verbose) {
+                                message("Error in correlation calculation:")
+                                print(e)
+                                message("Candidate pattern:")
+                                print(candidate_pattern)
+                                message("Selected pattern:")
+                                print(selected_pattern)
+                            }
+                            max_corr <- 1  # Conservative approach: assume max correlation on error
+                        })
                     }
+                    correlations[i] <- max_corr
                     
-                    corr <- try({
-                        cor(candidate_pattern, selected_pattern)
-                    })
-                    
-                    if(inherits(corr, "try-error")) {
-                        if(verbose) {
-                            message("Error calculating correlation:")
-                            print(corr)
-                            message("Patterns:")
-                            print(candidate_pattern)
-                            print(selected_pattern)
-                        }
-                        corr <- 1  # Assume maximum correlation on error
+                    if(verbose && i %% 100 == 0) {
+                        message(sprintf("Processed %d/%d candidates", i, nrow(candidates)))
                     }
-                    
-                    max_corr <- max(max_corr, abs(corr))
                 }
-                correlations[i] <- max_corr
-            }
-            
-            # Filter by correlation
-            valid_idx <- which(correlations <= max_correlation)
-            
-            if(verbose) {
-                message(sprintf("Candidates passing correlation filter (<= %.2f): %d", 
-                              max_correlation, length(valid_idx)))
-            }
-            
-            if(length(valid_idx) == 0) break
-            
-            # Score remaining candidates
-            scores <- numeric(nrow(candidates))
-            scores[] <- -Inf
-            
-            # Calculate scores for valid candidates
-            if(length(valid_idx) > 0) {
+                
+                # Filter by correlation
+                valid_idx <- which(correlations <= max_correlation)
+                
+                if(verbose) {
+                    message(sprintf("Candidates passing correlation filter (<= %.2f): %d", 
+                                  max_correlation, length(valid_idx)))
+                    if(length(valid_idx) > 0) {
+                        message("Correlation range for valid candidates: ", 
+                              sprintf("%.3f to %.3f", 
+                                     min(correlations[valid_idx]), 
+                                     max(correlations[valid_idx])))
+                    }
+                }
+                
+                if(length(valid_idx) == 0) {
+                    if(verbose) message("No candidates passed correlation filter, stopping")
+                    break
+                }
+                
+                # Score remaining candidates
+                scores <- numeric(nrow(candidates))
+                scores[] <- -Inf
+                
+                # Calculate scores for valid candidates
                 norm_delta <- scale_to_01(candidates$delta_means[valid_idx])
                 norm_corr <- scale_to_01(correlations[valid_idx])
                 
                 scores[valid_idx] <- delta_weight * norm_delta - 
                                    (1 - delta_weight) * (norm_corr^correlation_penalty)
+                
+                # Select best candidate
+                best_idx <- which.max(scores)
+                
+                if(verbose) {
+                    message(sprintf("Selected marker: delta_means=%.3f, max_corr=%.3f, score=%.3f", 
+                                  candidates$delta_means[best_idx],
+                                  correlations[best_idx],
+                                  scores[best_idx]))
+                }
+                
+                selected <- rbind(selected, candidates[best_idx])
+                candidates <- candidates[-best_idx]
             }
-            
-            # Select best candidate
-            best_idx <- which.max(scores)
+        }, error = function(e) {
+            if(verbose) {
+                message("\nError during marker selection:")
+                print(e)
+            }
+        })
+        
+        if(nrow(selected) > 0) {
+            selected_markers[[target_group]] <- selected
             
             if(verbose) {
-                message(sprintf("Selected marker: delta_means=%.3f, max_corr=%.3f, score=%.3f", 
-                              candidates$delta_means[best_idx],
-                              correlations[best_idx],
-                              scores[best_idx]))
+                message(sprintf("\nFinished %s: selected %d markers", 
+                              target_group, nrow(selected)))
             }
-            
-            selected <- rbind(selected, candidates[best_idx])
-            candidates <- candidates[-best_idx]
-        }
-        
-        selected_markers[[target_group]] <- selected
-        
-        if(verbose) {
-            message(sprintf("\nFinished %s: selected %d markers", 
-                          target_group, nrow(selected)))
         }
     }
     
@@ -429,8 +439,8 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
 
 # Helper function for scaling to 0-1 range
 scale_to_01 <- function(x) {
-    if(length(x) == 1) return(1)
-    rng <- range(x)
+    if(length(x) <= 1) return(rep(1, length(x)))
+    rng <- range(x, na.rm=TRUE)
     if(diff(rng) == 0) return(rep(1, length(x)))
     return((x - rng[1]) / diff(rng))
 }
@@ -441,6 +451,12 @@ get_methylation_pattern <- function(region, coverage_index) {
     region_coverage <- coverage_index[chr == region$chr & 
                                     start_idx >= region$startCpG & 
                                     start_idx <= region$endCpG]
+    
+    if(nrow(region_coverage) == 0) {
+        warning(sprintf("No coverage found for region %s:%d-%d", 
+                       region$chr, region$startCpG, region$endCpG))
+        return(numeric(0))
+    }
     
     # Create pattern vector (one value per group)
     pattern <- region_coverage[, .(total_reads = sum(read_count)), by=group]
