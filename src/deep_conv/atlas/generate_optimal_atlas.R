@@ -259,6 +259,33 @@ write_marker_file <- function(regions, outfile) {
         row.names=FALSE)
 }
 
+# Add safe correlation calculation
+safe_cor <- function(x, y) {
+    tryCatch({
+        cor(x, y)
+    }, error = function(e) {
+        NA_real_
+    })
+}
+
+get_methylation_pattern <- function(region, coverage_index) {
+    # Get coverage for the region
+    region_coverage <- coverage_index[chr == region$chr & 
+                                    start_idx >= region$startCpG & 
+                                    start_idx <= region$endCpG]
+    
+    if(nrow(region_coverage) == 0) {
+        warning("No coverage found for region")
+        return(NULL)
+    }
+    
+    # Create pattern vector (one value per group)
+    pattern <- region_coverage[, .(total_reads = sum(read_count)), by=group]
+    setkey(pattern, group)
+    
+    return(pattern$total_reads)
+}
+
 select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_cpgs=4, 
                                  top_n=100, 
                                  max_correlation=0.3,
@@ -304,28 +331,29 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         
         # Take top markers from each bin
         selected <- candidates[, {
-            # Order by delta_means and ttest within bin
             bin_candidates <- .SD[order(-delta_means, ttest)]
             selected_indices <- integer(0)
             n_selected <- 0
             
-            # Take up to markers_per_bin uncorrelated markers
             for(i in 1:min(markers_per_bin*2, nrow(bin_candidates))) {
                 if(n_selected >= markers_per_bin) break
                 
                 candidate <- bin_candidates[i]
                 is_valid <- TRUE
                 
-                # Check correlation with already selected markers in this bin
                 if(length(selected_indices) > 0) {
                     candidate_pattern <- get_methylation_pattern(candidate, coverage_index)
                     
-                    for(j in selected_indices) {
-                        selected_pattern <- get_methylation_pattern(bin_candidates[j], coverage_index)
-                        corr <- abs(cor(candidate_pattern, selected_pattern))
-                        if(corr > max_correlation) {
-                            is_valid <- FALSE
-                            break
+                    if(!is.null(candidate_pattern)) {
+                        for(j in selected_indices) {
+                            selected_pattern <- get_methylation_pattern(bin_candidates[j], coverage_index)
+                            if(!is.null(selected_pattern)) {
+                                corr <- safe_cor(candidate_pattern, selected_pattern)
+                                if(!is.na(corr) && abs(corr) > max_correlation) {
+                                    is_valid <- FALSE
+                                    break
+                                }
+                            }
                         }
                     }
                 }
@@ -369,14 +397,15 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
                     
                     current_pattern <- get_methylation_pattern(current, coverage_index)
                     next_pattern <- get_methylation_pattern(next_marker, coverage_index)
-                    corr <- abs(cor(current_pattern, next_pattern))
                     
-                    if(corr > max_correlation) {
-                        # Remove the one with lower delta_means
-                        if(current$delta_means >= next_marker$delta_means) {
-                            to_remove <- c(to_remove, i+1)
-                        } else {
-                            to_remove <- c(to_remove, i)
+                    if(!is.null(current_pattern) && !is.null(next_pattern)) {
+                        corr <- safe_cor(current_pattern, next_pattern)
+                        if(!is.na(corr) && corr > max_correlation) {
+                            if(current$delta_means >= next_marker$delta_means) {
+                                to_remove <- c(to_remove, i+1)
+                            } else {
+                                to_remove <- c(to_remove, i)
+                            }
                         }
                     }
                 }
@@ -423,33 +452,6 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
     }
     
     return(result)
-}
-
-# Helper function remains the same
-scale_to_01 <- function(x) {
-    if(length(x) <= 1) return(rep(1, length(x)))
-    rng <- range(x, na.rm=TRUE)
-    if(diff(rng) == 0) return(rep(1, length(x)))
-    return((x - rng[1]) / diff(rng))
-}
-
-get_methylation_pattern <- function(region, coverage_index) {
-    # Get coverage for the region
-    region_coverage <- coverage_index[chr == region$chr & 
-                                    start_idx >= region$startCpG & 
-                                    start_idx <= region$endCpG]
-    
-    if(nrow(region_coverage) == 0) {
-        warning(sprintf("No coverage found for region %s:%d-%d", 
-                       region$chr, region$startCpG, region$endCpG))
-        return(numeric(0))
-    }
-    
-    # Create pattern vector (one value per group)
-    pattern <- region_coverage[, .(total_reads = sum(read_count)), by=group]
-    setkey(pattern, group)
-    
-    return(pattern$total_reads)
 }
 
 main <- function() {
