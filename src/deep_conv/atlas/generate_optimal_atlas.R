@@ -265,7 +265,8 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
                                  min_delta_means=0.3,
                                  delta_weight=0.7,
                                  correlation_penalty=2,
-                                 max_distance=1e6,  # only check correlation within 1Mb
+                                 max_distance=1e6,  # 1Mb bins
+                                 top_per_bin=5,     # Take top 5 candidates per bin
                                  verbose=FALSE) {
     if(verbose) {
         cat("\nMarker selection parameters:\n")
@@ -274,6 +275,7 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         cat(sprintf("  delta_weight: %.2f\n", delta_weight))
         cat(sprintf("  correlation_penalty: %.2f\n", correlation_penalty))
         cat(sprintf("  max_distance: %.0f\n", max_distance))
+        cat(sprintf("  top_per_bin: %d\n", top_per_bin))
         cat(sprintf("  top_n: %d\n", top_n))
     }
     
@@ -287,8 +289,7 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         # Get candidates for this target with coverage and minimum delta_means
         candidates <- regions[target == target_group & 
                             has_coverage == TRUE &
-                            delta_means >= min_delta_means
-                            ][order(-delta_means, ttest)]
+                            delta_means >= min_delta_means]
         
         if(verbose) {
             cat(sprintf("Initial candidates: %d\n", nrow(candidates)))
@@ -300,14 +301,27 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         
         if(nrow(candidates) == 0) next
         
-        # Initialize with best candidate
-        selected <- data.table()
+        # Assign genomic bins
+        candidates[, bin := floor(start / max_distance)]
         
-        while(nrow(selected) < top_n && nrow(candidates) > 0) {
+        # Take top candidates per bin
+        top_candidates <- candidates[, head(.SD[order(-delta_means, ttest)], top_per_bin), by=.(chr, bin)]
+        
+        if(verbose) {
+            cat(sprintf("Selected top %d candidates per %.1f Mb bin\n", 
+                       top_per_bin, max_distance/1e6))
+            cat(sprintf("Reduced to %d total candidates\n", nrow(top_candidates)))
+        }
+        
+        # Initialize with best overall candidate
+        selected <- data.table()
+        top_candidates <- top_candidates[order(-delta_means, ttest)]
+        
+        while(nrow(selected) < top_n && nrow(top_candidates) > 0) {
             if(nrow(selected) == 0) {
                 # Take the best candidate as first marker
-                selected <- rbind(selected, candidates[1])
-                candidates <- candidates[-1]
+                selected <- rbind(selected, top_candidates[1])
+                top_candidates <- top_candidates[-1]
                 
                 if(verbose) {
                     cat(sprintf("\nSelected first marker: delta_means=%.3f, ttest=%.3f\n", 
@@ -316,11 +330,11 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
                 next
             }
             
-            # For each candidate, only check correlation with nearby markers
-            max_correlations <- numeric(nrow(candidates))
+            # For each remaining candidate, check correlation with nearby markers
+            max_correlations <- numeric(nrow(top_candidates))
             
-            for(i in 1:nrow(candidates)) {
-                candidate <- candidates[i]
+            for(i in 1:nrow(top_candidates)) {
+                candidate <- top_candidates[i]
                 max_corr <- -1
                 
                 # Find nearby selected markers
@@ -338,10 +352,6 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
                 }
                 
                 max_correlations[i] <- max_corr
-                
-                if(verbose && i %% 100 == 0) {
-                    cat(sprintf("Processed %d/%d candidates\n", i, nrow(candidates)))
-                }
             }
             
             # Filter by correlation
@@ -354,9 +364,9 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
             if(length(valid_idx) == 0) break
             
             # Score remaining candidates
-            scores <- numeric(nrow(candidates))
+            scores <- numeric(nrow(top_candidates))
             scores[] <- -Inf
-            scores[valid_idx] <- delta_weight * scale_to_01(candidates$delta_means[valid_idx]) - 
+            scores[valid_idx] <- delta_weight * scale_to_01(top_candidates$delta_means[valid_idx]) - 
                                (1 - delta_weight) * (scale_to_01(max_correlations[valid_idx])^correlation_penalty)
             
             # Select best candidate
@@ -365,12 +375,12 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
             if(verbose) {
                 cat(sprintf("Selected marker %d/%d: delta_means=%.3f, max_corr=%.3f\n", 
                            nrow(selected) + 1, top_n,
-                           candidates$delta_means[best_idx],
+                           top_candidates$delta_means[best_idx],
                            max_correlations[best_idx]))
             }
             
-            selected <- rbind(selected, candidates[best_idx])
-            candidates <- candidates[-best_idx]
+            selected <- rbind(selected, top_candidates[best_idx])
+            top_candidates <- top_candidates[-best_idx]
         }
         
         selected_markers[[target_group]] <- selected
@@ -389,7 +399,6 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
             cat("\nFinal marker counts by target:\n")
             print(result[, .N, by=target])
             
-            # Calculate overall correlation statistics
             cat("\nCorrelation statistics for selected markers:\n")
             patterns <- result[, get_methylation_pattern(.SD, coverage_index), by=1:nrow(result)]
             if(nrow(patterns) > 1) {
