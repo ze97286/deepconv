@@ -265,17 +265,15 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
                                  min_delta_means=0.3,
                                  delta_weight=0.7,
                                  correlation_penalty=2,
-                                 max_distance=1e6,  # 1Mb bins
-                                 top_per_bin=5,     # Take top 5 candidates per bin
+                                 bin_size=5e6,     # 5Mb bins
+                                 markers_per_bin=2, # Take 2 markers per bin
                                  verbose=FALSE) {
     if(verbose) {
         cat("\nMarker selection parameters:\n")
         cat(sprintf("  max_correlation: %.2f\n", max_correlation))
         cat(sprintf("  min_delta_means: %.2f\n", min_delta_means))
-        cat(sprintf("  delta_weight: %.2f\n", delta_weight))
-        cat(sprintf("  correlation_penalty: %.2f\n", correlation_penalty))
-        cat(sprintf("  max_distance: %.0f\n", max_distance))
-        cat(sprintf("  top_per_bin: %d\n", top_per_bin))
+        cat(sprintf("  bin_size: %.1f Mb\n", bin_size/1e6))
+        cat(sprintf("  markers_per_bin: %d\n", markers_per_bin))
         cat(sprintf("  top_n: %d\n", top_n))
     }
     
@@ -302,85 +300,95 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         if(nrow(candidates) == 0) next
         
         # Assign genomic bins
-        candidates[, bin := floor(start / max_distance)]
+        candidates[, bin := floor(start / bin_size)]
         
-        # Take top candidates per bin
-        top_candidates <- candidates[, head(.SD[order(-delta_means, ttest)], top_per_bin), by=.(chr, bin)]
-        
-        if(verbose) {
-            cat(sprintf("Selected top %d candidates per %.1f Mb bin\n", 
-                       top_per_bin, max_distance/1e6))
-            cat(sprintf("Reduced to %d total candidates\n", nrow(top_candidates)))
-        }
-        
-        # Initialize with best overall candidate
-        selected <- data.table()
-        top_candidates <- top_candidates[order(-delta_means, ttest)]
-        
-        while(nrow(selected) < top_n && nrow(top_candidates) > 0) {
-            if(nrow(selected) == 0) {
-                # Take the best candidate as first marker
-                selected <- rbind(selected, top_candidates[1])
-                top_candidates <- top_candidates[-1]
-                
-                if(verbose) {
-                    cat(sprintf("\nSelected first marker: delta_means=%.3f, ttest=%.3f\n", 
-                               selected$delta_means[1], selected$ttest[1]))
-                }
-                next
-            }
+        # Take top markers from each bin
+        selected <- candidates[, {
+            # Order by delta_means and ttest within bin
+            bin_candidates <- .SD[order(-delta_means, ttest)]
+            selected_indices <- integer(0)
+            n_selected <- 0
             
-            # For each remaining candidate, check correlation with nearby markers
-            max_correlations <- numeric(nrow(top_candidates))
-            
-            for(i in 1:nrow(top_candidates)) {
-                candidate <- top_candidates[i]
-                max_corr <- -1
+            # Take up to markers_per_bin uncorrelated markers
+            for(i in 1:min(markers_per_bin*2, nrow(bin_candidates))) {
+                if(n_selected >= markers_per_bin) break
                 
-                # Find nearby selected markers
-                nearby_selected <- selected[chr == candidate$chr & 
-                                         abs(start - candidate$start) <= max_distance]
+                candidate <- bin_candidates[i]
+                is_valid <- TRUE
                 
-                if(nrow(nearby_selected) > 0) {
+                # Check correlation with already selected markers in this bin
+                if(length(selected_indices) > 0) {
                     candidate_pattern <- get_methylation_pattern(candidate, coverage_index)
                     
-                    for(j in 1:nrow(nearby_selected)) {
-                        selected_pattern <- get_methylation_pattern(nearby_selected[j], coverage_index)
-                        corr <- cor(candidate_pattern, selected_pattern)
-                        max_corr <- max(max_corr, abs(corr))
+                    for(j in selected_indices) {
+                        selected_pattern <- get_methylation_pattern(bin_candidates[j], coverage_index)
+                        corr <- abs(cor(candidate_pattern, selected_pattern))
+                        if(corr > max_correlation) {
+                            is_valid <- FALSE
+                            break
+                        }
                     }
                 }
                 
-                max_correlations[i] <- max_corr
+                if(is_valid) {
+                    selected_indices <- c(selected_indices, i)
+                    n_selected <- n_selected + 1
+                }
             }
             
-            # Filter by correlation
-            valid_idx <- which(max_correlations <= max_correlation)
-            
+            bin_candidates[selected_indices]
+        }, by=.(chr, bin)]
+        
+        if(verbose) {
+            cat(sprintf("Selected %d markers from %d bins\n", 
+                       nrow(selected), uniqueN(selected$bin)))
+        }
+        
+        # If we have too many markers, take the top ones by delta_means
+        if(nrow(selected) > top_n) {
             if(verbose) {
-                cat(sprintf("\nCandidates passing correlation filter: %d\n", length(valid_idx)))
+                cat("Reducing to top markers by delta_means\n")
+            }
+            selected <- selected[order(-delta_means)][1:top_n]
+        }
+        
+        # Final correlation check between adjacent bins
+        if(nrow(selected) > 1) {
+            selected <- selected[order(chr, bin)]
+            to_remove <- integer(0)
+            
+            for(i in 1:(nrow(selected)-1)) {
+                if(i %in% to_remove) next
+                
+                current <- selected[i]
+                next_marker <- selected[i+1]
+                
+                # Only check if in same chromosome and adjacent bins
+                if(current$chr == next_marker$chr && 
+                   abs(current$bin - next_marker$bin) <= 1) {
+                    
+                    current_pattern <- get_methylation_pattern(current, coverage_index)
+                    next_pattern <- get_methylation_pattern(next_marker, coverage_index)
+                    corr <- abs(cor(current_pattern, next_pattern))
+                    
+                    if(corr > max_correlation) {
+                        # Remove the one with lower delta_means
+                        if(current$delta_means >= next_marker$delta_means) {
+                            to_remove <- c(to_remove, i+1)
+                        } else {
+                            to_remove <- c(to_remove, i)
+                        }
+                    }
+                }
             }
             
-            if(length(valid_idx) == 0) break
-            
-            # Score remaining candidates
-            scores <- numeric(nrow(top_candidates))
-            scores[] <- -Inf
-            scores[valid_idx] <- delta_weight * scale_to_01(top_candidates$delta_means[valid_idx]) - 
-                               (1 - delta_weight) * (scale_to_01(max_correlations[valid_idx])^correlation_penalty)
-            
-            # Select best candidate
-            best_idx <- which.max(scores)
-            
-            if(verbose) {
-                cat(sprintf("Selected marker %d/%d: delta_means=%.3f, max_corr=%.3f\n", 
-                           nrow(selected) + 1, top_n,
-                           top_candidates$delta_means[best_idx],
-                           max_correlations[best_idx]))
+            if(length(to_remove) > 0) {
+                if(verbose) {
+                    cat(sprintf("Removed %d markers due to correlation between bins\n", 
+                              length(to_remove)))
+                }
+                selected <- selected[-to_remove]
             }
-            
-            selected <- rbind(selected, top_candidates[best_idx])
-            top_candidates <- top_candidates[-best_idx]
         }
         
         selected_markers[[target_group]] <- selected
@@ -398,6 +406,9 @@ select_diverse_markers <- function(regions, coverage_index, min_coverage=3, min_
         if(nrow(result) > 0) {
             cat("\nFinal marker counts by target:\n")
             print(result[, .N, by=target])
+            
+            cat("\nMarker distribution across chromosomes:\n")
+            print(result[, .N, by=.(target, chr)])
             
             cat("\nCorrelation statistics for selected markers:\n")
             patterns <- result[, get_methylation_pattern(.SD, coverage_index), by=1:nrow(result)]
