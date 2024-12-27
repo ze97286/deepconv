@@ -34,7 +34,7 @@ class DeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types):
         super().__init__()
         
-        # Feature extractor
+        # Main feature extractor
         self.features = nn.Sequential(
             nn.Linear(num_markers, 256),
             nn.LayerNorm(256),
@@ -42,23 +42,64 @@ class DeconvolutionModel(nn.Module):
             nn.Dropout(0.2)
         )
         
+        # Binary classifier for "is it below 1%?"
+        self.low_concentration_gate = nn.Sequential(
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+        
+        # Main prediction path
         self.output = nn.Linear(256, num_cell_types)
         self.softmax = nn.Softmax(dim=1)
         
     def forward(self, X, coverage):
-        # Convert missing values and their coverage to zeros 
-        # to completely remove them from computation
+        # Handle missing values
         valid_mask = ~torch.isnan(X)
         X = torch.where(valid_mask, X, torch.zeros_like(X))
         coverage = coverage * valid_mask
+        X_weighted = X * torch.log1p(coverage)
         
-        # Weight valid measurements by their coverage
-        X_weighted = X * torch.log1p(coverage)  # Using log to dampen extreme coverage values
+        # Extract features
+        features = self.features(X_weighted)
         
-        x = self.features(X_weighted)
-        logits = self.output(x)
-        return self.softmax(logits)
+        # Get raw predictions
+        raw_predictions = self.softmax(self.output(features))
+        
+        # Get gate values (0 for < 1%, 1 for >= 1%)
+        gates = self.low_concentration_gate(features)
+        
+        # Scale predictions based on gate
+        # If gate is 0, prediction is scaled down significantly
+        scaled_predictions = raw_predictions * gates + raw_predictions * 0.01 * (1 - gates)
+        
+        return scaled_predictions
+
+
+def custom_loss(predictions, targets, inputs, model):
+    # Base MSE loss
+    mse_loss = F.mse_loss(predictions, targets)
     
+    # Binary labels for concentrations >= 1%
+    low_conc_labels = (targets >= 0.01).float()
+    
+    # Get features and gate predictions
+    features = model.features(inputs)
+    gate_predictions = model.low_concentration_gate(features)
+    
+    # Penalize variance around 1%
+    near_one_percent_mask = (targets >= 0.008) & (targets <= 0.012)
+    variance_penalty = 5.0 * torch.var(predictions[near_one_percent_mask]) if torch.any(near_one_percent_mask) else 0.0
+    
+    # Penalty for high predictions when true value is low
+    low_high_penalty = 10.0 * torch.mean(predictions[targets < 0.01] * (predictions[targets < 0.01] > 0.01).float())
+    
+    # Gate loss for detecting concentrations below 1%
+    gate_loss = F.binary_cross_entropy(gate_predictions, low_conc_labels)
+    
+    return mse_loss + variance_penalty + low_high_penalty + gate_loss
+
 
 def calculate_marker_importance(reference_profiles):
     """
@@ -96,7 +137,9 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=100, pat
            coverage = batch['coverage']
            optimizer.zero_grad()
            predictions = model(X, coverage)
-           loss = F.mse_loss(predictions, y)
+        #    loss = F.mse_loss(predictions, y)
+           X_weighted = X * torch.log1p(coverage)
+           loss = custom_loss(predictions, y, X_weighted, model)
            loss.backward()
            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
            optimizer.step()
@@ -110,7 +153,9 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=100, pat
                X, y = batch['X'], batch['y']
                coverage = batch['coverage']
                predictions = model(X, coverage)
-               loss = F.mse_loss(predictions, y)
+            #    loss = F.mse_loss(predictions, y)
+               X_weighted = X * torch.log1p(coverage)
+               loss = custom_loss(predictions, y, X_weighted, model)
                val_loss += loss.item()
        val_loss /= len(val_loader)
        print(f"Epoch {epoch+1}/{num_epochs}, "
