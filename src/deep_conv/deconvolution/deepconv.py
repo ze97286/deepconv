@@ -55,41 +55,33 @@ class DeconvolutionModel(nn.Module):
         self.softmax = nn.Softmax(dim=1)
         
     def forward(self, X, coverage):
-        # Handle missing values
         valid_mask = ~torch.isnan(X)
         X = torch.where(valid_mask, X, torch.zeros_like(X))
         coverage = coverage * valid_mask
         X_weighted = X * torch.log1p(coverage)
         
-        # Extract features
         features = self.features(X_weighted)
-        
-        # Get raw predictions
         raw_predictions = self.softmax(self.output(features))
+        gate_logits = self.low_concentration_gate(features)
+        gates = torch.sigmoid(gate_logits)
         
-        # Get gate values (0 for < 1%, 1 for >= 1%)
-        gates = self.low_concentration_gate(features)
-        
-        # Scale predictions based on gate
-        # If gate is 0, prediction is scaled down significantly
         scaled_predictions = raw_predictions * gates + raw_predictions * 0.01 * (1 - gates)
-        
         return scaled_predictions
 
 
 def custom_loss(predictions, targets, inputs, model):
     mse_loss = F.mse_loss(predictions, targets)
     
-    # Binary labels just for target cell type (first column)
+    # Binary labels for target cell type
     low_conc_labels = (targets[:, 0] >= 0.01).float().unsqueeze(1)
     
     features = model.features(inputs)
-    gate_predictions = model.low_concentration_gate(features)
+    gate_logits = model.low_concentration_gate(features)
+    gate_predictions = torch.sigmoid(gate_logits)
     
     near_one_percent_mask = (targets[:, 0] >= 0.008) & (targets[:, 0] <= 0.012)
     variance_penalty = 5.0 * torch.var(predictions[near_one_percent_mask, 0]) if torch.any(near_one_percent_mask) else 0.0
     
-    # Only consider target cell type for low-high penalty
     low_high_penalty = 10.0 * torch.mean(predictions[targets[:, 0] < 0.01, 0] * 
                                        (predictions[targets[:, 0] < 0.01, 0] > 0.01).float())
     
