@@ -78,24 +78,21 @@ class DeconvolutionModel(nn.Module):
 
 
 def custom_loss(predictions, targets, inputs, model):
-    # Base MSE loss
     mse_loss = F.mse_loss(predictions, targets)
     
-    # Binary labels for concentrations >= 1%
-    low_conc_labels = (targets >= 0.01).float()
+    # Binary labels just for target cell type (first column)
+    low_conc_labels = (targets[:, 0] >= 0.01).float().unsqueeze(1)
     
-    # Get features and gate predictions
     features = model.features(inputs)
     gate_predictions = model.low_concentration_gate(features)
     
-    # Penalize variance around 1%
-    near_one_percent_mask = (targets >= 0.008) & (targets <= 0.012)
-    variance_penalty = 5.0 * torch.var(predictions[near_one_percent_mask]) if torch.any(near_one_percent_mask) else 0.0
+    near_one_percent_mask = (targets[:, 0] >= 0.008) & (targets[:, 0] <= 0.012)
+    variance_penalty = 5.0 * torch.var(predictions[near_one_percent_mask, 0]) if torch.any(near_one_percent_mask) else 0.0
     
-    # Penalty for high predictions when true value is low
-    low_high_penalty = 10.0 * torch.mean(predictions[targets < 0.01] * (predictions[targets < 0.01] > 0.01).float())
+    # Only consider target cell type for low-high penalty
+    low_high_penalty = 10.0 * torch.mean(predictions[targets[:, 0] < 0.01, 0] * 
+                                       (predictions[targets[:, 0] < 0.01, 0] > 0.01).float())
     
-    # Gate loss for detecting concentrations below 1%
     gate_loss = F.binary_cross_entropy(gate_predictions, low_conc_labels)
     
     return mse_loss + variance_penalty + low_high_penalty + gate_loss
