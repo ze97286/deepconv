@@ -33,8 +33,6 @@ class TissueDeconvolutionDataset(Dataset):
 class DeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types):
         super().__init__()
-        
-        # Main feature extractor
         self.features = nn.Sequential(
             nn.Linear(num_markers, 256),
             nn.LayerNorm(256),
@@ -42,18 +40,14 @@ class DeconvolutionModel(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # Binary classifier for "is it below 1%?"
-        self.low_concentration_gate = nn.Sequential(
-            nn.Linear(256, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
+        self.is_high_conc = nn.Sequential(
+            nn.Linear(256, 1),
             nn.Sigmoid()
         )
         
-        # Main prediction path
         self.output = nn.Linear(256, num_cell_types)
         self.softmax = nn.Softmax(dim=1)
-        
+    
     def forward(self, X, coverage):
         valid_mask = ~torch.isnan(X)
         X = torch.where(valid_mask, X, torch.zeros_like(X))
@@ -61,33 +55,16 @@ class DeconvolutionModel(nn.Module):
         X_weighted = X * torch.log1p(coverage)
         
         features = self.features(X_weighted)
-        raw_predictions = self.softmax(self.output(features))
-        gate_logits = self.low_concentration_gate(features)
-        gates = torch.sigmoid(gate_logits)
+        predictions = self.softmax(self.output(features))
+        high_conc = self.is_high_conc(features)
         
-        scaled_predictions = raw_predictions * gates + raw_predictions * 0.01 * (1 - gates)
-        return scaled_predictions
+        return predictions * high_conc
 
-
-def custom_loss(predictions, targets, inputs, model):
-    mse_loss = F.mse_loss(predictions, targets)
-    
-    # Binary labels for target cell type
-    low_conc_labels = (targets[:, 0] >= 0.01).float().unsqueeze(1)
-    
-    features = model.features(inputs)
-    gate_logits = model.low_concentration_gate(features)
-    gate_predictions = torch.sigmoid(gate_logits)
-    
-    near_one_percent_mask = (targets[:, 0] >= 0.008) & (targets[:, 0] <= 0.012)
-    variance_penalty = 5.0 * torch.var(predictions[near_one_percent_mask, 0]) if torch.any(near_one_percent_mask) else 0.0
-    
-    low_high_penalty = 10.0 * torch.mean(predictions[targets[:, 0] < 0.01, 0] * 
-                                       (predictions[targets[:, 0] < 0.01, 0] > 0.01).float())
-    
-    gate_loss = F.binary_cross_entropy(gate_predictions, low_conc_labels)
-    
-    return mse_loss + variance_penalty + low_high_penalty + gate_loss
+def custom_loss(predictions, targets):
+    base_loss = F.mse_loss(predictions, targets)
+    high_conc_targets = (targets >= 0.01).float()
+    low_predictions_penalty = 5.0 * F.mse_loss(predictions[targets < 0.01], targets[targets < 0.01])
+    return base_loss + low_predictions_penalty
 
 
 def calculate_marker_importance(reference_profiles):
