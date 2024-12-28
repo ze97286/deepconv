@@ -63,19 +63,19 @@ class DeconvolutionModel(nn.Module):
         predictions = self.softmax(self.regressor(features))
         
         # Zero out predictions where classifier says <1%
-        return predictions * (is_high > 0.5).float()
+        return predictions * is_high
 
 def custom_loss(predictions, targets):
     # Binary classification loss
     is_high = (targets >= 0.01).float()
-    binary_loss = F.binary_cross_entropy(predictions > 0.01, is_high)
+    pred_high = (predictions >= 0.01).float()
+    binary_loss = F.binary_cross_entropy(pred_high, is_high)
     
     # Regression loss only for high values
     high_mask = targets >= 0.01
     regression_loss = F.mse_loss(predictions[high_mask], targets[high_mask]) if torch.any(high_mask) else 0.0
     
     return binary_loss * 10.0 + regression_loss
-
 
 def calculate_marker_importance(reference_profiles):
     """
