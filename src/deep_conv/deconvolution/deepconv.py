@@ -40,16 +40,13 @@ class DeconvolutionModel(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # More aggressive classifier for >1%
+        # Single classifier head
         self.classifier = nn.Sequential(
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
+            nn.Linear(256, 1),
             nn.Sigmoid()
         )
         
+        # Simple regressor
         self.regressor = nn.Linear(256, num_cell_types)
         self.softmax = nn.Softmax(dim=1)
     
@@ -60,35 +57,18 @@ class DeconvolutionModel(nn.Module):
         X_weighted = X * torch.log1p(coverage)
         
         features = self.features(X_weighted)
-        is_high = self.classifier(features)
+        is_one_percent = self.classifier(features)
         predictions = self.softmax(self.regressor(features))
         
-        # Lower threshold
-        threshold = 0.5
-        return predictions * (is_high > threshold).float()
+        # Simple threshold at 1%
+        return predictions * is_one_percent
 
 
 def custom_loss(predictions, targets):
-    # Binary classification loss with moderate weight
     is_high = (targets >= 0.01).float()
-    pred_high = (predictions >= 0.01).float()
-    binary_loss = 0.5 * F.binary_cross_entropy(pred_high, is_high)
-    
-    # Separate regression losses for different ranges
-    high_mask = targets >= 0.01
-    near_one_mask = (targets >= 0.009) & (targets <= 0.011)
-    
-    # Standard regression for high values
-    high_loss = F.mse_loss(predictions[high_mask], targets[high_mask]) if torch.any(high_mask) else 0.0
-    
-    # Extra penalty for variance around 1%
-    near_one_loss = 0.2 * torch.var(predictions[near_one_mask]) if torch.any(near_one_mask) else 0.0
-    
-    # More moderate penalty for non-zero predictions when target is low
-    low_mask = targets < 0.01
-    zero_loss = 1.0 * torch.mean(predictions[low_mask]**2) if torch.any(low_mask) else 0.0
-    
-    return binary_loss + high_loss + near_one_loss + zero_loss
+    binary_loss = F.binary_cross_entropy(predictions.mean(dim=1), is_high)
+    mse_loss = F.mse_loss(predictions, targets)
+    return binary_loss + mse_loss
 
 
 def calculate_marker_importance(reference_profiles):
