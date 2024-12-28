@@ -50,18 +50,17 @@ class DeconvolutionModel(nn.Module):
         return self.softmax(self.output(self.features(X_weighted)))
 
 def custom_loss(predictions, targets):
+    # MSE for all predictions
     base_loss = F.mse_loss(predictions, targets)
     
-    # Strong penalty for low concentration errors
-    low_conc_mask = targets < 0.01
-    low_conc_loss = 5.0 * F.mse_loss(predictions[low_conc_mask], targets[low_conc_mask])
+    # Additional MSE only for low concentrations (<1%)
+    low_mask = targets < 0.01
+    if torch.any(low_mask):
+        low_loss = F.mse_loss(predictions[low_mask], targets[low_mask])
+    else:
+        low_loss = 0.0
     
-    # Additional penalty for zero predictions
-    zero_mask = targets == 0
-    zero_loss = 10.0 * torch.mean(predictions[zero_mask]**2)
-    
-    return base_loss + low_conc_loss + zero_loss
-
+    return base_loss + 5.0 * low_loss
 
 def calculate_marker_importance(reference_profiles):
     """
