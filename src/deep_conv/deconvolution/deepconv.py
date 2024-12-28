@@ -57,11 +57,12 @@ class DeconvolutionModel(nn.Module):
         # Apply wavelet transform to each sample
         batch_coeffs = []
         for sample in x:
-            coeffs = pywt.wavedec(sample.cpu().numpy(), self.wavelet, level=self.level)
+            coeffs = pywt.wavedec(sample.detach().cpu().numpy(), self.wavelet, level=self.level)
             flat_coeffs = np.concatenate([c.flatten() for c in coeffs])
             batch_coeffs.append(flat_coeffs)
         return torch.tensor(np.stack(batch_coeffs), dtype=torch.float32).to(x.device)
-    
+
+
     def forward(self, X, coverage):
         valid_mask = ~torch.isnan(X)
         X = torch.where(valid_mask, X, torch.zeros_like(X))
@@ -87,8 +88,8 @@ def custom_loss(predictions, targets):
     batch_size = predictions.shape[0]
     coherence_loss = 0
     for i in range(batch_size):
-        pred_wave = pywt.wavedec(predictions[i].cpu().numpy(), 'db4', level=3)
-        target_wave = pywt.wavedec(targets[i].cpu().numpy(), 'db4', level=3)
+        pred_wave = pywt.wavedec(predictions[i].detach().cpu().numpy(), 'db4', level=3)
+        target_wave = pywt.wavedec(targets[i].detach().cpu().numpy(), 'db4', level=3)
         
         # Compare wavelet coefficients at each level
         level_loss = sum(F.mse_loss(torch.tensor(p), torch.tensor(t)) 
@@ -98,6 +99,7 @@ def custom_loss(predictions, targets):
     coherence_loss /= batch_size
     
     return mse_loss + 5.0 * zero_loss + coherence_loss
+
 
 def calculate_marker_importance(reference_profiles):
     """
