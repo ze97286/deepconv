@@ -39,7 +39,6 @@ class DeconvolutionModel(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.2)
         )
-        
         self.output = nn.Linear(256, num_cell_types)
         self.softmax = nn.Softmax(dim=1)
     
@@ -48,15 +47,20 @@ class DeconvolutionModel(nn.Module):
         X = torch.where(valid_mask, X, torch.zeros_like(X))
         coverage = coverage * valid_mask
         X_weighted = X * torch.log1p(coverage)
-        
-        features = self.features(X_weighted)
-        predictions = self.softmax(self.output(features))
-        return predictions * torch.clamp(predictions, max=0.5)  # Dampen high values
+        return self.softmax(self.output(self.features(X_weighted)))
 
 def custom_loss(predictions, targets):
-    mse_loss = F.mse_loss(predictions, targets)
-    zero_penalty = 10.0 * torch.mean(predictions[targets < 0.001]**2)
-    return mse_loss + zero_penalty
+    base_loss = F.mse_loss(predictions, targets)
+    
+    # Strong penalty for low concentration errors
+    low_conc_mask = targets < 0.01
+    low_conc_loss = 5.0 * F.mse_loss(predictions[low_conc_mask], targets[low_conc_mask])
+    
+    # Additional penalty for zero predictions
+    zero_mask = targets == 0
+    zero_loss = 10.0 * torch.mean(predictions[zero_mask]**2)
+    
+    return base_loss + low_conc_loss + zero_loss
 
 
 def calculate_marker_importance(reference_profiles):
