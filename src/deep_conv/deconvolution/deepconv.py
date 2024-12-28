@@ -40,9 +40,17 @@ class DeconvolutionModel(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # Simple regressor
-        self.output = nn.Linear(256, num_cell_types)
-        self.softmax = nn.Softmax(dim=1)
+        # Binary classifier for >1%
+        self.is_high = nn.Sequential(
+            nn.Linear(256, 1),
+            nn.Sigmoid()
+        )
+        
+        # Scale factor predictor
+        self.scale = nn.Sequential(
+            nn.Linear(256, num_cell_types),
+            nn.Softplus()  # Always positive
+        )
     
     def forward(self, X, coverage):
         valid_mask = ~torch.isnan(X)
@@ -51,27 +59,31 @@ class DeconvolutionModel(nn.Module):
         X_weighted = X * torch.log1p(coverage)
         
         features = self.features(X_weighted)
-        predictions = self.softmax(self.output(features))
+        high_prob = self.is_high(features)
+        scale = self.scale(features)
         
-        # Zero out predictions below 1%
-        is_low = predictions < 0.01
-        predictions = torch.where(is_low, torch.zeros_like(predictions), predictions)
+        # Final prediction
+        predictions = torch.where(high_prob > 0.5, scale, torch.zeros_like(scale))
         return predictions
 
-
 def custom_loss(predictions, targets):
-    # Higher weight for errors around 1%
-    near_one_mask = (targets >= 0.009) & (targets <= 0.011)
-    one_percent_loss = 5.0 * F.mse_loss(predictions[near_one_mask], targets[near_one_mask]) if torch.any(near_one_mask) else 0.0
+    # Binary classification loss
+    high_targets = (targets >= 0.01).float()
+    pred_high = (predictions >= 0.01).float()
+    binary_loss = F.binary_cross_entropy(pred_high, high_targets)
     
-    # Strong penalty for predictions when target is below 1%
-    low_mask = targets < 0.01
-    low_loss = 2.0 * torch.mean(predictions[low_mask]**2) if torch.any(low_mask) else 0.0
+    # Scale prediction loss only for high concentrations
+    high_mask = targets >= 0.01
+    if torch.any(high_mask):
+        scale_loss = F.mse_loss(predictions[high_mask], targets[high_mask])
+    else:
+        scale_loss = 0.0
     
-    # Standard MSE for the rest
-    mse_loss = F.mse_loss(predictions, targets)
+    # Strong penalty for false positives
+    false_positive_loss = torch.mean(predictions[~high_targets.bool()]**2)
     
-    return mse_loss + one_percent_loss + low_loss
+    return binary_loss + scale_loss + 2.0 * false_positive_loss
+
 
 
 def calculate_marker_importance(reference_profiles):
