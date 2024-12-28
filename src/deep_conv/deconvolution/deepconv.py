@@ -31,57 +31,51 @@ class TissueDeconvolutionDataset(Dataset):
 
 
 class DeconvolutionModel(nn.Module):
-   def __init__(self, num_markers, num_cell_types):
-       super().__init__()
-       self.features = nn.Sequential(
-           nn.Linear(num_markers, 256),
-           nn.LayerNorm(256),
-           nn.ReLU(),
-           nn.Dropout(0.2)
-       )
-       
-       self.is_high_conc = nn.Sequential(
-           nn.Linear(256, 1),
-           nn.Sigmoid()
-       )
-       
-       self.output = nn.Linear(256, num_cell_types)
-       self.softmax = nn.Softmax(dim=1)
-   
-   def forward(self, X, coverage):
-       valid_mask = ~torch.isnan(X)
-       X = torch.where(valid_mask, X, torch.zeros_like(X))
-       coverage = coverage * valid_mask
-       X_weighted = X * torch.log1p(coverage)
-       
-       features = self.features(X_weighted)
-       predictions = self.softmax(self.output(features))
-       high_conc = self.is_high_conc(features)
-       
-       return predictions * high_conc
-
+    def __init__(self, num_markers, num_cell_types):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Linear(num_markers, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 128),
+            nn.LayerNorm(128),
+            nn.ReLU()
+        )
+        
+        # Separate paths for high/low concentrations
+        self.low_conc = nn.Linear(128, num_cell_types)
+        self.high_conc = nn.Linear(128, num_cell_types)
+        
+        self.softmax = nn.Softmax(dim=1)
+    
+    def forward(self, X, coverage):
+        valid_mask = ~torch.isnan(X)
+        X = torch.where(valid_mask, X, torch.zeros_like(X))
+        coverage = coverage * valid_mask
+        X_weighted = X * torch.log1p(coverage)
+        
+        features = self.features(X_weighted)
+        low_pred = self.softmax(self.low_conc(features)) * 0.01  # Cap at 1%
+        high_pred = self.softmax(self.high_conc(features))
+        
+        return low_pred + high_pred
 
 def custom_loss(predictions, targets):
-    # Basic MSE
-    base_loss = F.mse_loss(predictions, targets)
+    mse_loss = F.mse_loss(predictions, targets)
     
-    # Strongly penalize predictions above 0.001 when true value is below 0.001
-    ultra_low_mask = targets < 0.001
-    ultra_low_penalty = 10.0 * F.mse_loss(
-        predictions[ultra_low_mask], 
-        targets[ultra_low_mask]
-    )
+    # Heavy penalty for non-zero predictions when target is 0
+    zero_mask = targets == 0
+    zero_penalty = 15.0 * torch.mean(predictions[zero_mask]**2)
     
-    # Encourage linearity between 0.01-0.1
-    high_range_mask = (targets >= 0.01) & (targets <= 0.1)
-    if torch.any(high_range_mask):
-        pred_diffs = predictions[high_range_mask][1:] - predictions[high_range_mask][:-1]
-        target_diffs = targets[high_range_mask][1:] - targets[high_range_mask][:-1]
-        linearity_penalty = 5.0 * F.mse_loss(pred_diffs, target_diffs)
+    # Penalize variance in low concentration predictions
+    low_mask = targets < 0.01
+    if torch.any(low_mask):
+        low_var_penalty = 5.0 * torch.var(predictions[low_mask])
     else:
-        linearity_penalty = 0.0
+        low_var_penalty = 0.0
         
-    return base_loss + ultra_low_penalty + linearity_penalty
+    return mse_loss + zero_penalty + low_var_penalty
 
 
 def calculate_marker_importance(reference_profiles):
