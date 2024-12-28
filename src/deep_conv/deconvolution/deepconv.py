@@ -62,9 +62,26 @@ class DeconvolutionModel(nn.Module):
 
 
 def custom_loss(predictions, targets):
-   base_loss = F.mse_loss(predictions, targets)
-   low_predictions_penalty = 5.0 * F.mse_loss(predictions[targets < 0.01], targets[targets < 0.01])
-   return base_loss + low_predictions_penalty
+    # Basic MSE
+    base_loss = F.mse_loss(predictions, targets)
+    
+    # Strongly penalize predictions above 0.001 when true value is below 0.001
+    ultra_low_mask = targets < 0.001
+    ultra_low_penalty = 10.0 * F.mse_loss(
+        predictions[ultra_low_mask], 
+        targets[ultra_low_mask]
+    )
+    
+    # Encourage linearity between 0.01-0.1
+    high_range_mask = (targets >= 0.01) & (targets <= 0.1)
+    if torch.any(high_range_mask):
+        pred_diffs = predictions[high_range_mask][1:] - predictions[high_range_mask][:-1]
+        target_diffs = targets[high_range_mask][1:] - targets[high_range_mask][:-1]
+        linearity_penalty = 5.0 * F.mse_loss(pred_diffs, target_diffs)
+    else:
+        linearity_penalty = 0.0
+        
+    return base_loss + ultra_low_penalty + linearity_penalty
 
 
 def calculate_marker_importance(reference_profiles):
