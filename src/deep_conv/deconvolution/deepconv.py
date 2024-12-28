@@ -39,7 +39,17 @@ class DeconvolutionModel(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.2)
         )
-        self.output = nn.Linear(256, num_cell_types)
+        
+        # Binary classifier for >1%
+        self.classifier = nn.Sequential(
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+        
+        # Regressor for concentration when >1%
+        self.regressor = nn.Linear(256, num_cell_types)
         self.softmax = nn.Softmax(dim=1)
     
     def forward(self, X, coverage):
@@ -47,29 +57,24 @@ class DeconvolutionModel(nn.Module):
         X = torch.where(valid_mask, X, torch.zeros_like(X))
         coverage = coverage * valid_mask
         X_weighted = X * torch.log1p(coverage)
-        return self.softmax(self.output(self.features(X_weighted)))
+        
+        features = self.features(X_weighted)
+        is_high = self.classifier(features)
+        predictions = self.softmax(self.regressor(features))
+        
+        # Zero out predictions where classifier says <1%
+        return predictions * (is_high > 0.5).float()
 
-def custom_loss(predictions, targets, threshold=0.01, margin=0.001):
-    # Define ranges
-    zero_range = targets < (threshold - margin)  # < 0.9%
-    one_range = (targets >= threshold - margin) & (targets <= threshold + margin)  # 0.9-1.1%
-    high_range = targets > (threshold + margin)  # > 1.1%
+def custom_loss(predictions, targets):
+    # Binary classification loss
+    is_high = (targets >= 0.01).float()
+    binary_loss = F.binary_cross_entropy(predictions > 0.01, is_high)
     
-    # Force predictions to zero for low concentrations
-    zero_loss = 50.0 * torch.mean(predictions[zero_range]**2)
+    # Regression loss only for high values
+    high_mask = targets >= 0.01
+    regression_loss = F.mse_loss(predictions[high_mask], targets[high_mask]) if torch.any(high_mask) else 0.0
     
-    # Force predictions to exactly 0.01 around threshold with minimal variance
-    if torch.any(one_range):
-        threshold_predictions = predictions[one_range]
-        threshold_loss = 20.0 * (torch.mean((threshold_predictions - threshold)**2) + 
-                                torch.var(threshold_predictions))
-    else:
-        threshold_loss = 0.0
-    
-    # Standard MSE for high concentrations
-    high_loss = F.mse_loss(predictions[high_range], targets[high_range]) if torch.any(high_range) else 0.0
-    
-    return zero_loss + threshold_loss + high_loss
+    return binary_loss * 10.0 + regression_loss
 
 
 def calculate_marker_importance(reference_profiles):
