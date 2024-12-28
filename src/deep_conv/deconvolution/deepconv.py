@@ -40,14 +40,8 @@ class DeconvolutionModel(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # Classifier for each cell type
-        self.classifier = nn.Sequential(
-            nn.Linear(256, num_cell_types),
-            nn.Sigmoid()
-        )
-        
-        # Regressor
-        self.regressor = nn.Linear(256, num_cell_types)
+        # Simple regressor
+        self.output = nn.Linear(256, num_cell_types)
         self.softmax = nn.Softmax(dim=1)
     
     def forward(self, X, coverage):
@@ -57,20 +51,28 @@ class DeconvolutionModel(nn.Module):
         X_weighted = X * torch.log1p(coverage)
         
         features = self.features(X_weighted)
-        is_one_percent = self.classifier(features)  # One per cell type
-        predictions = self.softmax(self.regressor(features))
+        predictions = self.softmax(self.output(features))
         
-        return predictions * is_one_percent
+        # Zero out predictions below 1%
+        is_low = predictions < 0.01
+        predictions = torch.where(is_low, torch.zeros_like(predictions), predictions)
+        return predictions
+
 
 def custom_loss(predictions, targets):
-    # Binary loss - maintain dimensions
-    is_high = (targets >= 0.01).float()
-    binary_loss = F.binary_cross_entropy(predictions, is_high)
+    # Higher weight for errors around 1%
+    near_one_mask = (targets >= 0.009) & (targets <= 0.011)
+    one_percent_loss = 5.0 * F.mse_loss(predictions[near_one_mask], targets[near_one_mask]) if torch.any(near_one_mask) else 0.0
     
-    # MSE loss
+    # Strong penalty for predictions when target is below 1%
+    low_mask = targets < 0.01
+    low_loss = 2.0 * torch.mean(predictions[low_mask]**2) if torch.any(low_mask) else 0.0
+    
+    # Standard MSE for the rest
     mse_loss = F.mse_loss(predictions, targets)
     
-    return binary_loss + mse_loss
+    return mse_loss + one_percent_loss + low_loss
+
 
 def calculate_marker_importance(reference_profiles):
     """
