@@ -50,18 +50,19 @@ class DeconvolutionModel(nn.Module):
         return self.softmax(self.output(self.features(X_weighted)))
 
 def custom_loss(predictions, targets):
-    # For values near 1% (0.8-1.2%), penalize variance heavily
-    near_one_mask = (targets >= 0.008) & (targets <= 0.012)
-    variance_loss = 15.0 * torch.var(predictions[near_one_mask]) if torch.any(near_one_mask) else 0.0
+    # Standard MSE for high concentrations (>1%)
+    high_mask = targets >= 0.01
+    high_loss = F.mse_loss(predictions[high_mask], targets[high_mask]) if torch.any(high_mask) else 0.0
     
-    # For values under 0.8%, drive to zero
-    under_mask = targets < 0.008
-    zero_loss = 20.0 * torch.mean(predictions[under_mask]**2) if torch.any(under_mask) else 0.0
+    # Binary decision boundary at 1% with tight variance
+    near_one_mask = (targets > 0.009) & (targets < 0.011)
+    boundary_loss = 15.0 * torch.var(predictions[near_one_mask]) if torch.any(near_one_mask) else 0.0
     
-    # For values over 1.2%, use standard MSE with lower weight
-    standard_mse = F.mse_loss(predictions, targets)
+    # Force all low values (<0.9%) to zero
+    low_mask = targets < 0.009
+    low_loss = 25.0 * torch.mean(predictions[low_mask]**2) if torch.any(low_mask) else 0.0
     
-    return standard_mse + variance_loss + zero_loss
+    return high_loss + boundary_loss + low_loss
 
 
 def calculate_marker_importance(reference_profiles):
