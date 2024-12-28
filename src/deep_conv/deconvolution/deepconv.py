@@ -49,20 +49,27 @@ class DeconvolutionModel(nn.Module):
         X_weighted = X * torch.log1p(coverage)
         return self.softmax(self.output(self.features(X_weighted)))
 
-def custom_loss(predictions, targets):
-    # Standard MSE for high concentrations (>1%)
-    high_mask = targets >= 0.01
-    high_loss = F.mse_loss(predictions[high_mask], targets[high_mask]) if torch.any(high_mask) else 0.0
+def custom_loss(predictions, targets, threshold=0.01, margin=0.001):
+    # Define ranges
+    zero_range = targets < (threshold - margin)  # < 0.9%
+    one_range = (targets >= threshold - margin) & (targets <= threshold + margin)  # 0.9-1.1%
+    high_range = targets > (threshold + margin)  # > 1.1%
     
-    # Binary decision boundary at 1% with tight variance
-    near_one_mask = (targets > 0.009) & (targets < 0.011)
-    boundary_loss = 15.0 * torch.var(predictions[near_one_mask]) if torch.any(near_one_mask) else 0.0
+    # Force predictions to zero for low concentrations
+    zero_loss = 50.0 * torch.mean(predictions[zero_range]**2)
     
-    # Force all low values (<0.9%) to zero
-    low_mask = targets < 0.009
-    low_loss = 25.0 * torch.mean(predictions[low_mask]**2) if torch.any(low_mask) else 0.0
+    # Force predictions to exactly 0.01 around threshold with minimal variance
+    if torch.any(one_range):
+        threshold_predictions = predictions[one_range]
+        threshold_loss = 20.0 * (torch.mean((threshold_predictions - threshold)**2) + 
+                                torch.var(threshold_predictions))
+    else:
+        threshold_loss = 0.0
     
-    return high_loss + boundary_loss + low_loss
+    # Standard MSE for high concentrations
+    high_loss = F.mse_loss(predictions[high_range], targets[high_range]) if torch.any(high_range) else 0.0
+    
+    return zero_loss + threshold_loss + high_loss
 
 
 def calculate_marker_importance(reference_profiles):
