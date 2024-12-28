@@ -50,21 +50,21 @@ class DeconvolutionModel(nn.Module):
         return self.softmax(self.output(self.features(X_weighted)))
 
 def custom_loss(predictions, targets):
-   base_loss = F.mse_loss(predictions, targets)
-   
-   # Hard penalty for predictions between 0-0.8%
-   very_low_mask = (targets < 0.008)
-   very_low_penalty = 15.0 * torch.mean(predictions[very_low_mask]**2)
-   
-   # Tight variance penalty around 1% (0.8-1.2%)
-   one_percent_mask = (targets >= 0.008) & (targets <= 0.012)
-   if torch.any(one_percent_mask):
-       one_percent_var = torch.var(predictions[one_percent_mask])
-       var_penalty = 10.0 * one_percent_var
-   else:
-       var_penalty = 0.0
-       
-   return base_loss + very_low_penalty + var_penalty
+    base_loss = F.mse_loss(predictions, targets)
+    
+    # Binary penalty - force predictions to effectively be 0 below 1%
+    below_threshold_mask = targets < 0.01
+    below_threshold_penalty = 20.0 * torch.mean(predictions[below_threshold_mask]**2)
+    
+    # Strong variance penalty exactly at 1%
+    at_one_percent = (targets >= 0.009) & (targets <= 0.011)
+    if torch.any(at_one_percent):
+        one_percent_var = torch.var(predictions[at_one_percent])
+        var_penalty = 15.0 * one_percent_var
+    else:
+        var_penalty = 0.0
+    
+    return base_loss + below_threshold_penalty + var_penalty
 
 def calculate_marker_importance(reference_profiles):
     """
