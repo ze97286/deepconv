@@ -29,7 +29,6 @@ class TissueDeconvolutionDataset(Dataset):
             'y': self.y[idx]
         }
 
-
 class DeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types):
         super().__init__()
@@ -40,15 +39,16 @@ class DeconvolutionModel(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # Binary classifier for >1%
+        # More aggressive classifier for >1%
         self.classifier = nn.Sequential(
-            nn.Linear(256, 64),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
             nn.Sigmoid()
         )
         
-        # Regressor for concentration when >1%
         self.regressor = nn.Linear(256, num_cell_types)
         self.softmax = nn.Softmax(dim=1)
     
@@ -62,20 +62,32 @@ class DeconvolutionModel(nn.Module):
         is_high = self.classifier(features)
         predictions = self.softmax(self.regressor(features))
         
-        # Zero out predictions where classifier says <1%
-        return predictions * is_high
+        # More aggressive thresholding
+        threshold = 0.7  # Higher threshold for more confidence
+        return predictions * (is_high > threshold).float()
 
 def custom_loss(predictions, targets):
-    # Binary classification loss
+    # Binary classification with higher weight
     is_high = (targets >= 0.01).float()
     pred_high = (predictions >= 0.01).float()
     binary_loss = F.binary_cross_entropy(pred_high, is_high)
     
-    # Regression loss only for high values
+    # Separate regression losses for different ranges
     high_mask = targets >= 0.01
-    regression_loss = F.mse_loss(predictions[high_mask], targets[high_mask]) if torch.any(high_mask) else 0.0
+    near_one_mask = (targets >= 0.009) & (targets <= 0.011)
     
-    return binary_loss * 10.0 + regression_loss
+    # Standard regression for high values
+    high_loss = F.mse_loss(predictions[high_mask], targets[high_mask]) if torch.any(high_mask) else 0.0
+    
+    # Extra penalty for variance around 1%
+    near_one_loss = torch.var(predictions[near_one_mask]) if torch.any(near_one_mask) else 0.0
+    
+    # Higher penalty for non-zero predictions when target is low
+    low_mask = targets < 0.01
+    zero_loss = 20.0 * torch.mean(predictions[low_mask]**2) if torch.any(low_mask) else 0.0
+    
+    return binary_loss * 15.0 + high_loss + near_one_loss * 10.0 + zero_loss
+
 
 def calculate_marker_importance(reference_profiles):
     """
