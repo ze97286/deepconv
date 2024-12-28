@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import random
 import os
 import matplotlib.pyplot as plt
+import pywt
 
 
 class TissueDeconvolutionDataset(Dataset):
@@ -30,27 +31,36 @@ class TissueDeconvolutionDataset(Dataset):
         }
 
 
+
 class DeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types):
+    def __init__(self, num_markers, num_cell_types, wavelet='db4', level=3):
         super().__init__()
+        self.wavelet = wavelet
+        self.level = level
+        
+        # Calculate expected coefficient length after wavelet transform
+        dummy_signal = torch.zeros(num_markers)
+        coeffs = pywt.wavedec(dummy_signal, wavelet, level=level)
+        coeff_len = sum(len(c) for c in coeffs)
+        
         self.features = nn.Sequential(
-            nn.Linear(num_markers, 256),
-            nn.LayerNorm(256),
+            nn.Linear(coeff_len, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
             nn.Dropout(0.2)
         )
         
-        # Binary classifier for >1%
-        self.is_high = nn.Sequential(
-            nn.Linear(256, 1),
-            nn.Sigmoid()
-        )
+        self.output = nn.Linear(512, num_cell_types)
+        self.softmax = nn.Softmax(dim=1)
         
-        # Scale factor predictor
-        self.scale = nn.Sequential(
-            nn.Linear(256, num_cell_types),
-            nn.Softplus()  # Always positive
-        )
+    def wavelet_transform(self, x):
+        # Apply wavelet transform to each sample
+        batch_coeffs = []
+        for sample in x:
+            coeffs = pywt.wavedec(sample.cpu().numpy(), self.wavelet, level=self.level)
+            flat_coeffs = np.concatenate([c.flatten() for c in coeffs])
+            batch_coeffs.append(flat_coeffs)
+        return torch.tensor(np.stack(batch_coeffs), dtype=torch.float32).to(x.device)
     
     def forward(self, X, coverage):
         valid_mask = ~torch.isnan(X)
@@ -58,33 +68,36 @@ class DeconvolutionModel(nn.Module):
         coverage = coverage * valid_mask
         X_weighted = X * torch.log1p(coverage)
         
-        features = self.features(X_weighted)
-        high_prob = self.is_high(features)
-        scale = self.scale(features)
+        # Transform to wavelet domain
+        wavelet_features = self.wavelet_transform(X_weighted)
         
-        # Final prediction
-        predictions = torch.where(high_prob > 0.5, scale, torch.zeros_like(scale))
-        return predictions
+        # Process wavelet coefficients
+        features = self.features(wavelet_features)
+        return self.softmax(self.output(features))
 
 def custom_loss(predictions, targets):
-    # Binary classification loss
-    high_targets = (targets >= 0.01).float()
-    pred_high = (predictions >= 0.01).float()
-    binary_loss = F.binary_cross_entropy(pred_high, high_targets)
+    # Standard MSE in concentration space
+    mse_loss = F.mse_loss(predictions, targets)
     
-    # Scale prediction loss only for high concentrations
-    high_mask = targets >= 0.01
-    if torch.any(high_mask):
-        scale_loss = F.mse_loss(predictions[high_mask], targets[high_mask])
-    else:
-        scale_loss = 0.0
+    # Penalty for non-zero predictions below 1%
+    low_mask = targets < 0.01
+    zero_loss = torch.mean(predictions[low_mask]**2)
     
-    # Strong penalty for false positives
-    false_positive_loss = torch.mean(predictions[~high_targets.bool()]**2)
+    # Added wavelet coherence penalty
+    batch_size = predictions.shape[0]
+    coherence_loss = 0
+    for i in range(batch_size):
+        pred_wave = pywt.wavedec(predictions[i].cpu().numpy(), 'db4', level=3)
+        target_wave = pywt.wavedec(targets[i].cpu().numpy(), 'db4', level=3)
+        
+        # Compare wavelet coefficients at each level
+        level_loss = sum(F.mse_loss(torch.tensor(p), torch.tensor(t)) 
+                        for p, t in zip(pred_wave, target_wave))
+        coherence_loss += level_loss
     
-    return binary_loss + scale_loss + 2.0 * false_positive_loss
-
-
+    coherence_loss /= batch_size
+    
+    return mse_loss + 5.0 * zero_loss + coherence_loss
 
 def calculate_marker_importance(reference_profiles):
     """
