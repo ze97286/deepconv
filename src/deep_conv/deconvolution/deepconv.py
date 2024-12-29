@@ -714,7 +714,13 @@ def main():
     )
     # X_val, y_val, coverage_val = augment_low_concentration_samples(data['X_val'], data['y_val'], data['coverage_val'], 1)
     X_val, y_val, coverage_val = data['X_val'], data['y_val'], data['coverage_val']
-    X_val_syn,cov_val_syn,Y_val_syn,_ = generate_enriched_data_from_df(atlas_df=atlas_df,compositions=compositions, n_samples_per_comp=100,coverage_mean=10,coverage_std=5, seed=42)
+    X_val_syn,cov_val_syn,Y_val_syn,_ = generate_enriched_data_from_df(
+        atlas_df=df,
+        compositions=compositions, 
+        n_samples_per_comp=100,
+        coverage_mean=10,
+        coverage_std=5, 
+        seed=43)
     X_val = np.vstack([X_val, X_val_syn])
     coverage_val = np.vstack([coverage_val, cov_val_syn])
     y_val = np.vstack([y_val, Y_val_syn])
