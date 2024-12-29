@@ -151,48 +151,39 @@ class MultiLabelDeconvolutionModel(nn.Module):
         # Shared features
         features = self.features(X_weighted)
 
-        # (1) Multi‐label classification
-        logits = self.classifier(features)          # shape (B, C)
-        probs_high = torch.sigmoid(logits)          # shape (B, C)
-
-        # (2) Regressor for fractional concentration
-        raw_regression = self.regressor(features)   # shape (B, C)
-        predictions = self.softmax(raw_regression)  # shape (B, C)
-
-        # Only zero out predictions well below 1%
-        very_low_mask = (predictions < 0.008).float()
-        predictions = predictions * (1 - very_low_mask)
+        logits = self.classifier(features)
+        probs_high = torch.sigmoid(logits)
+        
+        # Fractional predictions
+        raw_regression = self.regressor(features)
+        predictions = self.softmax(raw_regression)
+        
+        # Only zero out predictions well below 1% using classifier output
+        predictions = torch.where(probs_high < 0.2, torch.zeros_like(predictions), predictions)
         
         return predictions, probs_high
 
 
 def multi_label_custom_loss_tuned(
-    predictions,      # (B, C)
-    probs_high,       # (B, C)
-    targets,          # (B, C)
-    boundary=0.01, 
-    boundary_width=0.002,  # Tighter boundary width
-    classification_weight=5.0,
-    boundary_mse_weight=8.0  # Higher weight for boundary precision
+    predictions,
+    probs_high,
+    targets,
+    boundary=0.01,
+    boundary_width=0.002,
+    classification_weight=5.0
 ):
-    # Binary classification loss for >1%
-    is_high_truth = (targets >= boundary).float()
-    bce_loss = F.binary_cross_entropy(probs_high, is_high_truth)
+    # Binary classification loss with focus on boundary
+    is_high = (targets >= boundary).float()
+    bce_loss = F.binary_cross_entropy(probs_high, is_high)
     
-    # Heavy penalty for variance around 1%
+    # MSE loss with extra weight near boundary
     near_boundary = ((targets >= boundary - boundary_width) & 
-                    (targets <= boundary + boundary_width))
-    boundary_var_loss = torch.var(predictions[near_boundary]) if torch.any(near_boundary) else 0.0
+                    (targets <= boundary + boundary_width)).float()
+    mse_base = F.mse_loss(predictions, targets, reduction='none')
+    weighted_mse = mse_base * (1 + 5.0 * near_boundary)
+    mse_loss = weighted_mse.mean()
     
-    # Zero out very low values (< 0.8%)
-    very_low_mask = targets < (boundary - 2*boundary_width)
-    zero_loss = 10.0 * torch.mean(predictions[very_low_mask]**2) if torch.any(very_low_mask) else 0.0
-    
-    # Standard MSE for higher values
-    high_mask = targets >= (boundary - boundary_width)
-    mse_loss = F.mse_loss(predictions[high_mask], targets[high_mask]) if torch.any(high_mask) else 0.0
-    
-    return classification_weight * bce_loss + mse_loss + boundary_mse_weight * boundary_var_loss + zero_loss
+    return classification_weight * bce_loss + mse_loss
 
 
 def train_model(
@@ -237,7 +228,6 @@ def train_model(
                 boundary=0.01,
                 boundary_width=0.005,
                 classification_weight=5.0,
-                boundary_mse_weight=2.0
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
@@ -263,7 +253,6 @@ def train_model(
                     boundary=0.01,
                     boundary_width=0.005,
                     classification_weight=5.0,
-                    boundary_mse_weight=2.0
                 )
                 val_loss += loss.item()
 
