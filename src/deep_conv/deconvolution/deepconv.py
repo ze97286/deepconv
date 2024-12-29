@@ -100,6 +100,92 @@ def wavelet_custom_loss(predictions, targets):
     return mse_loss + 5.0 * zero_loss + coherence_loss
 
 
+def generate_enriched_data_from_df(
+    atlas_df,
+    compositions,
+    n_samples_per_comp=100,
+    coverage_mean=30,
+    coverage_std=10,
+    seed=42
+):
+    """
+    Generate synthetic methylation data using an atlas DataFrame of shape
+    (num_markers, num_cell_types) and a list of composition dicts.
+
+    Args:
+        atlas_df (pd.DataFrame):
+            index=markers, columns=cell types. 
+            Each cell is the unmethylation fraction in [0..1].
+        compositions (list of dict):
+            Each dict: cell_type -> fraction. 
+            E.g. {"CD4": 0.01, "Mono":0.24, "Neutro":0.20, ...} 
+            sums ~1.0
+        n_samples_per_comp (int):
+            How many synthetic samples to generate for each composition.
+        coverage_mean (float):
+            Mean coverage to sample from for each marker.
+        coverage_std (float):
+            Stddev for coverage distribution across markers.
+        seed (int):
+            Random seed for reproducibility.
+
+    Returns:
+        X (np.ndarray) shape (N, M):
+            Unmethylation fraction for each sample (N) and marker (M).
+        coverage_arr (np.ndarray) shape (N, M):
+            Coverage count for each sample and marker.
+        Y (np.ndarray) shape (N, C):
+            True fractions for each sample (N) across all cell types (C).
+        cell_types (list):
+            The list of atlas_df.columns in sorted order (or original order).
+    """
+    rng = np.random.default_rng(seed)
+    # cell_types as list (maintain original or sorted order)
+    cell_types = list(atlas_df.columns)
+    num_markers = atlas_df.shape[0]  # each row is a marker
+    X_list = []
+    coverage_list = []
+    Y_list = []
+    for comp_dict in compositions:
+        # Build fraction vector for each cell type
+        # cell_types is the reference order
+        fraction_vector = np.array([comp_dict.get(ct, 0.0) for ct in cell_types], dtype=float)
+        # (Optionally) normalize if needed:
+        # if fraction_vector.sum() > 0:
+        #     fraction_vector /= fraction_vector.sum()
+        for _ in range(n_samples_per_comp):
+            # Draw coverage per marker
+            cov = rng.normal(loc=coverage_mean, scale=coverage_std, size=num_markers)
+            cov = np.clip(np.round(cov), 0, None).astype(int)
+            # Weighted average of unmethylation fraction across cell types => final fraction
+            # shape: (num_markers,)
+            # We sum over cell_types: fraction_vector[i] * atlas_df.iloc[:, i]
+            # but we have marker x celltype => we want marker x celltype, for each celltype i -> atlas_df[cell_types[i]]
+            # atlas_df for cell_types[i] => shape (num_markers,) 
+            weighted_unmeth = np.zeros(num_markers, dtype=float)
+            for i, ct in enumerate(cell_types):
+                # column in df
+                ct_vector = atlas_df[ct].values  # shape (num_markers,)
+                weighted_unmeth += fraction_vector[i] * ct_vector
+            # Now simulate reads
+            synthetic_X = np.zeros(num_markers, dtype=float)
+            for m in range(num_markers):
+                c_m = cov[m]
+                if c_m > 0:
+                    num_unmeth = rng.binomial(n=c_m, p=weighted_unmeth[m])
+                    synthetic_X[m] = num_unmeth / c_m
+                else:
+                    synthetic_X[m] = np.nan  # coverage=0 => treat as missing
+            X_list.append(synthetic_X)
+            coverage_list.append(cov)
+            Y_list.append(fraction_vector)
+    # Convert to arrays
+    X_arr = np.vstack(X_list)               # shape (N, num_markers)
+    coverage_arr = np.vstack(coverage_list) # shape (N, num_markers)
+    Y_arr = np.vstack(Y_list)               # shape (N, num_cell_types)
+    return X_arr, coverage_arr, Y_arr, cell_types
+
+
 class DeconvolutionModel(nn.Module):
     """
     Multi-bin approach to handle distinct fraction ranges:
@@ -591,14 +677,47 @@ def main():
     torch.set_num_interop_threads(1)
     model_name = args.model_name
     data = load_dataset(args.training_path)
+    pd.read_csv("/users/zetzioni/sharedscratch/atlas/atlas_dmr_by_read.blood+gi+tum.U100.l4.bed", sep="\t").dropna()
+    df = df.drop_duplicates(df.columns[8:]).dropna()    
+    compositions = [
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.24, "Neutrophils":0.20, "CD4-T-cells": 0.0},
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.24, "Neutrophils":0.20, "CD4-T-cells": 0.001},
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.24, "Neutrophils":0.20, "CD4-T-cells": 0.005},
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.24, "Neutrophils":0.20, "CD4-T-cells": 0.01},
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.24, "Neutrophils":0.20, "CD8-T-cells": 0.0},
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.24, "Neutrophils":0.20, "CD8-T-cells": 0.001},
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.24, "Neutrophils":0.20, "CD8-T-cells": 0.005},
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.24, "Neutrophils":0.20, "CD8-T-cells": 0.01},
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.24, "Neutrophils":0.20, "CD4-T-cells": 0.0,"CD8-T-cells": 0.0},
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.24, "Neutrophils":0.20, "CD4-T-cells": 0.0005,"CD8-T-cells": 0.0005},
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.24, "Neutrophils":0.20, "CD4-T-cells": 0.0025,"CD8-T-cells": 0.0025},
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.24, "Neutrophils":0.20, "CD4-T-cells": 0.005,"CD8-T-cells": 0.005},
+        {"CD34-erythroblasts":0.15, "CD34-megakaryocytes":0.40, "Monocytes":0.23, "Neutrophils":0.20, "CD4-T-cells": 0.01,"CD8-T-cells": 0.01},
+    ]
 
     # X_train, y_train, coverage_train = augment_low_concentration_samples(data['X_train'], data['y_train'], data['coverage_train'], 1)
     X_train, y_train, coverage_train = data['X_train'], data['y_train'], data['coverage_train']
+    X_syn, coverage_syn, Y_syn, _ = generate_enriched_data_from_df(
+        atlas_df=df,
+        compositions=compositions,
+        n_samples_per_comp=200,
+        coverage_mean=5,
+        coverage_std=5,
+        seed=42
+    )
+    X_train = np.vstack([X_train, X_syn])
+    coverage_train = np.vstack([coverage_train, coverage_syn])
+    y_train = np.vstack([y_train, Y_syn])
+
     train_dataset = TissueDeconvolutionDataset(
         X_train, coverage_train, y_train
     )
     # X_val, y_val, coverage_val = augment_low_concentration_samples(data['X_val'], data['y_val'], data['coverage_val'], 1)
     X_val, y_val, coverage_val = data['X_val'], data['y_val'], data['coverage_val']
+    X_val_syn,cov_val_syn,Y_val_syn,_ = generate_enriched_data_from_df(atlas_df=atlas_df,compositions=compositions, n_samples_per_comp=100,coverage_mean=10,coverage_std=5, seed=42)
+    X_val = np.vstack([X_val, X_val_syn])
+    coverage_val = np.vstack([coverage_val, cov_val_syn])
+    y_val = np.vstack([y_val, Y_val_syn])
     val_dataset = TissueDeconvolutionDataset(
         X_val, coverage_val, y_val
     )
@@ -633,8 +752,7 @@ def main():
     marker_read_proportions, counts = pats_to_homog(
         args.atlas_path, args.pats_path, args.wgbs_tools_exec_path
     )
-    df = pd.read_csv("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/Atlas_dmr_by_read.blood+gi+tum.U100.l4.bed", sep="\t").dropna()
-    df = df.drop_duplicates(df.columns[8:]).dropna()    
+    
     atlas_names = set(df.name.unique())
     counts = counts[counts.name.isin(atlas_names)]
     marker_read_proportions = marker_read_proportions[marker_read_proportions.name.isin(atlas_names)]
