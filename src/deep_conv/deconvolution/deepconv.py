@@ -224,7 +224,7 @@ def multi_label_custom_loss_tuned(
     return loss
 
 
-def train_model_tuned(
+def train_model(
     model,
     train_loader,
     val_loader,
