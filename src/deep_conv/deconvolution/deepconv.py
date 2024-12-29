@@ -112,9 +112,8 @@ class MultiLabelDeconvolutionModel(nn.Module):
         self,
         num_markers,
         num_cell_types,
-        # Tweak these to reduce zeroing out of near‐1% predictions
-        clamp_below=0.003,          # Force <0.3% to 0.  Looser clamp than default 0.005
-        classifier_threshold=0.3    # Lower threshold => more borderline predictions are "≥1%"
+        clamp_below=0.004,          
+        classifier_threshold=0.45
     ):
         super().__init__()
         self.num_cell_types = num_cell_types
@@ -266,8 +265,8 @@ def train_model(
                 boundary=0.01,
                 boundary_width=0.005,
                 classification_weight=10.0,
-                boundary_bce_weight=4.0,   # heavier near boundary
-                boundary_mse_weight=4.0    # heavier near boundary
+                boundary_bce_weight=2.0,
+                boundary_mse_weight=2.0
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
@@ -293,8 +292,8 @@ def train_model(
                     boundary=0.01,
                     boundary_width=0.005,
                     classification_weight=10.0,
-                    boundary_bce_weight=4.0,
-                    boundary_mse_weight=4.0
+                    boundary_bce_weight=2.0,
+                    boundary_mse_weight=2.0
                 )
                 val_loss += loss.item()
 
@@ -317,20 +316,18 @@ def train_model(
     return model
 
 
-def predict_tuned(model, X, coverage):
+def predict(model, X, coverage):
     """
     Returns predicted cell-type fractions => shape (n_samples, num_cell_types).
     """
     model.eval()
     predictions_list = []
-
     with torch.no_grad():
         for i in range(len(X)):
             x = torch.tensor(X[i:i+1], dtype=torch.float32)
             c = torch.tensor(coverage[i:i+1], dtype=torch.float32)
             preds, _ = model(x, c)
             predictions_list.append(preds.cpu().numpy())
-
     return np.vstack(predictions_list)
 
 
