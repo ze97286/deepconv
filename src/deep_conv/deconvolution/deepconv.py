@@ -102,19 +102,20 @@ def wavelet_custom_loss(predictions, targets):
 
 class MultiLabelDeconvolutionModel(nn.Module):
     """
-    Model that outputs:
-      - 'probs_high' for each cell type (probability that cell type >= 1%)
-      - 'predictions' (0..1) for each cell type, clamped if below threshold.
-
-    Args:
-        num_markers (int): Number of markers in input (X).
-        num_cell_types (int): Number of cell types to predict.
-        clamp_below (float): E.g., 0.005 => force anything below 0.5% to 0.0
-        classifier_threshold (float): Sigmoid threshold to decide if cell type is >= 1%.
+    A multi‐label model that:
+      - Learns coverage‐weighted features
+      - Predicts probability each cell type >= 1% (probs_high)
+      - Predicts fractional concentration for each cell type
+      - Applies a clamp to small predictions
     """
-    def __init__(self, num_markers, num_cell_types,
-                 clamp_below=0.005,
-                 classifier_threshold=0.5):
+    def __init__(
+        self,
+        num_markers,
+        num_cell_types,
+        # Tweak these to reduce zeroing out of near‐1% predictions
+        clamp_below=0.003,          # Force <0.3% to 0.  Looser clamp than default 0.005
+        classifier_threshold=0.3    # Lower threshold => more borderline predictions are "≥1%"
+    ):
         super().__init__()
         self.num_cell_types = num_cell_types
         self.clamp_below = clamp_below
@@ -128,48 +129,42 @@ class MultiLabelDeconvolutionModel(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # Multi-label classifier => shape (batch_size, num_cell_types)
+        # Multi-label classifier => shape (B, C)
         self.classifier = nn.Sequential(
             nn.Linear(256, 64),
             nn.ReLU(),
-            nn.Linear(64, num_cell_types)  # No Sigmoid here -> we'll apply manually
+            nn.Linear(64, num_cell_types)  # We'll manually apply sigmoid
         )
         
-        # Regressor for concentration
+        # Softmax-based regressor => shape (B, C)
         self.regressor = nn.Linear(256, num_cell_types)
         self.softmax = nn.Softmax(dim=1)
 
     def forward(self, X, coverage):
-        """
-        1) Zero-out NaNs in X
-        2) coverage weighting (X * log1p(coverage))
-        3) Shared features
-        4) Multi-label classification via Sigmoid => shape (B, C)
-        5) Softmax regression => shape (B, C)
-        6) Zero out predictions if classifier < threshold
-        7) Clamp below 'clamp_below' to 0.0
-        """
+        # Handle NaNs in X
         valid_mask = ~torch.isnan(X)
         X_filled = torch.where(valid_mask, X, torch.zeros_like(X))
         coverage_filled = coverage * valid_mask
+
+        # Coverage weighting
         X_weighted = X_filled * torch.log1p(coverage_filled)
 
-        # Shared representation
+        # Shared features
         features = self.features(X_weighted)
 
-        # Classifier: multi-label => shape (B, C)
-        logits = self.classifier(features) 
-        probs_high = torch.sigmoid(logits)  # (B, C), each cell type's ">= 1%" probability
+        # (1) Multi‐label classification
+        logits = self.classifier(features)          # shape (B, C)
+        probs_high = torch.sigmoid(logits)          # shape (B, C)
 
-        # Regression => shape (B, C)
-        raw_regression = self.regressor(features)
-        predictions = self.softmax(raw_regression)  # (B, C), each cell type fraction
+        # (2) Regressor for fractional concentration
+        raw_regression = self.regressor(features)   # shape (B, C)
+        predictions = self.softmax(raw_regression)  # shape (B, C)
 
-        # Zero out predictions where classifier < threshold
-        mask_high = (probs_high >= self.classifier_threshold).float()  # (B, C)
+        # (3) Zero out predictions if classifier < threshold
+        mask_high = (probs_high >= self.classifier_threshold).float()
         predictions = predictions * mask_high
 
-        # Clamp small predictions to zero
+        # (4) Clamp smaller than clamp_below => 0
         predictions = torch.where(
             predictions < self.clamp_below,
             torch.zeros_like(predictions),
@@ -179,56 +174,164 @@ class MultiLabelDeconvolutionModel(nn.Module):
         return predictions, probs_high
 
 
-def multi_label_custom_loss(
-    predictions,     # (B, C)
-    probs_high,      # (B, C)
-    targets,         # (B, C)
-    boundary=0.01,         # 1% cutoff
-    boundary_width=0.005,  # ±0.5% region for "near boundary"
+def multi_label_custom_loss_tuned(
+    predictions,      # (B, C)
+    probs_high,       # (B, C)
+    targets,          # (B, C)
+    boundary=0.01, 
+    boundary_width=0.005,
     classification_weight=10.0,
-    boundary_bce_weight=2.0,
-    boundary_mse_weight=2.0
+    # Heavier boundary multipliers to push near‐1% strongly
+    boundary_bce_weight=4.0,
+    boundary_mse_weight=4.0
 ):
     """
-    Combines:
-      (1) Multi-label BCE classification loss at 1% boundary
-      (2) Weighted MSE for predicted fractions
-
-    1) BCE: is_high_truth = (targets >= boundary), shape (B, C)
-       - Weighted more heavily for samples near boundary
-    2) MSE: only on cell-types that have >0% (can refine to >= boundary if desired)
-       - Also weighted more if near boundary
+    - BCE on whether each cell type >= 1%
+    - Heavier penalty for near-boundary misclassifications
+    - MSE for fractional predictions, also heavier near boundary
     """
-    # 1) Multi-label classification target
-    is_high_truth = (targets >= boundary).float()  # (B, C)
+    # Classification target => shape (B, C)
+    is_high_truth = (targets >= boundary).float()
     
-    # Define near-boundary mask for (0.01 ± 0.005) => [0.005, 0.015]
+    # Near boundary mask => [0.005, 0.015] if boundary=0.01
     lower = boundary - boundary_width
     upper = boundary + boundary_width
-    near_boundary_mask = ((targets >= lower) & (targets <= upper)).float()  # (B, C)
+    near_boundary_mask = ((targets >= lower) & (targets <= upper)).float()  # shape (B, C)
 
-    # BCE (multi-label) => shape (B, C)
-    bce_loss_raw = F.binary_cross_entropy(probs_high, is_high_truth, reduction='none')
-    # Heavier weighting for near-boundary samples
+    # (1) BCE loss
+    bce_loss_raw = F.binary_cross_entropy(
+        probs_high, is_high_truth, reduction='none'
+    )
+    # Heavier weighting for boundary region
     bce_loss_raw = bce_loss_raw * (1.0 + boundary_bce_weight * near_boundary_mask)
-    bce_loss = bce_loss_raw.mean()  # average over everything
+    bce_loss = bce_loss_raw.mean()
 
-    # 2) MSE for cell-types > 0
-    high_mask = (targets > 0)       # boolean mask
+    # (2) MSE loss => only for targets > 0 (or >= boundary if you prefer)
+    high_mask = (targets > 0)
     if torch.any(high_mask):
         base_mse = F.mse_loss(predictions[high_mask], targets[high_mask])
-        # Weighted more if near-boundary
-        mse_boundary_mask = near_boundary_mask[high_mask]  # shape (#True in mask,)
+        
+        # Boundary weighting
+        mse_boundary_mask = near_boundary_mask[high_mask]
         if torch.any(mse_boundary_mask):
             base_mse += boundary_mse_weight * mse_boundary_mask.mean() * base_mse
         mse_loss = base_mse
     else:
         mse_loss = 0.0
 
-    # Combine classification + regression
+    # Combine
     loss = classification_weight * bce_loss + mse_loss
     return loss
 
+
+def train_model_tuned(
+    model,
+    train_loader,
+    val_loader,
+    model_path,
+    num_epochs=100,
+    patience=10,
+    lr=1e-4
+):
+    """
+    Training pipeline using the tuned multi_label_custom_loss_tuned.
+    Adjust any hyperparameters inside 'multi_label_custom_loss_tuned' for boundary weighting, etc.
+    """
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5, verbose=True
+    )
+    os.makedirs(model_path, exist_ok=True)
+    
+    best_val_loss = float('inf')
+    patience_counter = 0
+
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss = 0.0
+
+        # Training pass
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]"):
+            X = batch['X']
+            y = batch['y']
+            coverage = batch['coverage']
+
+            optimizer.zero_grad()
+            preds, probs_high = model(X, coverage)
+
+            loss = multi_label_custom_loss_tuned(
+                predictions=preds,
+                probs_high=probs_high,
+                targets=y,
+                boundary=0.01,
+                boundary_width=0.005,
+                classification_weight=10.0,
+                boundary_bce_weight=4.0,   # heavier near boundary
+                boundary_mse_weight=4.0    # heavier near boundary
+            )
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            optimizer.step()
+            train_loss += loss.item()
+
+        train_loss /= len(train_loader)
+
+        # Validation pass
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]"):
+                X = batch['X']
+                y = batch['y']
+                coverage = batch['coverage']
+
+                preds, probs_high = model(X, coverage)
+                loss = multi_label_custom_loss_tuned(
+                    predictions=preds,
+                    probs_high=probs_high,
+                    targets=y,
+                    boundary=0.01,
+                    boundary_width=0.005,
+                    classification_weight=10.0,
+                    boundary_bce_weight=4.0,
+                    boundary_mse_weight=4.0
+                )
+                val_loss += loss.item()
+
+        val_loss /= len(val_loader)
+        print(f"Epoch {epoch+1}/{num_epochs} => Train Loss={train_loss:.6f}, Val Loss={val_loss:.6f}")
+        scheduler.step(val_loss)
+
+        # Early stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), os.path.join(model_path, "best_model.pt"))
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered.")
+                break
+
+    model.load_state_dict(torch.load(os.path.join(model_path, "best_model.pt")))
+    return model
+
+
+def predict_tuned(model, X, coverage):
+    """
+    Returns predicted cell-type fractions => shape (n_samples, num_cell_types).
+    """
+    model.eval()
+    predictions_list = []
+
+    with torch.no_grad():
+        for i in range(len(X)):
+            x = torch.tensor(X[i:i+1], dtype=torch.float32)
+            c = torch.tensor(coverage[i:i+1], dtype=torch.float32)
+            preds, _ = model(x, c)
+            predictions_list.append(preds.cpu().numpy())
+
+    return np.vstack(predictions_list)
 
 
 def calculate_marker_importance(reference_profiles):
@@ -251,125 +354,6 @@ def calculate_marker_importance(reference_profiles):
     
     # Normalize to sum to 1
     return marker_importance / marker_importance.sum()
-
-
-def train_model(
-    model,
-    train_loader,
-    val_loader,
-    model_path,
-    num_epochs=100,
-    patience=10,
-    lr=1e-4
-):
-    """
-    Training loop:
-     - Uses 'multi_label_custom_loss'
-     - Early stopping on validation loss
-     - Saves best model
-    """
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=True
-    )
-    os.makedirs(model_path, exist_ok=True)
-    
-    best_val_loss = float('inf')
-    patience_counter = 0
-
-    for epoch in range(num_epochs):
-        model.train()
-        train_loss = 0.0
-
-        # --- Training pass ---
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]"):
-            X = batch['X']          # (batch_size, num_markers)
-            y = batch['y']          # (batch_size, num_cell_types)
-            coverage = batch['coverage']  # (batch_size, num_markers) or (batch_size, num_cell_types)? 
-                                          # either way, must match usage in forward().
-
-            optimizer.zero_grad()
-            preds, probs_high = model(X, coverage)
-
-            loss = multi_label_custom_loss(
-                predictions=preds,
-                probs_high=probs_high,
-                targets=y,
-                boundary=0.01,
-                boundary_width=0.005,
-                classification_weight=10.0,
-                boundary_bce_weight=2.0,
-                boundary_mse_weight=2.0
-            )
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-            optimizer.step()
-
-            train_loss += loss.item()
-
-        train_loss /= len(train_loader)
-
-        # --- Validation pass ---
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for batch in tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]"):
-                X = batch['X']
-                y = batch['y']
-                coverage = batch['coverage']
-
-                preds, probs_high = model(X, coverage)
-                loss = multi_label_custom_loss(
-                    predictions=preds,
-                    probs_high=probs_high,
-                    targets=y,
-                    boundary=0.01,
-                    boundary_width=0.005,
-                    classification_weight=10.0,
-                    boundary_bce_weight=2.0,
-                    boundary_mse_weight=2.0
-                )
-                val_loss += loss.item()
-
-        val_loss /= len(val_loader)
-        print(f"Epoch {epoch+1}/{num_epochs}: "
-              f"Train Loss={train_loss:.6f}, Val Loss={val_loss:.6f}")
-        
-        scheduler.step(val_loss)
-
-        # Early stopping
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), os.path.join(model_path, "best_model.pt"))
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print("Early stopping triggered.")
-                break
-
-    # Load best weights
-    model.load_state_dict(torch.load(os.path.join(model_path, "best_model.pt")))
-    return model
-
-
-def predict(model, X, coverage):
-    """
-    Returns predicted cell-type fractions in shape (num_samples, num_cell_types).
-    Ignores classifier output (probs_high).
-    """
-    model.eval()
-    predictions_list = []
-
-    with torch.no_grad():
-        for i in range(len(X)):
-            # Slice each sample individually or in batches
-            x = torch.tensor(X[i:i+1], dtype=torch.float32)
-            c = torch.tensor(coverage[i:i+1], dtype=torch.float32)
-            preds, _ = model(x, c)
-            predictions_list.append(preds.cpu().numpy())
-
-    return np.vstack(predictions_list)
 
 
 def augment_low_concentration_samples(X, y, coverage, factor=2):
