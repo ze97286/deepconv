@@ -102,20 +102,19 @@ def wavelet_custom_loss(predictions, targets):
 
 class DeconvolutionModel(nn.Module):
     """
-    Stage 1: classify cell type >= stage1_boundary (ex: 0.5%)
-    Stage 2: regress fraction [0..1] if stage 1 says "high"
+    Multi-bin approach to handle distinct fraction ranges:
+       Bin A: <0.5%
+       Bin B: [0.5%, 2%)
+       Bin C: >=2%
+    We do a 3-way classification for each cell type, plus
+    3 separate regressors (A,B,C). 
     """
-    def __init__(
-        self,
-        num_markers,
-        num_cell_types,
-        stage1_boundary=0.005,
-    ):
+
+    def __init__(self, num_markers, num_cell_types):
         super().__init__()
         self.num_cell_types = num_cell_types
-        self.stage1_boundary = stage1_boundary
         
-        # Shared features
+        # Shared feature extractor
         self.features = nn.Sequential(
             nn.Linear(num_markers, 256),
             nn.LayerNorm(256),
@@ -123,73 +122,144 @@ class DeconvolutionModel(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # Stage 1 classifier
-        self.classifier = nn.Sequential(
-            nn.Linear(256, 64),
-            nn.ReLU(),
-            nn.Linear(64, num_cell_types)
-        )
+        # 3-way classifier for each cell type => shape (batch, 3*C)
+        # We'll reshape to (batch, C, 3) and use CrossEntropy in the loss
+        self.classifier = nn.Linear(256, num_cell_types * 3)
         
-        # Stage 2 regressor
-        self.regressor = nn.Sequential(
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, num_cell_types)
+        # One regressor per bin
+        # For each bin's regressor, we output shape (batch, C)
+        # Using Sigmoid -> final range [0..1]. You can also do ReLU or Beta transform
+        self.regressor_binA = nn.Sequential(
+            nn.Linear(256, num_cell_types),
+            nn.Sigmoid()
+        )
+        self.regressor_binB = nn.Sequential(
+            nn.Linear(256, num_cell_types),
+            nn.Sigmoid()
+        )
+        self.regressor_binC = nn.Sequential(
+            nn.Linear(256, num_cell_types),
+            nn.Sigmoid()
         )
 
     def forward(self, X, coverage):
+        """
+        1) coverage weighting
+        2) classifier => (batch, C, 3)
+        3) regressors => binA/binB/binC => each (batch, C)
+        """
         valid_mask = ~torch.isnan(X)
         X_filled = torch.where(valid_mask, X, torch.zeros_like(X))
         coverage_filled = coverage * valid_mask
+        
+        # Weighted by log(1+coverage)
         X_weighted = X_filled * torch.log1p(coverage_filled)
         
         # Shared features
         feats = self.features(X_weighted)
         
-        # Stage 1 classification => prob that cell >= stage1_boundary
-        class_logits = self.classifier(feats)
-        probs_stage1 = torch.sigmoid(class_logits)
+        # Classifier raw logits => shape (batch, 3*C)
+        raw_logits = self.classifier(feats)
+        # Reshape to (batch, C, 3) so we can do cross_entropy easily
+        # or do so in the loss function
+        # We'll just return raw_logits as is; the loss will handle it
+        # But we can also reshape here if we want
+        # raw_logits_reshaped = raw_logits.view(-1, self.num_cell_types, 3)
         
-        # Stage 2 regressor => fraction [0..1]
-        reg_raw = self.regressor(feats)
-        reg_fractions = torch.sigmoid(reg_raw)  # shape (B, C)
+        # Regressors for each bin
+        outA = self.regressor_binA(feats)  # (batch, C)
+        outB = self.regressor_binB(feats)  # (batch, C)
+        outC = self.regressor_binC(feats)  # (batch, C)
         
-        # If stage1 < threshold => zero, else => reg_fractions
-        stage1_threshold = 0.5  # tuneable
-        high_mask = (probs_stage1 >= stage1_threshold).float()
-        final_preds = reg_fractions * high_mask
-        
-        return final_preds, probs_stage1
+        # Return everything; the custom loss + predict function decide how to use them
+        return raw_logits, outA, outB, outC
 
 
-def two_stage_loss(
-    predictions,    # final preds
-    probs_stage1,   # from stage 1
-    targets,
-    stage1_boundary=0.005,
+def multi_bin_loss(
+    raw_logits,    # shape (batch, 3*C)
+    outA, outB, outC,  # each (batch, C)
+    targets,       # (batch, C)
+    boundary1=0.005,   # e.g. 0.5%
+    boundary2=0.02,    # e.g. 2%
     classification_weight=10.0,
     regression_weight=1.0
 ):
     """
-    Stage 1: BCE for (target>=stage1_boundary)
-    Stage 2: MSE only for (target>=stage1_boundary)
+    We define bins:
+      Bin A: < boundary1 (0.5%)
+      Bin B: [boundary1, boundary2) => [0.5%, 2%)
+      Bin C: >= boundary2 (2%)
+    
+    1) cross-entropy over 3 bins
+    2) MSE only for the correct bin's regressor
     """
-    # Stage 1 label
-    is_high_truth = (targets >= stage1_boundary).float()
+
+    # 1) Construct bin labels
+    # bin_label[i,j] in {0,1,2}
+    # shape => same as targets => (batch, C)
+    binA_mask = (targets < boundary1)
+    binB_mask = (targets >= boundary1) & (targets < boundary2)
+    binC_mask = (targets >= boundary2)
     
-    # BCE
-    bce = F.binary_cross_entropy(
-        probs_stage1, is_high_truth, reduction='mean'
-    )
+    # We'll store as integer label
+    bin_label = torch.zeros_like(targets, dtype=torch.long)  # default 0 => binA
+    bin_label[binB_mask] = 1
+    bin_label[binC_mask] = 2
+
+    # Flatten for cross-entropy: we have batch*C samples, each with 3 classes
+    batch_size, C = targets.shape
+    logits_reshaped = raw_logits.view(batch_size * C, 3)  # (batch*C, 3)
+    bin_label_flat = bin_label.view(batch_size * C)       # (batch*C)
     
-    # MSE on the "high" ones
-    high_mask = (targets >= stage1_boundary)
-    if torch.any(high_mask):
-        mse = F.mse_loss(predictions[high_mask], targets[high_mask])
+    # 2) cross-entropy
+    # We'll rely on torch.cross_entropy with raw logits
+    ce_loss = F.cross_entropy(logits_reshaped, bin_label_flat, reduction='mean')
+
+    # 3) MSE for the correct bin
+    # flatten outA,outB,outC => each shape (batch*C,)
+    outA_flat = outA.view(batch_size * C)
+    outB_flat = outB.view(batch_size * C)
+    outC_flat = outC.view(batch_size * C)
+    targets_flat = targets.view(batch_size * C)
+    
+    # We'll pick the correct regressor for each sample
+    # i.e. if bin_label_flat=0 => use outA_flat
+    mseA = 0.0
+    if (bin_label_flat == 0).any():
+        mseA = F.mse_loss(
+            outA_flat[bin_label_flat == 0],
+            targets_flat[bin_label_flat == 0]
+        )
+    mseB = 0.0
+    if (bin_label_flat == 1).any():
+        mseB = F.mse_loss(
+            outB_flat[bin_label_flat == 1],
+            targets_flat[bin_label_flat == 1]
+        )
+    mseC = 0.0
+    if (bin_label_flat == 2).any():
+        mseC = F.mse_loss(
+            outC_flat[bin_label_flat == 2],
+            targets_flat[bin_label_flat == 2]
+        )
+    
+    # Combine them
+    # We can do a simple average or sum them
+    # This is up to you. We'll do an average for fairness:
+    bins_used = 0
+    if (bin_label_flat == 0).any():
+        bins_used += 1
+    if (bin_label_flat == 1).any():
+        bins_used += 1
+    if (bin_label_flat == 2).any():
+        bins_used += 1
+    if bins_used == 0:
+        mse_total = 0.0
     else:
-        mse = 0.0
-    
-    return classification_weight * bce + regression_weight * mse
+        mse_total = (mseA + mseB + mseC) / bins_used
+
+    total_loss = classification_weight * ce_loss + regression_weight * mse_total
+    return total_loss
 
 
 def train_model(
@@ -215,18 +285,19 @@ def train_model(
         train_loss = 0.0
 
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]"):
-            X = batch['X']
-            y = batch['y']
+            X = batch['X']          # (batch, num_markers)
+            y = batch['y']          # (batch, num_cell_types)
             coverage = batch['coverage']
 
             optimizer.zero_grad()
-            preds, probs_stage1 = model(X, coverage)
+            raw_logits, outA, outB, outC = model(X, coverage)
             
-            loss = two_stage_loss(
-                predictions=preds,
-                probs_stage1=probs_stage1,
+            loss = multi_bin_loss(
+                raw_logits=raw_logits,
+                outA=outA, outB=outB, outC=outC,
                 targets=y,
-                stage1_boundary=0.005,   # "≥0.5%" = label=1
+                boundary1=0.005,  # 0.5%
+                boundary2=0.02,   # 2%
                 classification_weight=10.0,
                 regression_weight=1.0
             )
@@ -246,12 +317,13 @@ def train_model(
                 y = batch['y']
                 coverage = batch['coverage']
 
-                preds, probs_stage1 = model(X, coverage)
-                loss = two_stage_loss(
-                    predictions=preds,
-                    probs_stage1=probs_stage1,
+                raw_logits, outA, outB, outC = model(X, coverage)
+                loss = multi_bin_loss(
+                    raw_logits=raw_logits,
+                    outA=outA, outB=outB, outC=outC,
                     targets=y,
-                    stage1_boundary=0.005,
+                    boundary1=0.005,
+                    boundary2=0.02,
                     classification_weight=10.0,
                     regression_weight=1.0
                 )
@@ -272,20 +344,49 @@ def train_model(
                 print("Early stopping triggered.")
                 break
 
+    # Load best
     model.load_state_dict(torch.load(os.path.join(model_path, "best_model.pt")))
     return model
 
 
-def predict_two_stage(model, X, coverage):
+def predict(model, X, coverage):
+    """
+    1) Classify each cell type into bin A,B, or C (3-way)
+    2) Use the corresponding regressor's output as final fraction
+    """
     model.eval()
-    preds_list = []
+    predictions_list = []
+    
     with torch.no_grad():
         for i in range(len(X)):
             x = torch.tensor(X[i:i+1], dtype=torch.float32)
             c = torch.tensor(coverage[i:i+1], dtype=torch.float32)
-            final_preds, _ = model(x, c)
-            preds_list.append(final_preds.cpu().numpy())
-    return np.vstack(preds_list)
+            raw_logits, outA, outB, outC = model(x, c)
+            
+            # shape (1, 3*C)
+            # reshape => (1, C, 3)
+            # argmax over dim=2 => bin index
+            batch_size, c_dim_3 = raw_logits.shape
+            c_dim = c_dim_3 // 3
+            logits_reshaped = raw_logits.view(batch_size, c_dim, 3)
+            
+            # shape (1, C)
+            bin_indices = torch.argmax(logits_reshaped, dim=2)  # => (1, C)
+            
+            # pick from outA,outB,outC
+            row_preds = []
+            for cell_idx in range(c_dim):
+                bin_idx = bin_indices[0, cell_idx].item()
+                if bin_idx == 0:
+                    val = outA[0, cell_idx].item()  # Bin A
+                elif bin_idx == 1:
+                    val = outB[0, cell_idx].item()  # Bin B
+                else:
+                    val = outC[0, cell_idx].item()  # Bin C
+                row_preds.append(val)
+            predictions_list.append(row_preds)
+    
+    return np.array(predictions_list) 
 
 
 def calculate_marker_importance(reference_profiles):
