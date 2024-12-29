@@ -698,7 +698,7 @@ def main():
     # X_train, y_train, coverage_train = augment_low_concentration_samples(data['X_train'], data['y_train'], data['coverage_train'], 1)
     X_train, y_train, coverage_train = data['X_train'], data['y_train'], data['coverage_train']
     X_syn, coverage_syn, Y_syn, _ = generate_enriched_data_from_df(
-        atlas_df=df,
+        atlas_df=df[df.columns[8:]],
         compositions=compositions,
         n_samples_per_comp=200,
         coverage_mean=5,
@@ -715,7 +715,7 @@ def main():
     # X_val, y_val, coverage_val = augment_low_concentration_samples(data['X_val'], data['y_val'], data['coverage_val'], 1)
     X_val, y_val, coverage_val = data['X_val'], data['y_val'], data['coverage_val']
     X_val_syn,cov_val_syn,Y_val_syn,_ = generate_enriched_data_from_df(
-        atlas_df=df,
+        atlas_df=df[df.columns[8:]],
         compositions=compositions, 
         n_samples_per_comp=100,
         coverage_mean=10,
