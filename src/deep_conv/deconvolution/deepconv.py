@@ -163,13 +163,6 @@ class MultiLabelDeconvolutionModel(nn.Module):
         mask_high = (probs_high >= self.classifier_threshold).float()
         predictions = predictions * mask_high
 
-        # (4) Clamp smaller than clamp_below => 0
-        predictions = torch.where(
-            predictions < self.clamp_below,
-            torch.zeros_like(predictions),
-            predictions
-        )
-
         return predictions, probs_high
 
 
@@ -179,7 +172,7 @@ def multi_label_custom_loss_tuned(
     targets,          # (B, C)
     boundary=0.01, 
     boundary_width=0.005,
-    classification_weight=10.0,
+    classification_weight=5.0,
     # Heavier boundary multipliers to push near‐1% strongly
     boundary_bce_weight=4.0,
     boundary_mse_weight=4.0
@@ -264,7 +257,7 @@ def train_model(
                 targets=y,
                 boundary=0.01,
                 boundary_width=0.005,
-                classification_weight=10.0,
+                classification_weight=5.0,
                 boundary_bce_weight=2.0,
                 boundary_mse_weight=2.0
             )
@@ -291,7 +284,7 @@ def train_model(
                     targets=y,
                     boundary=0.01,
                     boundary_width=0.005,
-                    classification_weight=10.0,
+                    classification_weight=5.0,
                     boundary_bce_weight=2.0,
                     boundary_mse_weight=2.0
                 )
