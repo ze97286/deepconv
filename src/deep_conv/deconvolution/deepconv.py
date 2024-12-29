@@ -237,7 +237,6 @@ def train_model(
                 boundary=0.01,
                 boundary_width=0.005,
                 classification_weight=5.0,
-                boundary_bce_weight=2.0,
                 boundary_mse_weight=2.0
             )
             loss.backward()
@@ -264,7 +263,6 @@ def train_model(
                     boundary=0.01,
                     boundary_width=0.005,
                     classification_weight=5.0,
-                    boundary_bce_weight=2.0,
                     boundary_mse_weight=2.0
                 )
                 val_loss += loss.item()
