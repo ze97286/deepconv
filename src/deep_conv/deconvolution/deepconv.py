@@ -31,8 +31,7 @@ class TissueDeconvolutionDataset(Dataset):
         }
 
 
-
-class DeconvolutionModel(nn.Module):
+class WaveletDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, wavelet='db4', level=3):
         super().__init__()
         self.wavelet = wavelet
@@ -76,7 +75,7 @@ class DeconvolutionModel(nn.Module):
         features = self.features(wavelet_features)
         return self.softmax(self.output(features))
 
-def custom_loss(predictions, targets):
+def wavelet_custom_loss(predictions, targets):
     # Standard MSE in concentration space
     mse_loss = F.mse_loss(predictions, targets)
     
@@ -100,6 +99,53 @@ def custom_loss(predictions, targets):
     
     return mse_loss + 5.0 * zero_loss + coherence_loss
 
+
+class DeconvolutionModel(nn.Module):
+    def __init__(self, num_markers, num_cell_types):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Linear(num_markers, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Dropout(0.2)
+        )
+        
+        # Binary classifier for >1%
+        self.classifier = nn.Sequential(
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+        
+        # Regressor for concentration when >1%
+        self.regressor = nn.Linear(256, num_cell_types)
+        self.softmax = nn.Softmax(dim=1)
+    
+    def forward(self, X, coverage):
+        valid_mask = ~torch.isnan(X)
+        X = torch.where(valid_mask, X, torch.zeros_like(X))
+        coverage = coverage * valid_mask
+        X_weighted = X * torch.log1p(coverage)
+        
+        features = self.features(X_weighted)
+        is_high = self.classifier(features)
+        predictions = self.softmax(self.regressor(features))
+        
+        # Zero out predictions where classifier says <1%
+        return predictions * is_high
+
+def custom_loss(predictions, targets):
+    # Binary classification loss
+    is_high = (targets >= 0.01).float()
+    pred_high = (predictions >= 0.01).float()
+    binary_loss = F.binary_cross_entropy(pred_high, is_high)
+    
+    # Regression loss only for high values
+    high_mask = targets >= 0.01
+    regression_loss = F.mse_loss(predictions[high_mask], targets[high_mask]) if torch.any(high_mask) else 0.0
+    
+    return binary_loss * 10.0 + regression_loss
 
 def calculate_marker_importance(reference_profiles):
     """
