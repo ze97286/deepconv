@@ -159,10 +159,10 @@ class MultiLabelDeconvolutionModel(nn.Module):
         raw_regression = self.regressor(features)   # shape (B, C)
         predictions = self.softmax(raw_regression)  # shape (B, C)
 
-        # (3) Zero out predictions if classifier < threshold
-        mask_high = (probs_high >= self.classifier_threshold).float()
-        predictions = predictions * mask_high
-
+        # Only zero out predictions well below 1%
+        very_low_mask = (predictions < 0.008).float()
+        predictions = predictions * (1 - very_low_mask)
+        
         return predictions, probs_high
 
 
@@ -171,49 +171,28 @@ def multi_label_custom_loss_tuned(
     probs_high,       # (B, C)
     targets,          # (B, C)
     boundary=0.01, 
-    boundary_width=0.005,
+    boundary_width=0.002,  # Tighter boundary width
     classification_weight=5.0,
-    # Heavier boundary multipliers to push near‐1% strongly
-    boundary_bce_weight=4.0,
-    boundary_mse_weight=4.0
+    boundary_mse_weight=8.0  # Higher weight for boundary precision
 ):
-    """
-    - BCE on whether each cell type >= 1%
-    - Heavier penalty for near-boundary misclassifications
-    - MSE for fractional predictions, also heavier near boundary
-    """
-    # Classification target => shape (B, C)
+    # Binary classification loss for >1%
     is_high_truth = (targets >= boundary).float()
+    bce_loss = F.binary_cross_entropy(probs_high, is_high_truth)
     
-    # Near boundary mask => [0.005, 0.015] if boundary=0.01
-    lower = boundary - boundary_width
-    upper = boundary + boundary_width
-    near_boundary_mask = ((targets >= lower) & (targets <= upper)).float()  # shape (B, C)
-
-    # (1) BCE loss
-    bce_loss_raw = F.binary_cross_entropy(
-        probs_high, is_high_truth, reduction='none'
-    )
-    # Heavier weighting for boundary region
-    bce_loss_raw = bce_loss_raw * (1.0 + boundary_bce_weight * near_boundary_mask)
-    bce_loss = bce_loss_raw.mean()
-
-    # (2) MSE loss => only for targets > 0 (or >= boundary if you prefer)
-    high_mask = (targets > 0)
-    if torch.any(high_mask):
-        base_mse = F.mse_loss(predictions[high_mask], targets[high_mask])
-        
-        # Boundary weighting
-        mse_boundary_mask = near_boundary_mask[high_mask]
-        if torch.any(mse_boundary_mask):
-            base_mse += boundary_mse_weight * mse_boundary_mask.mean() * base_mse
-        mse_loss = base_mse
-    else:
-        mse_loss = 0.0
-
-    # Combine
-    loss = classification_weight * bce_loss + mse_loss
-    return loss
+    # Heavy penalty for variance around 1%
+    near_boundary = ((targets >= boundary - boundary_width) & 
+                    (targets <= boundary + boundary_width))
+    boundary_var_loss = torch.var(predictions[near_boundary]) if torch.any(near_boundary) else 0.0
+    
+    # Zero out very low values (< 0.8%)
+    very_low_mask = targets < (boundary - 2*boundary_width)
+    zero_loss = 10.0 * torch.mean(predictions[very_low_mask]**2) if torch.any(very_low_mask) else 0.0
+    
+    # Standard MSE for higher values
+    high_mask = targets >= (boundary - boundary_width)
+    mse_loss = F.mse_loss(predictions[high_mask], targets[high_mask]) if torch.any(high_mask) else 0.0
+    
+    return classification_weight * bce_loss + mse_loss + boundary_mse_weight * boundary_var_loss + zero_loss
 
 
 def train_model(
