@@ -101,8 +101,12 @@ def wavelet_custom_loss(predictions, targets):
 
 
 class DeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types):
+    def __init__(self, num_markers, num_cell_types, clamp_below=0.005, classifier_threshold=0.5):
         super().__init__()
+        self.num_cell_types = num_cell_types
+        self.clamp_below = clamp_below
+        self.classifier_threshold = classifier_threshold
+        
         self.features = nn.Sequential(
             nn.Linear(num_markers, 256),
             nn.LayerNorm(256),
@@ -110,42 +114,123 @@ class DeconvolutionModel(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # Binary classifier for >1%
+        # Binary classifier for ~1%
         self.classifier = nn.Sequential(
             nn.Linear(256, 64),
             nn.ReLU(),
             nn.Linear(64, 1),
-            nn.Sigmoid()
+            # We'll *not* do Sigmoid here, so we can get raw logits and apply custom threshold
         )
         
-        # Regressor for concentration when >1%
+        # Regressor for concentration
         self.regressor = nn.Linear(256, num_cell_types)
         self.softmax = nn.Softmax(dim=1)
-    
-    def forward(self, X, coverage):
-        valid_mask = ~torch.isnan(X)
-        X = torch.where(valid_mask, X, torch.zeros_like(X))
-        coverage = coverage * valid_mask
-        X_weighted = X * torch.log1p(coverage)
-        
-        features = self.features(X_weighted)
-        is_high = self.classifier(features)
-        predictions = self.softmax(self.regressor(features))
-        
-        # Zero out predictions where classifier says <1%
-        return predictions * is_high
 
-def custom_loss(predictions, targets):
-    # Binary classification loss
-    is_high = (targets >= 0.01).float()
-    pred_high = (predictions >= 0.01).float()
-    binary_loss = F.binary_cross_entropy(pred_high, is_high)
+    def forward(self, X, coverage):
+        """
+        1) Weighted by log(1+coverage).
+        2) Binary classifier for >1% vs <1%.
+        3) If classifier < threshold => prediction = 0
+           Else => pass to softmax regressor
+        4) Then clamp small predictions.
+        """
+        valid_mask = ~torch.isnan(X)
+        X_filled = torch.where(valid_mask, X, torch.zeros_like(X))
+        coverage_filled = coverage * valid_mask
+        
+        # Weighted by log(1 + coverage)
+        X_weighted = X_filled * torch.log1p(coverage_filled)
+        
+        # Shared feature representation
+        features = self.features(X_weighted)
+        
+        # Classifier output (logits)
+        logits = self.classifier(features).squeeze(-1)  # shape: (batch,)
+        # Probability that cell type >= 1%
+        probs_high = torch.sigmoid(logits)              # shape: (batch,)
+        
+        # Softmax regression
+        raw_regression = self.regressor(features)       # shape: (batch, num_cell_types)
+        predictions = self.softmax(raw_regression)      # shape: (batch, num_cell_types)
+        
+        # (A) Zero out predictions for which classifier < threshold
+        # i.e., if probs_high < 0.5 => we treat as near-zero
+        mask_high = (probs_high >= self.classifier_threshold).float().unsqueeze(-1) 
+        # shape: (batch, 1), broadcast to (batch, num_cell_types)
+        predictions = predictions * mask_high
+        
+        # (B) Force small predictions below clamp_below to zero
+        predictions = torch.where(predictions < self.clamp_below,
+                                  torch.zeros_like(predictions),
+                                  predictions)
+        
+        return predictions, probs_high
     
-    # Regression loss only for high values
-    high_mask = targets >= 0.01
-    regression_loss = F.mse_loss(predictions[high_mask], targets[high_mask]) if torch.any(high_mask) else 0.0
+def custom_loss(predictions, probs_high, targets,
+                boundary=0.01,
+                boundary_width=0.005,
+                classification_weight=10.0,
+                boundary_bce_weight=2.0,
+                boundary_mse_weight=2.0):
+    """
+    predictions: shape (batch, num_cell_types)
+    probs_high: shape (batch,) – classifier probability for ">=1%"
+    targets: shape (batch, num_cell_types)
     
-    return binary_loss * 10.0 + regression_loss
+    boundary: 0.01  -> the 1% threshold
+    boundary_width: 0.005 -> 0.5% each side => "near-boundary" range = [0.005, 0.015]
+    
+    classification_weight: how strongly to weight the classification loss overall
+    boundary_bce_weight: additional factor for samples in [0.005, 0.015]
+    boundary_mse_weight: additional factor for MSE in that boundary region
+    """
+    # 1) Binary classification label: is_high?
+    # We'll say the target is "high" if ANY cell_type >= boundary 
+    # or if you only want to track a specific cell_type, pick it out.
+    # But if you're specifically training for a single cell type, do:
+    #   is_high_truth = (targets[:, your_cell_type_index] >= boundary).float()
+    # For simplicity, let's assume we look at a single cell type:
+    # or we gather if *any* cell type is above boundary...
+    # (You can adapt to your scenario)
+    
+    # For demonstration, let's assume the model is for a single cell type (just 1 column of targets).
+    # If you have multiple cell types, define which column you want the classifier to reflect.
+    is_high_truth = (targets >= boundary).float().squeeze(-1)  # shape (batch,)
+    
+    # 2) Classification loss (BCE)
+    # Weighted more if the sample is near boundary
+    near_boundary_mask = (targets >= (boundary - boundary_width)) & (targets <= (boundary + boundary_width))
+    near_boundary_mask = near_boundary_mask.float().squeeze(-1)  # shape (batch,)
+    
+    # Base BCE
+    bce_loss = F.binary_cross_entropy(probs_high, is_high_truth, reduction='none')
+    # Multiply BCE by an extra factor for near-boundary samples
+    bce_loss = bce_loss * (1.0 + boundary_bce_weight * near_boundary_mask)
+    # Then take mean
+    bce_loss = bce_loss.mean()
+    
+    # 3) Regression loss (MSE) only for "high" samples (or you can do it for all)
+    # We'll do it for targets > 0.  Or specifically > boundary if you like.
+    high_mask = (targets > 0).squeeze(-1)
+    
+    if torch.any(high_mask):
+        # Base MSE
+        mse_loss = F.mse_loss(predictions[high_mask], targets[high_mask])
+        
+        # Add heavier weight for boundary region
+        mse_boundary_mask = near_boundary_mask[high_mask]
+        # This is the fraction of "high_mask" samples that are near boundary
+        if torch.any(mse_boundary_mask > 0):
+            # Weighted MSE for boundary region => you could do a per-sample weighting if you want
+            # For simplicity, just do a scalar factor if any are near boundary
+            mse_loss += boundary_mse_weight * (mse_boundary_mask.mean()) * mse_loss
+    else:
+        mse_loss = 0.0
+    
+    # 4) Combine
+    # classification_weight factor ensures classification is heavily emphasized
+    loss = classification_weight * bce_loss + mse_loss
+    return loss
 
 def calculate_marker_importance(reference_profiles):
     """
@@ -170,50 +255,77 @@ def calculate_marker_importance(reference_profiles):
 
 
 def train_model(model, train_loader, val_loader, model_path, num_epochs=100, patience=10, lr=1e-4):
-   optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-   scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
-   os.makedirs(model_path, exist_ok=True)
-   best_val_loss = float('inf')
-   patience_counter = 0
-   for epoch in range(num_epochs):
-       model.train()
-       train_loss = 0
-       for batch in tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]'):
-           X, y = batch['X'], batch['y']
-           coverage = batch['coverage']
-           optimizer.zero_grad()
-           predictions = model(X, coverage)
-           loss = custom_loss(predictions, y)
-           loss.backward()
-           torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-           optimizer.step()
-           train_loss += loss.item()
-       train_loss /= len(train_loader)
-       model.eval()
-       val_loss = 0
-       with torch.no_grad():
-           for batch in tqdm(val_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]'):
-               X, y = batch['X'], batch['y']
-               coverage = batch['coverage']
-               predictions = model(X, coverage)
-               loss = custom_loss(predictions, y)
-               val_loss += loss.item()
-       val_loss /= len(val_loader)
-       print(f"Epoch {epoch+1}/{num_epochs}, "
-             f"Train Loss: {train_loss:.8f}, "
-             f"Val Loss: {val_loss:.8f}")
-       scheduler.step(val_loss)
-       if val_loss < best_val_loss:
-           best_val_loss = val_loss
-           patience_counter = 0
-           torch.save(model.state_dict(), os.path.join(model_path, "best_model.pt"))
-       else:
-           patience_counter += 1
-           if patience_counter >= patience:
-               print("Early stopping triggered.")
-               break
-   model.load_state_dict(torch.load(os.path.join(model_path, "best_model.pt")))
-   return model
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    
+    best_val_loss = float('inf')
+    patience_counter = 0
+    
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss = 0
+        for batch in train_loader:
+            X, y = batch['X'], batch['y']  # shape e.g. (batch, 1) if single cell type
+            coverage = batch['coverage']
+            
+            optimizer.zero_grad()
+            preds, probs_high = model(X, coverage)  # <— now returns (predictions, classifier probs)
+            
+            loss = custom_loss(
+                predictions=preds, 
+                probs_high=probs_high, 
+                targets=y,
+                boundary=0.01,
+                boundary_width=0.005,
+                classification_weight=10.0,
+                boundary_bce_weight=2.0,
+                boundary_mse_weight=2.0
+            )
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            optimizer.step()
+            train_loss += loss.item()
+        train_loss /= len(train_loader)
+        
+        # Validation
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                X, y = batch['X'], batch['y']
+                coverage = batch['coverage']
+                
+                preds, probs_high = model(X, coverage)
+                loss = custom_loss(
+                    predictions=preds, 
+                    probs_high=probs_high, 
+                    targets=y,
+                    boundary=0.01,
+                    boundary_width=0.005,
+                    classification_weight=10.0,
+                    boundary_bce_weight=2.0,
+                    boundary_mse_weight=2.0
+                )
+                val_loss += loss.item()
+        val_loss /= len(val_loader)
+        
+        print(f"Epoch {epoch+1}: Train Loss={train_loss:.6f}, Val Loss={val_loss:.6f}")
+        scheduler.step(val_loss)
+        
+        # Early stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), model_path + "/best_model.pt")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print("Early stopping triggered.")
+                break
+    
+    # Load best
+    model.load_state_dict(torch.load(model_path + "/best_model.pt"))
+    return model
 
 
 def predict(model, X, coverage):
