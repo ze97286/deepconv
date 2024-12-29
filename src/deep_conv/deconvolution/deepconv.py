@@ -100,25 +100,20 @@ def wavelet_custom_loss(predictions, targets):
     return mse_loss + 5.0 * zero_loss + coherence_loss
 
 
-class MultiLabelDeconvolutionModel(nn.Module):
+class DeconvolutionModel(nn.Module):
     """
-    A multi‐label model that:
-      - Learns coverage‐weighted features
-      - Predicts probability each cell type >= 1% (probs_high)
-      - Predicts fractional concentration for each cell type
-      - Applies a clamp to small predictions
+    Stage 1: classify cell type >= stage1_boundary (ex: 0.5%)
+    Stage 2: regress fraction [0..1] if stage 1 says "high"
     """
     def __init__(
         self,
         num_markers,
         num_cell_types,
-        clamp_below=0.004,          
-        classifier_threshold=0.45
+        stage1_boundary=0.005,
     ):
         super().__init__()
         self.num_cell_types = num_cell_types
-        self.clamp_below = clamp_below
-        self.classifier_threshold = classifier_threshold
+        self.stage1_boundary = stage1_boundary
         
         # Shared features
         self.features = nn.Sequential(
@@ -128,62 +123,73 @@ class MultiLabelDeconvolutionModel(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # Multi-label classifier => shape (B, C)
+        # Stage 1 classifier
         self.classifier = nn.Sequential(
             nn.Linear(256, 64),
             nn.ReLU(),
-            nn.Linear(64, num_cell_types)  # We'll manually apply sigmoid
+            nn.Linear(64, num_cell_types)
         )
         
-        # Softmax-based regressor => shape (B, C)
-        self.regressor = nn.Linear(256, num_cell_types)
-        self.softmax = nn.Softmax(dim=1)
+        # Stage 2 regressor
+        self.regressor = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, num_cell_types)
+        )
 
     def forward(self, X, coverage):
-        # Handle NaNs in X
         valid_mask = ~torch.isnan(X)
         X_filled = torch.where(valid_mask, X, torch.zeros_like(X))
         coverage_filled = coverage * valid_mask
-
-        # Coverage weighting
         X_weighted = X_filled * torch.log1p(coverage_filled)
-
+        
         # Shared features
-        features = self.features(X_weighted)
-
-        logits = self.classifier(features)
-        probs_high = torch.sigmoid(logits)
+        feats = self.features(X_weighted)
         
-        # Fractional predictions
-        raw_regression = self.regressor(features)
-        predictions = self.softmax(raw_regression)
+        # Stage 1 classification => prob that cell >= stage1_boundary
+        class_logits = self.classifier(feats)
+        probs_stage1 = torch.sigmoid(class_logits)
         
-        # Only zero out predictions well below 1% using classifier output
-        predictions = torch.where(probs_high < 0.2, torch.zeros_like(predictions), predictions)
+        # Stage 2 regressor => fraction [0..1]
+        reg_raw = self.regressor(feats)
+        reg_fractions = torch.sigmoid(reg_raw)  # shape (B, C)
         
-        return predictions, probs_high
+        # If stage1 < threshold => zero, else => reg_fractions
+        stage1_threshold = 0.5  # tuneable
+        high_mask = (probs_stage1 >= stage1_threshold).float()
+        final_preds = reg_fractions * high_mask
+        
+        return final_preds, probs_stage1
 
 
-def multi_label_custom_loss_tuned(
-    predictions,
-    probs_high,
+def two_stage_loss(
+    predictions,    # final preds
+    probs_stage1,   # from stage 1
     targets,
-    boundary=0.01,
-    boundary_width=0.002,
-    classification_weight=5.0
+    stage1_boundary=0.005,
+    classification_weight=10.0,
+    regression_weight=1.0
 ):
-    # Binary classification loss with focus on boundary
-    is_high = (targets >= boundary).float()
-    bce_loss = F.binary_cross_entropy(probs_high, is_high)
+    """
+    Stage 1: BCE for (target>=stage1_boundary)
+    Stage 2: MSE only for (target>=stage1_boundary)
+    """
+    # Stage 1 label
+    is_high_truth = (targets >= stage1_boundary).float()
     
-    # MSE loss with extra weight near boundary
-    near_boundary = ((targets >= boundary - boundary_width) & 
-                    (targets <= boundary + boundary_width)).float()
-    mse_base = F.mse_loss(predictions, targets, reduction='none')
-    weighted_mse = mse_base * (1 + 5.0 * near_boundary)
-    mse_loss = weighted_mse.mean()
+    # BCE
+    bce = F.binary_cross_entropy(
+        probs_stage1, is_high_truth, reduction='mean'
+    )
     
-    return classification_weight * bce_loss + mse_loss
+    # MSE on the "high" ones
+    high_mask = (targets >= stage1_boundary)
+    if torch.any(high_mask):
+        mse = F.mse_loss(predictions[high_mask], targets[high_mask])
+    else:
+        mse = 0.0
+    
+    return classification_weight * bce + regression_weight * mse
 
 
 def train_model(
@@ -195,10 +201,6 @@ def train_model(
     patience=10,
     lr=1e-4
 ):
-    """
-    Training pipeline using the tuned multi_label_custom_loss_tuned.
-    Adjust any hyperparameters inside 'multi_label_custom_loss_tuned' for boundary weighting, etc.
-    """
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=5, verbose=True
@@ -212,31 +214,30 @@ def train_model(
         model.train()
         train_loss = 0.0
 
-        # Training pass
         for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]"):
             X = batch['X']
             y = batch['y']
             coverage = batch['coverage']
 
             optimizer.zero_grad()
-            preds, probs_high = model(X, coverage)
-
-            loss = multi_label_custom_loss_tuned(
+            preds, probs_stage1 = model(X, coverage)
+            
+            loss = two_stage_loss(
                 predictions=preds,
-                probs_high=probs_high,
+                probs_stage1=probs_stage1,
                 targets=y,
-                boundary=0.01,
-                boundary_width=0.005,
-                classification_weight=5.0,
+                stage1_boundary=0.005,   # "≥0.5%" = label=1
+                classification_weight=10.0,
+                regression_weight=1.0
             )
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             optimizer.step()
             train_loss += loss.item()
 
         train_loss /= len(train_loader)
 
-        # Validation pass
+        # Validation
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -245,14 +246,14 @@ def train_model(
                 y = batch['y']
                 coverage = batch['coverage']
 
-                preds, probs_high = model(X, coverage)
-                loss = multi_label_custom_loss_tuned(
+                preds, probs_stage1 = model(X, coverage)
+                loss = two_stage_loss(
                     predictions=preds,
-                    probs_high=probs_high,
+                    probs_stage1=probs_stage1,
                     targets=y,
-                    boundary=0.01,
-                    boundary_width=0.005,
-                    classification_weight=5.0,
+                    stage1_boundary=0.005,
+                    classification_weight=10.0,
+                    regression_weight=1.0
                 )
                 val_loss += loss.item()
 
@@ -275,19 +276,16 @@ def train_model(
     return model
 
 
-def predict(model, X, coverage):
-    """
-    Returns predicted cell-type fractions => shape (n_samples, num_cell_types).
-    """
+def predict_two_stage(model, X, coverage):
     model.eval()
-    predictions_list = []
+    preds_list = []
     with torch.no_grad():
         for i in range(len(X)):
             x = torch.tensor(X[i:i+1], dtype=torch.float32)
             c = torch.tensor(coverage[i:i+1], dtype=torch.float32)
-            preds, _ = model(x, c)
-            predictions_list.append(preds.cpu().numpy())
-    return np.vstack(predictions_list)
+            final_preds, _ = model(x, c)
+            preds_list.append(final_preds.cpu().numpy())
+    return np.vstack(preds_list)
 
 
 def calculate_marker_importance(reference_profiles):
