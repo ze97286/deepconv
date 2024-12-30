@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# src/deep_conv/atlas/preprocess_pats.sh 4 /users/zetzioni/sharedscratch/atlas/taps_atlas_class.csv /users/zetzioni/sharedscratch/atlas/pats/ 32
+# /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/preprocess_pats.sh 4 /users/zetzioni/sharedscratch/atlas/taps_atlas_class.csv /users/zetzioni/sharedscratch/atlas/pats/ 32
 
 # Arguments
 min_cpgs=$1
