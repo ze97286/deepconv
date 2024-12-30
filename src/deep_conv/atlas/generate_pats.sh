@@ -8,8 +8,6 @@ if [ ! -e $MARKERBED ]; then
   exit 1
 fi
 
-. $HOME/Code/GRAIL/bin/activate
-
 mkdir -p $PATDIR
 mkdir -p $TMPDIR
 
