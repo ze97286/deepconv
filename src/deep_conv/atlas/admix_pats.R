@@ -7,10 +7,10 @@ suppressPackageStartupMessages({
 })
 
 # R_LIBS_USER=~/R/library Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/admix_pats.R \
-#  --pat_dir /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.250/Song/celltypes \
-#   --output_dir /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.250/Song/mixed/CD4 \
-#   --tmp_dir /path/to/tmp \
-#   --target_depth 10 \
+#  --pat_dir /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.100/Song/celltypes \
+#   --output_dir /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.100/Song/mixed/CD4 \
+#   --tmp_dir /users/zetzioni/sharedscratch/atlas/tmp \
+#   --target_depth 30000 \
 #   --repeats 100 \
 #   --threads 32
 
