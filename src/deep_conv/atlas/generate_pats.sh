@@ -12,14 +12,24 @@ fi
 mkdir -p $PATDIR
 mkdir -p $TMPDIR
 
-# Debug the input paths
-echo "Original paths:"
-cut -f 2 $BASEDIR/type2bam.tsv | head -n 2
+# Get input files and process them
+cut -f 2 $BASEDIR/type2bam.tsv | while read infile; do
+    # Transform path for reading
+    pat_file=$(echo $infile | \
+        sed 's:/mnt/lustre/users/ramess/TAPSbeta_tissue_map/Results/1.3.1/Alignments/:/mnt/lustre/users/bschuster/Tissue_map/Results/1.2/pat/:' | \
+        sed 's/_md.bam/.pat.gz/')
+    
+    # Get just the filename for output
+    outname=$(basename $pat_file)
+    outfile="$PATDIR/$outname"
+    
+    # Process if output doesn't exist
+    if [ ! -e "$outfile" ]; then
+        tabix -R <(tail -n+2 $MARKERBED | cut -f 1,4,5) "$pat_file" | \
+            sort -k1,1V -k2,2n -k3,3 | \
+            bgzip -c > "$outfile"
+        tabix -s 1 -b 2 -e 2 -C "$outfile"
+    fi
+done
 
-# Show the transformed paths before execution
-echo "Transformed paths:"
-cut -f 2 $BASEDIR/type2bam.tsv | \
-  sed 's:/mnt/lustre/users/ramess/TAPSbeta_tissue_map/Results/1.3.1/Alignments/:/mnt/lustre/users/bschuster/Tissue_map/Results/1.2/pat/:' | \
-  sed 's/_md.bam/.pat.gz/' | head -n 2
-
-echo "PATDIR=$PATDIR"
+rm -rf $TMPDIR
