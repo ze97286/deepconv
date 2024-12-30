@@ -60,16 +60,13 @@ read_count_table <- function(patdir) {
     files <- list.files(patdir, pattern=".*\\.pat\\.gz$")
     names(files) <- gsub(".pat.gz", "", files, fixed=TRUE)
     all_frags <- lapply(files, function(file_name) {
-        data <- fread(paste0(patdir, '/', file_name), 
-                     stringsAsFactors = TRUE, header=FALSE, select=4)
+        cmd <- sprintf("zcat %s/%s", patdir, file_name)
+        data <- fread(cmd=cmd, stringsAsFactors=TRUE, header=FALSE, select=4)
         setnames(data, c("counts"))
         return(sum(data$counts))
     })
     all_frags <- as.data.table(all_frags)
-    all_frags <- data.table(
-        sample=names(all_frags), 
-        fragments=t(all_frags)[,1]
-    )
+    all_frags <- data.table(sample=names(all_frags), fragments=t(all_frags)[,1])
     return(all_frags)
 }
 
