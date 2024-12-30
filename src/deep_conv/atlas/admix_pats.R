@@ -56,6 +56,7 @@ make_target_table <- function(target_fraction, dilutions, pat_dir=".", suffix=".
     return(rbindlist(out.dt, idcol="dilution"))
 }
 
+
 read_count_table <- function(patdir) {
     # First check the directory exists
     if (!dir.exists(patdir)) {
@@ -71,34 +72,66 @@ read_count_table <- function(patdir) {
     cat("Found files:\n")
     print(files)
     
+    # Assign names to files
     names(files) <- gsub(".pat.gz", "", basename(files), fixed=TRUE)
     
-    all_frags <- lapply(files, function(file_name) {
+    # Initialize list to store fragment counts
+    all_frags_list <- lapply(files, function(file_name) {
         cat(sprintf("\nProcessing file: %s\n", file_name))
         
-        # Check file exists and has size
+        # Check if file exists
         if (!file.exists(file_name)) {
             stop(sprintf("File does not exist: %s", file_name))
         }
+        
+        # Check file size
         file_info <- file.info(file_name)
         if (file_info$size == 0) {
-            stop(sprintf("File is empty: %s", file_name))
+            cat(sprintf("Skipping empty file: %s\n", file_name))
+            return(NULL)  # Skip this file
         }
         
-        cmd <- sprintf("zcat %s", file_name)
+        # Construct and run the command
+        cmd <- sprintf("zcat %s", shQuote(file_name))
         cat(sprintf("Running command: %s\n", cmd))
         
-        data <- fread(cmd=cmd, stringsAsFactors=TRUE, header=FALSE, select=4)
+        # Read the data using fread
+        data <- tryCatch({
+            fread(cmd=cmd, stringsAsFactors=TRUE, header=FALSE, select=4)
+        }, error = function(e) {
+            warning(sprintf("Error reading file %s: %s", file_name, e$message))
+            return(NULL)
+        })
+        
+        # Check if data was read successfully
         if (is.null(data) || ncol(data) == 0) {
-            stop(sprintf("Failed to read data from: %s", file_name))
+            warning(sprintf("Failed to read data from: %s. Skipping this file.", file_name))
+            return(NULL)
         }
         
-        setnames(data, c("counts"))
-        return(sum(data$counts))
+        # Rename the column and calculate the sum of counts
+        setnames(data, "V1", "counts")
+        total_counts <- sum(data$counts, na.rm = TRUE)
+        cat(sprintf("Total counts for %s: %d\n", file_name, total_counts))
+        return(total_counts)
     })
     
-    all_frags <- as.data.table(all_frags)
-    all_frags <- data.table(sample=names(all_frags), fragments=t(all_frags)[,1])
+    # Remove NULL entries (skipped files)
+    valid_indices <- !sapply(all_frags_list, is.null)
+    all_frags_list <- all_frags_list[valid_indices]
+    valid_files <- names(all_frags_list)
+    
+    # Check if any files were processed
+    if (length(all_frags_list) == 0) {
+        stop("No valid .pat.gz files were processed. All files might be empty or failed to read.")
+    }
+    
+    # Create a data.table from the results
+    all_frags <- data.table(
+        sample = valid_files,
+        fragments = unlist(all_frags_list)
+    )
+    
     return(all_frags)
 }
 
