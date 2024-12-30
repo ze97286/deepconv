@@ -14,7 +14,7 @@ cut -f 1 $MAPFILE | sort -u | while read celltype; do
             sed "s:.*/:$SOURCEDIR/:" | \
             sed 's/_md.bam/.pat.gz/') | \
             sort -k1,1V -k2,2n -k3,3 | \
-            perl -n deduplicate_pat.pl | \
+            perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | \
             bgzip -c > "$PATDIR/${celltype}.pat.gz"
         tabix -s 1 -b 2 -e 2 -C "$PATDIR/${celltype}.pat.gz"
     fi
