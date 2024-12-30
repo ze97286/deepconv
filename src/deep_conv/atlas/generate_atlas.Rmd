@@ -1,0 +1,374 @@
+---
+title: "Generate Methylation Atlas"
+author: "Zohar Etzioni"
+date: "`r Sys.Date()`"
+output: html_document
+params:
+  base_dir: "/path/to/base/dir"
+  map_file: "/path/to/per-read-bed2class.csv"
+  cpg_file: "/path/to/CpG.bed.gz"
+  out_file: "/path/to/dmr_by_read.blood+gi+tum.U100.l4.bed"
+  incl_flag: 3
+  excl_flag: 3852
+  min_isize: 130
+  max_isize: 2000
+  min_mapq: 5
+  min_cpg_count: 4
+  min_coverage: 3
+  min_alpha_dist: 0.2
+  threads: 8
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(data.table)
+library(progressr)
+library(furrr)
+library(ggplot2)
+library(pals)
+library(NMF)
+
+# Source our functions
+source("dmr_functions.R")
+
+# Set environment variables
+Sys.setenv(BASEDIR=params$base_dir)
+Sys.setenv(MARKER_FILE=params$out_file)
+```
+
+## Load Data and Generate Region Info
+
+```{r}
+# Load sample to group mapping and CpG info
+bed2type <- load_sample2group(params$map_file)
+cpg_info <- load_cpg_info(params$cpg_file)
+
+# Set up parallel processing
+plan(multisession, workers = params$threads)
+
+# Load position-level methylation data for all chromosomes
+with_progress({
+  p <- progressor(steps=22)
+  pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
+    res <- fread(paste0(params$base_dir, "/dmr_by_read/blood+tum+gi_scores-by-position_", 
+                       chrom, ".txt.gz"), 
+                 header=TRUE, stringsAsFactors = TRUE)
+    p()
+    return(res)
+  }) 
+})
+pval.all <- rbindlist(pval.all)
+
+# Find unique methylation regions
+unique.regions <- collapse_to_regions(pval.all, cpg_info, max_gap = 1, 
+                                    max_dist = 1000, min_logp = -30, 
+                                    min_length = 150)
+
+setkey(unique.regions, chr, start, end)
+  
+# Calculate statistics for unique regions
+unique.regions.stat <- foverlaps(
+  cpg_info, 
+  unique.regions[fully_covered==TRUE], 
+  nomatch=NULL
+)[, .(
+  startCpG=min(index), 
+  endCpG=max(index), 
+  r_len=mean(r_len), 
+  p_len=mean(p_len), 
+  tg_mean=mean(avg_min_ci), 
+  ttest=mean(med_logp), 
+  delta_means=mean(avg_min_alpha_dist), 
+  direction=fifelse(mean(avg_min_ci)<0, "U", "M")
+), by=.(chr, start=start-1, end=end, target=group)]
+
+# Write results for deconvolution
+fwrite(unique.regions.stat[r_len>=5, 
+                          .(`#chr`=chr, start, end, startCpG, endCpG, target, 
+                            r_len, p_len, tg_mean, ttest, delta_means, direction)],
+       file.path(params$base_dir, "dmr-by-read.blood+gi+tum_v4.all.l4.bed.gz"),
+       sep="\t", col.names = TRUE, quote=FALSE, row.names = FALSE, 
+       compress="gzip")
+```
+
+## Visualize Statistics
+
+```{r}
+# Plot number of unique regions by cell type
+ggplot(unique.regions[r_len>5, 
+                     .(N=nrow(.SD[, .N, by=.(chr, start, end)])), 
+                     by=group], 
+       aes(x=group, y=N)) + 
+  geom_bar(stat="identity") + 
+  ylab("Number of unique regions") + 
+  xlab("Cell type") + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  geom_text(aes(label=N), vjust=-1, size=3)
+```
+
+## Prepare Example Regions for Plotting
+
+```{r}
+setkey(cpg_info, chr, start, end)
+
+# Select subset of regions for visualization
+subset <- unique.regions[fully_covered & 
+                        r_len>5 & 
+                        p_len>=100 & 
+                        avg_min_ci < 0][group=="T-cells"]
+
+# Prepare data for plotting
+pval.all[, end:=pos]
+setkey(pval.all, chr, pos, end)
+setkey(subset, chr, start, end)
+pval.subset <- foverlaps(subset[, .(.N), 
+                                keyby=.(chr, start=start-300, end=end+300)], 
+                         pval.all, nomatch=NULL)
+pval.all[, end:=NULL]
+```
+
+## Analyze Alpha Distribution
+
+```{r}
+# Calculate alpha statistics by group
+alpha.by_group <- pval.subset[, .(
+  group, chr, pos, start=start+300, end=i.end-300, mean_alpha_dist,
+  pval.mean, pval.med, pval.min, pval.max, pval.iqr, ci.min, ci.max,
+  outgroup_count, min_alpha_dist)][, .(
+    min_alpha = mean(min_alpha_dist),
+    n_low=sum(min_alpha_dist<params$min_alpha_dist),
+    n_pos=.N,
+    med_logp=median(fifelse(pval.med==0, -308, log10(pval.med))),
+    mean_logp=log10(mean(pval.med))
+  ), by=.(group, chr, start, end)]
+
+setkey(alpha.by_group, group, chr, start, end)
+setkey(subset, group, chr, start, end)
+
+# Plot alpha distributions
+ggplot(alpha.by_group[min_alpha>params$min_alpha_dist], 
+       aes(x=min_alpha)) + 
+  geom_density() + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  facet_wrap(vars(group), scales = "free")
+
+ggplot(alpha.by_group[min_alpha>params$min_alpha_dist], 
+       aes(x=n_low/n_pos)) + 
+  geom_density() + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  facet_wrap(vars(group), scales = "free")
+
+ggplot(alpha.by_group[min_alpha>params$min_alpha_dist], 
+       aes(x=med_logp)) + 
+  geom_density() + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  facet_wrap(vars(group), scales = "free")
+
+ggplot(alpha.by_group[min_alpha>params$min_alpha_dist], 
+       aes(x=mean_logp)) + 
+  geom_density() + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  facet_wrap(vars(group), scales = "free")
+```
+
+## Plot Detailed Region Views
+
+```{r}
+# Select regions for detailed plotting
+subset.plot <- alpha.by_group[
+  group=="T-cells" & 
+  (n_low/n_pos)<0.4][
+    order(min_alpha, decreasing = TRUE)][1:60]
+
+subset.plot[, region := paste0(chr, ":", start-300, ":", end+300)]
+pval.all[, end:=pos]
+setkey(pval.all, chr, pos, end)
+pval.forplot <- foverlaps(pval.all, 
+                         subset.plot[, .N, keyby=.(chr, start-300, end+300)], 
+                         nomatch=NULL)
+pval.all[, end:=NULL]
+
+# Set up colors and prepare data
+colors.group <- alphabet2(15)
+names(colors.group) <- unique(alpha.by_group$group)
+alpha.by_group[, region:=paste0(chr, ":", start-300, '-', end+300)]
+setkey(alpha.by_group, region)
+
+# Load read data for selected regions
+plan(multisession, workers = params$threads)
+
+regions <- split(subset.plot[, .(chr, start, end)], seq(nrow(subset.plot)))
+files <- as.character(bed2type$name)
+names(files) <- as.character(bed2type$sample)
+
+with_progress({
+  p <- progressor(steps=length(regions))
+  reads.all <- future_map(regions, function(region) {
+    region$start = region$start - 300
+    region$end = region$end + 300
+    reads <- load_reads(files, cpg_info, bed2type, 
+                       paste0(region$chr, ":", region$start, '-', region$end),
+                       1, params$min_isize, params$max_isize, 
+                       params$incl_flag, params$excl_flag, params$min_mapq, 
+                       show_progress = FALSE)
+    reads[, region := paste0(region$chr, ":", region$start, '-', region$end)]
+    p()
+    return(reads)
+  })
+})
+
+reads.all <- rbindlist(reads.all)
+reads.all.sum <- reads.all[, .(
+  mean_alpha=sum(num_mod)/sum(num_cpg),
+  mean_cov=.N/length(unique(sample))
+), by=.(chr, pos, group, region)]
+
+setkey(reads.all.sum, region)
+```
+
+## Generate Plots
+
+```{r fig.height=20, fig.width=25}
+# Plot coverage
+ggplot(reads.all.sum, aes(x=pos, y=mean_cov, color=group)) + 
+  geom_line(alpha=0.8) + 
+  scale_color_manual(values = colors.group) + 
+  xlab("Position in chrom") + 
+  ylab("mean coverage") + 
+  facet_wrap(vars(region), scales = "free")
+
+# Get CpGs per region
+cpgs_per_region <- pval.forplot[, .N, keyby=.(r=region, group)][group=="T-cells"]
+
+# Plot mean alpha
+ggplot(reads.all.sum, aes(x=pos, y=mean_alpha, color=group)) + 
+  geom_rect(aes(xmin=as.integer(tstrsplit(region, "[-:]")[[2]])+300, 
+                xmax=as.integer(tstrsplit(region, "[-:]")[[3]])-300, 
+                ymin=0, ymax=1), 
+            alpha=0.5, fill="lightblue", inherit.aes = FALSE) + 
+  geom_line(alpha=0.8) + 
+  scale_color_manual(values = colors.group) + 
+  xlab("Position in chrom") + 
+  ylab("mean alpha") + 
+  facet_wrap(vars(paste0(region, ' ', cpgs_per_region[region]$N)), 
+             scales="free")
+
+# Plot p-values
+ggplot(pval.forplot[, .(
+  mean_logp=mean(fifelse(pval.mean==0, -308, log10(pval.mean)))
+), by=.(chrom=chr, pos, region, group)], 
+  aes(x=pos, y=mean_logp, color=group)) + 
+  geom_rect(aes(xmin=as.integer(tstrsplit(region, "[-:]")[[2]])+300, 
+                xmax=as.integer(tstrsplit(region, "[-:]")[[3]])-300, 
+                ymin=-40, ymax=0), 
+            alpha=0.5, fill="lightblue", inherit.aes = FALSE) + 
+  geom_line(alpha=0.8) + 
+  scale_color_manual(values = colors.group) + 
+  xlab("Position in chrom") + 
+  ylab("mean p-value") + 
+  facet_wrap(vars(paste0(region, ' ', cpgs_per_region[region]$N)), 
+             scales="free")
+
+# Plot alpha distances
+ggplot(pval.forplot[, .(
+  min_alpha_dist=mean(min_alpha_dist)
+), by=.(chr, pos, region, group)], 
+  aes(x=pos, y=min_alpha_dist, color=group)) + 
+  geom_rect(aes(xmin=as.integer(tstrsplit(region, "[-:]")[[2]])+300, 
+                xmax=as.integer(tstrsplit(region, "[-:]")[[3]])-300, 
+                ymin=0, ymax=0.8), 
+            alpha=0.5, fill="lightblue", inherit.aes = FALSE) + 
+  geom_line(alpha=0.8) + 
+  scale_color_manual(values = colors.group) + 
+  xlab("Position in chrom") + 
+  ylab("mean alpha dist") + 
+  facet_wrap(vars(region), scales="free")
+```
+
+## Generate Marker File and Atlas
+
+```{r}
+# Generate marker file
+unique.regions.stat[, direction := fifelse(tg_mean>0, "M", "U")]
+top100.regions <- unique.regions.stat[direction=="U" & r_len>5, 
+                                    .SD[order(delta_means, -ttest, decreasing = TRUE)][1:100], 
+                                    by=target]
+
+fwrite(top100.regions[, .(
+  `#chr`=chr, start, end, startCpG, endCpG, target, 
+  region=paste0(chr,":",start+1,"-",end), 
+  lenCpG=paste0(r_len, "CpGs"), 
+  bp=paste0(p_len,"bp"), 
+  tg_mean, bg_mean=0.0, dela_means=0.0, delta_quants=0.0, 
+  delta_maxmin=0.0, ttest, direction)], 
+  params$out_file, 
+  sep="\t", quote=FALSE, col.names=TRUE, row.names=FALSE)
+```
+
+## Generate Atlas
+
+```{bash}
+# Activate wgbs_tools
+. ~/Code/GRAIL/bin/activate
+
+PATDIR="$BASEDIR/pat/Tissue"
+OUTFILE="$BASEDIR/Atlas_dmr_by_read.blood+gi+tum.U100_v2.l4.bed"
+mkdir -p $BASEDIR/tmp
+
+CLASS_CSV=`mktemp --suffix .csv`
+perl -pe 's:.*/::; s/\.beta//; s/\.calls\.all//' $BASEDIR/taps_atlas_class.csv > $CLASS_CSV
+  
+# Build the actual atlas
+if [ ! -e $OUTFILE ]; then
+  uxm build --markers $MARKER_FILE --groups $CLASS_CSV \
+            --tmp_dir $BASEDIR/tmp \
+            --pats `cut -d , -f 1 $BASEDIR/taps_atlas_class.csv | \
+                    tail -n+2 | \
+                    sed 's/\.beta/.pat.gz/' | \
+                    sed "s:beta:pat/Tissue:" | \
+                    sed "s/\.calls\.all//" | \
+                    sed 's/\n/ /g'` \
+            -@ 12 -o $OUTFILE --rlen 4
+fi
+
+rm -rf $BASEDIR/tmp
+rm $CLASS_CSV
+```
+
+## Visualize Atlas
+
+```{r fig.height=10, fig.width=10}
+# Read and prepare atlas data
+atlas.core <- fread(file.path(params$base_dir, 
+                             "Atlas_dmr_by_read.blood+gi+tum.U100_v2.l4.bed"), 
+                   header=TRUE, stringsAsFactors = TRUE)
+forPlot <- atlas.core
+setDF(forPlot)
+rownames(forPlot) <- paste(forPlot$name, forPlot$target, forPlot$direction)
+forPlot <- forPlot[, -c(1:8)]
+forPlot <- na.omit(forPlot)
+
+# Generate heatmap
+aheatmap(forPlot, 
+         Rowv = FALSE, 
+         Colv = FALSE, 
+         annRow = list(
+           group=tstrsplit(rownames(forPlot), ' ')[[2]], 
+           direction=tstrsplit(rownames(forPlot), ' ')[[3]]
+         ), 
+         annCol = list(
+           tissue=as.factor(colnames(forPlot))
+         ), 
+         annColors = list(
+           group=as.vector(alphabet2(20)), 
+           tissue=as.vector(alphabet2(20))
+         ))
+```
