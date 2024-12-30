@@ -1,4 +1,4 @@
-# ./generate_pats /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.250/Song_pattools/files /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.250.l4.bed
+# /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/generate_pats.sh /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.250/Song_pattools/files /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.250.l4.bed
 PATDIR=$1
 MARKERBED=$2 
 TMPDIR=/users/zetzioni/sharedscratch/atlas/tmp
