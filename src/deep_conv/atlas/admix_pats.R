@@ -167,7 +167,8 @@ generate_mix_from_pat <- function(targets, target_dir, repeats=1, target_depth=2
                                        paste0("-n ", skew), "")
                     
                     system2("sh", c("-c", sprintf(
-                        '"pattools sample -s %.8f %s %s | bgzip -c > %s/d%s_%d_%s.pat.gz"', 
+                        # '"pattools sample -s %.8f %s %s | bgzip -c > %s/d%s_%d_%s.pat.gz"', 
+                        '"/users/zetzioni/sharedscratch/wgbs_tools/src/pat_sampler %.8f %s %s | bgzip -c > %s/d%s_%d_%s.pat.gz"', 
                         fraction, skew_param, filename, tmp_dir, dil, r, ct
                     )))
                 }
