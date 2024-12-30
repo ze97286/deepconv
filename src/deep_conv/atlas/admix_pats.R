@@ -64,7 +64,7 @@ read_count_table <- function(patdir) {
     }
 
     # List and check files
-    files <- list.files(patdir, pattern=".*\\.pat\\.gz$", full.names=TRUE)
+    files <- list.files(patdir, pattern = ".*\\.pat\\.gz$", full.names = TRUE)
     if (length(files) == 0) {
         stop(sprintf("No .pat.gz files found in: %s", patdir))
     }
@@ -73,7 +73,7 @@ read_count_table <- function(patdir) {
     print(files)
     
     # Assign names to files
-    names(files) <- gsub(".pat.gz", "", basename(files), fixed=TRUE)
+    names(files) <- gsub(".pat.gz", "", basename(files), fixed = TRUE)
     
     # Initialize list to store fragment counts
     all_frags_list <- lapply(files, function(file_name) {
@@ -97,7 +97,7 @@ read_count_table <- function(patdir) {
         
         # Read the data using fread
         data <- tryCatch({
-            fread(cmd=cmd, stringsAsFactors=TRUE, header=FALSE, select=4)
+            fread(cmd = cmd, stringsAsFactors = TRUE, header = FALSE, select = 4)
         }, error = function(e) {
             warning(sprintf("Error reading file %s: %s", file_name, e$message))
             return(NULL)
@@ -109,8 +109,14 @@ read_count_table <- function(patdir) {
             return(NULL)
         }
         
+        # Check if column 'V4' exists
+        if (!"V4" %in% names(data)) {
+            warning(sprintf("Column V4 not found in data from: %s. Skipping this file.", file_name))
+            return(NULL)
+        }
+        
         # Rename the column and calculate the sum of counts
-        setnames(data, "V1", "counts")
+        setnames(data, "V4", "counts")
         total_counts <- sum(data$counts, na.rm = TRUE)
         cat(sprintf("Total counts for %s: %d\n", file_name, total_counts))
         return(total_counts)
