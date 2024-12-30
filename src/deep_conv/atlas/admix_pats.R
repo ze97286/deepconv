@@ -57,14 +57,46 @@ make_target_table <- function(target_fraction, dilutions, pat_dir=".", suffix=".
 }
 
 read_count_table <- function(patdir) {
-    files <- list.files(patdir, pattern=".*\\.pat\\.gz$")
-    names(files) <- gsub(".pat.gz", "", files, fixed=TRUE)
+    # First check the directory exists
+    if (!dir.exists(patdir)) {
+        stop(sprintf("Directory does not exist: %s", patdir))
+    }
+
+    # List and check files
+    files <- list.files(patdir, pattern=".*\\.pat\\.gz$", full.names=TRUE)
+    if (length(files) == 0) {
+        stop(sprintf("No .pat.gz files found in: %s", patdir))
+    }
+    
+    cat("Found files:\n")
+    print(files)
+    
+    names(files) <- gsub(".pat.gz", "", basename(files), fixed=TRUE)
+    
     all_frags <- lapply(files, function(file_name) {
-        cmd <- sprintf("zcat %s/%s", patdir, file_name)
+        cat(sprintf("\nProcessing file: %s\n", file_name))
+        
+        # Check file exists and has size
+        if (!file.exists(file_name)) {
+            stop(sprintf("File does not exist: %s", file_name))
+        }
+        file_info <- file.info(file_name)
+        if (file_info$size == 0) {
+            stop(sprintf("File is empty: %s", file_name))
+        }
+        
+        cmd <- sprintf("zcat %s", file_name)
+        cat(sprintf("Running command: %s\n", cmd))
+        
         data <- fread(cmd=cmd, stringsAsFactors=TRUE, header=FALSE, select=4)
+        if (is.null(data) || ncol(data) == 0) {
+            stop(sprintf("Failed to read data from: %s", file_name))
+        }
+        
         setnames(data, c("counts"))
         return(sum(data$counts))
     })
+    
     all_frags <- as.data.table(all_frags)
     all_frags <- data.table(sample=names(all_frags), fragments=t(all_frags)[,1])
     return(all_frags)
