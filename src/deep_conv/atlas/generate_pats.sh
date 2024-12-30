@@ -2,6 +2,7 @@
 PATDIR=$1
 MARKERBED=$2 
 TMPDIR=/users/zetzioni/sharedscratch/atlas/tmp
+BASEDIR=/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/Benchmark
 
 if [ ! -e $MARKERBED ]; then
   echo "Error: $MARKERBED does not exist!" 2>&1
