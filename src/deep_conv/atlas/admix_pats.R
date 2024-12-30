@@ -178,7 +178,7 @@ generate_mix_from_pat <- function(targets, target_dir, repeats=1, target_depth=2
                 system2("sh", c("-c", paste0(
                     '"zcat ', tmp_dir, '/d',dil, '_',r,'_*.pat.gz | ',
                     'sort -k1,1V -k2,2n -k3,3 | ',
-                    'perl -n deduplicate_pat.pl | ',
+                    'perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | ',
                     'bgzip -c > ', out_file,
                     '; tabix -s 1 -b 2 -e 2 -C ', out_file, '"'
                 )))
