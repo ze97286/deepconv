@@ -211,24 +211,58 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
   
   unique.sign.regions <- dmrs[unique.sign.regions, on=list(group, chr, pos), nomatch=NULL]
   
+  if (params$verbose) {
+      message("\nStructure of unique.sign.regions:")
+      print(str(unique.sign.regions))
+      message("\nFirst few rows:")
+      print(head(unique.sign.regions))
+      message("\nColumn names:")
+      print(names(unique.sign.regions))
+  }
+
   unique.sign.regions.stats <- suppressWarnings(
-    unique.sign.regions[, .(
-      r_len=length(unique(pos)), 
-      p_len=min(end-start+1), 
-      avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))), 
-      med_logp=median(fifelse(pval.med==0,-308,log10(pval.med))), 
-      MPD = mean(abs(outer(.SD, .SD, "-"))),  
-      SNR = var(.SD) / var(rowMeans(.SD)),    
-      min_logp=min(fifelse(pval.min==0,-308,log10(pval.min))), 
-      max_logp=max(fifelse(pval.max==0,-308,log10(pval.max))), 
-      fully_covered=all(outgroup_count==n_groups-1),
-      avg_min_alpha_dist = mean(min_alpha_dist), 
-      avg_min_ci = mean(ci.min), 
-      n_low_alpha_dist=sum(min_alpha_dist < mad), 
-      n_total=.N
-    ), by=.(chr, group, start, end, region_index),
-      .SDcols = mixture_cell_types]
-    )
+    unique.sign.regions[, {
+          # First calculate the non-mixture stats
+          basic_stats <- .(
+              r_len=length(unique(pos)), 
+              p_len=min(end-start+1), 
+              avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))), 
+              med_logp=median(fifelse(pval.med==0,-308,log10(pval.med))), 
+              min_logp=min(fifelse(pval.min==0,-308,log10(pval.min))), 
+              max_logp=max(fifelse(pval.max==0,-308,log10(pval.max))), 
+              fully_covered=all(outgroup_count==n_groups-1),
+              avg_min_alpha_dist = mean(min_alpha_dist), 
+              avg_min_ci = mean(ci.min), 
+              n_low_alpha_dist=sum(min_alpha_dist < mad), 
+              n_total=.N
+          )
+          
+          # Reshape data for mixture analysis
+          mixture_data <- dcast(.SD, pos ~ group, 
+                              subset = .(group %in% mixture_cell_types),
+                              value.var = "value", 
+                              fill = 0)
+          
+          if(ncol(mixture_data) > 1) {
+              mixture_vals <- as.matrix(mixture_data[, -1])  # Remove pos column
+              mpd <- mean(abs(outer(mixture_vals, mixture_vals, "-")))
+              snr <- var(mixture_vals) / var(rowMeans(mixture_vals))
+              # Calculate MDD for each cell type
+              mdds <- sapply(1:ncol(mixture_vals), function(i) {
+                  signal <- mixture_vals[,i]
+                  noise_sd <- sd(mixture_vals[,-i])
+                  abs(signal) / (noise_sd + 1e-10)
+              })
+              
+              c(basic_stats, 
+                list(MPD = mpd,
+                    SNR = snr,
+                    MDD = min(mdds)))  # Worst case MDD
+          } else {
+              basic_stats
+          }
+      }, by=.(chr, group, start, end, region_index)]
+  )
   
   return(unique.sign.regions.stats)
 }
@@ -289,8 +323,8 @@ main <- function() {
                 help="Maximum number of top markers to keep per target [default %default]"),
     make_option(c("--mpd_threshold"), type="integer", default=0.001,
                 help="Minimum pairwise difference [default %default]"),
-    make_option(c("--snr_threshold"), type="integer", default=1,
-                help="Signal to noise ratio threshold [default %default]"),
+    make_option(c("--mdd_threshold"), type="integer", default=0.0001,
+                help="Minimum detectable threshold [default %default]"),
     make_option(c("-r", "--min_reads"), type="integer", default=3,
                 help="Minimum number of qualifying reads per group [default %default]"),
     make_option(c("-g", "--min_cpgs"), type="integer", default=4,
@@ -500,8 +534,9 @@ main <- function() {
   
   # Apply thresholds
   filtered_regions <- candidate_regions[has_coverage == TRUE & 
-                                        MPD > mpd_threshold & 
-                                        SNR > snr_threshold]
+                                    MPD > mpd_threshold & 
+                                    SNR > snr_threshold &
+                                    MDD > mdd_threshold]
 
   # Log number of markers per cell type after filtering
   if (params$verbose) {
@@ -526,7 +561,7 @@ main <- function() {
   }
 
   # Rank globally and apply optional total limit
-  top_regions <- filtered_regions[order(-delta_means, -MPD, -SNR)]
+  top_regions <- filtered_regions[order(-delta_means, -MPD, -SNR, -MDD)]
   if (!is.null(params$top_n)) {
     top_regions <- top_regions[1:params$top_n]
   }
