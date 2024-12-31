@@ -249,9 +249,12 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
           
           if(ncol(mixture_data) > 1) {
               mixture_vals <- as.matrix(mixture_data[, -1])  
-              # Row-wise MPD calculation
+
+              # Ensure mixture_vals is in the global environment
+              assign("mixture_vals", mixture_vals, envir = .GlobalEnv)
+
+              # Logging for MPD calculation
               message(Sys.time(), " - Starting MPD calculation...")
-              # Row-wise MPD calculation (memory efficient)
               mpd <- mean(apply(mixture_vals, 1, function(row) {
                   mean(abs(outer(row, row, "-")))  # Pairwise differences for each position
               }))
@@ -270,6 +273,8 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
 
               # MDD calculation with logging
               cl <- makeCluster(detectCores() - 1)  # Use all but one core
+
+              # Export variables to the cluster
               clusterExport(cl, varlist = c("mixture_vals"))
 
               message(Sys.time(), " - Starting MDD calculation...")
