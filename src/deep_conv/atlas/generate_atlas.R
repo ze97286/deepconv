@@ -248,20 +248,46 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
           
           if(ncol(mixture_data) > 1) {
               mixture_vals <- as.matrix(mixture_data[, -1])  
-              # Row-wise MPD calculation (efficient)
-              mpd <- mean(apply(mixture_vals, 1, function(row) {
-                  mean(abs(outer(row, row, "-")))  # Pairwise differences for each position
-              }))
+              # Row-wise MPD calculation
+              handlers(global = TRUE)
+              progressr::with_progress({
+                p <- progressor(steps = 1) 
+                message(Sys.time(), " - Starting MPD calculation...")
+                # Optimized MPD calculation
+                mpd <- mean(abs(mixture_vals %*% t(mixture_vals))) / 
+                        (ncol(mixture_vals) * nrow(mixture_vals))
+                
+                p()
+                message(Sys.time(), " - MPD calculation complete.")
+              })
 
               # Signal-to-Noise Ratio (SNR)
-              snr <- var(as.vector(mixture_vals)) / var(rowMeans(mixture_vals))
+              message(Sys.time(), " - Calculating row means...")
+              row_means <- rowMeans(mixture_vals)
+
+              message(Sys.time(), " - Calculating total variance...")
+              total_variance <- mean(apply(mixture_vals, 1, var))
+
+              message(Sys.time(), " - Calculating SNR...")
+              snr <- total_variance / var(row_means)
+              message(Sys.time(), " - SNR calculation complete.")
 
               # Mean Differential Detection (MDD) for each cell type
-              mdds <- sapply(1:ncol(mixture_vals), function(i) {
-                  signal <- mixture_vals[,i]  # Signal for cell type i
-                  noise_sd <- apply(mixture_vals[,-i, drop = FALSE], 1, sd)  # Noise from other cell types
-                  abs(signal) / (noise_sd + 1e-10)
+              cl <- makeCluster(detectCores() - 1)  # Use all but one core
+              clusterExport(cl, varlist = c("mixture_vals"))
+              handlers(global = TRUE)
+              progressr::with_progress({
+                  p <- progressor(steps = ncol(mixture_vals))  # Progress bar for each cell type
+                  message(Sys.time(), " - Starting MDD calculation...")
+                  mdds <- parSapply(cl, 1:ncol(mixture_vals), function(i) {
+                      p()  # Update progress
+                      signal <- mixture_vals[,i]
+                      noise_sd <- apply(mixture_vals[,-i, drop = FALSE], 1, sd)
+                      abs(signal) / (noise_sd + 1e-10)
+                  })
+                  message(Sys.time(), " - MDD calculation complete.")
               })
+              stopCluster(cl)
               
               c(basic_stats, 
                 list(MPD = mpd,
