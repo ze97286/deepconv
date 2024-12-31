@@ -286,7 +286,7 @@ def save_estimated_proportions(
 
 def columns():
     return [
-        f"d0_{i}" for i in range(1, 101)
+        f"d1e-05_{i}" for i in range(1, 101)
     ] + [
         f"d1e-04_{i}" for i in range(1, 101)
     ] + [
@@ -303,7 +303,7 @@ def columns():
 
 def dilutions():
     return [
-        0 for i in range(1, 101)
+        1e-5 for i in range(1, 101)
     ] + [
         1e-4 for i in range(1, 101)
     ] + [
