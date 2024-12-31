@@ -248,8 +248,15 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
           
           if(ncol(mixture_data) > 1) {
               mixture_vals <- as.matrix(mixture_data[, -1])  
-              mpd <- mean(rowMeans(abs(outer(mixture_vals, mixture_vals, "-"))))  # Per position MPD
+              # Row-wise MPD calculation (efficient)
+              mpd <- mean(apply(mixture_vals, 1, function(row) {
+                  mean(abs(outer(row, row, "-")))  # Pairwise differences for each position
+              }))
+
+              # Signal-to-Noise Ratio (SNR)
               snr <- var(as.vector(mixture_vals)) / var(rowMeans(mixture_vals))
+
+              # Mean Differential Detection (MDD) for each cell type
               mdds <- sapply(1:ncol(mixture_vals), function(i) {
                   signal <- mixture_vals[,i]  # Signal for cell type i
                   noise_sd <- apply(mixture_vals[,-i, drop = FALSE], 1, sd)  # Noise from other cell types
