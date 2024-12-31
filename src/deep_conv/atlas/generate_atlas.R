@@ -238,19 +238,21 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
           )
           
           # Reshape data for mixture analysis
-          mixture_data <- dcast(.SD, pos ~ group, 
-                              subset = .(group %in% mixture_cell_types),
-                              value.var = "value", 
-                              fill = 0)
+          mixture_data <- dcast(
+            unique.sign.regions, 
+            pos ~ group,                      
+            value.var = "mean_alpha_dist",    
+            fill = 0,                         
+            subset = .(group %in% mixture_cell_types) 
+          )
           
           if(ncol(mixture_data) > 1) {
-              mixture_vals <- as.matrix(mixture_data[, -1])  # Remove pos column
-              mpd <- mean(abs(outer(mixture_vals, mixture_vals, "-")))
-              snr <- var(mixture_vals) / var(rowMeans(mixture_vals))
-              # Calculate MDD for each cell type
+              mixture_vals <- as.matrix(mixture_data[, -1])  
+              mpd <- mean(rowMeans(abs(outer(mixture_vals, mixture_vals, "-"))))  # Per position MPD
+              snr <- var(as.vector(mixture_vals)) / var(rowMeans(mixture_vals))
               mdds <- sapply(1:ncol(mixture_vals), function(i) {
-                  signal <- mixture_vals[,i]
-                  noise_sd <- sd(mixture_vals[,-i])
+                  signal <- mixture_vals[,i]  # Signal for cell type i
+                  noise_sd <- apply(mixture_vals[,-i, drop = FALSE], 1, sd)  # Noise from other cell types
                   abs(signal) / (noise_sd + 1e-10)
               })
               
