@@ -135,7 +135,7 @@ verify_region_coverage <- function(regions, coverage_index, min_coverage=3, min_
 
 # Region processing functions
 collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, max_dist=1e3, 
-                              min_logp=-20, min_length=100, mad=0.1) {
+                              min_logp=-20, min_length=100, mad=0.1, verbose=TRUE) {
   n_groups = length(unique(dmrs$group))
   
   if (!identical(key(dmrs), c("chr", "pos"))) {
@@ -211,7 +211,7 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
   
   unique.sign.regions <- dmrs[unique.sign.regions, on=list(group, chr, pos), nomatch=NULL]
   
-  if (params$verbose) {
+  if (verbose) {
       message("\nStructure of unique.sign.regions:")
       print(str(unique.sign.regions))
       message("\nFirst few rows:")
@@ -430,7 +430,7 @@ main <- function() {
   }
   
   # Find candidate regions
-  unique.regions <- collapse_to_regions(pval.all, cpg_info, mixture_cell_types = c("B-cells", "CD34-erythroblasts", "CD34-megakaryocytes", "CD4-T-cells","CD8-T-cells","Eosinophils", "Monocytes", "NK-cells","Neutrophils"))
+  unique.regions <- collapse_to_regions(pval.all, cpg_info, mixture_cell_types = c("B-cells", "CD34-erythroblasts", "CD34-megakaryocytes", "CD4-T-cells","CD8-T-cells","Eosinophils", "Monocytes", "NK-cells","Neutrophils"),verbose = params$verbose)
   
   if (params$verbose) {
     end_time <- Sys.time()
