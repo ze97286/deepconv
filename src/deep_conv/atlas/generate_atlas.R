@@ -5,9 +5,9 @@
 #   --cpg_file /users/zetzioni/sharedscratch/wgbs_tools/references/hg38/CpG.bed.gz \
 #   --map_file /users/zetzioni/sharedscratch/atlas/per-read-bed2class.csv \
 #   --base_dir /users/zetzioni/sharedscratch/atlas/ \
-#   --out_file /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.100.l4.bed \
+#   --out_file /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.25_500.l4.bed \
 #   --index_file /users/zetzioni/sharedscratch/atlas/pats/cell_type_pat_index_l4.csv.gz \
-#   --top_n 100 \
+#   --top_n 25 \
 #   --threads 32 \
 #   --verbose
 
@@ -134,7 +134,7 @@ verify_region_coverage <- function(regions, coverage_index, min_coverage=3, min_
 }
 
 # Region processing functions
-collapse_to_regions <- function(dmrs, cpg_info, max_gap=1, max_dist=1e3, 
+collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, max_dist=1e3, 
                               min_logp=-20, min_length=100, mad=0.1) {
   n_groups = length(unique(dmrs$group))
   
@@ -217,8 +217,8 @@ collapse_to_regions <- function(dmrs, cpg_info, max_gap=1, max_dist=1e3,
       p_len=min(end-start+1), 
       avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))), 
       med_logp=median(fifelse(pval.med==0,-308,log10(pval.med))), 
-      MPD = mean(abs(outer(mixture_values, mixture_values, "-"))),
-      SNR = var(between_cell_values) / var(mixture_values),
+      MPD = mean(abs(outer(.SD, .SD, "-"))),  
+      SNR = var(.SD) / var(rowMeans(.SD)),    
       min_logp=min(fifelse(pval.min==0,-308,log10(pval.min))), 
       max_logp=max(fifelse(pval.max==0,-308,log10(pval.max))), 
       fully_covered=all(outgroup_count==n_groups-1),
@@ -226,7 +226,9 @@ collapse_to_regions <- function(dmrs, cpg_info, max_gap=1, max_dist=1e3,
       avg_min_ci = mean(ci.min), 
       n_low_alpha_dist=sum(min_alpha_dist < mad), 
       n_total=.N
-    ), by=.(chr, group, start, end, region_index)])
+    ), by=.(chr, group, start, end, region_index),
+      .SDcols = mixture_cell_types]
+    )
   
   return(unique.sign.regions.stats)
 }
@@ -394,7 +396,7 @@ main <- function() {
   }
   
   # Find candidate regions
-  unique.regions <- collapse_to_regions(pval.all, cpg_info)
+  unique.regions <- collapse_to_regions(pval.all, cpg_info, mixture_cell_types = c("B-cells", "CD34-erythroblasts", "CD34-megakaryocytes", "CD4-T-cells","CD8-T-cells","Eosinophils", "Monocytes", "NK-cells","Neutrophils"))
   
   if (params$verbose) {
     end_time <- Sys.time()
