@@ -18,6 +18,7 @@ suppressPackageStartupMessages({
   library(optparse)
   library(progressr)
   library(furrr)
+  library(parallel)
 })
 
 # Data loading helper functions
