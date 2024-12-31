@@ -250,8 +250,10 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
               mixture_vals <- as.matrix(mixture_data[, -1])  
               # Row-wise MPD calculation
               message(Sys.time(), " - Starting MPD calculation...")
-              mpd <- mean(abs(mixture_vals %*% t(mixture_vals))) / 
-                    (ncol(mixture_vals) * nrow(mixture_vals))
+              # Row-wise MPD calculation (memory efficient)
+              mpd <- mean(apply(mixture_vals, 1, function(row) {
+                  mean(abs(outer(row, row, "-")))  # Pairwise differences for each position
+              }))
               message(Sys.time(), " - MPD calculation complete.")
 
               # Logging for SNR calculation
