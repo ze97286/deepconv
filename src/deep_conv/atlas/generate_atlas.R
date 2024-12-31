@@ -271,19 +271,16 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
               snr <- total_variance / var(row_means)
               message(Sys.time(), " - SNR calculation complete.")
 
-              # MDD calculation with logging
-              cl <- makeCluster(detectCores() - 1)  # Use all but one core
-
-              # Export variables to the cluster
-              clusterExport(cl, varlist = c("mixture_vals"))
-
+              # Logging for MDD calculation
               message(Sys.time(), " - Starting MDD calculation...")
-              mdds <- parSapply(cl, 1:ncol(mixture_vals), function(i) {
-                  signal <- mixture_vals[,i]
-                  noise_sd <- apply(mixture_vals[,-i, drop = FALSE], 1, sd)
-                  abs(signal) / (noise_sd + 1e-10)
+              # Precompute standard deviations for each cell type
+              precomputed_sds <- apply(mixture_vals, 2, sd)  # Standard deviation per column
+              # Calculate MDD for each cell type sequentially
+              mdds <- sapply(1:ncol(mixture_vals), function(i) {
+                  signal <- mixture_vals[, i]
+                  noise_sd <- precomputed_sds[-i]  # Exclude the current column's SD
+                  abs(signal) / (mean(noise_sd) + 1e-10)  # Compute MDD for this column
               })
-              stopCluster(cl)
               message(Sys.time(), " - MDD calculation complete.")
               
               c(basic_stats, 
