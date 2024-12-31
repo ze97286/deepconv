@@ -217,6 +217,8 @@ collapse_to_regions <- function(dmrs, cpg_info, max_gap=1, max_dist=1e3,
       p_len=min(end-start+1), 
       avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))), 
       med_logp=median(fifelse(pval.med==0,-308,log10(pval.med))), 
+      MPD = mean(abs(outer(mixture_values, mixture_values, "-"))),
+      SNR = var(between_cell_values) / var(mixture_values),
       min_logp=min(fifelse(pval.min==0,-308,log10(pval.min))), 
       max_logp=max(fifelse(pval.max==0,-308,log10(pval.max))), 
       fully_covered=all(outgroup_count==n_groups-1),
@@ -254,6 +256,14 @@ write_marker_file <- function(regions, outfile) {
         row.names=FALSE)
 }
 
+calculate_within_mixture_variance <- function(regions, mixture_cell_types, variance_threshold) {
+  # Calculate variance across mixture cell types for each region
+  regions[, within_var := apply(.SD, 1, var), .SDcols = mixture_cell_types]
+  
+  # Filter regions with variance above the threshold
+  return(regions[within_var > variance_threshold])
+}
+
 main <- function() {
   option_list <- list(
     make_option(c("-c", "--cpg_file"), type="character",
@@ -271,8 +281,14 @@ main <- function() {
     make_option(c("-o", "--out_file"), type="character",
                 help="Output file path for markers [REQUIRED]",
                 metavar="markers.bed"),
-    make_option(c("-n", "--top_n"), type="integer", default=100,
-                help="Number of top markers to keep per target [default %default]"),
+    make_option(c("-n", "--top_n"), type="integer", default=50,
+                help="Minimum number of top markers to keep per target [default %default]"),
+    make_option(c("--max_per_cell_type"), type="integer", default=500,
+                help="Maximum number of top markers to keep per target [default %default]"),
+    make_option(c("--mpd_threshold"), type="integer", default=0.001,
+                help="Minimum pairwise difference [default %default]"),
+    make_option(c("--snr_threshold"), type="integer", default=1,
+                help="Signal to noise ratio threshold [default %default]"),
     make_option(c("-r", "--min_reads"), type="integer", default=3,
                 help="Minimum number of qualifying reads per group [default %default]"),
     make_option(c("-g", "--min_cpgs"), type="integer", default=4,
@@ -472,17 +488,52 @@ main <- function() {
   if (params$verbose) {
     message(Sys.time(), " Selecting final regions...")
   }
-  
-  top_regions <- candidate_regions[has_coverage==TRUE, 
-                                 head(.SD[order(delta_means, -ttest, decreasing=TRUE)], 
-                                      n=params$top_n), 
-                                 by=target]
-  
+
+  candidate_regions <- calculate_within_mixture_variance(candidate_regions, 
+                                                       mixture_cell_types = c("B-cells", "CD34-erythroblasts", "CD34-megakaryocytes", "CD4-T-cells","CD8-T-cells","Eosinophils", "Monocytes", "NK-cells","Neutrophils"), 
+                                                       variance_threshold = 0.01)  
   if (params$verbose) {
-    message(sprintf("\nSelected top %d regions per target (total %d regions)", 
-                   params$top_n, nrow(top_regions)))
-    message("\nFinal distribution by target:")
-    print(top_regions[, .N, by=target])
+    message(sprintf("Filtered regions based on variance: %d remaining.", nrow(candidate_regions)))
+  }
+  
+  # Apply thresholds
+  filtered_regions <- candidate_regions[has_coverage == TRUE & 
+                                        MPD > mpd_threshold & 
+                                        SNR > snr_threshold]
+
+  # Log number of markers per cell type after filtering
+  if (params$verbose) {
+    message("Number of markers per cell type after filtering by MPD and SNR thresholds:")
+    print(filtered_regions[, .N, by = target])
+  }
+
+  # Check for minimum markers per cell type
+  marker_counts <- filtered_regions[, .N, by = target]
+  if (any(marker_counts$N < n_top)) {
+    stop(sprintf("Failed to find at least %d markers for all cell types. Missing: %s", 
+                n_top, paste(marker_counts[target %in% marker_counts[N < n_top, target]]$target, collapse = ", ")))
+  }
+
+  # Enforce upper bound on markers per cell type
+  filtered_regions <- filtered_regions[, head(.SD, max_per_cell_type), by = target]
+
+  # Log number of markers per cell type after applying upper bound
+  if (params$verbose) {
+    message("Number of markers per cell type after applying the upper bound:")
+    print(filtered_regions[, .N, by = target])
+  }
+
+  # Rank globally and apply optional total limit
+  top_regions <- filtered_regions[order(-delta_means, -MPD, -SNR)]
+  if (!is.null(params$top_n)) {
+    top_regions <- top_regions[1:params$top_n]
+  }
+
+  # Log final number of markers
+  if (params$verbose) {
+    message(sprintf("Final number of top regions: %d", nrow(top_regions)))
+    message("Final distribution of markers by cell type:")
+    print(top_regions[, .N, by = target])
   }
   
   # Write output
