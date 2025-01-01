@@ -1,3 +1,11 @@
+required_packages <- c("data.table", "ggplot2", "gridExtra", "optparse")
+new_packages <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) {
+    install.packages(new_packages, 
+                    lib = Sys.getenv("R_LIBS_USER"), 
+                    repos = "https://cloud.r-project.org")
+}
+
 library(data.table)
 library(ggplot2)
 library(gridExtra)
