@@ -223,8 +223,15 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
 
   unique.sign.regions.stats <- suppressWarnings(
         unique.sign.regions[, {
-            # Basic stats remain same
-            basic_stats <- .(
+            if(verbose) {
+                message(sprintf("\nProcessing region: chr=%s, start=%d, end=%d", 
+                              chr[1], start[1], end[1]))
+                message("Group: ", group[1])
+                message("Number of positions: ", .N)
+            }
+            
+            # Basic stats with logging
+            region_stats <- .(
                 r_len=length(unique(pos)), 
                 p_len=min(end-start+1),
                 avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))),
@@ -235,31 +242,70 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
                 avg_min_alpha_dist = mean(min_alpha_dist),
                 avg_min_ci = mean(ci.min),
                 n_low_alpha_dist=sum(min_alpha_dist < mad),
-                n_total=.N
+                n_total=.N,
+                region_alpha = mean(mean_alpha_dist)
             )
             
-            # Calculate mean alpha dist per group for this region
-            region_means <- unique.sign.regions[, .(region_alpha = mean(mean_alpha_dist)), by=group]
-            mixture_vals <- region_means[group %in% mixture_cell_types, region_alpha]
+            if(verbose) {
+                message("Region alpha value: ", region_stats$region_alpha)
+            }
             
-            # Calculate MPD
-            mpd <- mean(abs(outer(mixture_vals, mixture_vals, "-")))
-            
-            # Calculate SNR
-            mixture_matrix <- matrix(mixture_vals)
-            snr <- var(mixture_vals) / var(rowMeans(mixture_matrix))
-            
-            # Calculate variance within mixture cell types
-            mixture_var <- var(mixture_vals)
-            
-            c(basic_stats, 
-              list(MPD = mpd,
-                   SNR = snr,
-                   mixture_variance = mixture_var))
+            return(region_stats)
         }, by=.(chr, group, start, end, region_index)]
     )
-    
-    return(unique.sign.regions.stats)
+
+    if(verbose) {
+        message("\nFirst stage stats:")
+        print(head(unique.sign.regions.stats))
+    }
+
+    # Second stage - between group metrics
+    final_regions <- unique.sign.regions.stats[, {
+        if(verbose) {
+            message(sprintf("\nCalculating between-group metrics for region: chr=%s, start=%d, end=%d", 
+                          chr[1], start[1], end[1]))
+        }
+        
+        # Get alpha values for mixture cell types
+        mixture_vals <- region_alpha[group %in% mixture_cell_types]
+        
+        if(verbose) {
+            message("Mixture cell types values:")
+            print(data.table(group=group[group %in% mixture_cell_types], 
+                            alpha=mixture_vals))
+        }
+        
+        # Calculate metrics with logging
+        mpd <- mean(abs(outer(mixture_vals, mixture_vals, "-")))
+        snr <- var(mixture_vals) / (var(rowMeans(matrix(mixture_vals))) + 1e-10)
+        mixture_var <- var(mixture_vals)
+        
+        if(verbose) {
+            message(sprintf("MPD: %.4f, SNR: %.4f, Mixture Variance: %.4f", 
+                          mpd, snr, mixture_var))
+        }
+        
+        result <- c(.SD[1],
+                    list(MPD = mpd,
+                        SNR = snr,
+                        mixture_variance = mixture_var))
+        
+        if(verbose) {
+            message("Final metrics for region:")
+            print(result[c("MPD", "SNR", "mixture_variance")])
+        }
+        
+        return(result)
+    }, by=.(chr, start, end, region_index)]
+
+    if(verbose) {
+        message("\nFinal results:")
+        print(head(final_regions))
+        message("\nColumn names in final results:")
+        print(names(final_regions))
+    }
+
+    return(final_regions)
 }
 
 write_marker_file <- function(regions, outfile) {
