@@ -282,19 +282,22 @@ write_marker_file <- function(regions, outfile) {
 }
 
 calculate_within_mixture_variance <- function(regions, mixture_cell_types, variance_threshold) {
-    # For each region, calculate mean_alpha_dist per group
-    regions_variance <- regions[, {
-        # Get mean alpha dist for each mixture cell type in this region
-        cell_type_means <- regions[group %in% mixture_cell_types, 
-                                 .(mean_val = mean(mean_alpha_dist)), 
-                                 by=group]
-        .(within_var = var(cell_type_means$mean_val))
-    }, by=.(chr, start, end)]
+    # First aggregate to region level
+    region_stats <- regions[
+        group %in% mixture_cell_types,
+        .(region_mean = mean(mean_alpha_dist)),
+        by=.(chr, start, end, group)
+    ]
+    
+    # Calculate variance between cell types for each region
+    region_variance <- region_stats[,
+        .(within_var = var(region_mean)),
+        by=.(chr, start, end)
+    ]
     
     # Join back and filter
-    regions[regions_variance, on=.(chr, start, end)][within_var > variance_threshold]
+    regions[region_variance, on=.(chr, start, end)][within_var > variance_threshold]
 }
-
 main <- function() {
   option_list <- list(
     make_option(c("-c", "--cpg_file"), type="character",
