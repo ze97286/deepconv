@@ -342,7 +342,7 @@ calculate_within_mixture_variance <- function(regions, mixture_cell_types, varia
     setkey(regions, chr, start, end)  # Ensure keys are set
     
     filtered_regions <- regions[
-        group %in% mixture_cell_types,  # First filter to only mixture cell types
+        target %in% mixture_cell_types,  # First filter to only mixture cell types
         {
             var_val = var(mean_alpha_dist)  # Calculate variance directly
             if(var_val > variance_threshold) .SD  # Only return data if variance exceeds threshold
