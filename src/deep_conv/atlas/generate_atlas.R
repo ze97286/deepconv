@@ -222,38 +222,44 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
   }
 
   unique.sign.regions.stats <- suppressWarnings(
-    unique.sign.regions[, {
-          # First calculate the non-mixture stats
-          basic_stats <- .(
-              r_len=length(unique(pos)), 
-              p_len=min(end-start+1), 
-              avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))), 
-              med_logp=median(fifelse(pval.med==0,-308,log10(pval.med))), 
-              min_logp=min(fifelse(pval.min==0,-308,log10(pval.min))), 
-              max_logp=max(fifelse(pval.max==0,-308,log10(pval.max))), 
-              fully_covered=all(outgroup_count==n_groups-1),
-              avg_min_alpha_dist = mean(min_alpha_dist), 
-              avg_min_ci = mean(ci.min), 
-              n_low_alpha_dist=sum(min_alpha_dist < mad), 
-              n_total=.N
-          )
-          
-          # Calculate mean alpha dist per group for this region
-          region_means <- unique.sign.regions[, .(region_alpha = mean(mean_alpha_dist)), by=group]
-          
-          # Now calculate our new metrics on these region-level values
-          mixture_vals <- region_means[group %in% mixture_cell_types, region_alpha]
-          
-          mpd <- mean(abs(outer(mixture_vals, mixture_vals, "-")))
-          snr <- var(mixture_vals) / var(rowMeans(matrix(mixture_vals)))
-          
-          c(basic_stats, 
-            list(MPD = mpd,
-                SNR = snr))
-      }, by=.(chr, group, start, end, region_index)]
-  )
-  
-  return(unique.sign.regions.stats)
+        unique.sign.regions[, {
+            # Basic stats remain same
+            basic_stats <- .(
+                r_len=length(unique(pos)), 
+                p_len=min(end-start+1),
+                avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))),
+                med_logp=median(fifelse(pval.med==0,-308,log10(pval.med))),
+                min_logp=min(fifelse(pval.min==0,-308,log10(pval.min))),
+                max_logp=max(fifelse(pval.max==0,-308,log10(pval.max))),
+                fully_covered=all(outgroup_count==n_groups-1),
+                avg_min_alpha_dist = mean(min_alpha_dist),
+                avg_min_ci = mean(ci.min),
+                n_low_alpha_dist=sum(min_alpha_dist < mad),
+                n_total=.N
+            )
+            
+            # Calculate mean alpha dist per group for this region
+            region_means <- unique.sign.regions[, .(region_alpha = mean(mean_alpha_dist)), by=group]
+            mixture_vals <- region_means[group %in% mixture_cell_types, region_alpha]
+            
+            # Calculate MPD
+            mpd <- mean(abs(outer(mixture_vals, mixture_vals, "-")))
+            
+            # Calculate SNR
+            mixture_matrix <- matrix(mixture_vals)
+            snr <- var(mixture_vals) / var(rowMeans(mixture_matrix))
+            
+            # Calculate variance within mixture cell types
+            mixture_var <- var(mixture_vals)
+            
+            c(basic_stats, 
+              list(MPD = mpd,
+                   SNR = snr,
+                   mixture_variance = mixture_var))
+        }, by=.(chr, group, start, end, region_index)]
+    )
+    
+    return(unique.sign.regions.stats)
 }
 
 write_marker_file <- function(regions, outfile) {
@@ -282,22 +288,22 @@ write_marker_file <- function(regions, outfile) {
 }
 
 calculate_within_mixture_variance <- function(regions, mixture_cell_types, variance_threshold) {
-    # First aggregate to region level
-    region_stats <- regions[
-        group %in% mixture_cell_types,
-        .(region_mean = mean(mean_alpha_dist)),
-        by=.(chr, start, end, group)
+    # Do it all in one operation
+    setkey(regions, chr, start, end)  # Ensure keys are set
+    
+    filtered_regions <- regions[
+        group %in% mixture_cell_types,  # First filter to only mixture cell types
+        {
+            var_val = var(mean_alpha_dist)  # Calculate variance directly
+            if(var_val > variance_threshold) .SD  # Only return data if variance exceeds threshold
+        },
+        by=.(chr, start, end)  # Group by region
     ]
     
-    # Calculate variance between cell types for each region
-    region_variance <- region_stats[,
-        .(within_var = var(region_mean)),
-        by=.(chr, start, end)
-    ]
-    
-    # Join back and filter
-    regions[region_variance, on=.(chr, start, end)][within_var > variance_threshold]
+    return(filtered_regions)
 }
+
+
 main <- function() {
   option_list <- list(
     make_option(c("-c", "--cpg_file"), type="character",
@@ -532,37 +538,26 @@ main <- function() {
   
   # Apply thresholds
   filtered_regions <- candidate_regions[has_coverage == TRUE & 
-                                    MPD > mpd_threshold & 
-                                    SNR > snr_threshold &
-                                    MDD > mdd_threshold]
+                                    SNR > 1]
 
-  # Log number of markers per cell type after filtering
+  # Log after filtering
   if (params$verbose) {
-    message("Number of markers per cell type after filtering by MPD and SNR thresholds:")
-    print(filtered_regions[, .N, by = target])
+      message("Number of markers per cell type after SNR filtering:")
+      print(filtered_regions[, .N, by = target])
   }
 
   # Check for minimum markers per cell type
   marker_counts <- filtered_regions[, .N, by = target]
-  if (any(marker_counts$N < n_top)) {
-    stop(sprintf("Failed to find at least %d markers for all cell types. Missing: %s", 
-                n_top, paste(marker_counts[target %in% marker_counts[N < n_top, target]]$target, collapse = ", ")))
+  if (any(marker_counts$N < params$top_n)) {
+      stop(sprintf("Failed to find at least %d markers for all cell types. Missing: %s", 
+                  params$top_n, paste(marker_counts[target %in% marker_counts[N < params$top_n, target]]$target, collapse = ", ")))
   }
 
-  # Enforce upper bound on markers per cell type
-  filtered_regions <- filtered_regions[, head(.SD, max_per_cell_type), by = target]
+  # Sort by combination of metrics including mixture variance
+  filtered_regions <- filtered_regions[order(-delta_means, -MPD, -mixture_variance)]
 
-  # Log number of markers per cell type after applying upper bound
-  if (params$verbose) {
-    message("Number of markers per cell type after applying the upper bound:")
-    print(filtered_regions[, .N, by = target])
-  }
-
-  # Rank globally and apply optional total limit
-  top_regions <- filtered_regions[order(-delta_means, -MPD, -SNR, -MDD)]
-  if (!is.null(params$top_n)) {
-    top_regions <- top_regions[1:params$top_n]
-  }
+  # Take top N per cell type
+  top_regions <- filtered_regions[, head(.SD, params$max_per_cell_type), by = target]
 
   # Log final number of markers
   if (params$verbose) {
