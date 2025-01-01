@@ -249,41 +249,29 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
           
           if(ncol(mixture_data) > 1) {
               mixture_vals <- as.matrix(mixture_data[, -1])  
+              message(sprintf("Processing %d rows x %d cell types", nrow(mixture_vals), ncol(mixture_vals)))
 
-              # Ensure mixture_vals is in the global environment
-              assign("mixture_vals", mixture_vals, envir = .GlobalEnv)
-
-              # Logging for MPD calculation
-              message(Sys.time(), " - Starting MPD calculation...")
-              mpd <- mean(apply(mixture_vals, 1, function(row) {
-                  mean(abs(outer(row, row, "-")))  # Pairwise differences for each position
-              }))
-              message(Sys.time(), " - MPD calculation complete.")
-
-              # Logging for SNR calculation
-              message(Sys.time(), " - Calculating row means...")
+              # SNR calculation
+              message(Sys.time(), " - Starting SNR calculation...")
               row_means <- rowMeans(mixture_vals)
-
-              message(Sys.time(), " - Calculating total variance...")
-              total_variance <- mean(apply(mixture_vals, 1, var))
-
-              message(Sys.time(), " - Calculating SNR...")
+              total_variance <- var(as.vector(mixture_vals))  # Faster than row-wise variance
               snr <- total_variance / var(row_means)
-              message(Sys.time(), " - SNR calculation complete.")
+              message(Sys.time(), " - SNR calculation complete")
 
-              # Logging for MDD calculation
+              # MPD calculation - using means instead of row-wise
+              message(Sys.time(), " - Starting MPD calculation...")
+              col_means <- colMeans(mixture_vals)
+              mpd <- mean(abs(outer(col_means, col_means, "-")))
+              message(Sys.time(), " - MPD calculation complete")
+              
+              # MDD calculation
               message(Sys.time(), " - Starting MDD calculation...")
-              # For each cell type, calculate:
-              # 1. Its mean signal
-              # 2. Standard deviation of all other cell types combined
-              mdds <- numeric(ncol(mixture_vals))
-              for(i in 1:ncol(mixture_vals)) {
+              mdds <- sapply(1:ncol(mixture_vals), function(i) {
                   signal <- mean(mixture_vals[,i])
-                  others <- mixture_vals[,-i]
-                  noise_sd <- sd(as.vector(others))  # Flatten other cell types into single vector
-                  mdds[i] <- abs(signal) / (noise_sd + 1e-10)
-              }
-              message(Sys.time(), " - MDD calculation complete.")
+                  noise_sd <- sd(as.vector(mixture_vals[,-i]))
+                  abs(signal) / (noise_sd + 1e-10)
+              })
+              message(Sys.time(), " - MDD calculation complete")
               
               c(basic_stats, 
                 list(MPD = mpd,
