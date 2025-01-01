@@ -512,7 +512,10 @@ main <- function() {
           p_len=mean(p_len), 
           tg_mean=mean(avg_min_ci), 
           ttest=mean(med_logp), 
-          delta_means=mean(avg_min_alpha_dist)), 
+          delta_means=mean(avg_min_alpha_dist),
+          MPD=mean(MPD),               
+          SNR=mean(SNR),               
+          mixture_variance=mean(mixture_variance)), 
       by=.(chr, start=start-1, end=end, target=group)]
   
   unique.regions.stat[, direction := fifelse(tg_mean>0, "M", "U")]
