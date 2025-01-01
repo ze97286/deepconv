@@ -579,13 +579,6 @@ main <- function() {
     message(Sys.time(), " Selecting final regions...")
   }
 
-  candidate_regions <- calculate_within_mixture_variance(candidate_regions, 
-                                                       mixture_cell_types = c("B-cells", "CD34-erythroblasts", "CD34-megakaryocytes", "CD4-T-cells","CD8-T-cells","Eosinophils", "Monocytes", "NK-cells","Neutrophils"), 
-                                                       variance_threshold = 0.01)  
-  if (params$verbose) {
-    message(sprintf("Filtered regions based on variance: %d remaining.", nrow(candidate_regions)))
-  }
-  
   # Apply thresholds
   filtered_regions <- candidate_regions[has_coverage == TRUE & 
                                     SNR > 1]
