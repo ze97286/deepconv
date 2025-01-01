@@ -264,7 +264,8 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
        message("Calculating between-group metrics...")
    }
    
-   final_regions <- unique.sign.regions.stats[, {
+  # Second stage - calculate between group metrics
+  final_regions <- unique.sign.regions.stats[, {
       if(verbose) {
           message(sprintf("\nCalculating between-group metrics for region: chr=%s, start=%d, end=%d", 
                         chr[1], start[1], end[1]))
@@ -296,14 +297,17 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
                         mpd, snr, mixture_var))
       }
       
-      # Return as a proper data.table row
+      # Create new columns instead of trying to include .SD
       .(
-          first_row = .SD[1],  # Keep first row's stats
           MPD = mpd,
           SNR = snr,
           mixture_variance = mixture_var
       )
   }, by=.(chr, start, end, region_index)]
+
+  # Now merge back with original stats
+  final_regions <- merge(unique.sign.regions.stats, final_regions, 
+                        by=c("chr", "start", "end", "region_index"))
     
    return(final_regions)
 }
