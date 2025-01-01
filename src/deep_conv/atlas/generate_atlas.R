@@ -273,14 +273,16 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
 
               # Logging for MDD calculation
               message(Sys.time(), " - Starting MDD calculation...")
-              # Precompute standard deviations for each cell type
-              precomputed_sds <- apply(mixture_vals, 2, sd)  # Standard deviation per column
-              # Calculate MDD for each cell type sequentially
-              mdds <- sapply(1:ncol(mixture_vals), function(i) {
-                  signal <- mixture_vals[, i]
-                  noise_sd <- precomputed_sds[-i]  # Exclude the current column's SD
-                  abs(signal) / (mean(noise_sd) + 1e-10)  # Compute MDD for this column
-              })
+              # For each cell type, calculate:
+              # 1. Its mean signal
+              # 2. Standard deviation of all other cell types combined
+              mdds <- numeric(ncol(mixture_vals))
+              for(i in 1:ncol(mixture_vals)) {
+                  signal <- mean(mixture_vals[,i])
+                  others <- mixture_vals[,-i]
+                  noise_sd <- sd(as.vector(others))  # Flatten other cell types into single vector
+                  mdds[i] <- abs(signal) / (noise_sd + 1e-10)
+              }
               message(Sys.time(), " - MDD calculation complete.")
               
               c(basic_stats, 
