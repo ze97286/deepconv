@@ -107,6 +107,40 @@ calculate_and_visualize_marker_metrics <- function(atlas_file, blood_columns = c
     message("\nTop markers by variance:")
     print(blood_metrics[order(-blood_variance)][1:10])
     
+    # Add to the existing code
+    message("\nMarker counts for different threshold combinations:")
+    min_thresholds <- seq(0, 0.2, by=0.05)
+    var_thresholds <- seq(0, 0.1, by=0.02)
+
+    counts_matrix <- sapply(min_thresholds, function(min_t) {
+        sapply(var_thresholds, function(var_t) {
+            blood_metrics[blood_min >= min_t & blood_variance >= var_t, .N]
+        })
+    })
+
+    # Create a table of results
+    result_dt <- data.table(
+        min_threshold = rep(min_thresholds, each=length(var_thresholds)),
+        var_threshold = rep(var_thresholds, times=length(min_thresholds)),
+        count = as.vector(counts_matrix)
+    )
+
+    # Print results in a readable format
+    message("\nNumber of markers meeting both thresholds:")
+    for(min_t in min_thresholds) {
+        message(sprintf("\nMinimum UXM >= %.2f:", min_t))
+        for(var_t in var_thresholds) {
+            count <- result_dt[min_threshold == min_t & var_threshold == var_t, count]
+            message(sprintf("  Variance >= %.2f: %d markers", var_t, count))
+        }
+    }
+
+    # Look at top markers by variance
+    message("\nTop 20 markers by variance:")
+    print(blood_metrics[order(-blood_variance)][1:20,
+        .(chr, start, end, target, blood_variance, blood_min, blood_max, blood_range)])
+
+
     return(list(metrics = blood_metrics, plots = plots))
 }
 
@@ -147,38 +181,6 @@ main <- function() {
     message(sprintf("Metrics saved to: %s", metrics_path))
 }
 
-# Add to the existing code
-message("\nMarker counts for different threshold combinations:")
-min_thresholds <- seq(0, 0.2, by=0.05)
-var_thresholds <- seq(0, 0.1, by=0.02)
-
-counts_matrix <- sapply(min_thresholds, function(min_t) {
-    sapply(var_thresholds, function(var_t) {
-        blood_metrics[blood_min >= min_t & blood_variance >= var_t, .N]
-    })
-})
-
-# Create a table of results
-result_dt <- data.table(
-    min_threshold = rep(min_thresholds, each=length(var_thresholds)),
-    var_threshold = rep(var_thresholds, times=length(min_thresholds)),
-    count = as.vector(counts_matrix)
-)
-
-# Print results in a readable format
-message("\nNumber of markers meeting both thresholds:")
-for(min_t in min_thresholds) {
-    message(sprintf("\nMinimum UXM >= %.2f:", min_t))
-    for(var_t in var_thresholds) {
-        count <- result_dt[min_threshold == min_t & var_threshold == var_t, count]
-        message(sprintf("  Variance >= %.2f: %d markers", var_t, count))
-    }
-}
-
-# Look at top markers by variance
-message("\nTop 20 markers by variance:")
-print(blood_metrics[order(-blood_variance)][1:20,
-    .(chr, start, end, target, blood_variance, blood_min, blood_max, blood_range)])
 
 if (sys.nframe() == 0) {
     suppressPackageStartupMessages({
