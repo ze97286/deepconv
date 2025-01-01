@@ -136,176 +136,172 @@ verify_region_coverage <- function(regions, coverage_index, min_coverage=3, min_
 
 # Region processing functions
 collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, max_dist=1e3, 
-                              min_logp=-20, min_length=100, mad=0.1, verbose=TRUE) {
-  n_groups = length(unique(dmrs$group))
-  
-  if (!identical(key(dmrs), c("chr", "pos"))) {
-    setkey(dmrs, chr, pos)
-  }
-  
-  if (!identical(key(cpg_info), c("chr", "start", "end"))) {
-    setkey(cpg_info, chr, start, end)
-  }
-  
-  sign.positions <- dmrs[fifelse(pval.med==0, -308.0, log10(pval.med)) < min_logp][
-    cpg_info, nomatch=NULL][, 
-    .(pos, region_index=cumsum(c(TRUE, diff(index)>max_gap | diff(pos)>max_dist))), 
-    by=.(chr, group)]
-  
-  sign.regions <- sign.positions[, 
-    .(start=min(pos), end=max(pos), total_positions=.N), 
-    by=.(chr, group, region_index)]
-  
-  setkey(sign.regions, chr, start, end)
-  
-  overlapping.regions <- foverlaps(sign.regions, sign.regions)[group != i.group]
-  setkey(overlapping.regions, group, chr, start, end, region_index)
-  setkey(sign.regions, group, chr, start, end, region_index)
-  
-  overlapping.regions <- overlapping.regions[sign.regions, nomatch=NA][
-    , .(chr, group, region_index, start, end, i.total_positions, 
-        i.group, i.region_index, i.start, i.end, i.total_positions)]
-  
-  split_regions  <- function(ref_start, ref_end, starts, ends) {
-    if (is.na(starts) || is.na(ends) || is.null(starts) || is.null(ends) || 
-        length(starts)==0 || length(ends)==0) {
-      return(list(start=ref_start, end=ref_end))
-    }
-    
-    rel_start <- starts-ref_start + 1
-    rel_end <- ends-ref_start + 1
-    rel_start[rel_start < 1] <- 1
-    rel_end[rel_end > ref_end-ref_start + 1] <- ref_end-ref_start + 1
-    mask <- rep(TRUE, ref_end-ref_start + 1)
-    
-    for (i in 1:length(rel_end)) {
-      mask[rel_start[i]:rel_end[i]] <- FALSE
-    }
-    
-    remaining_indices <- which(mask)
-    clusters <- cumsum(c(TRUE, diff(remaining_indices)!=1))
-    output <- list(start=c(), end=c())
-    
-    for (cluster in unique(clusters)) {
-      output$start <- c(output$start, ref_start+min(remaining_indices[clusters==cluster])-1)
-      output$end <- c(output$end, ref_start+max(remaining_indices[clusters==cluster])-1)
-    }
-    
-    output$start <- as.integer(output$start)
-    output$end <- as.integer(output$end)
-    
-    return(output)
-  }
-  
-  unique.sign.regions <- overlapping.regions[
-    , split_regions(start[1], end[1], i.start, i.end), 
-    by=.(chr, group, region_index)]
-  
-  unique.sign.regions <- unique.sign.regions[!is.na(end) & !is.na(start) & 
-                                           end-start >= min_length]
-  
-  setkey(unique.sign.regions, chr, start, end)
-  unique.sign.regions <- foverlaps(cpg_info, unique.sign.regions, nomatch = NULL)
-  setnames(unique.sign.regions, "i.start", "pos")
-  unique.sign.regions[, i.end:=NULL]
-  setkey(unique.sign.regions, group, chr, pos)
-  
-  unique.sign.regions <- dmrs[unique.sign.regions, on=list(group, chr, pos), nomatch=NULL]
-  
-  if (verbose) {
-      message("\nStructure of unique.sign.regions:")
-      print(str(unique.sign.regions))
-      message("\nFirst few rows:")
-      print(head(unique.sign.regions))
-      message("\nColumn names:")
-      print(names(unique.sign.regions))
-  }
-
-  unique.sign.regions.stats <- suppressWarnings(
-        unique.sign.regions[, {
-            if(verbose) {
-                message(sprintf("\nProcessing region: chr=%s, start=%d, end=%d", 
-                              chr[1], start[1], end[1]))
-                message("Group: ", group[1])
-                message("Number of positions: ", .N)
-            }
-            
-            # Basic stats with logging
-            region_stats <- .(
-                r_len=length(unique(pos)), 
-                p_len=min(end-start+1),
-                avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))),
-                med_logp=median(fifelse(pval.med==0,-308,log10(pval.med))),
-                min_logp=min(fifelse(pval.min==0,-308,log10(pval.min))),
-                max_logp=max(fifelse(pval.max==0,-308,log10(pval.max))),
-                fully_covered=all(outgroup_count==n_groups-1),
-                avg_min_alpha_dist = mean(min_alpha_dist),
-                avg_min_ci = mean(ci.min),
-                n_low_alpha_dist=sum(min_alpha_dist < mad),
-                n_total=.N,
-                region_alpha = mean(mean_alpha_dist)
-            )
-            
-            if(verbose) {
-                message("Region alpha value: ", region_stats$region_alpha)
-            }
-            
-            return(region_stats)
-        }, by=.(chr, group, start, end, region_index)]
-    )
-
-    if(verbose) {
-        message("\nFirst stage stats:")
-        print(head(unique.sign.regions.stats))
-    }
-
-    # Second stage - between group metrics
-    final_regions <- unique.sign.regions.stats[, {
-        if(verbose) {
-            message(sprintf("\nCalculating between-group metrics for region: chr=%s, start=%d, end=%d", 
-                          chr[1], start[1], end[1]))
-        }
-        
-        # Get alpha values for mixture cell types
-        mixture_vals <- region_alpha[group %in% mixture_cell_types]
-        
-        if(verbose) {
-            message("Mixture cell types values:")
-            print(data.table(group=group[group %in% mixture_cell_types], 
-                            alpha=mixture_vals))
-        }
-        
-        # Calculate metrics with logging
-        mpd <- mean(abs(outer(mixture_vals, mixture_vals, "-")))
-        snr <- var(mixture_vals) / (var(rowMeans(matrix(mixture_vals))) + 1e-10)
-        mixture_var <- var(mixture_vals)
-        
-        if(verbose) {
-            message(sprintf("MPD: %.4f, SNR: %.4f, Mixture Variance: %.4f", 
-                          mpd, snr, mixture_var))
-        }
-        
-        result <- c(.SD[1],
-                    list(MPD = mpd,
-                        SNR = snr,
-                        mixture_variance = mixture_var))
-        
-        if(verbose) {
-            message("Final metrics for region:")
-            print(result[c("MPD", "SNR", "mixture_variance")])
-        }
-        
-        return(result)
-    }, by=.(chr, start, end, region_index)]
-
-    if(verbose) {
-        message("\nFinal results:")
-        print(head(final_regions))
-        message("\nColumn names in final results:")
-        print(names(final_regions))
-    }
-
-    return(final_regions)
+                             min_logp=-20, min_length=100, mad=0.1, verbose=TRUE) {
+   n_groups = length(unique(dmrs$group))
+   
+   if (!identical(key(dmrs), c("chr", "pos"))) {
+       setkey(dmrs, chr, pos)
+   }
+   
+   if (!identical(key(cpg_info), c("chr", "start", "end"))) {
+       setkey(cpg_info, chr, start, end)
+   }
+   
+   if(verbose) {
+       message("Finding significant positions...")
+   }
+   
+   sign.positions <- dmrs[fifelse(pval.med==0, -308.0, log10(pval.med)) < min_logp][
+       cpg_info, nomatch=NULL][, 
+       .(pos, region_index=cumsum(c(TRUE, diff(index)>max_gap | diff(pos)>max_dist))), 
+       by=.(chr, group)]
+   
+   if(verbose) {
+       message("Creating initial regions...")
+   }
+   
+   sign.regions <- sign.positions[, 
+       .(start=min(pos), end=max(pos), total_positions=.N), 
+       by=.(chr, group, region_index)]
+   
+   setkey(sign.regions, chr, start, end)
+   
+   if(verbose) {
+       message("Processing overlapping regions...")
+   }
+   
+   overlapping.regions <- foverlaps(sign.regions, sign.regions)[group != i.group]
+   setkey(overlapping.regions, group, chr, start, end, region_index)
+   setkey(sign.regions, group, chr, start, end, region_index)
+   
+   overlapping.regions <- overlapping.regions[sign.regions, nomatch=NA][
+       , .(chr, group, region_index, start, end, i.total_positions, 
+           i.group, i.region_index, i.start, i.end, i.total_positions)]
+   
+   split_regions  <- function(ref_start, ref_end, starts, ends) {
+       if (is.na(starts) || is.na(ends) || is.null(starts) || is.null(ends) || 
+           length(starts)==0 || length(ends)==0) {
+           return(list(start=ref_start, end=ref_end))
+       }
+       
+       rel_start <- starts-ref_start + 1
+       rel_end <- ends-ref_start + 1
+       rel_start[rel_start < 1] <- 1
+       rel_end[rel_end > ref_end-ref_start + 1] <- ref_end-ref_start + 1
+       mask <- rep(TRUE, ref_end-ref_start + 1)
+       
+       for (i in 1:length(rel_end)) {
+           mask[rel_start[i]:rel_end[i]] <- FALSE
+       }
+       
+       remaining_indices <- which(mask)
+       clusters <- cumsum(c(TRUE, diff(remaining_indices)!=1))
+       output <- list(start=c(), end=c())
+       
+       for (cluster in unique(clusters)) {
+           output$start <- c(output$start, ref_start+min(remaining_indices[clusters==cluster])-1)
+           output$end <- c(output$end, ref_start+max(remaining_indices[clusters==cluster])-1)
+       }
+       
+       output$start <- as.integer(output$start)
+       output$end <- as.integer(output$end)
+       
+       return(output)
+   }
+   
+   if(verbose) {
+       message("Splitting overlapping regions...")
+   }
+   
+   unique.sign.regions <- overlapping.regions[
+       , split_regions(start[1], end[1], i.start, i.end), 
+       by=.(chr, group, region_index)]
+   
+   unique.sign.regions <- unique.sign.regions[!is.na(end) & !is.na(start) & 
+                                            end-start >= min_length]
+   
+   setkey(unique.sign.regions, chr, start, end)
+   unique.sign.regions <- foverlaps(cpg_info, unique.sign.regions, nomatch = NULL)
+   setnames(unique.sign.regions, "i.start", "pos")
+   unique.sign.regions[, i.end:=NULL]
+   setkey(unique.sign.regions, group, chr, pos)
+   
+   if(verbose) {
+       message("Joining with methylation data...")
+   }
+   
+   unique.sign.regions <- dmrs[unique.sign.regions, on=list(group, chr, pos), nomatch=NULL]
+   
+   # First stage - calculate per group stats
+   if(verbose) {
+       message("Calculating per-group region statistics...")
+   }
+   
+   unique.sign.regions.stats <- unique.sign.regions[, {
+       if(verbose) {
+           message(sprintf("  Processing region: chr=%s, start=%d, end=%d, group=%s", 
+                         chr[1], start[1], end[1], group[1]))
+       }
+       
+       list(
+           r_len=length(unique(pos)), 
+           p_len=min(end-start+1),
+           avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))),
+           med_logp=median(fifelse(pval.med==0,-308,log10(pval.med))),
+           min_logp=min(fifelse(pval.min==0,-308,log10(pval.min))),
+           max_logp=max(fifelse(pval.max==0,-308,log10(pval.max))),
+           fully_covered=all(outgroup_count==n_groups-1),
+           avg_min_alpha_dist = mean(min_alpha_dist),
+           avg_min_ci = mean(ci.min),
+           n_low_alpha_dist=sum(min_alpha_dist < mad),
+           n_total=.N,
+           region_alpha = mean(mean_alpha_dist)
+       )
+   }, by=.(chr, group, start, end, region_index)]
+   
+   # Second stage - calculate between group metrics
+   if(verbose) {
+       message("Calculating between-group metrics...")
+   }
+   
+   final_regions <- unique.sign.regions.stats[, {
+       if(verbose) {
+           message(sprintf("  Processing region metrics: chr=%s, start=%d, end=%d", 
+                         chr[1], start[1], end[1]))
+       }
+       
+       # Get mixture values
+       mixture_vals <- region_alpha[group %in% mixture_cell_types]
+       
+       if(verbose) {
+           message(sprintf("  Number of mixture values: %d", length(mixture_vals)))
+           if(length(mixture_vals) > 0) {
+               message("  Mixture values:")
+               print(data.table(group=group[group %in% mixture_cell_types], 
+                              alpha=mixture_vals))
+           }
+       }
+       
+       # Calculate metrics
+       mpd <- mean(abs(outer(mixture_vals, mixture_vals, "-")))
+       snr <- var(mixture_vals) / (var(rowMeans(matrix(mixture_vals))) + 1e-10)
+       mixture_var <- var(mixture_vals)
+       
+       if(verbose) {
+           message(sprintf("  MPD: %.4f", mpd))
+           message(sprintf("  SNR: %.4f", snr))
+           message(sprintf("  Mixture variance: %.4f", mixture_var))
+       }
+       
+       list(
+           base_stats = .SD[1],  # Keep original stats
+           MPD = mpd,
+           SNR = snr,
+           mixture_variance = mixture_var
+       )
+   }, by=.(chr, start, end, region_index)]
+   
+   return(final_regions)
 }
 
 write_marker_file <- function(regions, outfile) {
