@@ -15,27 +15,39 @@ library(gridExtra)
 # -o /users/zetzioni/sharedscratch/atlas/
 
 calculate_and_visualize_marker_metrics <- function(atlas_file, blood_columns = c("B-cells", "CD34-erythroblasts", 
-                                                                "CD34-megakaryocytes", "CD4-T-cells",
-                                                                "CD8-T-cells", "Eosinophils", 
-                                                                "Monocytes", "NK-cells", "Neutrophils")) {
-   # Calculate metrics as before
-   atlas <- fread(atlas_file)
-   dir_col <- which(names(atlas) == "direction")
-   value_cols <- names(atlas)[(dir_col + 1):ncol(atlas)]
-   
-   # Calculate metrics for blood/immune cells
-   blood_metrics <- atlas[, {
-       blood_values <- unlist(.SD[, ..blood_columns])
-       blood_values <- blood_values[!is.na(blood_values)]
-       
-       blood_var <- var(blood_values)
-       blood_mean <- mean(blood_values)
-       blood_snr <- blood_var / (blood_mean + 1e-10)
-       
-       list(blood_variance = blood_var,
-            blood_mean = blood_mean,
-            blood_snr = blood_snr)
-   }, by = .(chr, start, end, target)]
+                                                                 "CD34-megakaryocytes", "CD4-T-cells",
+                                                                 "CD8-T-cells", "Eosinophils", 
+                                                                 "Monocytes", "NK-cells", "Neutrophils")) {
+    # Read atlas
+    atlas <- fread(atlas_file)
+    dir_col <- which(names(atlas) == "direction")
+    value_cols <- names(atlas)[(dir_col + 1):ncol(atlas)]
+    
+    # Calculate metrics for blood/immune cells
+    blood_metrics <- atlas[, {
+        # Get values for blood cells only
+        blood_vals <- as.numeric(unlist(.SD[, ..blood_columns]))
+        
+        # Reshape values into a matrix where each column is a cell type
+        blood_matrix <- matrix(blood_vals, ncol=length(blood_columns))
+        colnames(blood_matrix) <- blood_columns
+        
+        # Calculate means for each cell type
+        cell_type_means <- colMeans(blood_matrix, na.rm=TRUE)
+        
+        # Signal is variance between cell type means
+        signal <- var(cell_type_means)
+        
+        # Noise could be mean value or some other baseline metric
+        noise <- mean(blood_vals)
+        
+        # New SNR calculation
+        blood_snr <- signal / (noise + 1e-10)
+        
+        list(blood_variance = var(blood_vals),
+             blood_mean = mean(blood_vals),
+             blood_snr = blood_snr)
+    }, by = .(chr, start, end, target)]
    
    # Calculate metrics for all cell types
    all_metrics <- atlas[, {
