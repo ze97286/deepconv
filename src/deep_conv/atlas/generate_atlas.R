@@ -238,48 +238,18 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
               n_total=.N
           )
           
-          # Reshape data for mixture analysis
-          mixture_data <- dcast(
-            unique.sign.regions, 
-            pos ~ group,                      
-            value.var = "mean_alpha_dist",    
-            fill = 0,                         
-            subset = .(group %in% mixture_cell_types) 
-          )
+          # Calculate mean alpha dist per group for this region
+          region_means <- unique.sign.regions[, .(region_alpha = mean(mean_alpha_dist)), by=group]
           
-          if(ncol(mixture_data) > 1) {
-              mixture_vals <- as.matrix(mixture_data[, -1])  
-              message(sprintf("Processing %d rows x %d cell types", nrow(mixture_vals), ncol(mixture_vals)))
-
-              # SNR calculation
-              message(Sys.time(), " - Starting SNR calculation...")
-              row_means <- rowMeans(mixture_vals)
-              total_variance <- var(as.vector(mixture_vals))  # Faster than row-wise variance
-              snr <- total_variance / var(row_means)
-              message(Sys.time(), " - SNR calculation complete")
-
-              # MPD calculation - using means instead of row-wise
-              message(Sys.time(), " - Starting MPD calculation...")
-              col_means <- colMeans(mixture_vals)
-              mpd <- mean(abs(outer(col_means, col_means, "-")))
-              message(Sys.time(), " - MPD calculation complete")
-              
-              # MDD calculation
-              message(Sys.time(), " - Starting MDD calculation...")
-              mdds <- sapply(1:ncol(mixture_vals), function(i) {
-                  signal <- mean(mixture_vals[,i])
-                  noise_sd <- sd(as.vector(mixture_vals[,-i]))
-                  abs(signal) / (noise_sd + 1e-10)
-              })
-              message(Sys.time(), " - MDD calculation complete")
-              
-              c(basic_stats, 
-                list(MPD = mpd,
-                    SNR = snr,
-                    MDD = min(mdds)))  # Worst case MDD
-          } else {
-              basic_stats
-          }
+          # Now calculate our new metrics on these region-level values
+          mixture_vals <- region_means[group %in% mixture_cell_types, region_alpha]
+          
+          mpd <- mean(abs(outer(mixture_vals, mixture_vals, "-")))
+          snr <- var(mixture_vals) / var(rowMeans(matrix(mixture_vals)))
+          
+          c(basic_stats, 
+            list(MPD = mpd,
+                SNR = snr))
       }, by=.(chr, group, start, end, region_index)]
   )
   
@@ -312,11 +282,17 @@ write_marker_file <- function(regions, outfile) {
 }
 
 calculate_within_mixture_variance <- function(regions, mixture_cell_types, variance_threshold) {
-  # Calculate variance across mixture cell types for each region
-  regions[, within_var := apply(.SD, 1, var), .SDcols = mixture_cell_types]
-  
-  # Filter regions with variance above the threshold
-  return(regions[within_var > variance_threshold])
+    # For each region, calculate mean_alpha_dist per group
+    regions_variance <- regions[, {
+        # Get mean alpha dist for each mixture cell type in this region
+        cell_type_means <- regions[group %in% mixture_cell_types, 
+                                 .(mean_val = mean(mean_alpha_dist)), 
+                                 by=group]
+        .(within_var = var(cell_type_means$mean_val))
+    }, by=.(chr, start, end)]
+    
+    # Join back and filter
+    regions[regions_variance, on=.(chr, start, end)][within_var > variance_threshold]
 }
 
 main <- function() {
