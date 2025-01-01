@@ -265,42 +265,46 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
    }
    
    final_regions <- unique.sign.regions.stats[, {
-       if(verbose) {
-           message(sprintf("  Processing region metrics: chr=%s, start=%d, end=%d", 
-                         chr[1], start[1], end[1]))
-       }
-       
-       # Get mixture values
-       mixture_vals <- region_alpha[group %in% mixture_cell_types]
-       
-       if(verbose) {
-           message(sprintf("  Number of mixture values: %d", length(mixture_vals)))
-           if(length(mixture_vals) > 0) {
-               message("  Mixture values:")
-               print(data.table(group=group[group %in% mixture_cell_types], 
-                              alpha=mixture_vals))
-           }
-       }
-       
-       # Calculate metrics
-       mpd <- mean(abs(outer(mixture_vals, mixture_vals, "-")))
-       snr <- var(mixture_vals) / (var(rowMeans(matrix(mixture_vals))) + 1e-10)
-       mixture_var <- var(mixture_vals)
-       
-       if(verbose) {
-           message(sprintf("  MPD: %.4f", mpd))
-           message(sprintf("  SNR: %.4f", snr))
-           message(sprintf("  Mixture variance: %.4f", mixture_var))
-       }
-       
-       list(
-           base_stats = .SD[1],  # Keep original stats
-           MPD = mpd,
-           SNR = snr,
-           mixture_variance = mixture_var
-       )
-   }, by=.(chr, start, end, region_index)]
-   
+      if(verbose) {
+          message(sprintf("\nCalculating between-group metrics for region: chr=%s, start=%d, end=%d", 
+                        chr[1], start[1], end[1]))
+      }
+      
+      # Get mixture values
+      mixture_vals <- region_alpha[group %in% mixture_cell_types]
+      
+      if(verbose) {
+          message("Number of mixture values: ", length(mixture_vals))
+          message("Mixture values:")
+          print(data.table(group=group[group %in% mixture_cell_types], 
+                          alpha=mixture_vals))
+      }
+      
+      # Only calculate metrics if we have enough values
+      if(length(mixture_vals) > 1) {
+          mpd <- mean(abs(outer(mixture_vals, mixture_vals, "-")))
+          snr <- var(mixture_vals) / (var(rowMeans(matrix(mixture_vals))) + 1e-10)
+          mixture_var <- var(mixture_vals)
+      } else {
+          mpd <- 0
+          snr <- 0
+          mixture_var <- 0
+      }
+      
+      if(verbose) {
+          message(sprintf("MPD: %.4f, SNR: %.4f, Mixture variance: %.4f", 
+                        mpd, snr, mixture_var))
+      }
+      
+      # Return as a proper data.table row
+      .(
+          first_row = .SD[1],  # Keep first row's stats
+          MPD = mpd,
+          SNR = snr,
+          mixture_variance = mixture_var
+      )
+  }, by=.(chr, start, end, region_index)]
+    
    return(final_regions)
 }
 
