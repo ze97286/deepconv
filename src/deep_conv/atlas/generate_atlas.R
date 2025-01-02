@@ -11,6 +11,14 @@
 #   --threads 32 \
 #   --verbose
 
+required_packages <- c("data.table", "ggplot2", "gridExtra", "optparse", "progressr", "furrr", "jsonlite")
+new_packages <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+if(length(new_packages)) {
+    install.packages(new_packages, 
+                    lib = Sys.getenv("R_LIBS_USER"), 
+                    repos = "https://cloud.r-project.org")
+}
+
 
 # Required libraries
 suppressPackageStartupMessages({
