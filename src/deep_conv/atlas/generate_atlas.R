@@ -49,7 +49,15 @@ load_cpg_info <- function(cpg_file) {
 
 verify_region_coverage <- function(regions, coverage_index, min_coverage=3, min_cpgs=4, verbose=FALSE) {
     if(verbose) {
-        message("Starting batch coverage verification...")
+        message("\nStarting coverage verification...")
+        message("\nUnique groups in coverage index:")
+        print(sort(unique(coverage_index$group)))
+        message("\nFirst few rows of coverage index:")
+        print(head(coverage_index))
+        message("\nUnique groups in regions:")
+        print(sort(unique(regions$target)))
+        message("\nFirst few regions:")
+        print(head(regions))
     }
     
     # Process each chromosome separately to manage memory
@@ -400,12 +408,13 @@ main <- function() {
   pval.all <- rbindlist(lapply(pval.all, function(x) x$data))
 
   if (params$verbose) {
-      message("\nFirst few rows of combined data:")
-      print(head(pval.all))
-      message("\nTotal rows in combined data: ", nrow(pval.all))
-  }
-  
-  if (params$verbose) {
+    message("\nFirst few rows of combined data:")
+    print(head(pval.all))
+    message("\nTotal rows in combined data: ", nrow(pval.all))
+    message("\nChromosome levels in data:")
+    print(levels(pval.all$chr))
+    message("\nActual chromosomes present in data:")
+    print(table(pval.all$chr))
     end_time <- Sys.time()
     message(sprintf("Loaded %d methylation positions in %.1f seconds", 
                    nrow(pval.all), 
@@ -413,9 +422,6 @@ main <- function() {
     message("\nPositions per chromosome:")
     names(chrom_sizes) <- paste0("chr", 1:22)
     print(chrom_sizes)
-  }
-  
-  if (params$verbose) {
     message(Sys.time(), " Finding unique regions...")
     start_time <- Sys.time()
   }
@@ -479,7 +485,7 @@ main <- function() {
     message("\nCandidates per target:")
     print(candidate_regions[, .N, by=target])
   }
-  
+
   if (params$verbose) {
     message("\nCandidate regions structure:")
     print(str(candidate_regions))
