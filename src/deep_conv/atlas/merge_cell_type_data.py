@@ -8,6 +8,7 @@ from functools import partial
 #   --input_dir /users/zetzioni/sharedscratch/atlas/pats/tmp \
 #   --output_dir /users/zetzioni/sharedscratch/atlas/pat_index \
 #   --class_file /users/zetzioni/sharedscratch/atlas/taps_atlas_class.csv
+#   --output_prefix agg_tcells
 #   --min_cpgs 3
 
 def merge_chromosome(cell_type, chr_num, input_dir, output_dir):
@@ -64,7 +65,7 @@ def merge_cell_type(cell_type, chromosomes, input_dir, output_dir):
         merged_df.to_csv(combined_file, sep="\t", index=False, compression="gzip")
 
 
-def parallel_merge(cell_types, chromosomes, min_cpgs, input_dir, output_dir):
+def parallel_merge(cell_types, chromosomes, min_cpgs, input_dir, output_dir, output_prefix):
     """
     Parallelize the merging process by cell type (chromosome merging is sequential).
     """
@@ -73,14 +74,14 @@ def parallel_merge(cell_types, chromosomes, min_cpgs, input_dir, output_dir):
             partial(merge_cell_type, chromosomes=chromosomes, input_dir=input_dir, output_dir=output_dir),
             cell_types
         )
-    merge_all_cell_types(cell_types, min_cpgs, output_dir)
+    merge_all_cell_types(cell_types, min_cpgs, output_dir, output_prefix)
 
 
 def merge_all_cell_types(cell_types, min_cpgs, output_dir):
     """
     Merge all cell type files into a single zipped CSV.
     """
-    merged_file = Path(output_dir) / f"cell_type_pat_index_l{min_cpgs}.csv.gz"
+    merged_file = Path(output_dir) / f"{output_prefix}cell_type_pat_index_l{min_cpgs}.csv.gz"
     df_list = [
         pd.read_csv(Path(output_dir) / f"{cell_type}_merged_coverage_index.txt.gz", sep="\t", header=0)
         for cell_type in cell_types
@@ -101,12 +102,16 @@ if __name__ == "__main__":
     parser.add_argument("--input_dir", required=True, help="Input directory containing intermediate files.")
     parser.add_argument("--class_file", required=True, help="List of cell types.")
     parser.add_argument("--output_dir", required=True, help="Output directory for merged files.")
+    parser.add_argument("--output_prefix", required=False,default=None, help="Prefix for the output file.")
     parser.add_argument("--min_cpgs", required=True, help="the minimum number of cpgs per read.")
 
     args = parser.parse_args()
     df = pd.read_csv(args.class_file)
     cell_types = sorted(df.group.unique())
-    parallel_merge(cell_types, range(1, 23), args.min_cpgs, args.input_dir, args.output_dir)
-    final_df = pd.read_csv(args.output_dir+f"/cell_type_pat_index_l{args.min_cpgs}.csv.gz", sep="\t")
+    output_prefix = ""
+    if args.output_prefix is not None:
+        output_prefix = args.output_prefix+"_"
+    parallel_merge(cell_types, range(1, 23), args.min_cpgs, args.input_dir, args.output_dir, output_prefix)    
+    final_df = pd.read_csv(args.output_dir+f"/{output_prefix}cell_type_pat_index_l{args.min_cpgs}.csv.gz", sep="\t")
     print(final_df.head())
     print(final_df.info())
