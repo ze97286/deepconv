@@ -19,6 +19,7 @@ suppressPackageStartupMessages({
   library(progressr)
   library(furrr)
   library(parallel)
+  library(jsonlite)
 })
 
 # Data loading helper functions
@@ -281,7 +282,10 @@ main <- function() {
     make_option(c("-t", "--threads"), type="integer", default=8,
                 help="Number of threads [default %default]"),
     make_option(c("-v", "--verbose"), action="store_true", default=FALSE,
-                help="Print progress information")
+                help="Print progress information"),
+    make_option(c("-g", "--group_mapping"), type="character", default=NULL,
+               help="JSON string mapping group names, e.g. '{\"CD4-T-cells\":\"T-cells\",\"CD8-T-cells\":\"T-cells\"}' [default %default]",
+               metavar="json_string")
   )
   
   parser <- OptionParser(option_list=option_list)
@@ -350,16 +354,31 @@ main <- function() {
   # Load and process methylation data for all chromosomes
   chrom_sizes <- numeric(22)
   with_progress({
-    p <- progressor(steps=22)
-    pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
-      if (params$verbose) message(sprintf("  Reading %s...", chrom))
-      res <- fread(paste0(params$base_dir, "/dmr_by_read/blood+tum+gi_scores-by-position_", 
-                         chrom, ".txt.gz"), 
-                   header=TRUE, stringsAsFactors = TRUE)
-      chrom_sizes[as.numeric(sub("chr", "", chrom))] <<- nrow(res)
-      p()
-      return(res)
-    }) 
+      p <- progressor(steps=22)
+      pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
+          if (params$verbose) message(sprintf("  Reading %s...", chrom))
+          res <- fread(paste0(params$base_dir, "/dmr_by_read/blood+tum+gi_scores-by-position_",
+                            chrom, ".txt.gz"),
+                      header=TRUE, stringsAsFactors = TRUE)
+          
+          # Apply group mapping if provided
+          if (!is.null(params$group_mapping)) {
+              # Parse JSON string to named vector
+              group_map <- fromJSON(params$group_mapping)
+              
+              # Replace group values using the mapping
+              for (old_group in names(group_map)) {
+                  res[group == old_group, group := group_map[old_group]]
+              }
+              
+              # Re-factor the group column
+              res[, group := as.factor(as.character(group))]
+          }
+          
+          chrom_sizes[as.numeric(sub("chr", "", chrom))] <<- nrow(res)
+          p()
+          return(res)
+      })
   })
   pval.all <- rbindlist(pval.all)
   
