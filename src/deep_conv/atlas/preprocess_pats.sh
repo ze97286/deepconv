@@ -1,6 +1,7 @@
 #!/bin/bash
 
-# /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/preprocess_pats.sh 4 /users/zetzioni/sharedscratch/atlas/taps_atlas_class.csv /users/zetzioni/sharedscratch/atlas/pats/ 32
+# /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/preprocess_pats.sh 4 /users/zetzioni/sharedscratch/atlas/classes/taps_atlas_class.csv /users/zetzioni/sharedscratch/atlas/pats/tmp4 32
+# /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/preprocess_pats.sh 3 /users/zetzioni/sharedscratch/atlas/classes/taps_atlas_class.csv /users/zetzioni/sharedscratch/atlas/pats/tmp3 32
 
 # Arguments
 min_cpgs=$1
@@ -8,7 +9,7 @@ class_file=$2
 output_dir=$3
 threads=${4:-32}  # Default to 32 threads
 
-mkdir -p "$output_dir/tmp"
+mkdir -p "$output_dir"
 
 # Create task list for GNU parallel
 while IFS=, read -r pat_file group; do
@@ -19,7 +20,7 @@ while IFS=, read -r pat_file group; do
     for chr in {1..22}; do
         echo "$pat_file,$group,$pat_basename,chr$chr"
     done
-done < "$class_file" > "$output_dir/tmp/tasks.txt"
+done < "$class_file" > "$output_dir/tasks.txt"
 
 # Process task
 process_file() {
@@ -43,16 +44,16 @@ process_file() {
                     print pos + i - 1, $4
             }
         }
-    ' <(zcat "$pat_file") > "$output_dir/tmp/${group}_${pat_basename}_${chr}_index.txt"
+    ' <(zcat "$pat_file") > "$output_dir/${group}_${pat_basename}_${chr}_index.txt"
 
     # Sanity check: Ensure no NaN values in the output
-    if grep -q 'NaN' "$output_dir/tmp/${group}_${pat_basename}_${chr}_index.txt"; then
-        echo "Error: File contains NaN values - $output_dir/tmp/${group}_${pat_basename}_${chr}_index.txt" >&2
+    if grep -q 'NaN' "$output_dir/${group}_${pat_basename}_${chr}_index.txt"; then
+        echo "Error: File contains NaN values - $output_dir/${group}_${pat_basename}_${chr}_index.txt" >&2
         exit 1
     fi
 
-    if [[ -f "$output_dir/tmp/${group}_${pat_basename}_${chr}_index.txt" ]]; then
-        echo "File written successfully: $output_dir/tmp/${group}_${pat_basename}_${chr}_index.txt" >&2
+    if [[ -f "$output_dir/${group}_${pat_basename}_${chr}_index.txt" ]]; then
+        echo "File written successfully: $output_dir/${group}_${pat_basename}_${chr}_index.txt" >&2
     else
         echo "Failed to write file for: $pat_file $group $chr" >&2
     fi
@@ -61,9 +62,9 @@ export output_dir="${output_dir%/}"
 export -f process_file
 
 # Run tasks in parallel
-cat "$output_dir/tmp/tasks.txt" | parallel -j "$threads" --progress process_file {}
+cat "$output_dir/tasks.txt" | parallel -j "$threads" --progress process_file {}
 
 # Cleanup temporary task list
-rm "$output_dir/tmp/tasks.txt"
+rm "$output_dir/tasks.txt"
 
-echo "Index generation complete! All files are saved with unique names in $output_dir/tmp"
+echo "Index generation complete! All files are saved with unique names in $output_dir"
