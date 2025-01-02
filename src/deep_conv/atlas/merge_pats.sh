@@ -1,9 +1,8 @@
-# /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/merge_pats.sh /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.250/Song_pattools/files /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.250/Song_pattools/celltypes
+# /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/merge_pats.sh /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.250/Song_pattools/files /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.250/Song_pattools/celltypes /users/zetzioni/sharedscratch/atlas/type2bam.tsv
  
 SOURCEDIR=$1
 PATDIR=$2
-BASEDIR=/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/Benchmark
-MAPFILE=$BASEDIR/type2bam.tsv
+MAPFILE=$3
 
 mkdir -p $PATDIR
 

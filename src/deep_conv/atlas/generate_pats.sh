@@ -1,8 +1,8 @@
-# /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/generate_pats.sh /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.250/Song_pattools/files /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.250.l4.bed
+# /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/generate_pats.sh /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.250/Song_pattools/files /users/zetzioni/sharedscratch/atlas/dmr_by_read.blood+gi+tum.250.l4.bed /users/zetzioni/sharedscratch/atlas/type2bam.tsv
 PATDIR=$1
 MARKERBED=$2 
 TMPDIR=/users/zetzioni/sharedscratch/atlas/tmp
-BASEDIR=/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/Benchmark
+TYPE2BAM=$3
 
 if [ ! -e $MARKERBED ]; then
   echo "Error: $MARKERBED does not exist!" 2>&1
@@ -13,7 +13,7 @@ mkdir -p $PATDIR
 mkdir -p $TMPDIR
 
 # Get input files and process them
-cut -f 2 $BASEDIR/type2bam.tsv | while read infile; do
+cut -f 2 $TYPE2BAM | while read infile; do
     # Transform path for reading
     pat_file=$(echo $infile | \
         sed 's:/mnt/lustre/users/ramess/TAPSbeta_tissue_map/Results/1.3.1/Alignments/:/mnt/lustre/users/bschuster/Tissue_map/Results/1.2/pat/:' | \
