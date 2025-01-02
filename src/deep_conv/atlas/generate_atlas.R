@@ -361,6 +361,7 @@ main <- function() {
   
   # Load and process methylation data for all chromosomes
   chrom_sizes <- numeric(22)
+  # Load and process methylation data for all chromosomes
   with_progress({
       p <- progressor(steps=22)
       pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
@@ -369,13 +370,6 @@ main <- function() {
                             chrom, ".txt.gz"), 
                       header=TRUE, stringsAsFactors = TRUE)
           
-          if (params$verbose) {
-              message(sprintf("\nAfter fread for %s:", chrom))
-              message(sprintf("Number of rows: %d", nrow(res)))
-              message("First few rows:")
-              print(head(res))
-          }
-          
           # Apply group mapping if provided
           if (!is.null(params$group_mapping)) {
               group_map <- fromJSON(params$group_mapping)
@@ -383,36 +377,33 @@ main <- function() {
                   res[group == old_group, group := group_map[old_group]]
               }
               res[, group := as.factor(as.character(group))]
-              
-              if (params$verbose) {
-                  message(sprintf("\nAfter group mapping for %s:", chrom))
-                  message(sprintf("Number of rows: %d", nrow(res)))
-                  message("Unique groups:")
-                  print(table(res$group))
-              }
-          }
-          
-          cur_size <- nrow(res)
-          chrom_sizes[as.numeric(sub("chr", "", chrom))] <<- cur_size
-          
-          if (params$verbose) {
-              message(sprintf("\nSize assigned to chromosome %s: %d", chrom, cur_size))
-              message(sprintf("Current chrom_sizes value for this chromosome: %d", 
-                            chrom_sizes[as.numeric(sub("chr", "", chrom))]))
           }
           
           p()
-          return(res)
-      })
-
-      if (params$verbose) {
-          message("\nFinal chrom_sizes after all chromosomes:")
-          print(chrom_sizes)
-          message("\nFirst few rows of combined data:")
-          print(head(rbindlist(pval.all)))
-      }
+          list(data = res, size = nrow(res), chrom = chrom)
+      }) 
   })
-  pval.all <- rbindlist(pval.all)
+
+  # After parallel processing, set sizes and combine data
+  chrom_sizes <- numeric(22)
+  for(result in pval.all) {
+      chrom_idx <- as.numeric(sub("chr", "", result$chrom))
+      chrom_sizes[chrom_idx] <- result$size
+  }
+
+  if (params$verbose) {
+      message("\nChromosome sizes after processing:")
+      print(chrom_sizes)
+  }
+
+  # Extract just the data for rbindlist
+  pval.all <- rbindlist(lapply(pval.all, function(x) x$data))
+
+  if (params$verbose) {
+      message("\nFirst few rows of combined data:")
+      print(head(pval.all))
+      message("\nTotal rows in combined data: ", nrow(pval.all))
+  }
   
   if (params$verbose) {
     end_time <- Sys.time()
