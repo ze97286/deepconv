@@ -141,6 +141,25 @@ calculate_and_visualize_marker_metrics <- function(atlas_file, blood_columns = c
         .(chr, start, end, target, blood_variance, blood_min, blood_max, blood_range)])
 
 
+    # For each combination of thresholds, count markers per target cell type
+    message("\nMarkers per cell type for different threshold combinations:")
+    for(min_t in c(0, 0.05, 0.1)) {
+        message(sprintf("\nMinimum UXM >= %.2f:", min_t))
+        for(var_t in c(0, 0.02, 0.04, 0.06)) {
+            message(sprintf("\n  Variance >= %.2f:", var_t))
+            counts_by_target <- blood_metrics[blood_min >= min_t & 
+                                            blood_variance >= var_t, 
+                                            .N, by=target][order(-N)]
+            print(counts_by_target)
+        }
+    }
+
+    # Also look at specific interesting thresholds:
+    message("\nDetailed look at potential threshold combination:")
+    message("\nMinimum UXM >= 0.1 and Variance >= 0.04:")
+    print(blood_metrics[blood_min >= 0.1 & blood_variance >= 0.04, 
+                    .N, by=target][order(-N)])
+
     return(list(metrics = blood_metrics, plots = plots))
 }
 
