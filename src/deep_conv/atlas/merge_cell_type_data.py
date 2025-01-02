@@ -6,8 +6,9 @@ from functools import partial
 
 # python -m deep_conv.atlas.merge_cell_type_data \
 #   --input_dir /users/zetzioni/sharedscratch/atlas/pats/tmp \
-#   --output_dir /users/zetzioni/sharedscratch/atlas/pats \
+#   --output_dir /users/zetzioni/sharedscratch/atlas/pat_index \
 #   --class_file /users/zetzioni/sharedscratch/atlas/taps_atlas_class.csv
+#   --min_cpgs 3
 
 def merge_chromosome(cell_type, chr_num, input_dir, output_dir):
     """
@@ -19,7 +20,6 @@ def merge_chromosome(cell_type, chr_num, input_dir, output_dir):
     # Collect all files for this cell type and chromosome
     files = list(input_path.glob(f"{cell_type}_*_chr{chr_num}_index.txt"))
     print("merging cell type",cell_type,"from",files)
-
     if not files:
         print(f"No files found for {cell_type}, chr{chr_num}")
         return
@@ -38,7 +38,6 @@ def merge_chromosome(cell_type, chr_num, input_dir, output_dir):
     # Add `chr` and `group` columns
     merged_df["chr"] = f"chr{chr_num}"
     merged_df["group"] = cell_type
-
     # Save merged results to a gzipped file
     output_file = output_path / f"coverage_index_chr{chr_num}.txt.gz"
     merged_df.to_csv(output_file, sep="\t", index=False, compression="gzip")
@@ -65,7 +64,7 @@ def merge_cell_type(cell_type, chromosomes, input_dir, output_dir):
         merged_df.to_csv(combined_file, sep="\t", index=False, compression="gzip")
 
 
-def parallel_merge(cell_types, chromosomes, input_dir, output_dir):
+def parallel_merge(cell_types, chromosomes, min_cpgs, input_dir, output_dir):
     """
     Parallelize the merging process by cell type (chromosome merging is sequential).
     """
@@ -74,20 +73,19 @@ def parallel_merge(cell_types, chromosomes, input_dir, output_dir):
             partial(merge_cell_type, chromosomes=chromosomes, input_dir=input_dir, output_dir=output_dir),
             cell_types
         )
-    merge_all_cell_types(cell_types, output_dir)
+    merge_all_cell_types(cell_types, min_cpgs, output_dir)
 
 
-def merge_all_cell_types(cell_types, output_dir):
+def merge_all_cell_types(cell_types, min_cpgs, output_dir):
     """
     Merge all cell type files into a single zipped CSV.
     """
-    merged_file = Path(output_dir) / "cell_type_pat_index_l4.csv.gz"
+    merged_file = Path(output_dir) / f"cell_type_pat_index_l{min_cpgs}.csv.gz"
     df_list = [
         pd.read_csv(Path(output_dir) / f"{cell_type}_merged_coverage_index.txt.gz", sep="\t", header=0)
         for cell_type in cell_types
         if (Path(output_dir) / f"{cell_type}_merged_coverage_index.txt.gz").exists()
     ]
-
     if df_list:
         merged_df = pd.concat(df_list, ignore_index=True)
         merged_df = merged_df.sort_values(["chr", "pos", "group"])
@@ -103,10 +101,12 @@ if __name__ == "__main__":
     parser.add_argument("--input_dir", required=True, help="Input directory containing intermediate files.")
     parser.add_argument("--class_file", required=True, help="List of cell types.")
     parser.add_argument("--output_dir", required=True, help="Output directory for merged files.")
+    parser.add_argument("--min_cpgs", required=True, help="the minimum number of cpgs per read.")
+
     args = parser.parse_args()
     df = pd.read_csv(args.class_file)
     cell_types = sorted(df.group.unique())
-    parallel_merge(cell_types, range(1, 23), args.input_dir, args.output_dir)
-    final_df = pd.read_csv(args.output_dir+"/cell_type_pat_index_l4.csv.gz", sep="\t")
+    parallel_merge(cell_types, range(1, 23), args.min_cpgs, args.input_dir, args.output_dir)
+    final_df = pd.read_csv(args.output_dir+f"/cell_type_pat_index_l{args.min_cpgs}.csv.gz", sep="\t")
     print(final_df.head())
     print(final_df.info())
