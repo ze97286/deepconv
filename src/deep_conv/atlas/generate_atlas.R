@@ -291,7 +291,7 @@ main <- function() {
                 help="Number of threads [default %default]"),
     make_option(c("-v", "--verbose"), action="store_true", default=FALSE,
                 help="Print progress information"),
-    make_option(c("-g", "--group_mapping"), type="character", default=NULL,
+    make_option(c("--group_mapping"), type="character", default=NULL,
                help="JSON string mapping group names, e.g. '{\"CD4-T-cells\":\"T-cells\",\"CD8-T-cells\":\"T-cells\"}' [default %default]",
                metavar="json_string")
   )
