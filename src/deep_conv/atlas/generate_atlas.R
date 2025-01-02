@@ -365,28 +365,52 @@ main <- function() {
       p <- progressor(steps=22)
       pval.all <- future_map(paste0("chr", 1:22), function(chrom) {
           if (params$verbose) message(sprintf("  Reading %s...", chrom))
-          res <- fread(paste0(params$base_dir, "/dmr_by_read/blood+tum+gi_scores-by-position_",
-                            chrom, ".txt.gz"),
+          res <- fread(paste0(params$base_dir, "/dmr_by_read/blood+tum+gi_scores-by-position_", 
+                            chrom, ".txt.gz"), 
                       header=TRUE, stringsAsFactors = TRUE)
+          
+          if (params$verbose) {
+              message(sprintf("\nAfter fread for %s:", chrom))
+              message(sprintf("Number of rows: %d", nrow(res)))
+              message("First few rows:")
+              print(head(res))
+          }
           
           # Apply group mapping if provided
           if (!is.null(params$group_mapping)) {
-              # Parse JSON string to named vector
               group_map <- fromJSON(params$group_mapping)
-              
-              # Replace group values using the mapping
               for (old_group in names(group_map)) {
                   res[group == old_group, group := group_map[old_group]]
               }
-              
-              # Re-factor the group column
               res[, group := as.factor(as.character(group))]
+              
+              if (params$verbose) {
+                  message(sprintf("\nAfter group mapping for %s:", chrom))
+                  message(sprintf("Number of rows: %d", nrow(res)))
+                  message("Unique groups:")
+                  print(table(res$group))
+              }
           }
           
-          chrom_sizes[as.numeric(sub("chr", "", chrom))] <<- nrow(res)
+          cur_size <- nrow(res)
+          chrom_sizes[as.numeric(sub("chr", "", chrom))] <<- cur_size
+          
+          if (params$verbose) {
+              message(sprintf("\nSize assigned to chromosome %s: %d", chrom, cur_size))
+              message(sprintf("Current chrom_sizes value for this chromosome: %d", 
+                            chrom_sizes[as.numeric(sub("chr", "", chrom))]))
+          }
+          
           p()
           return(res)
       })
+
+      if (params$verbose) {
+          message("\nFinal chrom_sizes after all chromosomes:")
+          print(chrom_sizes)
+          message("\nFirst few rows of combined data:")
+          print(head(rbindlist(pval.all)))
+      }
   })
   pval.all <- rbindlist(pval.all)
   
