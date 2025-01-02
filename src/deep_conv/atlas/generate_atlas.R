@@ -261,10 +261,8 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
   if(verbose) {
       message("\nAfter splitting regions:")
       message(sprintf("Number of split regions: %d", nrow(unique.sign.regions)))
-      if(nrow(unique.sign.regions) > 0) {
-          message("Distribution by group:")
-          print(unique.sign.regions[, .N, by=group])
-      }
+      message("Distribution by group:")
+      print(unique.sign.regions[, .N, by=group])
   }
   
   unique.sign.regions <- unique.sign.regions[!is.na(end) & !is.na(start) & 
@@ -273,10 +271,8 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
   if(verbose) {
       message("\nAfter filtering for length >= ", min_length, ":")
       message(sprintf("Number of length-filtered regions: %d", nrow(unique.sign.regions)))
-      if(nrow(unique.sign.regions) > 0) {
-          message("Distribution by group:")
-          print(unique.sign.regions[, .N, by=group])
-      }
+      message("Distribution by group:")
+      print(unique.sign.regions[, .N, by=group])
   }
   
   setkey(unique.sign.regions, chr, start, end)
@@ -285,10 +281,8 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
   if(verbose) {
       message("\nAfter cpg_info overlap:")
       message(sprintf("Number of regions: %d", nrow(unique.sign.regions)))
-      if(nrow(unique.sign.regions) > 0) {
-          message("Distribution by group:")
-          print(unique.sign.regions[, .N, by=group])
-      }
+      message("Distribution by group:")
+      print(unique.sign.regions[, .N, by=group])
   }
   
   setnames(unique.sign.regions, "i.start", "pos")
@@ -300,38 +294,40 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
   if(verbose) {
       message("\nAfter joining with methylation data:")
       message(sprintf("Number of regions: %d", nrow(unique.sign.regions)))
-      if(nrow(unique.sign.regions) > 0) {
-          message("Distribution by group:")
-          print(unique.sign.regions[, .N, by=group])
-      }
+      message("Distribution by group:")
+      print(unique.sign.regions[, .N, by=group])
   }
   
   unique.sign.regions.stats <- suppressWarnings(
-      unique.sign.regions[, .(
-          r_len=length(unique(pos)), 
-          p_len=min(end-start+1), 
-          avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))), 
-          med_logp=median(fifelse(pval.med==0,-308,log10(pval.med))), 
-          min_logp=min(fifelse(pval.min==0,-308,log10(pval.min))), 
-          max_logp=max(fifelse(pval.max==0,-308,log10(pval.max))), 
-          fully_covered=all(outgroup_count==n_groups-1),
-          avg_min_alpha_dist = mean(min_alpha_dist), 
-          avg_min_ci = mean(ci.min), 
-          n_low_alpha_dist=sum(min_alpha_dist < mad), 
-          n_total=.N
-      ), by=.(chr, group, start, end, region_index)])
+      unique.sign.regions[, {
+          .(r_len=length(unique(pos)), 
+            p_len=min(end-start+1), 
+            avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))), 
+            med_logp=median(fifelse(pval.med==0,-308,log10(pval.med))), 
+            min_logp=min(fifelse(pval.min==0,-308,log10(pval.min))), 
+            max_logp=max(fifelse(pval.max==0,-308,log10(pval.max))), 
+            fully_covered=all(outgroup_count==n_groups-1),
+            avg_min_alpha_dist = mean(min_alpha_dist), 
+            avg_min_ci = mean(ci.min), 
+            n_low_alpha_dist=sum(min_alpha_dist < mad), 
+            n_total=.N,
+            region_alpha = mean(mean_alpha_dist))
+      }, by=.(chr, group, start, end, region_index, fully_covered=all(outgroup_count==n_groups-1))])
   
   if(verbose) {
       message("\nAfter calculating statistics:")
       message(sprintf("Number of regions with stats: %d", nrow(unique.sign.regions.stats)))
+      message("Distribution by group:")
+      print(unique.sign.regions.stats[, .N, by=group])
       if(nrow(unique.sign.regions.stats) > 0) {
-          message("Distribution by group:")
-          print(unique.sign.regions.stats[, .N, by=group])
+          message("\nDistribution of fully_covered:")
+          print(table(unique.sign.regions.stats$fully_covered))
       }
   }
   
   return(unique.sign.regions.stats)
 }
+
 
 write_marker_file <- function(regions, outfile) {
     fwrite(regions[, .(
@@ -522,6 +518,13 @@ main <- function() {
                    difftime(end_time, start_time, units="secs")))
   }
   
+  if (params$verbose) {
+    message("\nAfter collapse_to_regions:")
+    message(sprintf("Number of regions: %d", nrow(unique.regions)))
+    message("Distribution of fully_covered:")
+    print(table(unique.regions$fully_covered))
+  }
+
   # Calculate region statistics
   if (params$verbose) {
     message(Sys.time(), " Calculating region statistics...")
