@@ -527,7 +527,7 @@ main <- function() {
   
   setkey(unique.regions, chr, start, end)
   setkey(cpg_info, chr, start, end)
-
+  
   unique.regions.stat <- foverlaps(
     cpg_info, 
     unique.regions, 

@@ -6,7 +6,7 @@ suppressPackageStartupMessages({
     library(doParallel)
 })
 
-# R_LIBS_USER=~/R/library Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/admix_pats.R \
+# R_LIBS_USER=~/R/library Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/admix_pats_t_cells.R \
 #  --pat_dir /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.100/Song/celltypes \
 #   --output_dir /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.100/Song/mixed/CD4 \
 #   --tmp_dir /users/zetzioni/sharedscratch/atlas/tmp \
@@ -219,14 +219,14 @@ main <- function() {
     
     # Define dilutions
     dilutions <- list(
-        c("CD4-T-cells"=0.00001),
-        c("CD4-T-cells"=0.0001),
-        c("CD4-T-cells"=0.001),
-        c("CD4-T-cells"=0.005),
-        c("CD4-T-cells"=0.01),
-        c("CD4-T-cells"=0.025),
-        c("CD4-T-cells"=0.05),
-        c("CD4-T-cells"=0.1)
+        c("T-cells"=0.00001),
+        c("T-cells"=0.0001),
+        c("T-cells"=0.001),
+        c("T-cells"=0.005),
+        c("T-cells"=0.01),
+        c("T-cells"=0.025),
+        c("T-cells"=0.05),        
+        c("T-cells"=0.1)
     )
     names(dilutions) <- c("1e-05", "1e-04", "0.001", "0.005", "0.01", "0.025", "0.05", "0.1")
     
