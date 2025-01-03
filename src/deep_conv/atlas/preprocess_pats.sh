@@ -9,6 +9,8 @@ class_file=$2
 output_dir=$3
 threads=${4:-32}  # Default to 32 threads
 
+export min_cpgs
+
 mkdir -p "$output_dir"
 
 # Create task list for GNU parallel
