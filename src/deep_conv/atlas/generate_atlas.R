@@ -316,19 +316,14 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
             avg_min_ci = mean(ci.min), 
             n_low_alpha_dist=sum(min_alpha_dist < mad), 
             n_total=.N,
-            region_alpha = mean(mean_alpha_dist),
-            fully_covered = all(outgroup_count==n_groups-1))
+            region_alpha = mean(mean_alpha_dist))
       }, by=.(chr, group, start, end, region_index)])
   
   if(verbose) {
       message("\nAfter calculating statistics:")
       message(sprintf("Number of regions with stats: %d", nrow(unique.sign.regions.stats)))
       message("Distribution by group:")
-      print(unique.sign.regions.stats[, .N, by=group])
-      if(nrow(unique.sign.regions.stats) > 0) {
-          message("\nDistribution of fully_covered:")
-          print(table(unique.sign.regions.stats$fully_covered))
-      }
+      print(unique.sign.regions.stats[, .N, by=group])      
   }
   
   return(unique.sign.regions.stats)
@@ -524,13 +519,6 @@ main <- function() {
                    difftime(end_time, start_time, units="secs")))
   }
   
-  if (params$verbose) {
-    message("\nAfter collapse_to_regions:")
-    message(sprintf("Number of regions: %d", nrow(unique.regions)))
-    message("Distribution of fully_covered:")
-    print(table(unique.regions$fully_covered))
-  }
-
   # Calculate region statistics
   if (params$verbose) {
     message(Sys.time(), " Calculating region statistics...")
@@ -542,7 +530,6 @@ main <- function() {
   
   unique.regions.stat <- foverlaps(
     cpg_info, 
-    unique.regions[fully_covered==TRUE], 
     nomatch=NULL)[
       , .(startCpG=min(index), 
           endCpG=max(index) + 1,
