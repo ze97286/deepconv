@@ -297,23 +297,28 @@ collapse_to_regions <- function(dmrs, cpg_info, mixture_cell_types, max_gap=1, m
       message("Distribution by group:")
       print(unique.sign.regions[, .N, by=group])
   }
+
+  if(verbose) {
+      message("\nDebug: checking outgroup_count values")
+      message("Unique outgroup_count values in data:", paste(sort(unique(unique.sign.regions$outgroup_count)), collapse=", "))
+      message(sprintf("n_groups: %d", n_groups))
+  }
   
   unique.sign.regions.stats <- suppressWarnings(
-    unique.sign.regions[, {
-        .(r_len=length(unique(pos)), 
-          p_len=min(end-start+1), 
-          avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))), 
-          med_logp=median(fifelse(pval.med==0,-308,log10(pval.med))), 
-          min_logp=min(fifelse(pval.min==0,-308,log10(pval.min))), 
-          max_logp=max(fifelse(pval.max==0,-308,log10(pval.max))), 
-          avg_min_alpha_dist = mean(min_alpha_dist), 
-          avg_min_ci = mean(ci.min), 
-          n_low_alpha_dist=sum(min_alpha_dist < mad), 
-          n_total=.N,
-          region_alpha = mean(mean_alpha_dist),
-          fully_covered = all(outgroup_count==n_groups-1))  # Just keep it here
-    }, by=.(chr, group, start, end, region_index)])
-    
+      unique.sign.regions[, {
+          .(r_len=length(unique(pos)), 
+            p_len=min(end-start+1), 
+            avg_logp=mean(fifelse(pval.mean==0,-308,log10(pval.mean))), 
+            med_logp=median(fifelse(pval.med==0,-308,log10(pval.med))), 
+            min_logp=min(fifelse(pval.min==0,-308,log10(pval.min))), 
+            max_logp=max(fifelse(pval.max==0,-308,log10(pval.max))), 
+            avg_min_alpha_dist = mean(min_alpha_dist), 
+            avg_min_ci = mean(ci.min), 
+            n_low_alpha_dist=sum(min_alpha_dist < mad), 
+            n_total=.N,
+            region_alpha = mean(mean_alpha_dist),
+            fully_covered = all(outgroup_count==n_groups-1))
+      }, by=.(chr, group, start, end, region_index)])
   
   if(verbose) {
       message("\nAfter calculating statistics:")
