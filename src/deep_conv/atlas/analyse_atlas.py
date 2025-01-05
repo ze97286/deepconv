@@ -433,6 +433,175 @@ def analyse_marker_quality(df):
     return cd4_markers
 
 
+
+def analyze_detection_limit(df):
+    blood_cells = ['B-cells', 'CD4-T-cells', 'CD8-T-cells', 'NK-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 'Monocytes', 'Neutrophils', 'Eosinophils']
+    cd4_markers = df[df['target'] == 'CD4-T-cells'].copy()
+    other_blood = [c for c in blood_cells if c != 'CD4-T-cells']
+    cd4_markers['blood_background_max'] = cd4_markers[other_blood].max(axis=1)
+    cd4_markers['snr'] = (cd4_markers['CD4-T-cells'] + 1e-10) / (cd4_markers['blood_background_max'] + 1e-10)
+    # Get top 20 markers by SNR
+    top_20 = cd4_markers.nlargest(20, 'snr')
+    # Create simulation of signal vs background at different concentrations
+    concentrations = [0.1, 0.01, 0.005, 0.001]  # 10%, 1%, 0.5%, 0.1%
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=(
+            'CD4 Signal vs Background at Different Concentrations (Top 20 Markers)',
+            'Signal Distribution at 1% CD4',
+            'Distribution of Signal Ratios at Different Concentrations',
+            'Signal vs Background Noise per Marker at 1% CD4'
+        )
+    )
+    # 1. Signal vs Background line plot
+    for marker_idx in range(20):
+        marker = top_20.iloc[marker_idx]
+        cd4_signals = []
+        bg_signals = []
+        for conc in concentrations:
+            # CD4 signal at this concentration
+            cd4_signal = marker['CD4-T-cells'] * conc
+            # Background signal (other cells equally distributed in remaining proportion)
+            other_conc = (1 - conc) / len(other_blood)
+            bg_signal = sum(marker[cell] * other_conc for cell in other_blood)
+            cd4_signals.append(cd4_signal)
+            bg_signals.append(bg_signal)
+        # Plot signal and background lines
+        fig.add_trace(
+            go.Scatter(
+                x=concentrations,
+                y=cd4_signals,
+                name=f'CD4 Signal Marker {marker_idx+1}',
+                line=dict(color='blue', width=1),
+                opacity=0.3,
+                showlegend=False
+            ),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=concentrations,
+                y=bg_signals,
+                name=f'Background Marker {marker_idx+1}',
+                line=dict(color='red', width=1),
+                opacity=0.3,
+                showlegend=False
+            ),
+            row=1, col=1
+        )
+    # Add mean lines
+    cd4_means = []
+    bg_means = []
+    for conc in concentrations:
+        cd4_signal = top_20['CD4-T-cells'] * conc
+        other_conc = (1 - conc) / len(other_blood)
+        bg_signal = sum(top_20[cell] * other_conc for cell in other_blood)
+        cd4_means.append(cd4_signal.mean())
+        bg_means.append(bg_signal.mean())
+    fig.add_trace(
+        go.Scatter(
+            x=concentrations,
+            y=cd4_means,
+            name='Mean CD4 Signal',
+            line=dict(color='blue', width=3)
+        ),
+        row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=concentrations,
+            y=bg_means,
+            name='Mean Background',
+            line=dict(color='red', width=3)
+        ),
+        row=1, col=1
+    )
+    # 2. Signal Distribution at 1%
+    cd4_signal_1pct = top_20['CD4-T-cells'] * 0.01
+    other_conc = 0.99 / len(other_blood)
+    bg_signal_1pct = sum(top_20[cell] * other_conc for cell in other_blood)
+    fig.add_trace(
+        go.Histogram(
+            x=cd4_signal_1pct,
+            name='CD4 Signal at 1%',
+            opacity=0.7,
+            nbinsx=20,
+            marker_color='blue'
+        ),
+        row=1, col=2
+    )
+    fig.add_trace(
+        go.Histogram(
+            x=bg_signal_1pct,
+            name='Background at 1%',
+            opacity=0.7,
+            nbinsx=20,
+            marker_color='red'
+        ),
+        row=1, col=2
+    )
+    # 3. Distribution of Signal Ratios
+    ratios = []
+    ratio_concs = []
+    for conc in concentrations:
+        cd4_signal = top_20['CD4-T-cells'] * conc
+        other_conc = (1 - conc) / len(other_blood)
+        bg_signal = sum(top_20[cell] * other_conc for cell in other_blood)
+        ratio = cd4_signal / (bg_signal + 1e-10)
+        ratios.extend(ratio)
+        ratio_concs.extend([conc] * len(ratio))
+    for conc in concentrations:
+        mask = [c == conc for c in ratio_concs]
+        fig.add_trace(
+            go.Box(
+                y=[r for r, m in zip(ratios, mask) if m],
+                name=f'{conc*100}%',
+                boxpoints='all'
+            ),
+            row=2, col=1
+        )
+    
+    # 4. Signal vs Background Scatter at 1%
+    fig.add_trace(
+        go.Scatter(
+            x=bg_signal_1pct,
+            y=cd4_signal_1pct,
+            mode='markers',
+            name='Markers at 1% CD4',
+            marker=dict(
+                color=cd4_signal_1pct/(bg_signal_1pct + 1e-10),
+                colorscale='Viridis',
+                showscale=True,
+                colorbar=dict(title='Signal Ratio')
+            )
+        ),
+        row=2, col=2
+    )
+    # Update layouts
+    fig.update_xaxes(title_text='CD4 Concentration', type='log', row=1, col=1)
+    fig.update_yaxes(title_text='Signal', row=1, col=1)
+    fig.update_xaxes(title_text='Signal Value', row=1, col=2)
+    fig.update_yaxes(title_text='Count', row=1, col=2)
+    fig.update_xaxes(title_text='Concentration', row=2, col=1)
+    fig.update_yaxes(title_text='Signal Ratio (CD4/Background)', type='log', row=2, col=1)
+    fig.update_xaxes(title_text='Background Signal', row=2, col=2)
+    fig.update_yaxes(title_text='CD4 Signal', row=2, col=2)
+    fig.update_layout(
+        height=1000,
+        width=1200,
+        showlegend=True,
+        title_text="CD4 Detection Limit Analysis",
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=0.45,
+            xanchor="center",
+            x=0.5
+        )
+    )
+    fig.write_html("CD4_detection_limits.html")
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Analyze methylation atlas data')
