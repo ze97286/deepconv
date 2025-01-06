@@ -216,7 +216,6 @@ def load_pats_homog(atlas, pats, tmp_dir, verb, rlen, force, nodump, debug, thre
             exit(1)
     pats = [op.abspath(p) for p in pats]
     uxm_dict = gen_homogs(atlas, pats, tmp_dir, verb, rlen, force, nodump, debug, threads, wgbs_tools_exec)
-    print("gen_homogs completed")
     samples_df = atlas[['name', 'direction']].copy()
     counts = atlas[['name', 'direction']].copy()
     for pat in pats:
@@ -240,7 +239,7 @@ def pats_to_homog(atlas_path, pats_path, wgbs_tools_exec_path, r_len = 4, output
         rlen=r_len,
         force=False,
         nodump=False,
-        debug=True,
+        debug=False,
         threads=threads,
         wgbs_tools_exec=wgbs_tools_exec_path,
     )
