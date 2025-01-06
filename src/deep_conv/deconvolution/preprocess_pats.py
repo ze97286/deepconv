@@ -195,7 +195,6 @@ def pat2homog(markers, pat, tmp_dir_l, rlen, verb, force, nodump, debug, wgbs_to
 
 def gen_homogs(markers, pats, tmp_dir, verb, rlen, force, nodump, debug, threads, wgbs_tools_exec):
     check_executable(wgbs_tools_exec)
-    print(markers.head())
     # arguments cleanup
     markers = markers[coord_cols]          # keep only coords columns
     # change to abs path (for mem files), validate existance, drop dups
