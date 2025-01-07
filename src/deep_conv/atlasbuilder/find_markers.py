@@ -89,7 +89,8 @@ def process_batch(temp_atlas, pats_path, wgbs_tools_exec_path, min_cpgs, min_cov
             for cell in cell_types:
                 result[cell] = marker_props[col_mapping[cell]].iloc[i]
                 result[f'{cell}_coverage'] = coverage[col_mapping[cell]].iloc[i]
-            print("found good marker for", cell_types[best_targets_idx[i]], "with SNR", metrics['snr'], "value",metrics['target_value'])
+            if cell_types[best_targets_idx[i]] == "CD4-T-cells" or cell_types[best_targets_idx[i]] == "CD8-T-cells":
+                print("found good marker for", cell_types[best_targets_idx[i]], "with SNR", metrics['snr'], "value",metrics['target_value'])
             good_markers.append(result)
     if not good_markers:
         return None
@@ -178,10 +179,12 @@ if __name__ == "__main__":
     )
     
     if result_df is not None:
-        # Save results
-        output_file = f"{args.output_dir}/{args.chr}_markers.csv.gz"
-        result_df.to_csv(output_file, index=False, compression='gzip')
-        print(f"Results saved to {output_file}")
+        cell_types = result_df['target'].unique()
+        for cell_type in cell_types:
+            # Save results
+            output_file = f"{args.output_dir}/{cell_type}_{args.chr}_markers.parquet"
+            result_df.to_parquet(output_file, index=False)
+            print(f"Results saved to {output_file}")
         
         # Print summary statistics
         print("\nSummary Statistics:")
