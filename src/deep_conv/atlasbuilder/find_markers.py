@@ -2,179 +2,158 @@ import argparse
 import glob 
 import numpy as np
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from deep_conv.deconvolution.preprocess_pats import *
 
 
-def calculate_snr_significance_vectorized(values_matrix, cell_types, n_permutations=1000):
+def evaluate_marker_quality(values, target_idx, min_signal, min_snr, significance_threshold):
     """
-    Calculate p-values for SNR using permutation test, vectorized for all rows
-    
-    Args:
-        values_matrix: numpy array of shape (n_regions, n_cell_types)
-        cell_types: list of cell type names
-        n_permutations: number of permutations for the test
-    
-    Returns:
-        p_values array of shape (n_regions, n_cell_types)
+    Evaluate marker quality considering signal strength, SNR and statistical significance
     """
-    n_regions, n_cell_types = values_matrix.shape
-    observed_snrs = np.zeros((n_regions, n_cell_types))
+    target_value = values[target_idx]
+    other_values = values[np.arange(len(values)) != target_idx]
     
-    # Calculate observed SNRs for each target
-    for i, target in enumerate(cell_types):
-        other_indices = [j for j, c in enumerate(cell_types) if c != target]
-        max_background = values_matrix[:, other_indices].max(axis=1)
-        observed_snrs[:, i] = values_matrix[:, i] / (max_background + 1e-10)
+    # Basic metrics
+    max_background = other_values.max()
+    snr = target_value / (max_background + 1e-10)
     
-    # Permutation test
-    random_snrs = np.zeros((n_regions, n_permutations, n_cell_types))
-    for p in range(n_permutations):
-        # Shuffle each row independently
-        shuffled_values = np.array([np.random.permutation(row) for row in values_matrix])
-        for i, target in enumerate(cell_types):
-            other_indices = [j for j, c in enumerate(cell_types) if c != target]
-            max_background = shuffled_values[:, other_indices].max(axis=1)
-            random_snrs[:, p, i] = shuffled_values[:, i] / (max_background + 1e-10)
+    # Calculate significance (p-value)
+    p_value = np.mean(other_values >= target_value)
     
-    # Calculate p-values
-    p_values = np.mean(random_snrs >= observed_snrs[:, np.newaxis, :], axis=1)
-    return p_values
+    # Additional quality metrics
+    num_nonzero_background = (other_values > 0).sum()
+    background_mean = other_values.mean()
+    background_std = other_values.std()
+    
+    # Quality criteria
+    is_good_marker = (
+        (target_value > min_signal) &  # Minimum absolute signal
+        (snr > min_snr) &  # Minimum SNR
+        (p_value < significance_threshold)  # Statistical significance
+    )
+    
+    return is_good_marker, {
+        'snr': snr,
+        'target_value': target_value,
+        'max_background': max_background,
+        'p_value': p_value,
+        'num_nonzero_background': num_nonzero_background,
+        'background_mean': background_mean,
+        'background_std': background_std
+    }
 
 
-   
-
-def process_batch(args):
-    """
-    Process a batch of regions to evaluate markers
-
-    Args:
-        args: tuple of (batch_df, pats_path, wgbs_tools_exec_path, min_coverage, snr_threshold, significance_threshold)
-    """
-    temp_atlas, pats_path, wgbs_tools_exec_path, min_coverage, snr_threshold, significance_threshold = args
-   
+def process_batch(temp_atlas, pats_path, wgbs_tools_exec_path, min_cpgs, min_coverage, 
+                  snr_threshold, significance_threshold, min_signal_threshold, threads):
     batch_df = pd.read_csv(temp_atlas,sep="\t")
-    # Get marker values and coverage
-    marker_props, coverage = pats_to_homog(temp_atlas, pats_path, wgbs_tools_exec_path)
-
-    # Clean cell type names
-    col_mapping = {col.split('_')[0]: col for col in marker_props.columns 
-                    if col not in ['name', 'direction']}
+    try:
+        marker_props, coverage = pats_to_homog(temp_atlas, pats_path, wgbs_tools_exec_path, r_len=min_cpgs, threads = threads)
+    except:
+        print("failed to process batch for",temp_atlas)
+        return None
+    col_mapping = {col.split('_')[0]: col for col in marker_props.columns if col not in ['name', 'direction']}
     cell_types = list(col_mapping.keys())
-    
-    # Filter out rows with NAs or zero coverage
+    # Filter out rows with NAs or insufficient coverage
     valid_rows = ~marker_props.iloc[:, 2:].isna().any(axis=1)
     marker_props = marker_props[valid_rows]
     coverage = coverage[valid_rows]
     batch_df = batch_df[valid_rows].reset_index(drop=True)
-    
     if len(batch_df) == 0:
         return None
-        
-    # Filter rows with insufficient coverage
+    coverage.index = marker_props.index
+    batch_df.index = marker_props.index
     sufficient_coverage = (coverage.iloc[:, 2:] >= min_coverage).all(axis=1)
-    marker_props = marker_props[sufficient_coverage]
-    coverage = coverage[sufficient_coverage]
+    marker_props = marker_props[sufficient_coverage].reset_index(drop=True)
+    coverage = coverage[sufficient_coverage].reset_index(drop=True)
     batch_df = batch_df[sufficient_coverage].reset_index(drop=True)
-    
     if len(batch_df) == 0:
         return None
-        
-    # Extract just the values matrix for cell types
     values_matrix = marker_props.iloc[:, 2:].values
-    
-    # Calculate SNR for each cell type (vectorized)
-    snrs = np.zeros((len(values_matrix), len(cell_types)))
-    for i, target in enumerate(cell_types):
-        other_indices = [j for j, c in enumerate(cell_types) if c != target]
-        max_background = values_matrix[:, other_indices].max(axis=1)
-        snrs[:, i] = values_matrix[:, i] / (max_background + 1e-10)
-    
-    p_values = calculate_snr_significance_vectorized(values_matrix, cell_types)
-    
-    # Find best target for each row
-    best_snrs = snrs.max(axis=1)
-    best_targets_idx = snrs.argmax(axis=1)
-    best_targets = np.array(cell_types)[best_targets_idx]
-    best_pvalues = p_values[np.arange(len(p_values)), best_targets_idx]
-    
-    # Filter by SNR threshold and significance
-    good_markers = (best_snrs > snr_threshold) & (best_pvalues < significance_threshold)
-    
-    if not good_markers.any():
+    best_targets_idx = values_matrix.argmax(axis=1)
+    # Evaluate each region
+    good_markers = []
+    for i in range(len(values_matrix)):
+        is_good_marker, metrics = evaluate_marker_quality(values_matrix[i], best_targets_idx[i], 
+                                                        min_signal=min_signal_threshold, 
+                                                        min_snr=snr_threshold,
+                                                        significance_threshold=significance_threshold)
+        if is_good_marker:  
+            result = batch_df.iloc[i].copy()
+            result['target'] = cell_types[best_targets_idx[i]]
+            result['snr'] = metrics['snr']
+            result['pvalue'] = metrics['p_value']  
+            result['target_value'] = metrics['target_value']
+            result['num_nonzero_background'] = metrics['num_nonzero_background']
+            result['background_mean'] = metrics['background_mean']
+            result['background_std'] = metrics['background_std']
+            # Add all cell type values and coverage
+            for cell in cell_types:
+                result[cell] = marker_props[col_mapping[cell]].iloc[i]
+                result[f'{cell}_coverage'] = coverage[col_mapping[cell]].iloc[i]
+            print("found good marker for", cell_types[best_targets_idx[i]], "with SNR", metrics['snr'], "value",metrics['target_value'])
+            good_markers.append(result)
+    if not good_markers:
         return None
+    return pd.DataFrame(good_markers)
+    
         
-    # Create result DataFrame
-    result_df = batch_df[good_markers].copy()
-    result_df['target'] = best_targets[good_markers]
-    result_df['snr'] = best_snrs[good_markers]
-    result_df['pvalue'] = best_pvalues[good_markers]
-    
-    # Add values for all cell types
-    for cell in cell_types:
-        result_df[cell] = marker_props[col_mapping[cell]][good_markers].values
-        result_df[f'{cell}_coverage'] = coverage[col_mapping[cell]][good_markers].values
-    
-    return result_df
-       
-
-def process_all_regions(marker_regions, pats_path, wgbs_tools_exec_path, min_coverage=10, 
-                      snr_threshold=1.0, significance_threshold=0.05, threads=32):
-   """
-   Process all region files in parallel and combine results
-   """
+def process_all_regions(marker_regions, 
+                        pats_path, 
+                        wgbs_tools_exec_path, 
+                        min_cpgs, 
+                        min_coverage, 
+                        snr_threshold, 
+                        significance_threshold, 
+                        min_signal_threshold, 
+                        threads):
    print(f"Processing {len(marker_regions)} region files...")
-   
-   # Prepare args for each file
-   process_args = []
-   for region_file in marker_regions:
-       args = (region_file, pats_path, wgbs_tools_exec_path, min_coverage, 
-              snr_threshold, significance_threshold)
-       process_args.append(args)
-   
-   # Process in parallel
-   with Pool(threads) as pool:
-       results = list(tqdm(
-           pool.imap(process_batch, process_args),
-           total=len(process_args),
-           desc="Processing region files"
-       ))
-   
-   # Filter None results and combine
-   valid_results = [df for df in results if df is not None]
+   valid_results = []
+   for region_file in tqdm(marker_regions):
+        df = process_batch(temp_atlas=region_file, 
+                           pats_path=pats_path, 
+                           wgbs_tools_exec_path=wgbs_tools_exec_path, 
+                           min_cpgs=min_cpgs,
+                           min_coverage= min_coverage,
+                           snr_threshold=snr_threshold,
+                           significance_threshold=significance_threshold,
+                           min_signal_threshold=min_signal_threshold,
+                           threads=threads)
+        if df is not None:
+            print("found good markers",df.head())
+            valid_results.append(df)
    if not valid_results:
        print("No valid markers found.")
        return None
-   
-   # Combine all results
    print("Combining results...")
    combined_df = pd.concat(valid_results, ignore_index=True)
    print(f"Found {len(combined_df)} valid markers.")
-   
    return combined_df
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--chr', type=str, required=True)
+    parser.add_argument('--min_cpgs', type=int, required=True)
     parser.add_argument('--output_dir', type=str, required=True)
     parser.add_argument('--pats_path', type=str, required=True)
     parser.add_argument('--wgbs_tools_exec_path', type=str, required=True)
-    parser.add_argument('--snr_threshold', type=float, default=1.0)
+    parser.add_argument('--snr_threshold', type=float, default=2.0)
+    parser.add_argument('--significance_threshold', type=float, default=0.05)
+    parser.add_argument('--min_signal_threshold', type=float, default=0.5)
     parser.add_argument('--min_coverage', type=int, default=10)
     parser.add_argument('--threads', type=int, default=4)
 
     args = parser.parse_args()
-    marker_regions = glob.glob(f"{args.output_dir}/{args.chr}_region_*.l4.bed")
-    
+    marker_regions = sorted(glob.glob(f"{args.output_dir}/by_chr/{args.chr}_region_*.l4.bed"))
     result_df = process_all_regions(
-       marker_regions,
-       args.pats_path,
-       args.wgbs_tools_exec_path,
-       args.min_coverage,
-       args.snr_threshold,
-       args.significance_threshold,
-       args.threads
+        marker_regions=marker_regions,
+        pats_path=args.pats_path,
+        wgbs_tools_exec_path=args.wgbs_tools_exec_path,
+        min_cpgs=args.min_cpgs,
+        min_coverage=args.min_coverage,
+        snr_threshold=args.snr_threshold,
+        significance_threshold=args.significance_threshold,
+        min_signal_threshold=args.min_signal_threshold,
+        threads=args.threads,
     )
     
     if result_df is not None:
