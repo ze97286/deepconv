@@ -89,8 +89,7 @@ def process_batch(temp_atlas, pats_path, wgbs_tools_exec_path, min_cpgs, min_cov
             for cell in cell_types:
                 result[cell] = marker_props[col_mapping[cell]].iloc[i]
                 result[f'{cell}_coverage'] = coverage[col_mapping[cell]].iloc[i]
-            if cell_types[best_targets_idx[i]] == "CD4-T-cells" or cell_types[best_targets_idx[i]] == "CD8-T-cells":
-                print("found good marker for", cell_types[best_targets_idx[i]], "with SNR", metrics['snr'], "value",metrics['target_value'])
+            print("found good marker for", cell_types[best_targets_idx[i]], "with SNR", metrics['snr'], "value",metrics['target_value'])
             good_markers.append(result)
     if not good_markers:
         return None
@@ -119,7 +118,6 @@ def process_all_regions(marker_regions,
                            min_signal_threshold=min_signal_threshold,
                            threads=threads)
         if df is not None:
-            print("found good markers",df.head())
             valid_results.append(df)
    if not valid_results:
        print("No valid markers found.")
@@ -129,6 +127,28 @@ def process_all_regions(marker_regions,
    print(f"Found {len(combined_df)} valid markers.")
    return combined_df
 
+# python -m deep_conv.atlasbuilder.find_markers --chr chr1 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr2 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr3 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr4 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr5 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr6 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr7 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr8 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr9 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr10 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr11 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr12 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr13 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr14 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr15 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr16 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr17 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr18 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr19 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr20 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr21 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
+# python -m deep_conv.atlasbuilder.find_markers --chr chr22 --output_dir /users/zetzioni/sharedscratch/atlas/marker_regions --pats_path /users/zetzioni/sharedscratch/atlas/pat_by_cell_type --wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools --min_cpgs 4 --min_coverage 10 --snr_threshold 2.5 --significance_threshold 0.05 --min_signal_threshold 0.5 --threads 4
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -158,12 +178,10 @@ if __name__ == "__main__":
     )
     
     if result_df is not None:
-        cell_types = result_df['target'].unique()
-        for cell_type in cell_types:
-            # Save results
-            output_file = f"{args.output_dir}/{cell_type}_{args.chr}_markers.parquet"
-            result_df.to_parquet(output_file, index=False)
-            print(f"Results saved to {output_file}")
+        # Save results
+        output_file = f"{args.output_dir}/{args.chr}_markers.csv.gz"
+        result_df.to_csv(output_file, index=False, compression='gzip')
+        print(f"Results saved to {output_file}")
         
         # Print summary statistics
         print("\nSummary Statistics:")
