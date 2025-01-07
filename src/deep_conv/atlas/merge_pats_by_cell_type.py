@@ -1,6 +1,5 @@
 import pandas as pd
-
-from multiprocessing import Pool
+import argparse
 from pathlib import Path
 
 # the purpose of this script is to merge by cell type input pat files by aggregating the coverage per pattern. This is further used downstream. 
@@ -114,17 +113,12 @@ def merge_pat_files(pat_files, output_path):
     merged.to_csv(output_path, sep='\t', index=False, header=False, compression='gzip')
     return output_path
 
-def merge_all_cell_types(pat_files_by_cell_type, output_dir, threads=None):
-    output_dir = Path(output_dir)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--cell_type', type=str, required=True)
+    args = parser.parse_args()
+    output_dir = Path("/users/zetzioni/sharedscratch/atlas/pat_by_cell_type/")
     output_dir.mkdir(parents=True, exist_ok=True)
-    merge_args = [
-        (pat_files, output_dir / f"{cell_type}_merged.pat.gz")
-        for cell_type, pat_files in pat_files_by_cell_type.items()
-    ]
-    with Pool(threads) as pool:
-        results = pool.starmap(merge_pat_files, merge_args)
-    return {cell_type: result 
-            for cell_type, result in zip(pat_files_by_cell_type.keys(), results)}
+    merge_pat_files(cell_type_to_pat[args.cell_type], output_dir / f"{args.cell_type}_merged.pat.gz")
 
-
-merge_all_cell_types(cell_type_to_pat, "/users/zetzioni/sharedscratch/atlas/pat_by_cell_type/", threads=32)
