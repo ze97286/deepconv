@@ -35,7 +35,7 @@ def generate_regions(cpg_file, chromosome, output_dir, min_cpgs=4, max_distance=
     # For each starting CpG
     for i in range(n_cpgs):
         # Find all valid ending positions
-        j = i + min_cpgs - 1  # minimum end position
+        j = i + min_cpgs
         while j < n_cpgs and positions[j] - positions[i] <= max_distance:
             regions.append({
                 'chr': chromosome,
