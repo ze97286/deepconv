@@ -308,8 +308,8 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
         batch_df = regions_df
         batch_df = batch_df[valid_rows].reset_index(drop=True)
         if len(batch_df) == 0:
-            print("finished batch",batch_id,"in",time.time()-t_batch)
-            return None
+            print("finished batch",batch_id,"in",time.time()-t_batch)    
+            continue        
         coverage.index = marker_props.index
         batch_df.index = marker_props.index
         sufficient_coverage = (coverage.iloc[:, 2:] >= min_coverage).all(axis=1)
@@ -318,7 +318,7 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
         batch_df = batch_df[sufficient_coverage].reset_index(drop=True)
         if len(batch_df) == 0:
             print("finished batch",batch_id,"in",time.time()-t_batch)
-            return None
+            continue
         marker_props.to_csv(f'{output_dir}/{chr}_raw_markers_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
         coverage.to_csv(f'{output_dir}/{chr}_raw_coverage_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
         values_matrix = marker_props.iloc[:, 2:].values
@@ -352,7 +352,7 @@ def main():
     parser.add_argument('--min_signal_threshold', type=float, default=0.5)
     parser.add_argument('--output_dir', required=True, help='Path to output marker and coverage files')
     parser.add_argument('--threads', type=int, default=mp.cpu_count(), help='Number of threads')
-    parser.add_argument('--batch_size', type=int, default=100_000, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=500_000, help='Batch size')
     args = parser.parse_args()
 
     process_with_params(args.chr, args.pat_dir, args.regions, args.min_cpgs, args.min_coverage, args.snr_threshold, args.significance_threshold, args.min_signal_threshold, args.output_dir, args.threads, batch_size=args.batch_size)
