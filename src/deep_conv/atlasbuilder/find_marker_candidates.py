@@ -101,11 +101,8 @@ def create_empty_results(regions_df: pd.DataFrame, cell_type: str) -> tuple[pd.D
 def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Process a single pat file and return UXM proportions and coverage"""
     counter = RegionCounter(regions_df, min_cpgs)
-    import pprint 
-    pprint.pprint(counter.counts)
     pat_file = str(pat_file)
     cell_type = Path(pat_file).stem.replace('.pat', '')
-    print(f"\nProcessing {cell_type}...")
     column_names = ['chr', 'start', 'pattern', 'count']
     processed_lines = 0
     total_lines = 0
@@ -140,9 +137,6 @@ def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> 
            if chunk['start'].max() > counter.last_cpg:
                pbar.update(total_lines - processed_lines)
                break
-    print(f"Finished processing {cell_type} ({processed_lines}/{total_lines} patterns)")
-    import pprint 
-    pprint.pprint(counter.counts)
     # Convert counts to proportions and create output DataFrames
     results_uxm = []
     results_coverage = []
@@ -175,7 +169,6 @@ def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> 
                 'value': 0,
                 'cell_type': cell_type  # Add cell_type column
             })
-    print(f"Counted {counter.patterns_counted} patterns for this pat file")
 
     return pd.DataFrame(results_uxm), pd.DataFrame(results_coverage), cell_type
 
@@ -260,17 +253,13 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
     t0 = time.time()
     batch_id=0
     for batch in pd.read_csv(regions, sep='\t', chunksize=batch_size):
-        regions_df = batch.reset_index()
-        print(regions_df.head(10))
+        regions_df = batch.reset_index(drop=True) 
         t_batch = time.time()
         batch_id+=1
         print(f"Loaded {len(regions_df)} regions")
         pat_files = list(Path(pat_dir).glob('*.pat.gz'))
-        print(f"Found {len(pat_files)} pat files in {pat_dir}")
         if not pat_files:
             raise ValueError(f"No .pat.gz files found in {pat_dir}")
-        # Process pat files in parallel with progress tracking
-        print(f"\nProcessing pat files using {threads} threads...")
         with mp.Pool(threads) as pool:
             process_func = partial(process_pat_file, regions_df, min_cpgs=min_cpgs)
             results = list(tqdm(
@@ -280,9 +269,6 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
             ))
         print("\nBuilding final matrices...")
         
-        print(regions_df.head())
-
-
         # Separate UXM and coverage results
         uxm_dfs = []
         coverage_dfs = []
@@ -291,8 +277,6 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
             uxm_dfs.append(uxm_df)
             coverage_dfs.append(coverage_df)
             cell_types.append(cell_type)
-        print(f"UXM values for tracked region:")
-        
 
         # Create final matrices
         # First, create the base DataFrame with name and direction
@@ -308,28 +292,14 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
             # Then assign to new column
             uxm_matrix[f"{cell_type}_merged"] = merged['value']
 
-        print("uxm_matrix:\n", uxm_matrix.head())
         # Create coverage matrix                           
         coverage_matrix = base_df.copy()
-        print("base_df\n",base_df.head(10))
         for df, cell_type in zip(coverage_dfs, cell_types):
-            # Debug the merge
-            print(f"\nMerging for {cell_type}:")
-            print("base_df shape:", base_df.shape)
-            print("coverage_df shape:", df.shape)
-            print("coverage_df head:")
-            print(df.head())
-            
             merged = pd.merge(base_df, 
                             df[['name', 'direction', 'value']], 
                             on=['name', 'direction'], 
                             how='left')
-            print("merged shape:", merged.shape)
-            print("merged head:")
-            print(merged.head())
-            
             coverage_matrix[f"{cell_type}_merged"] = merged['value']
-        print("coverage_matrix:\n",coverage_matrix.head())
         marker_props, coverage = uxm_matrix, coverage_matrix
         col_mapping = {col.split('_')[0]: col for col in marker_props.columns if col not in ['name', 'direction']}
         cell_types = list(col_mapping.keys())
@@ -338,10 +308,8 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
         coverage = coverage[valid_rows]
         batch_df = regions_df
         batch_df = batch_df[valid_rows].reset_index(drop=True)
-        print(f"Batch {batch_id}: After matrix creation: {len(marker_props)} rows")
         if len(batch_df) == 0:
-            print(f"Batch {batch_id}: No valid rows after NaN filtering")
-            print("finished batch",batch_id,"in",time.time()-t_batch)    
+            print("finished batch with no coverage",batch_id,"in",time.time()-t_batch)    
             continue 
         coverage.index = marker_props.index
         batch_df.index = marker_props.index
@@ -350,7 +318,7 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
         coverage = coverage[sufficient_coverage].reset_index(drop=True)
         batch_df = batch_df[sufficient_coverage].reset_index(drop=True)
         if len(batch_df) == 0:
-            print("finished batch",batch_id,"in",time.time()-t_batch)
+            print("finished batch with insufficient coverage",batch_id,"in",time.time()-t_batch)
             continue
         marker_props.to_csv(f'{output_dir}/{chr}_raw_markers_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
         coverage.to_csv(f'{output_dir}/{chr}_raw_coverage_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
