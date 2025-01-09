@@ -255,7 +255,8 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
     print(f"Loading regions from {regions}...")
     t0 = time.time()
     batch_id=0
-    for regions_df in pd.read_csv(regions, sep='\t', chunksize=batch_size):
+    for batch in pd.read_csv(regions, sep='\t', chunksize=batch_size):
+        regions_df = batch.copy()
         t_batch = time.time()
         batch_id+=1
         print(f"Loaded {len(regions_df)} regions")
@@ -273,9 +274,10 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
                 desc="Overall progress"
             ))
         print("\nBuilding final matrices...")
-        debug_region = regions_df.iloc[0]
-        print(f"\nTracking region: {debug_region['name']}")
-        print(f"CpG range: {debug_region['startCpG']}-{debug_region['endCpG']}")
+        
+        print(regions_df.head())
+
+
         # Separate UXM and coverage results
         uxm_dfs = []
         coverage_dfs = []
@@ -285,10 +287,8 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
             coverage_dfs.append(coverage_df)
             cell_types.append(cell_type)
         print(f"UXM values for tracked region:")
-        for df, cell_type in zip(uxm_dfs, cell_types):
-            matching_row = df[df['name'] == debug_region['name']]
-            if not matching_row.empty:
-                print(f"{cell_type}: {matching_row['value'].iloc[0]}")
+        
+
         # Create final matrices
         # First, create the base DataFrame with name and direction
         base_df = regions_df[['name', 'direction']]
@@ -302,6 +302,8 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
                             how='left')
             # Then assign to new column
             uxm_matrix[f"{cell_type}_merged"] = merged['value']
+
+        print(uxm_matrix.head())
         # Create coverage matrix
         coverage_matrix = base_df.copy()
         for df, cell_type in zip(coverage_dfs, cell_types):
@@ -312,6 +314,7 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
                             how='left')
             # Then assign to new column
             coverage_matrix[f"{cell_type}_merged"] = merged['value']
+        print(coverage_matrix)
         marker_props, coverage = uxm_matrix, coverage_matrix
         col_mapping = {col.split('_')[0]: col for col in marker_props.columns if col not in ['name', 'direction']}
         cell_types = list(col_mapping.keys())
