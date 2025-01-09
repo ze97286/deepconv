@@ -257,6 +257,7 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
     batch_id=0
     for batch in pd.read_csv(regions, sep='\t', chunksize=batch_size):
         regions_df = batch.copy()
+        print(regions_df.head(10))
         t_batch = time.time()
         batch_id+=1
         print(f"Loaded {len(regions_df)} regions")
