@@ -260,7 +260,7 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
     t0 = time.time()
     batch_id=0
     for batch in pd.read_csv(regions, sep='\t', chunksize=batch_size):
-        regions_df = batch.copy()
+        regions_df = batch.reset_index()
         print(regions_df.head(10))
         t_batch = time.time()
         batch_id+=1
