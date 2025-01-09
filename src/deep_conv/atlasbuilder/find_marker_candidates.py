@@ -352,7 +352,7 @@ def main():
     parser.add_argument('--min_signal_threshold', type=float, default=0.5)
     parser.add_argument('--output_dir', required=True, help='Path to output marker and coverage files')
     parser.add_argument('--threads', type=int, default=mp.cpu_count(), help='Number of threads')
-    parser.add_argument('--batch_size', type=int, default=250_000, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=100_000, help='Batch size')
     args = parser.parse_args()
 
     process_with_params(args.chr, args.pat_dir, args.regions, args.min_cpgs, args.min_coverage, args.snr_threshold, args.significance_threshold, args.min_signal_threshold, args.output_dir, args.threads, batch_size=args.batch_size)
