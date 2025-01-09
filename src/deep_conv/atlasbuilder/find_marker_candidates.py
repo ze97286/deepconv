@@ -19,6 +19,7 @@ class Region:
 
 class RegionCounter:
     def __init__(self, regions_df: pd.DataFrame, min_cpgs: int):
+        self.patterns_counted = 0
         self.min_cpgs = min_cpgs
         self.th1 = round(1 - (min_cpgs - 1) / min_cpgs, 3) + 0.001
         self.th2 = round((min_cpgs - 1) / min_cpgs, 3)
@@ -61,6 +62,8 @@ class RegionCounter:
             return
         # Find overlapping regions
         overlaps = self.find_overlapping_regions(start_cpg, len(pattern))
+        if overlaps:  # If we found any overlaps, increment counter
+            self.patterns_counted += 1
         for region, offset, overlap_len in overlaps:
             # Extract overlapping portion
             overlap_pat = pattern[offset:offset + overlap_len]
@@ -168,6 +171,8 @@ def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> 
                 'value': 0,
                 'cell_type': cell_type  # Add cell_type column
             })
+    print(f"Counted {counter.patterns_counted} patterns for this pat file")
+
     return pd.DataFrame(results_uxm), pd.DataFrame(results_coverage), cell_type
 
 
@@ -366,7 +371,7 @@ def main():
     args = parser.parse_args()
 
     process_with_params(args.chr, args.pat_dir, args.regions, args.min_cpgs, args.min_coverage, args.snr_threshold, args.significance_threshold, args.min_signal_threshold, args.output_dir, args.threads, batch_size=args.batch_size)
-    process_with_params(chr="chr2", pat_dir="/users/zetzioni/sharedscratch/atlas/pat_by_cell_type", regions="/users/zetzioni/sharedscratch/atlas/marker_regions/regions_chr2_4_1000.bed.gz", min_cpgs=4, min_coverage=10, snr_threshold=1,significance_threshold=0.05, min_signal_threshold=0.1,output_dir="/users/zetzioni/sharedscratch/atlas/marker_regions", threads=15, batch_size=10_000)
+    # process_with_params(chr="chr2", pat_dir="/users/zetzioni/sharedscratch/atlas/pat_by_cell_type", regions="/users/zetzioni/sharedscratch/atlas/marker_regions/regions_chr2_4_1000.bed.gz", min_cpgs=4, min_coverage=10, snr_threshold=1,significance_threshold=0.05, min_signal_threshold=0.1,output_dir="/users/zetzioni/sharedscratch/atlas/marker_regions", threads=15, batch_size=10_000)
 
 
 if __name__ == '__main__':
