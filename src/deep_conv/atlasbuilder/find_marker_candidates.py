@@ -102,7 +102,7 @@ def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> 
     """Process a single pat file and return UXM proportions and coverage"""
     counter = RegionCounter(regions_df, min_cpgs)
     from pprint import pprint 
-    pprint(pat_file, "\n", counter.counts)
+    pprint(counter.counts)
     pat_file = str(pat_file)
     cell_type = Path(pat_file).stem.replace('.pat', '')
     print(f"\nProcessing {cell_type}...")
@@ -142,7 +142,7 @@ def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> 
                break
     print(f"Finished processing {cell_type} ({processed_lines}/{total_lines} patterns)")
     from pprint import pprint 
-    pprint(pat_file, "\n", counter.counts)
+    pprint(counter.counts)
     # Convert counts to proportions and create output DataFrames
     results_uxm = []
     results_coverage = []
