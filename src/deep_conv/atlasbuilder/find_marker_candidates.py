@@ -268,6 +268,9 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
                 desc="Overall progress"
             ))
         print("\nBuilding final matrices...")
+        debug_region = regions_df.iloc[0]
+        print(f"\nTracking region: {debug_region['name']}")
+        print(f"CpG range: {debug_region['startCpG']}-{debug_region['endCpG']}")
         # Separate UXM and coverage results
         uxm_dfs = []
         coverage_dfs = []
@@ -276,6 +279,11 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
             uxm_dfs.append(uxm_df)
             coverage_dfs.append(coverage_df)
             cell_types.append(cell_type)
+        print(f"UXM values for tracked region:")
+        for df, cell_type in zip(uxm_dfs, cell_types):
+            matching_row = df[df['name'] == debug_region['name']]
+            if not matching_row.empty:
+                print(f"{cell_type}: {matching_row['value'].iloc[0]}")
         # Create final matrices
         # First, create the base DataFrame with name and direction
         base_df = regions_df[['name', 'direction']]
@@ -307,9 +315,11 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
         coverage = coverage[valid_rows]
         batch_df = regions_df
         batch_df = batch_df[valid_rows].reset_index(drop=True)
+        print(f"Batch {batch_id}: After matrix creation: {len(marker_props)} rows")
         if len(batch_df) == 0:
+            print(f"Batch {batch_id}: No valid rows after NaN filtering")
             print("finished batch",batch_id,"in",time.time()-t_batch)    
-            continue        
+            continue 
         coverage.index = marker_props.index
         batch_df.index = marker_props.index
         sufficient_coverage = (coverage.iloc[:, 2:] >= min_coverage).all(axis=1)
@@ -356,7 +366,7 @@ def main():
     args = parser.parse_args()
 
     process_with_params(args.chr, args.pat_dir, args.regions, args.min_cpgs, args.min_coverage, args.snr_threshold, args.significance_threshold, args.min_signal_threshold, args.output_dir, args.threads, batch_size=args.batch_size)
-    # process_with_params(chr="chr2", pat_dir="/users/zetzioni/sharedscratch/atlas/pat_by_cell_type", regions="/users/zetzioni/sharedscratch/atlas/marker_regions/regions_chr2_4_1000.bed.gz", min_cpgs=4, min_coverage=10, snr_threshold=2.5,significance_threshold=0.05, min_signal_threshold=0.5,output_dir="/users/zetzioni/sharedscratch/atlas/marker_regions", threads=10, batch_size=500_000)
+    process_with_params(chr="chr2", pat_dir="/users/zetzioni/sharedscratch/atlas/pat_by_cell_type", regions="/users/zetzioni/sharedscratch/atlas/marker_regions/regions_chr2_4_1000.bed.gz", min_cpgs=4, min_coverage=10, snr_threshold=1,significance_threshold=0.05, min_signal_threshold=0.1,output_dir="/users/zetzioni/sharedscratch/atlas/marker_regions", threads=15, batch_size=10_000)
 
 
 if __name__ == '__main__':
