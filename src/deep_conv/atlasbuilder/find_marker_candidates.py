@@ -352,9 +352,10 @@ def main():
     parser.add_argument('--min_signal_threshold', type=float, default=0.5)
     parser.add_argument('--output_dir', required=True, help='Path to output marker and coverage files')
     parser.add_argument('--threads', type=int, default=mp.cpu_count(), help='Number of threads')
+    parser.add_argument('--batch_size', type=int, default=250_000, help='Batch size')
     args = parser.parse_args()
 
-    process_with_params(args.chr, args.pat_dir, args.regions, args.min_cpgs, args.min_coverage, args.snr_threshold, args.significance_threshold, args.min_signal_threshold, args.output_dir, args.threads)
+    process_with_params(args.chr, args.pat_dir, args.regions, args.min_cpgs, args.min_coverage, args.snr_threshold, args.significance_threshold, args.min_signal_threshold, args.output_dir, args.threads, batch_size=args.batch_size)
     # process_with_params(chr="chr2", pat_dir="/users/zetzioni/sharedscratch/atlas/pat_by_cell_type", regions="/users/zetzioni/sharedscratch/atlas/marker_regions/regions_chr2_4_1000.bed.gz", min_cpgs=4, min_coverage=10, snr_threshold=2.5,significance_threshold=0.05, min_signal_threshold=0.5,output_dir="/users/zetzioni/sharedscratch/atlas/marker_regions", threads=10, batch_size=500_000)
 
 
