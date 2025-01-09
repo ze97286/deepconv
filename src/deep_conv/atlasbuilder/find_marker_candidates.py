@@ -308,13 +308,12 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
         # Create coverage matrix
         coverage_matrix = base_df.copy()
         for df, cell_type in zip(coverage_dfs, cell_types):
-            # First merge base_df with current results
+            print("cell_type coverage:", cell_type, "\n", df.head(10))
             merged = pd.merge(base_df, 
                             df[['name', 'direction', 'value']], 
                             on=['name', 'direction'], 
                             how='left')
-            # Then assign to new column
-            coverage_matrix[f"{cell_type}_merged"] = merged['value']
+            coverage_matrix[f"{cell_type}_merged"] = merged['value'].fillna(0)
         print("coverage_matrix:\n",coverage_matrix.head())
         marker_props, coverage = uxm_matrix, coverage_matrix
         col_mapping = {col.split('_')[0]: col for col in marker_props.columns if col not in ['name', 'direction']}
