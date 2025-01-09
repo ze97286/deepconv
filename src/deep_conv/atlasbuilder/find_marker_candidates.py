@@ -208,7 +208,7 @@ def evaluate_marker_quality(values, target_idx, min_signal, min_snr, significanc
     }
 
 
-def find_good_markers(batch_df, cell_types, marker_props, col_mapping, coverage, values_matrix, best_targets_idx, min_signal_threshold, snr_threshold, significance_threshold, output_dir):
+def find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, coverage, values_matrix, best_targets_idx, min_signal_threshold, snr_threshold, significance_threshold, output_dir, batch_id):
     good_markers = []
     for i in range(len(values_matrix)):
         is_good_marker, metrics = evaluate_marker_quality(values_matrix[i], best_targets_idx[i], 
@@ -240,86 +240,93 @@ def find_good_markers(batch_df, cell_types, marker_props, col_mapping, coverage,
     if result_df is not None:
         grouped = result_df.groupby('target')
         for target, group in grouped:
-            filename = f"{chr}_{target}_markers.parquet"
+            filename = f"{chr}_{target}_markers_{batch_id}.parquet"
             filepath = os.path.join(output_dir, filename)
             group.to_parquet(filepath, index=False)
             print(f"saved {len(group)} markers for chromosome {chr}/{target}")
 
 
-def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_threshold, significance_threshold, min_signal_threshold, output_dir, threads):
+def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_threshold, significance_threshold, min_signal_threshold, output_dir, threads, batch_size=500_000):
     print(f"Loading regions from {regions}...")
     t0 = time.time()
-    regions_df = pd.read_csv(regions, sep='\t')
-    print(f"Loaded {len(regions_df)} regions")
-    pat_files = list(Path(pat_dir).glob('*.pat.gz'))
-    print(f"Found {len(pat_files)} pat files in {pat_dir}")
-    if not pat_files:
-        raise ValueError(f"No .pat.gz files found in {pat_dir}")
-    # Process pat files in parallel with progress tracking
-    print(f"\nProcessing pat files using {threads} threads...")
-    with mp.Pool(threads) as pool:
-        process_func = partial(process_pat_file, regions_df, min_cpgs=min_cpgs)
-        results = list(tqdm(
-            pool.imap(process_func, pat_files),
-            total=len(pat_files),
-            desc="Overall progress"
-        ))
-    print("\nBuilding final matrices...")
-    # Separate UXM and coverage results
-    uxm_dfs = []
-    coverage_dfs = []
-    cell_types = []
-    for uxm_df, coverage_df, cell_type in results:
-        uxm_dfs.append(uxm_df)
-        coverage_dfs.append(coverage_df)
-        cell_types.append(cell_type)
-    # Create final matrices
-    # First, create the base DataFrame with name and direction
-    base_df = regions_df[['name', 'direction']]
-    # Create UXM matrix
-    uxm_matrix = base_df.copy()
-    for df, cell_type in zip(uxm_dfs, cell_types):
-        # First merge base_df with current results
-        merged = pd.merge(base_df, 
-                        df[['name', 'direction', 'value']], 
-                        on=['name', 'direction'], 
-                        how='left')
-        # Then assign to new column
-        uxm_matrix[f"{cell_type}_merged"] = merged['value']
-    # Create coverage matrix
-    coverage_matrix = base_df.copy()
-    for df, cell_type in zip(coverage_dfs, cell_types):
-        # First merge base_df with current results
-        merged = pd.merge(base_df, 
-                        df[['name', 'direction', 'value']], 
-                        on=['name', 'direction'], 
-                        how='left')
-        # Then assign to new column
-        coverage_matrix[f"{cell_type}_merged"] = merged['value']
-    marker_props, coverage = uxm_matrix, coverage_matrix
-    col_mapping = {col.split('_')[0]: col for col in marker_props.columns if col not in ['name', 'direction']}
-    cell_types = list(col_mapping.keys())
-    valid_rows = ~marker_props.iloc[:, 2:].isna().any(axis=1)
-    marker_props = marker_props[valid_rows]
-    coverage = coverage[valid_rows]
-    batch_df = regions_df
-    batch_df = batch_df[valid_rows].reset_index(drop=True)
-    if len(batch_df) == 0:
-        return None
-    coverage.index = marker_props.index
-    batch_df.index = marker_props.index
-    sufficient_coverage = (coverage.iloc[:, 2:] >= min_coverage).all(axis=1)
-    marker_props = marker_props[sufficient_coverage].reset_index(drop=True)
-    coverage = coverage[sufficient_coverage].reset_index(drop=True)
-    batch_df = batch_df[sufficient_coverage].reset_index(drop=True)
-    if len(batch_df) == 0:
-        return None
-    marker_props.to_csv(f'{output_dir}/{chr}_raw_markers.l4.bed', sep='\t', index=False)
-    coverage.to_csv(f'{output_dir}/{chr}_raw_coverage.l4.bed', sep='\t', index=False)
-    values_matrix = marker_props.iloc[:, 2:].values
-    best_targets_idx = values_matrix.argmax(axis=1)
-    find_good_markers(batch_df, cell_types, marker_props, col_mapping, coverage, values_matrix, best_targets_idx, min_signal_threshold, snr_threshold, significance_threshold, output_dir)
+    batch_id=0
+    for regions_df in pd.read_csv(regions, sep='\t', chunksize=batch_size):
+        t_batch = time.time()
+        batch_id+=1
+        print(f"Loaded {len(regions_df)} regions")
+        pat_files = list(Path(pat_dir).glob('*.pat.gz'))
+        print(f"Found {len(pat_files)} pat files in {pat_dir}")
+        if not pat_files:
+            raise ValueError(f"No .pat.gz files found in {pat_dir}")
+        # Process pat files in parallel with progress tracking
+        print(f"\nProcessing pat files using {threads} threads...")
+        with mp.Pool(threads) as pool:
+            process_func = partial(process_pat_file, regions_df, min_cpgs=min_cpgs)
+            results = list(tqdm(
+                pool.imap(process_func, pat_files),
+                total=len(pat_files),
+                desc="Overall progress"
+            ))
+        print("\nBuilding final matrices...")
+        # Separate UXM and coverage results
+        uxm_dfs = []
+        coverage_dfs = []
+        cell_types = []
+        for uxm_df, coverage_df, cell_type in results:
+            uxm_dfs.append(uxm_df)
+            coverage_dfs.append(coverage_df)
+            cell_types.append(cell_type)
+        # Create final matrices
+        # First, create the base DataFrame with name and direction
+        base_df = regions_df[['name', 'direction']]
+        # Create UXM matrix
+        uxm_matrix = base_df.copy()
+        for df, cell_type in zip(uxm_dfs, cell_types):
+            # First merge base_df with current results
+            merged = pd.merge(base_df, 
+                            df[['name', 'direction', 'value']], 
+                            on=['name', 'direction'], 
+                            how='left')
+            # Then assign to new column
+            uxm_matrix[f"{cell_type}_merged"] = merged['value']
+        # Create coverage matrix
+        coverage_matrix = base_df.copy()
+        for df, cell_type in zip(coverage_dfs, cell_types):
+            # First merge base_df with current results
+            merged = pd.merge(base_df, 
+                            df[['name', 'direction', 'value']], 
+                            on=['name', 'direction'], 
+                            how='left')
+            # Then assign to new column
+            coverage_matrix[f"{cell_type}_merged"] = merged['value']
+        marker_props, coverage = uxm_matrix, coverage_matrix
+        col_mapping = {col.split('_')[0]: col for col in marker_props.columns if col not in ['name', 'direction']}
+        cell_types = list(col_mapping.keys())
+        valid_rows = ~marker_props.iloc[:, 2:].isna().any(axis=1)
+        marker_props = marker_props[valid_rows]
+        coverage = coverage[valid_rows]
+        batch_df = regions_df
+        batch_df = batch_df[valid_rows].reset_index(drop=True)
+        if len(batch_df) == 0:
+            print("finished batch",batch_id,"in",time.time()-t_batch)
+            return None
+        coverage.index = marker_props.index
+        batch_df.index = marker_props.index
+        sufficient_coverage = (coverage.iloc[:, 2:] >= min_coverage).all(axis=1)
+        marker_props = marker_props[sufficient_coverage].reset_index(drop=True)
+        coverage = coverage[sufficient_coverage].reset_index(drop=True)
+        batch_df = batch_df[sufficient_coverage].reset_index(drop=True)
+        if len(batch_df) == 0:
+            print("finished batch",batch_id,"in",time.time()-t_batch)
+            return None
+        marker_props.to_csv(f'{output_dir}/{chr}_raw_markers_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
+        coverage.to_csv(f'{output_dir}/{chr}_raw_coverage_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
+        values_matrix = marker_props.iloc[:, 2:].values
+        best_targets_idx = values_matrix.argmax(axis=1)
+        find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, coverage, values_matrix, best_targets_idx, min_signal_threshold, snr_threshold, significance_threshold, output_dir, batch_id)
+        print("finished batch",batch_id,"in",time.time()-t_batch)
     print("finished",chr, "in",time.time()-t0)
+
 
 # python -m deep_conv.atlasbuilder.find_marker_candidates \
 # --chr 21 \
@@ -348,7 +355,7 @@ def main():
     args = parser.parse_args()
 
     process_with_params(args.chr, args.pat_dir, args.regions, args.min_cpgs, args.min_coverage, args.snr_threshold, args.significance_threshold, args.min_signal_threshold, args.output_dir, args.threads)
-    # process_with_params(chr="chr22", pat_dir="/users/zetzioni/sharedscratch/atlas/pat_by_cell_type", regions="/users/zetzioni/sharedscratch/atlas/marker_regions/regions_chr22_4_1000.bed.gz", min_cpgs=4, min_coverage4=10, snr_threshold=2,significance_threshold=0.05, min_signal_threshold=0.4,output_dir="/users/zetzioni/sharedscratch/atlas/marker_regions", threads=15)
+    # process_with_params(chr="chr2", pat_dir="/users/zetzioni/sharedscratch/atlas/pat_by_cell_type", regions="/users/zetzioni/sharedscratch/atlas/marker_regions/regions_chr2_4_1000.bed.gz", min_cpgs=4, min_coverage=10, snr_threshold=2.5,significance_threshold=0.05, min_signal_threshold=0.5,output_dir="/users/zetzioni/sharedscratch/atlas/marker_regions", threads=10, batch_size=500_000)
 
 
 if __name__ == '__main__':
