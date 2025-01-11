@@ -87,38 +87,40 @@ def main():
 
     config = {
         # cell_type: [min_score, max_markers]
-        "B-cells":[10, 100, "B-cells"],
-        "CD34-erythroblasts":[10, 100, "CD34-erythroblasts"],
-        "CD34-megakaryocytes":[10, 100, "CD34-megakaryocytes"],
-        "CD4-T-cells": [6,250, "CD4-T-cells"],
-        "CD8-T-cells": [6,200, "CD8-T-cells"],
-        "Colon":[10, 100, "Colon"],
-        "Eosinophils":[10, 100, "Eosinophils"],
-        "Esophagus":[10, 100, "Esophagus"],
-        "Monocytes":[10, 100, "Monocytes"],
-        "Neutrophils":[10,100, "Neutrophils"],
-        "NK-cells":[10,100, "NK-cells"],
-        "OAC":[10,100, "OAC"],
-        "Pancreas":[10, 100, "Pancreas"],
-        "Stomach":[8, 100, "Stomach"],
-        "Duodenum":[10, 100, "Duodenum"],
+        "B-cells":[10, 100],
+        "CD34-erythroblasts":[10, 100],
+        "CD34-megakaryocytes":[10, 100],
+        "CD4-T-cells": [6,250],
+        "CD8-T-cells": [6,200],
+        "Colon":[10, 100],
+        "Eosinophils":[10, 100],
+        "Esophagus":[10, 100],
+        "Monocytes":[10, 100],
+        "Neutrophils":[10,100],
+        "NK-cells":[10,100],
+        "OAC":[10,100],
+        "Pancreas":[10, 100],
+        "Stomach":[8, 100],
+        "Duodenum":[10, 100],
     }
 
     markers_dfs = []
+    input_dir = args.input_dir
+    marker_output_name = args.marker_output_name
+    atlas_output_name = args.atlas_output_name
 
     for ct, ct_config in config.items():
-        df = pd.read_parquet(glob.glob(f"{args.input_dir}/*{ct}*"))
-        score, max_markers, name = ct_config
+        df = pd.read_parquet(glob.glob(f"{input_dir}/*{ct}*"))
+        score, max_markers = ct_config
+        print("preparing target", ct)
         scores = select_non_overlapping_markers(df)
-        scores['target'] = name
-        if name != ct:
-            df.rename(columns={ct:name})
+        scores['target'] = ct
         markers_dfs.append(scores[scores.score>=score].iloc[:max_markers])
         
     markers = pd.concat(markers_dfs, axis=0, ignore_index=True)
-    markers.to_csv(args.marker_output_name, sep="\t")
+    markers.to_csv(marker_output_name, sep="\t")
     atlas = markers[['chr','start','end','startCpG','endCpG','target','name','direction','B-cells','CD34-erythroblasts','CD34-megakaryocytes','CD4-T-cells','CD8-T-cells','Colon','Duodenum','Eosinophils','Esophagus','Monocytes','NK-cells','Neutrophils','OAC','Pancreas','Stomach']]
-    atlas.to_csv(args.atlas_output_name, sep="\t")
+    atlas.to_csv(atlas_output_name, sep="\t")
 
 
 
