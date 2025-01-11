@@ -3,7 +3,7 @@ import argparse
 from pathlib import Path
 
 # the purpose of this script is to merge by cell type input pat files by aggregating the coverage per pattern. This is further used downstream. 
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_B-cell" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_B_cells.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type B-cell"
+# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_B-cells" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_B_cells.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type B-cells"
 # qsub -b y -l h_vmem=150g -pe smp 1 -V -N "merge_pats_CD34-erythroblasts" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_CD34-erythroblasts.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type CD34-erythroblasts"
 # qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_CD34-megakaryocytes" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_CD34-megakaryocytes.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type CD34-megakaryocytes"
 # qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_CD4-T-cells" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_CD4-T-cells.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type CD4-T-cells"
@@ -20,7 +20,7 @@ from pathlib import Path
 # qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_Duodenum" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_Duodenum.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type Duodenum"
 
 cell_type_to_pat = {
-    "B-cell": [
+    "B-cells": [
         "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/UKVAC-001-5_B-cells_md.pat.gz",
         "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/UKVAC-003-6_B-cells_md.pat.gz",
         "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/UKVAC-049-3_B-cells_md.pat.gz",
