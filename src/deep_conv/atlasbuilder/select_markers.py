@@ -118,9 +118,9 @@ def main():
         markers_dfs.append(scores[scores.score>=score].iloc[:max_markers])
         
     markers = pd.concat(markers_dfs, axis=0, ignore_index=True)
-    markers.to_csv(marker_output_name, sep="\t")
+    markers.to_csv(marker_output_name, sep="\t", index=False)
     atlas = markers[['chr','start','end','startCpG','endCpG','target','name','direction','B-cells','CD34-erythroblasts','CD34-megakaryocytes','CD4-T-cells','CD8-T-cells','Colon','Duodenum','Eosinophils','Esophagus','Monocytes','NK-cells','Neutrophils','OAC','Pancreas','Stomach']]
-    atlas.to_csv(atlas_output_name, sep="\t")
+    atlas.to_csv(atlas_output_name, sep="\t", index=False)
 
 
 

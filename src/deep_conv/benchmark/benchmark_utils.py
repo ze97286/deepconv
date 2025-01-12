@@ -296,6 +296,8 @@ def columns():
     ] + [
         f"d0.01_{i}" for i in range(1, 101)
     ] + [
+        f"d0.025_{i}" for i in range(1, 101)
+    ] + [
         f"d0.05_{i}" for i in range(1, 101)
     ] + [
         f"d0.1_{i}" for i in range(1, 101)
@@ -312,6 +314,8 @@ def dilutions():
         0.005 for i in range(1, 101)
     ] + [
         0.01 for i in range(1, 101)
+    ] + [
+        0.025 for i in range(1, 101)
     ] + [
         0.05 for i in range(1, 101)
     ] + [
