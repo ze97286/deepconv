@@ -25,10 +25,11 @@ cut -f 2 $TYPE2BAM | while read infile; do
     
     # Process if output doesn't exist
     if [ ! -e "$outfile" ]; then
-        tabix -R <(tail -n+2 $MARKERBED | cut -f 1,4,5) "$pat_file" | \
+        tabix -R <(tail -n+2 $MARKERBED | awk '{start=$4-100; end=$5+100; if (start<0) start=0; print $1, start, end}' OFS="\t") "$pat_file" | \
             sort -k1,1V -k2,2n -k3,3 | \
             bgzip -c > "$outfile"
         tabix -s 1 -b 2 -e 2 -C "$outfile"
+        
     fi
 done
 
