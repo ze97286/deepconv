@@ -99,78 +99,71 @@ def create_empty_results(regions_df: pd.DataFrame, cell_type: str) -> tuple[pd.D
 
 
 def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Process a single pat file and return UXM proportions and coverage"""
-    counter = RegionCounter(regions_df, min_cpgs)
-    pat_file = str(pat_file)
-    cell_type = Path(pat_file).stem.replace('.pat', '')
-    column_names = ['chr', 'start', 'pattern', 'count']
-    processed_lines = 0
-    total_lines = 0
-    # Count total lines for progress bar
-    with gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file) as f:
-       for line in f:
-           if total_lines == 0:  # Check first line
-               start = int(line.split('\t')[1])
-               if start > counter.last_cpg:
-                   print(f"Skipping {cell_type} - all positions after our regions")
-                   return create_empty_results(regions_df, cell_type)
+   """Process a single pat file and return UXM proportions and coverage"""
+   counter = RegionCounter(regions_df, min_cpgs)
+   pat_file = str(pat_file)
+   cell_type = Path(pat_file).stem.replace('.pat', '')
+   column_names = ['chr', 'start', 'pattern', 'count']
+   processed_lines = 0
+   total_lines = 0
+   # Count total lines for progress bar
+   with gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file) as f:
+       for _ in f:
            total_lines += 1
-    with tqdm(total=total_lines, desc=f"Processing {cell_type}") as pbar:
+   with tqdm(total=total_lines, desc=f"Processing {cell_type}") as pbar:
        for chunk in pd.read_csv(pat_file, sep='\t', names=column_names, chunksize=1_000_000):
-           # Filter chunk to only patterns that could overlap our regions
-           relevant_chunk = chunk[chunk['start'].between(counter.first_cpg, counter.last_cpg)]
+           # A pattern can overlap if:
+           # - starts before last_cpg (starts before end of last region)
+           # - extends past first_cpg (pattern end > first region start)
+           relevant_chunk = chunk[
+               (chunk['start'] < counter.last_cpg) & 
+               (chunk['start'] + chunk['pattern'].str.len() > counter.first_cpg)
+           ]
            if len(relevant_chunk) == 0:
-               if chunk['start'].min() > counter.last_cpg:
+               if chunk['start'].min() >= counter.last_cpg:
                    pbar.update(total_lines - processed_lines)
-                   break  # We've passed our regions
+                   break  # Past all our regions
                processed_lines += len(chunk)
                pbar.update(len(chunk))
-               continue  # Skip this chunk
-           # Process relevant rows
+               continue
            for _, row in relevant_chunk.iterrows():
                counter.process_pattern(row['pattern'], row['start'], row['count'])
-           # Update progress for all rows in chunk, not just relevant ones
            chunk_size = len(chunk)
            processed_lines += chunk_size
            pbar.update(chunk_size)
-           # Check if we've passed our regions
-           if chunk['start'].max() > counter.last_cpg:
-               pbar.update(total_lines - processed_lines)
-               break
-    # Convert counts to proportions and create output DataFrames
-    results_uxm = []
-    results_coverage = []
-    for idx in range(len(regions_df)):
-        counts = counter.counts[idx]
-        total = sum(counts.values())
-        if total > 0:
-            results_uxm.append({
-                'name': regions_df.iloc[idx]['name'],
-                'direction': regions_df.iloc[idx]['direction'],
-                'value': counts['u'] / total,
-                'cell_type': cell_type  # Add cell_type column
-            })
-            results_coverage.append({
-                'name': regions_df.iloc[idx]['name'],
-                'direction': regions_df.iloc[idx]['direction'],
-                'value': total,
-                'cell_type': cell_type  # Add cell_type column
-            })
-        else:
-            results_uxm.append({
-                'name': regions_df.iloc[idx]['name'],
-                'direction': regions_df.iloc[idx]['direction'],
-                'value': np.nan,
-                'cell_type': cell_type  # Add cell_type column
-            })
-            results_coverage.append({
-                'name': regions_df.iloc[idx]['name'],
-                'direction': regions_df.iloc[idx]['direction'],
-                'value': 0,
-                'cell_type': cell_type  # Add cell_type column
-            })
-
-    return pd.DataFrame(results_uxm), pd.DataFrame(results_coverage), cell_type
+   # Convert counts to proportions and create output DataFrames
+   results_uxm = []
+   results_coverage = []
+   for idx in range(len(regions_df)):
+       counts = counter.counts[idx]
+       total = sum(counts.values())
+       if total > 0:
+           results_uxm.append({
+               'name': regions_df.iloc[idx]['name'],
+               'direction': regions_df.iloc[idx]['direction'],
+               'value': counts['u'] / total,
+               'cell_type': cell_type
+           })
+           results_coverage.append({
+               'name': regions_df.iloc[idx]['name'],
+               'direction': regions_df.iloc[idx]['direction'],
+               'value': total,
+               'cell_type': cell_type
+           })
+       else:
+           results_uxm.append({
+               'name': regions_df.iloc[idx]['name'],
+               'direction': regions_df.iloc[idx]['direction'],
+               'value': np.nan,
+               'cell_type': cell_type
+           })
+           results_coverage.append({
+               'name': regions_df.iloc[idx]['name'],
+               'direction': regions_df.iloc[idx]['direction'],
+               'value': 0,
+               'cell_type': cell_type
+           })
+   return pd.DataFrame(results_uxm), pd.DataFrame(results_coverage), cell_type
 
 
 def evaluate_marker_quality(values, target_idx, min_signal, min_snr, significance_threshold):
