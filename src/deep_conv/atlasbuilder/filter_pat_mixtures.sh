@@ -11,6 +11,12 @@ fi
 
 mkdir -p $OUTPUT_DIR
 
+for pat_file in $MIXEDPATS_DIR/*_0.1_*_0.9_*.pat.gz; do
+    if [ ! -e "$pat_file.tbi" ]; then
+        tabix -s 1 -b 2 -e 2 -C "$pat_file"
+    fi
+done
+
 # Process each mixed pat file
 for pat_file in $MIXEDPATS_DIR/*.pat.gz; do
     outname=$(basename $pat_file)
