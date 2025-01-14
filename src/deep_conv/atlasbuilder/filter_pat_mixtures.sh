@@ -11,7 +11,7 @@ fi
 
 mkdir -p $OUTPUT_DIR
 
-for pat_file in $MIXEDPATS_DIR/*_0.1_*_0.9_*.pat.gz; do
+for pat_file in $MIXEDPATS_DIR/*.pat.gz; do
     if [ ! -e "$pat_file.tbi" ]; then
         tabix -s 1 -b 2 -e 2 -C "$pat_file"
     fi
