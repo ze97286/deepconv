@@ -249,10 +249,14 @@ main <- function() {
     
     # Get read counts from source files
     reads_by_celltype <- read_count_table(args$pat_dir)
+    print("\nSource file read counts:")
+    print(reads_by_celltype)
     
     # Calculate target fragments based on desired depth
     conc_table[, target_fragments := ceiling(args$target_depth * fraction)]
-    
+    print("Concentration table with target fragments:")
+    print(conc_table[, .(celltype, fraction, target_fragments)])
+
     setkey(conc_table, celltype)
     setkey(reads_by_celltype, sample)
     
@@ -260,7 +264,13 @@ main <- function() {
     target_dilutions <- conc_table[reads_by_celltype, nomatch=NULL][
         , list(celltype, dilution, filename, fraction=target_fragments/fragments)
     ]
-    print(target_dilutions[, .(celltype, fragments=target_fragments, source_fragments=fragments, sampling_fraction=fraction)])
+    print("\nFinal sampling fractions:")
+    print(target_dilutions[, .(
+        celltype,
+        original_reads = fragments,  # from the join
+        target_reads = target_fragments,  # from the join
+        sampling_fraction = fraction
+    )])
     
     # Generate mixtures
     generate_mix_from_pat(
