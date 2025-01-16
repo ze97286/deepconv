@@ -292,20 +292,34 @@ main <- function() {
         args$tmp_dir <- paste0(args$output_dir, "/tmp")
     }
     
-    # Read concentrations from JSON file
-    concentrations <- read_concentrations(args$concentrations)
-    
     # Generate target table
     target_table <- make_target_table(concentrations, pat_dir = args$pat_dir)
     reads_by_celltype <- read_count_table(args$pat_dir)
-    target_table[, target_fragments := ceiling(args$target_depth * fraction)]
     
+    # Calculate sampling fractions to achieve target depth
     setkey(target_table, celltype)
     setkey(reads_by_celltype, sample)
     
+    # Each cell type should contribute (target_depth * its_fraction) reads
     target_dilutions <- target_table[reads_by_celltype, nomatch=NULL][
-        , list(celltype, dilution, filename, fraction=target_fragments/fragments)
+        , list(
+            celltype, 
+            dilution, 
+            filename, 
+            target_reads = ceiling(args$target_depth * fraction),
+            source_reads = fragments,
+            # Calculate sampling fraction needed to get target number of reads
+            fraction = pmin(1, (args$target_depth * fraction) / fragments)
+        )
     ]
+    
+    cat("\nTargeted sampling:\n")
+    print(target_dilutions[, .(
+        celltype, 
+        target_reads,
+        source_reads,
+        sampling_fraction = sprintf("%.4f", fraction)
+    )])
     
     # Generate mixtures
     generate_mix_from_pat(
