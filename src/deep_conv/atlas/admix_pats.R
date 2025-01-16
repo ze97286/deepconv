@@ -29,53 +29,26 @@ option_list <- list(
                 help="JSON file or JSON string containing cell type concentrations [REQUIRED]")
 )
 
-# Helper function to read and validate concentrations
-read_concentrations <- function(json_input) {
-    # Try to parse as direct JSON string first
-    concentrations <- tryCatch({
-        fromJSON(json_input)
-    }, error = function(e) {
-        # If that fails, try reading as a file
-        if (file.exists(json_input)) {
-            fromJSON(json_input)
-        } else {
-            stop("Input is neither valid JSON nor an existing file path")
-        }
+# Helper functions
+make_target_table <- function(target_fraction, dilutions, pat_dir=".", suffix=".pat.gz") {
+    target_fraction.dt <- as.data.table(target_fraction, keep.rownames = TRUE)
+    setnames(target_fraction.dt, c("celltype", "fraction"))
+    setkey(target_fraction.dt, celltype)
+    
+    out.dt <- lapply(dilutions, function(dilution) {
+        total_dil <- sum(dilution)
+        dilution.dt <- as.data.table(dilution, keep.rownames = TRUE)
+        setnames(dilution.dt, c("celltype", "fraction"))
+        return(dilution.dt[target_fraction.dt, on="celltype"][, .(
+            celltype, 
+            filename=paste0(pat_dir,'/',celltype,suffix), 
+            fraction=ifelse(is.na(fraction), 
+                          i.fraction-total_dil/length(unique(celltype[is.na(fraction)])), 
+                          fraction)
+        )])
     })
     
-    # Validate that concentrations sum to 1 (with small tolerance for floating point)
-    total <- sum(unlist(concentrations))
-    tolerance <- 1e-10
-    if (abs(total - 1) > tolerance) {
-        stop(sprintf("Concentrations must sum to 1. Current sum is %f", total))
-    }
-    
-    # Convert to data.table
-    conc.dt <- data.table(
-        celltype = names(concentrations),
-        concentration = as.numeric(unlist(concentrations))
-    )
-    
-    return(conc.dt)
-}
-
-# Modified make_target_table function
-make_target_table <- function(concentrations.dt, pat_dir=".", suffix=".pat.gz") {
-    # Normalize concentrations to fractions
-    concentrations.dt[, fraction := concentration / sum(concentration)]
-    setkey(concentrations.dt, celltype)
-    
-    # Create output data.table
-    out.dt <- concentrations.dt[, .(
-        celltype,
-        filename = paste0(pat_dir, '/', celltype, suffix),
-        fraction
-    )]
-    
-    # Add dilution identifier
-    out.dt[, dilution := 1]
-    
-    return(out.dt)
+    return(rbindlist(out.dt, idcol="dilution"))
 }
 
 read_count_table <- function(patdir) {
@@ -153,126 +126,86 @@ read_count_table <- function(patdir) {
 
 generate_mix_from_pat <- function(targets, target_dir, repeats=1, target_depth=22000, 
                                 threads=1, skew=0, tmp_dir=NULL, overwrite=FALSE) {
-    # Ensure we have absolute paths
-    target_dir <- normalizePath(target_dir, mustWork = FALSE)
     if(is.null(tmp_dir)) {
-        tmp_dir <- file.path(target_dir, "tmp")
-    } else {
-        tmp_dir <- normalizePath(tmp_dir, mustWork = FALSE)
+        tmp_dir <- paste0(target_dir,"/tmp")
     }
     
-    # Create directories before starting parallel execution
+    registerDoParallel(cores=threads)
+    
     dir.create(target_dir, showWarnings = FALSE, recursive = TRUE, mode = "0755")
     dir.create(tmp_dir, showWarnings = FALSE, recursive = TRUE, mode = "0755")
-    
-    # Test write permissions
-    test_file <- file.path(tmp_dir, "test_write")
-    tryCatch({
-        write.table(data.frame(test=1), file=test_file)
-        file.remove(test_file)
-    }, error = function(e) {
-        stop(sprintf("Cannot write to tmp directory %s: %s", tmp_dir, e$message))
-    })
-    
-    registerDoParallel(cores=threads)
     
     setkey(targets, dilution, celltype)
     
     for (dil in unique(targets$dilution)) {
         foreach(r=1:repeats) %dopar% {
-            tryCatch({
-                counts_file <- file.path(tmp_dir, sprintf("mix_%d_counts.txt", r))
-                
-                for (ct in unique(targets$celltype)) {
-                    out_file <- file.path(target_dir, sprintf("mix_%d.pat.gz", r))
-                    if (overwrite || !file.exists(out_file)) {
-                        sub.dt <- targets[list(dilution=dil, celltype=ct)]
-                        fraction <- sub.dt$fraction
-                        filename <- sub.dt$filename
-                        
-                        skew_param <- ifelse(is.numeric(skew) && skew != 0, 
-                                           paste0("-n ", skew), "")
-                        
-                        # Sample and count reads
-                        tmp_file <- file.path(tmp_dir, sprintf("mix_%d_%s.pat.gz", r, ct))
-                        count_file <- paste0(tmp_file, ".count")
-                        
-                        # First generate the sampled pat file
-                        cmd <- sprintf('"/users/zetzioni/sharedscratch/pattools sample -s %.8f %s %s | bgzip -c > %s"', 
-                                     fraction, skew_param, filename, tmp_file)
-                        result <- system2("sh", c("-c", cmd))
-                        if (result != 0) {
-                            stop(sprintf("Failed to sample reads for %s", ct))
-                        }
-                        
-                        # Then count the lines in the generated file
-                        cmd <- sprintf('"zcat %s | wc -l > %s"', tmp_file, count_file)
-                        
-                        result <- system2("sh", c("-c", cmd))
-                        if (result != 0) {
-                            stop(sprintf("Failed to sample reads for %s", ct))
-                        }
-                        
-                        # Read the count
-                        if (!file.exists(count_file)) {
-                            stop(sprintf("Count file not created: %s", count_file))
-                        }
-                        count <- as.numeric(readLines(count_file)[1])
-                        file.remove(count_file)
-                        
-                        # Store count in a tracking file
-                        write.table(
-                            data.frame(celltype=ct, count=count),
-                            file=counts_file,
-                            append=TRUE,
-                            row.names=FALSE,
-                            col.names=!file.exists(counts_file)
-                        )
-                    }
-                }
-                
-                # merge pat files
-                if (!file.exists(out_file) || overwrite) {
-                    cmd <- paste0(
-                        '"zcat ', file.path(tmp_dir, sprintf('mix_%d_*.pat.gz', r)), ' | ',
-                        'sort -k1,1V -k2,2n -k3,3 | ',
-                        'perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | ',
-                        'bgzip -c > ', out_file,
-                        '; tabix -s 1 -b 2 -e 2 -C ', out_file, '"'
-                    )
+            for (ct in unique(targets$celltype)) {
+                out_file <- paste0(target_dir,'/mix_',r,'.pat.gz')
+                if (overwrite || !file.exists(out_file)) {
+                    sub.dt <- targets[list(dilution=dil, celltype=ct)]
+                    fraction <- sub.dt$fraction
+                    filename <- sub.dt$filename
                     
+                    skew_param <- ifelse(is.numeric(skew) && skew != 0, 
+                                       paste0("-n ", skew), "")
+                    
+                    # First generate the sampled pat file
+                    cmd <- sprintf('"/users/zetzioni/sharedscratch/pattools sample -s %.8f %s %s | bgzip -c > %s/mix_%d_%s.pat.gz"', 
+                                 fraction, skew_param, filename, tmp_dir, r, ct)
                     result <- system2("sh", c("-c", cmd))
                     if (result != 0) {
-                        stop("Failed to merge pat files")
+                        stop(sprintf("Failed to sample reads for %s", ct))
                     }
+                    
+                    # Then count the lines in the generated file
+                    tmp_file <- sprintf("%s/mix_%d_%s.pat.gz", tmp_dir, r, ct)
+                    count_file <- paste0(tmp_file, ".count")
+                    cmd <- sprintf('"zcat %s | wc -l > %s"', tmp_file, count_file)
+                    system2("sh", c("-c", cmd))
+                    
+                    # Read the count
+                    count <- as.numeric(readLines(count_file)[1])
+                    file.remove(count_file)
+                    
+                    # Store count in a tracking file
+                    write.table(
+                        data.frame(celltype=ct, count=count),
+                        file=sprintf("%s/mix_%d_counts.txt", tmp_dir, r),
+                        append=TRUE,
+                        row.names=FALSE,
+                        col.names=!file.exists(sprintf("%s/mix_%d_counts.txt", tmp_dir, r))
+                    )
                 }
-                
-                # Read the counts and calculate true concentrations
-                if (!file.exists(counts_file)) {
-                    stop(sprintf("Counts file not found: %s", counts_file))
-                }
-                counts <- fread(counts_file)
-                total_reads <- sum(counts$count)
-                counts[, true_concentration := count/total_reads]
-                
-                # Reshape the data to have cell types as columns
-                wide_counts <- dcast(counts, . ~ celltype, value.var = "true_concentration")
-                wide_counts[, `:=`(. = NULL, sample = sprintf("mix_%d", r))]
-                
-                # Save the true concentrations
-                conc_file <- file.path(target_dir, sprintf("mix_%d_true_concentrations.csv", r))
-                fwrite(wide_counts, conc_file)
-                
-                # Cleanup temp files
-                tmp_files <- list.files(tmp_dir, 
-                                      paste0("mix_",r,"_.*\\.(pat\\.gz|count)$"), 
-                                      full.names = TRUE)
-                file.remove(tmp_files)
-                file.remove(counts_file)
-                
-            }, error = function(e) {
-                warning(sprintf("Error in repeat %d: %s", r, e$message))
-            })
+            }
+            
+            # merge pat files
+            if (!file.exists(out_file) || overwrite) {
+                system2("sh", c("-c", paste0(
+                    '"zcat ', tmp_dir, '/mix_',r,'_*.pat.gz | ',
+                    'sort -k1,1V -k2,2n -k3,3 | ',
+                    'perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | ',
+                    'bgzip -c > ', out_file,
+                    '; tabix -s 1 -b 2 -e 2 -C ', out_file, '"'
+                )))
+            }
+            
+            # Read the counts and calculate true concentrations
+            counts <- fread(sprintf("%s/mix_%d_counts.txt", tmp_dir, r))
+            total_reads <- sum(counts$count)
+            counts[, true_concentration := count/total_reads]
+            
+            # Reshape the data to have cell types as columns
+            wide_counts <- dcast(counts, . ~ celltype, value.var = "true_concentration")
+            wide_counts[, `:=`(. = NULL, sample = sprintf("mix_%d", r))]
+            
+            # Save the true concentrations
+            fwrite(wide_counts, sprintf("%s/mix_%d_true_concentrations.csv", target_dir, r))
+            
+            # Cleanup temp files
+            file.remove(list.files(tmp_dir, 
+                                 paste0("mix_",r,"_.*\\.(pat\\.gz|count)$"), 
+                                 full.names = TRUE))
+            file.remove(sprintf("%s/mix_%d_counts.txt", tmp_dir, r))
         }
     }
 }
@@ -292,34 +225,43 @@ main <- function() {
         args$tmp_dir <- paste0(args$output_dir, "/tmp")
     }
     
-    # Generate target table
-    target_table <- make_target_table(concentrations, pat_dir = args$pat_dir)
-    reads_by_celltype <- read_count_table(args$pat_dir)
+    # Parse JSON input to get target ratios
+    targetRatio <- tryCatch({
+        fromJSON(args$concentrations)
+    }, error = function(e) {
+        # If that fails, try reading as a file
+        if (file.exists(args$concentrations)) {
+            fromJSON(args$concentrations)
+        } else {
+            stop("Input is neither valid JSON nor an existing file path")
+        }
+    })
+    target_fraction <- unlist(targetRatio)/sum(unlist(targetRatio))
     
-    # Calculate sampling fractions to achieve target depth
-    setkey(target_table, celltype)
+    # Define dilutions
+    dilutions <- list(
+        c("CD4-T-cells"=0.00001),
+        c("CD4-T-cells"=0.0001),
+        c("CD4-T-cells"=0.001),
+        c("CD4-T-cells"=0.005),
+        c("CD4-T-cells"=0.01),
+        c("CD4-T-cells"=0.025),
+        c("CD4-T-cells"=0.05),
+        c("CD4-T-cells"=0.1)
+    )
+    names(dilutions) <- c("1e-05", "1e-04", "0.001", "0.005", "0.01", "0.025", "0.05", "0.1")
+    
+    # Generate dilution table
+    dil_table <- make_target_table(target_fraction, dilutions, pat_dir = args$pat_dir)
+    reads_by_celltype <- read_count_table(args$pat_dir)
+    dil_table[, target_fragments := ceiling(args$target_depth * fraction)]
+    
+    setkey(dil_table, celltype)
     setkey(reads_by_celltype, sample)
     
-    # Each cell type should contribute (target_depth * its_fraction) reads
-    target_dilutions <- target_table[reads_by_celltype, nomatch=NULL][
-        , list(
-            celltype, 
-            dilution, 
-            filename, 
-            target_reads = ceiling(args$target_depth * fraction),
-            source_reads = fragments,
-            # Calculate sampling fraction needed to get target number of reads
-            fraction = pmin(1, (args$target_depth * fraction) / fragments)
-        )
+    target_dilutions <- dil_table[reads_by_celltype, nomatch=NULL][
+        , list(celltype, dilution, filename, fraction=target_fragments/fragments)
     ]
-    
-    cat("\nTargeted sampling:\n")
-    print(target_dilutions[, .(
-        celltype, 
-        target_reads,
-        source_reads,
-        sampling_fraction = sprintf("%.4f", fraction)
-    )])
     
     # Generate mixtures
     generate_mix_from_pat(
