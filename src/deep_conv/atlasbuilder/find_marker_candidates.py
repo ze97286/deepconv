@@ -79,11 +79,11 @@ class RegionCounter:
             self.patterns_counted += 1
         for region, offset, overlap_len in overlaps:
             # Extract overlapping portion
-            overlap_pat = pattern[offset:offset + overlap_len]
+            overlap_pat = pattern[offset:offset + overlap_len + 1]
             # Calculate methylation ratio
             meth_count = overlap_pat.count('C')
             valid_cpgs = sum(1 for c in overlap_pat if c in 'CT')
-            meth_ratio = meth_count / valid_cpgs if valid_cpgs >= self.min_cpgs else 0
+            meth_ratio = meth_count / valid_cpgs 
             # Update appropriate counter
             if meth_ratio < self.th1:
                 self.counts[region.index]['u'] += count
