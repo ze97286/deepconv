@@ -66,7 +66,7 @@ class RegionCounter:
             valid_overlap_cpgs = sum(1 for c in overlap_pat if c in 'CT')
             
             if valid_overlap_cpgs >= self.min_cpgs:
-                overlaps.append((region, pattern_offset, valid_overlap_cpgs))
+                overlaps.append((region, pattern_offset, len(overlap_pat)))
                 
         return overlaps
     def process_pattern(self, pattern: str, start_cpg: int, count: int):
@@ -79,7 +79,7 @@ class RegionCounter:
             self.patterns_counted += 1
         for region, offset, overlap_len in overlaps:
             # Extract overlapping portion
-            overlap_pat = pattern[offset:offset + overlap_len + 1]
+            overlap_pat = pattern[offset:offset + overlap_len]
             # Calculate methylation ratio
             meth_count = overlap_pat.count('C')
             valid_cpgs = sum(1 for c in overlap_pat if c in 'CT')
