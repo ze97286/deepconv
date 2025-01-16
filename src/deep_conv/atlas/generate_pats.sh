@@ -24,12 +24,12 @@ cut -f 1 $TYPE2BAM | sort -u | while read celltype; do
         if [ ! -e "$pat_file" ]; then
             echo "Warning: Input file $pat_file does not exist!" 2>&1
             continue
-        fi
+        }
         
-        tabix -R <(tail -n+2 $MARKERBED | awk '{start=$4-2; end=$5-4; if (start<0) start=0; print $1, start, end}' OFS="\t") "$pat_file" | \      
-        sort -k1,1V -k2,2n -k3,3 | \
-        bgzip -c > "$outfile"
-        
+        tabix -R <(tail -n+2 $MARKERBED | awk -v OFS="\t" '{start=$4-2; end=$5+2; if (start<0) start=0; print $1,start,end}') "$pat_file" | \
+            sort -k1,1V -k2,2n -k3,3 | \
+            bgzip -c > "$outfile"
+            
         tabix -s 1 -b 2 -e 2 -C "$outfile"
     fi
 done
