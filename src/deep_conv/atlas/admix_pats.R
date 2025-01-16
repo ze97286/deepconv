@@ -225,8 +225,8 @@ main <- function() {
         args$tmp_dir <- paste0(args$output_dir, "/tmp")
     }
     
-    # Parse JSON input to get target ratios
-    targetRatio <- tryCatch({
+    # Parse JSON input to get concentrations
+    concentrations <- tryCatch({
         fromJSON(args$concentrations)
     }, error = function(e) {
         # If that fails, try reading as a file
@@ -236,30 +236,28 @@ main <- function() {
             stop("Input is neither valid JSON nor an existing file path")
         }
     })
-    target_fraction <- unlist(targetRatio)/sum(unlist(targetRatio))
     
-    # Define dilutions
-    dilutions <- list(
-        c("CD4-T-cells"=0.00001),
-        c("CD4-T-cells"=0.0001),
-        c("CD4-T-cells"=0.001),
-        c("CD4-T-cells"=0.005),
-        c("CD4-T-cells"=0.01),
-        c("CD4-T-cells"=0.025),
-        c("CD4-T-cells"=0.05),
-        c("CD4-T-cells"=0.1)
+    # Create table with desired concentrations
+    conc_table <- data.table(
+        celltype = names(concentrations),
+        fraction = unlist(concentrations),
+        filename = paste0(args$pat_dir, '/', names(concentrations), '.pat.gz')
     )
-    names(dilutions) <- c("1e-05", "1e-04", "0.001", "0.005", "0.01", "0.025", "0.05", "0.1")
     
-    # Generate dilution table
-    dil_table <- make_target_table(target_fraction, dilutions, pat_dir = args$pat_dir)
+    # Add dilution identifier (we only have one mixture now)
+    conc_table[, dilution := 1]
+    
+    # Get read counts from source files
     reads_by_celltype <- read_count_table(args$pat_dir)
-    dil_table[, target_fragments := ceiling(args$target_depth * fraction)]
     
-    setkey(dil_table, celltype)
+    # Calculate target fragments based on desired depth
+    conc_table[, target_fragments := ceiling(args$target_depth * fraction)]
+    
+    setkey(conc_table, celltype)
     setkey(reads_by_celltype, sample)
     
-    target_dilutions <- dil_table[reads_by_celltype, nomatch=NULL][
+    # Calculate sampling fractions
+    target_dilutions <- conc_table[reads_by_celltype, nomatch=NULL][
         , list(celltype, dilution, filename, fraction=target_fragments/fragments)
     ]
     
