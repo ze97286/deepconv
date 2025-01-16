@@ -7,18 +7,6 @@ suppressPackageStartupMessages({
     library(jsonlite)
 })
 
-# Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/admix_pats.R \
-#   --pat_dir /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.100/Song/celltypes \
-#   --output_dir /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.100/Song/mixed/CD4/0.1 \
-#   --concentrations concentrations.json \
-#   --repeats 1000
-
-# Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/admix_pats.R \
-#   --pat_dir /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.100/Song/celltypes \
-#   --output_dir /users/zetzioni/sharedscratch/pat/dmr_by_read.blood+gi+tum.100/Song/mixed/CD4/0.01 \
-#     --concentrations '{"CD34-megakaryocytes": 0.8, "Monocytes": 0.19, "CD4-T-cells": 0.01}' \
-#   --repeats 1000
-
 # Parse command line arguments
 option_list <- list(
     make_option(c("-p", "--pat_dir"), type="character",
@@ -62,14 +50,11 @@ read_concentrations <- function(json_input) {
         stop(sprintf("Concentrations must sum to 1. Current sum is %f", total))
     }
     
-    # Validate the structure
-    if (!is.list(concentrations) || length(concentrations) == 0) {
-        stop("Invalid concentrations format. Expected non-empty list of cell types and their concentrations")
-    }
-    
     # Convert to data.table
-    conc.dt <- as.data.table(concentrations, keep.rownames = TRUE)
-    setnames(conc.dt, c("celltype", "concentration"))
+    conc.dt <- data.table(
+        celltype = names(concentrations),
+        concentration = as.numeric(unlist(concentrations))
+    )
     
     return(conc.dt)
 }
