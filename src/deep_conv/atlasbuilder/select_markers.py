@@ -91,7 +91,7 @@ def main():
         "CD34-erythroblasts":[10, 100],
         "CD34-megakaryocytes":[10, 100],
         "CD4-T-cells": [6,250],
-        "CD8-T-cells": [6,200],
+        "CD8-T-cells": [6,250],
         "Colon":[10, 100],
         "Eosinophils":[10, 100],
         "Esophagus":[10, 100],
@@ -110,7 +110,10 @@ def main():
     atlas_output_name = args.atlas_output_name
 
     for ct, ct_config in config.items():
+        print("processing cell type", ct)
         df = pd.read_parquet(glob.glob(f"{input_dir}/*{ct}*"))
+        df = df.rename(columns={"B-cell":"B-cells","B-cell_coverage":"B-cells_coverage"})
+        df['target']=ct
         score, max_markers = ct_config
         print("preparing target", ct)
         scores = select_non_overlapping_markers(df)
