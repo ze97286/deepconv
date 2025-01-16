@@ -38,7 +38,7 @@ class RegionCounter:
         valid_cpgs = sum(1 for c in pattern if c in 'CT')
         if valid_cpgs < self.min_cpgs:
             return []
-        pat_end = pat_start + valid_cpgs - 1
+        pat_end = pat_start + len(pattern) - 1
         overlaps = []
         # Binary search for first potential region
         left, right = 0, len(self.regions) - 1
@@ -74,7 +74,7 @@ class RegionCounter:
         if len(pattern) < self.min_cpgs:
             return
         # Find overlapping regions
-        overlaps = self.find_overlapping_regions(start_cpg, len(pattern))
+        overlaps = self.find_overlapping_regions(start_cpg, pattern)
         if overlaps:  # If we found any overlaps, increment counter
             self.patterns_counted += 1
         for region, offset, overlap_len in overlaps:
