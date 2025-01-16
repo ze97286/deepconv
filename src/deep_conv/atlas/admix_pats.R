@@ -265,12 +265,8 @@ main <- function() {
         , list(celltype, dilution, filename, fraction=target_fragments/fragments)
     ]
     print("\nFinal sampling fractions:")
-    print(target_dilutions[, .(
-        celltype,
-        original_reads = fragments,  # from the join
-        target_reads = target_fragments,  # from the join
-        sampling_fraction = fraction
-    )])
+    print(target_dilutions)
+
     
     # Generate mixtures
     generate_mix_from_pat(
