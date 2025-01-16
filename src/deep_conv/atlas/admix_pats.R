@@ -197,8 +197,16 @@ generate_mix_from_pat <- function(targets, target_dir, repeats=1, target_depth=2
                         tmp_file <- file.path(tmp_dir, sprintf("mix_%d_%s.pat.gz", r, ct))
                         count_file <- paste0(tmp_file, ".count")
                         
-                        cmd <- sprintf('"/users/zetzioni/sharedscratch/pattools sample -s %.8f %s %s | tee >(wc -l > %s) | bgzip -c > %s"', 
-                                     fraction, skew_param, filename, count_file, tmp_file)
+                        # First generate the sampled pat file
+                        cmd <- sprintf('"/users/zetzioni/sharedscratch/pattools sample -s %.8f %s %s | bgzip -c > %s"', 
+                                     fraction, skew_param, filename, tmp_file)
+                        result <- system2("sh", c("-c", cmd))
+                        if (result != 0) {
+                            stop(sprintf("Failed to sample reads for %s", ct))
+                        }
+                        
+                        # Then count the lines in the generated file
+                        cmd <- sprintf('"zcat %s | wc -l > %s"', tmp_file, count_file)
                         
                         result <- system2("sh", c("-c", cmd))
                         if (result != 0) {
