@@ -260,6 +260,7 @@ main <- function() {
     target_dilutions <- conc_table[reads_by_celltype, nomatch=NULL][
         , list(celltype, dilution, filename, fraction=target_fragments/fragments)
     ]
+    print(target_dilutions[, .(celltype, fragments=target_fragments, source_fragments=fragments, sampling_fraction=fraction)])
     
     # Generate mixtures
     generate_mix_from_pat(
