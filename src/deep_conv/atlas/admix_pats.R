@@ -153,79 +153,118 @@ read_count_table <- function(patdir) {
 
 generate_mix_from_pat <- function(targets, target_dir, repeats=1, target_depth=22000, 
                                 threads=1, skew=0, tmp_dir=NULL, overwrite=FALSE) {
+    # Ensure we have absolute paths
+    target_dir <- normalizePath(target_dir, mustWork = FALSE)
     if(is.null(tmp_dir)) {
-        tmp_dir <- paste0(target_dir,"/tmp")
+        tmp_dir <- file.path(target_dir, "tmp")
+    } else {
+        tmp_dir <- normalizePath(tmp_dir, mustWork = FALSE)
     }
     
-    registerDoParallel(cores=threads)
-    
+    # Create directories before starting parallel execution
     dir.create(target_dir, showWarnings = FALSE, recursive = TRUE, mode = "0755")
     dir.create(tmp_dir, showWarnings = FALSE, recursive = TRUE, mode = "0755")
+    
+    # Test write permissions
+    test_file <- file.path(tmp_dir, "test_write")
+    tryCatch({
+        write.table(data.frame(test=1), file=test_file)
+        file.remove(test_file)
+    }, error = function(e) {
+        stop(sprintf("Cannot write to tmp directory %s: %s", tmp_dir, e$message))
+    })
+    
+    registerDoParallel(cores=threads)
     
     setkey(targets, dilution, celltype)
     
     for (dil in unique(targets$dilution)) {
         foreach(r=1:repeats) %dopar% {
-            for (ct in unique(targets$celltype)) {
-                out_file <- paste0(target_dir,'/mix_',r,'.pat.gz')
-                if (overwrite || !file.exists(out_file)) {
-                    sub.dt <- targets[list(dilution=dil, celltype=ct)]
-                    fraction <- sub.dt$fraction
-                    filename <- sub.dt$filename
-                    
-                    skew_param <- ifelse(is.numeric(skew) && skew != 0, 
-                                       paste0("-n ", skew), "")
-                    
-                    # Sample and count reads
-                    tmp_file <- sprintf("%s/mix_%d_%s.pat.gz", tmp_dir, r, ct)
-                    system2("sh", c("-c", sprintf(
-                        '"/users/zetzioni/sharedscratch/pattools sample -s %.8f %s %s | tee >(wc -l > %s.count) | bgzip -c > %s"', 
-                        fraction, skew_param, filename, tmp_file, tmp_file
-                    )))
-                    
-                    # Read the count
-                    count <- as.numeric(readLines(sprintf("%s.count", tmp_file))[1])
-                    file.remove(sprintf("%s.count", tmp_file))
-                    
-                    # Store count in a tracking file
-                    write.table(
-                        data.frame(celltype=ct, count=count),
-                        file=sprintf("%s/mix_%d_counts.txt", tmp_dir, r),
-                        append=TRUE,
-                        row.names=FALSE,
-                        col.names=!file.exists(sprintf("%s/mix_%d_counts.txt", tmp_dir, r))
-                    )
+            tryCatch({
+                counts_file <- file.path(tmp_dir, sprintf("mix_%d_counts.txt", r))
+                
+                for (ct in unique(targets$celltype)) {
+                    out_file <- file.path(target_dir, sprintf("mix_%d.pat.gz", r))
+                    if (overwrite || !file.exists(out_file)) {
+                        sub.dt <- targets[list(dilution=dil, celltype=ct)]
+                        fraction <- sub.dt$fraction
+                        filename <- sub.dt$filename
+                        
+                        skew_param <- ifelse(is.numeric(skew) && skew != 0, 
+                                           paste0("-n ", skew), "")
+                        
+                        # Sample and count reads
+                        tmp_file <- file.path(tmp_dir, sprintf("mix_%d_%s.pat.gz", r, ct))
+                        count_file <- paste0(tmp_file, ".count")
+                        
+                        cmd <- sprintf('"/users/zetzioni/sharedscratch/pattools sample -s %.8f %s %s | tee >(wc -l > %s) | bgzip -c > %s"', 
+                                     fraction, skew_param, filename, count_file, tmp_file)
+                        
+                        result <- system2("sh", c("-c", cmd))
+                        if (result != 0) {
+                            stop(sprintf("Failed to sample reads for %s", ct))
+                        }
+                        
+                        # Read the count
+                        if (!file.exists(count_file)) {
+                            stop(sprintf("Count file not created: %s", count_file))
+                        }
+                        count <- as.numeric(readLines(count_file)[1])
+                        file.remove(count_file)
+                        
+                        # Store count in a tracking file
+                        write.table(
+                            data.frame(celltype=ct, count=count),
+                            file=counts_file,
+                            append=TRUE,
+                            row.names=FALSE,
+                            col.names=!file.exists(counts_file)
+                        )
+                    }
                 }
-            }
-            
-            # merge pat files
-            if (!file.exists(out_file) || overwrite) {
-                system2("sh", c("-c", paste0(
-                    '"zcat ', tmp_dir, '/mix_',r,'_*.pat.gz | ',
-                    'sort -k1,1V -k2,2n -k3,3 | ',
-                    'perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | ',
-                    'bgzip -c > ', out_file,
-                    '; tabix -s 1 -b 2 -e 2 -C ', out_file, '"'
-                )))
-            }
-            
-            # Read the counts and calculate true concentrations
-            counts <- fread(sprintf("%s/mix_%d_counts.txt", tmp_dir, r))
-            total_reads <- sum(counts$count)
-            counts[, true_concentration := count/total_reads]
-            
-            # Reshape the data to have cell types as columns
-            wide_counts <- dcast(counts, . ~ celltype, value.var = "true_concentration")
-            wide_counts[, `:=`(. = NULL, sample = sprintf("mix_%d", r))]
-            
-            # Save the true concentrations
-            fwrite(wide_counts, sprintf("%s/mix_%d_true_concentrations.csv", args$output_dir, r))
-            
-            # Cleanup temp files
-            file.remove(list.files(tmp_dir, 
-                                 paste0("mix_",r,"_.*\\.(pat\\.gz|count)$"), 
-                                 full.names = TRUE))
-            file.remove(sprintf("%s/mix_%d_counts.txt", tmp_dir, r))
+                
+                # merge pat files
+                if (!file.exists(out_file) || overwrite) {
+                    cmd <- paste0(
+                        '"zcat ', file.path(tmp_dir, sprintf('mix_%d_*.pat.gz', r)), ' | ',
+                        'sort -k1,1V -k2,2n -k3,3 | ',
+                        'perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | ',
+                        'bgzip -c > ', out_file,
+                        '; tabix -s 1 -b 2 -e 2 -C ', out_file, '"'
+                    )
+                    
+                    result <- system2("sh", c("-c", cmd))
+                    if (result != 0) {
+                        stop("Failed to merge pat files")
+                    }
+                }
+                
+                # Read the counts and calculate true concentrations
+                if (!file.exists(counts_file)) {
+                    stop(sprintf("Counts file not found: %s", counts_file))
+                }
+                counts <- fread(counts_file)
+                total_reads <- sum(counts$count)
+                counts[, true_concentration := count/total_reads]
+                
+                # Reshape the data to have cell types as columns
+                wide_counts <- dcast(counts, . ~ celltype, value.var = "true_concentration")
+                wide_counts[, `:=`(. = NULL, sample = sprintf("mix_%d", r))]
+                
+                # Save the true concentrations
+                conc_file <- file.path(target_dir, sprintf("mix_%d_true_concentrations.csv", r))
+                fwrite(wide_counts, conc_file)
+                
+                # Cleanup temp files
+                tmp_files <- list.files(tmp_dir, 
+                                      paste0("mix_",r,"_.*\\.(pat\\.gz|count)$"), 
+                                      full.names = TRUE)
+                file.remove(tmp_files)
+                file.remove(counts_file)
+                
+            }, error = function(e) {
+                warning(sprintf("Error in repeat %d: %s", r, e$message))
+            })
         }
     }
 }
