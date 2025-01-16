@@ -34,27 +34,40 @@ class RegionCounter:
             ))
         self.regions.sort(key=lambda r: r.start_cpg)
         self.counts = defaultdict(lambda: {'u': 0, 'x': 0, 'm': 0})
-    def find_overlapping_regions(self, pat_start: int, pat_length: int) -> List[Tuple[Region, int, int]]:
-        pat_end = pat_start + pat_length - 1
+    def find_overlapping_regions(self, pat_start: int, pattern: str) -> List[Tuple[Region, int, int]]:
+        valid_cpgs = sum(1 for c in pattern if c in 'CT')
+        if valid_cpgs < self.min_cpgs:
+            return []
+        pat_end = pat_start + valid_cpgs - 1
         overlaps = []
         # Binary search for first potential region
         left, right = 0, len(self.regions) - 1
         while left <= right:
             mid = (left + right) // 2
-            if self.regions[mid].end_cpg > pat_start:  # Changed from >= to >
+            if self.regions[mid].end_cpg > pat_start:
                 right = mid - 1
             else:
                 left = mid + 1
+                
         # Check all potential overlapping regions
         for region in self.regions[left:]:
             if region.start_cpg > pat_end:
                 break
+                
             # Calculate overlap with half-open intervals
             overlap_start = max(pat_start, region.start_cpg)
-            overlap_end = min(pat_end + 1, region.end_cpg)  # +1 because pat_end is inclusive
-            overlap_length = overlap_end - overlap_start  # Remove +1 since we're using half-open interval
-            if overlap_length >= self.min_cpgs:
-                overlaps.append((region, overlap_start - pat_start, overlap_length))
+            overlap_end = min(pat_end + 1, region.end_cpg)
+            
+            # Extract overlapping portion
+            pattern_offset = overlap_start - pat_start
+            overlap_pat = pattern[pattern_offset:pattern_offset + (overlap_end - overlap_start)]
+            
+            # Count valid CpGs in overlap
+            valid_overlap_cpgs = sum(1 for c in overlap_pat if c in 'CT')
+            
+            if valid_overlap_cpgs >= self.min_cpgs:
+                overlaps.append((region, pattern_offset, valid_overlap_cpgs))
+                
         return overlaps
     def process_pattern(self, pattern: str, start_cpg: int, count: int):
         """Process a single pattern and update counts for overlapping regions"""
