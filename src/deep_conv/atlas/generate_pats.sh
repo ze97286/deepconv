@@ -26,7 +26,8 @@ cut -f 1 $TYPE2BAM | sort -u | while read celltype; do
             continue
         fi
         
-        tabix -R <(tail -n+2 $MARKERBED | awk '{start=$4-100; end=$5+100; if (start<0) start=0; print $1, start, end}' OFS="\t") "$pat_file" | \
+        tabix -R <(tail -n+2 $MARKERBED | awk '{start=$4-2; end=$5-4; if (start<0) start=0; print $1, start, end}' OFS="\t") "$pat_file"
+
         sort -k1,1V -k2,2n -k3,3 | \
         bgzip -c > "$outfile"
         
