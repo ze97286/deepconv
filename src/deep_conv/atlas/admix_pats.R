@@ -127,7 +127,7 @@ read_count_table <- function(patdir) {
 }
 
 generate_mix_from_pat <- function(targets, target_dir, repeats=1, target_depth=22000, 
-                                threads=1, skew=0, tmp_dir=NULL, overwrite=FALSE) {
+                                threads=1, skew=0, tmp_dir=NULL, overwrite=FALSE, prefix="mix") {
     if(is.null(tmp_dir)) {
         tmp_dir <- paste0(target_dir,"/tmp")
     }
@@ -279,7 +279,8 @@ main <- function() {
         threads = args$threads,
         skew = args$skew,
         tmp_dir = args$tmp_dir,
-        overwrite = args$overwrite
+        overwrite = args$overwrite,
+        prefix = args$prefix
     )
 }
 
