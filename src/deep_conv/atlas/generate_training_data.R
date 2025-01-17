@@ -133,7 +133,7 @@ main <- function() {
             
             # Call the admixing script
             system2("Rscript", c(
-                "/path/to/admix_pats.R",
+                "../admix_pats.R",
                 "--pat_dir", args$pat_dir,
                 "--output_dir", out_dir,
                 "--tmp_dir", args$tmp_dir,
