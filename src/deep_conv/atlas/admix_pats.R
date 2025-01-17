@@ -28,7 +28,7 @@ option_list <- list(
     make_option(c("-c", "--concentrations"), type="character",
                 help="JSON file or JSON string containing cell type concentrations [REQUIRED]"),
     make_option(c("--prefix"), type="character", default="mix",
-            help="Prefix for output files [default %default]")                
+            help="Prefix for output files [default %default]")
 )
 
 # Helper functions
@@ -201,7 +201,7 @@ generate_mix_from_pat <- function(targets, target_dir, repeats=1, target_depth=2
             wide_counts[, `:=`(. = NULL, sample = sprintf("mix_%d", r))]
             
             # Save the true concentrations
-            fwrite(wide_counts, sprintf("%s/mix_%d_true_concentrations.csv", target_dir, r))
+            fwrite(wide_counts, sprintf("%s/%s_true_concentrations.csv", target_dir, prefix))
             
             # Cleanup temp files
             file.remove(list.files(tmp_dir, 

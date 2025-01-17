@@ -32,7 +32,9 @@ option_list <- list(
     make_option(c("--n_train"), type="integer", default=100000,
                 help="Number of training samples to generate [default %default]"),
     make_option(c("--n_eval"), type="integer", default=20000,
-                help="Number of evaluation samples to generate [default %default]")
+                help="Number of evaluation samples to generate [default %default]"),
+    make_option(c("--reps_per_combo"), type="integer", default=10,
+            help="Number of repetitions per combination [default %default]")                                         
 )
 
 # Function to generate random concentrations following the python script's strategy
@@ -140,7 +142,8 @@ main <- function() {
                 "--target_depth", args$target_depth,
                 "--threads", args$threads,
                 "--concentrations", shQuote(conc_json),
-                "--prefix", paste0(prefix, "_", i)
+                "--prefix", paste0(prefix, "_", i),
+                "--repeats", args$reps_per_combo
             ))
         }
     }
