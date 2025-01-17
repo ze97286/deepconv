@@ -1,13 +1,21 @@
 #!/usr/bin/env Rscript
-
 suppressPackageStartupMessages({
     library(data.table)
     library(optparse)
     library(jsonlite)
-    library(MCMCpack)
 })
 
 # R_LIBS_USER=~/R/library Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/generate_training_data.R --pat_dir /users/zetzioni/sharedscratch/pat/snr_fixed.blood+gi+tum.l4/Song/celltypes --output_dir /users/zetzioni/sharedscratch/atlas/training --tmp_dir /users/zetzioni/sharedscratch/atlas/tmp --threads 5 --n_train 10 --n_eval 2
+
+rdirichlet <- function(n, alpha) {
+    # Generate gamma samples and normalize
+    gamma_samples <- matrix(0, nrow=n, ncol=length(alpha))
+    for(i in 1:length(alpha)) {
+        gamma_samples[,i] <- rgamma(n, shape=alpha[i], rate=1)
+    }
+    # Normalize rows to get Dirichlet samples
+    gamma_samples / rowSums(gamma_samples)
+}
 
 # Parse command line arguments
 option_list <- list(
