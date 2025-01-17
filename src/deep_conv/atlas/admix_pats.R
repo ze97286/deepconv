@@ -26,7 +26,9 @@ option_list <- list(
     make_option(c("--overwrite"), action="store_true", default=FALSE,
                 help="Overwrite existing files [default %default]"),
     make_option(c("-c", "--concentrations"), type="character",
-                help="JSON file or JSON string containing cell type concentrations [REQUIRED]")
+                help="JSON file or JSON string containing cell type concentrations [REQUIRED]"),
+    make_option(c("-p", "--prefix"), type="character", default="mix",
+            help="Prefix for output files [default %default]")                
 )
 
 # Helper functions
@@ -140,7 +142,7 @@ generate_mix_from_pat <- function(targets, target_dir, repeats=1, target_depth=2
     for (dil in unique(targets$dilution)) {
         foreach(r=1:repeats) %dopar% {
             for (ct in unique(targets$celltype)) {
-                out_file <- paste0(target_dir,'/mix_',r,'.pat.gz')
+                out_file <- paste0(target_dir,'/', prefix, '_',r,'.pat.gz')
                 if (overwrite || !file.exists(out_file)) {
                     sub.dt <- targets[list(dilution=dil, celltype=ct)]
                     fraction <- sub.dt$fraction
