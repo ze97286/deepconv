@@ -133,7 +133,7 @@ main <- function() {
             
             # Call the admixing script
             system2("Rscript", c(
-                "/Users/zoharetzioni/Downloads/deepconv/src/deep_conv/atlas/admix_pats.R",
+                "deep_conv/atlas/admix_pats.R",
                 "--pat_dir", args$pat_dir,
                 "--output_dir", out_dir,
                 "--tmp_dir", args$tmp_dir,
