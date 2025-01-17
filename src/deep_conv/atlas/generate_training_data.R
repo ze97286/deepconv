@@ -4,16 +4,10 @@ suppressPackageStartupMessages({
     library(data.table)
     library(optparse)
     library(jsonlite)
+    library(MCMCpack)
 })
 
-# R_LIBS_USER=~/R/library Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/admix_pats.R \
-#   --pat_dir /users/zetzioni/sharedscratch/pat/snr_fixed.blood+gi+tum.l4/Song/celltypes \
-#   --output_dir /users/zetzioni/sharedscratch/atlas/training \
-#   --tmp_dir /users/zetzioni/sharedscratch/atlas/tmp \
-#   --threads 5 \
-#   --n_train 10 \
-#   --n_eval 2 \ 
-#   --target_depth 50000
+# R_LIBS_USER=~/R/library Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/generate_training_data.R --pat_dir /users/zetzioni/sharedscratch/pat/snr_fixed.blood+gi+tum.l4/Song/celltypes --output_dir /users/zetzioni/sharedscratch/atlas/training --tmp_dir /users/zetzioni/sharedscratch/atlas/tmp --threads 5 --n_train 10 --n_eval 2
 
 # Parse command line arguments
 option_list <- list(
