@@ -201,7 +201,7 @@ generate_mix_from_pat <- function(targets, target_dir, repeats=1, target_depth=2
             wide_counts[, `:=`(. = NULL, sample = sprintf("mix_%d", r))]
             
             # Save the true concentrations
-            fwrite(wide_counts, sprintf("%s/%s_true_concentrations.csv", target_dir, prefix))
+            fwrite(wide_counts, sprintf("%s/%s_%d_true_concentrations.csv", target_dir, prefix, r))
             
             # Cleanup temp files
             file.remove(list.files(tmp_dir, 
