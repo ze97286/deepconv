@@ -27,7 +27,7 @@ option_list <- list(
                 help="Overwrite existing files [default %default]"),
     make_option(c("-c", "--concentrations"), type="character",
                 help="JSON file or JSON string containing cell type concentrations [REQUIRED]"),
-    make_option(c("-p", "--prefix"), type="character", default="mix",
+    make_option(c("--prefix"), type="character", default="mix",
             help="Prefix for output files [default %default]")                
 )
 
