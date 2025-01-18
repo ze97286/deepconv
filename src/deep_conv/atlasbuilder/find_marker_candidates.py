@@ -235,45 +235,54 @@ def evaluate_marker_quality(values, target_idx, min_signal, min_snr, significanc
 def find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, coverage, 
                      values_matrix, best_targets_idx, min_signal_threshold, 
                      snr_threshold, significance_threshold, output_dir, batch_id):
-    """Modified to include extended metrics in output"""
-    good_markers = []
+    """Find good markers efficiently using bulk operations"""
+    # Find all good markers with their metrics
+    good_indices = []
+    good_metrics = []
     
     for i in range(len(values_matrix)):
         is_good_marker, metrics = evaluate_marker_quality(
-            values_matrix[i], 
+            values_matrix[i],
             best_targets_idx[i],
             min_signal=min_signal_threshold,
             min_snr=snr_threshold,
             significance_threshold=significance_threshold
         )
-        
         if is_good_marker:
-            result = batch_df.iloc[i].copy()
-            result['target'] = cell_types[best_targets_idx[i]]
+            good_indices.append(i)
+            good_metrics.append(metrics)
             
-            # Add all metrics to results
-            for metric_name, metric_value in metrics.items():
-                result[metric_name] = metric_value
-            
-            # Add cell type specific values and coverage (as in original)
-            for cell in cell_types:
-                result[cell] = marker_props[col_mapping[cell]].iloc[i]
-                result[f'{cell}_coverage'] = coverage[col_mapping[cell]].iloc[i]
-                
-            good_markers.append(result)
-    
-    if not good_markers:
+    if not good_indices:
         return None
         
-    result_df = pd.DataFrame(good_markers)
-    if result_df is not None:
-        grouped = result_df.groupby('target')
-        for target, group in grouped:
-            filename = f"{chr}_{target}_markers_{batch_id}.parquet"
-            filepath = os.path.join(output_dir, filename)
-            group.to_parquet(filepath, index=False)
-            print(f"saved {len(group)} markers for chromosome {chr}/{target}")
-            
+    # Get all column names we'll need
+    metric_columns = list(good_metrics[0].keys())
+    
+    # Create the base result from batch_df
+    result_df = batch_df.iloc[good_indices].copy()
+    
+    # Add target column
+    result_df['target'] = [cell_types[idx] for idx in best_targets_idx[good_indices]]
+    
+    # Add metrics columns efficiently
+    for metric in metric_columns:
+        result_df[metric] = [m[metric] for m in good_metrics]
+    
+    # Add cell type values and coverage efficiently
+    for cell in cell_types:
+        result_df[cell] = marker_props[col_mapping[cell]].iloc[good_indices].values
+        result_df[f'{cell}_coverage'] = coverage[col_mapping[cell]].iloc[good_indices].values
+    
+    # Save results
+    grouped = result_df.groupby('target')
+    for target, group in grouped:
+        filename = f"{chr}_{target}_markers_{batch_id}.parquet"
+        filepath = os.path.join(output_dir, filename)
+        group.to_parquet(filepath, index=False)
+        print(f"saved {len(group)} markers for chromosome {chr}/{target}")
+    
+    return result_df
+
 
 def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_threshold, significance_threshold, min_signal_threshold, output_dir, threads, batch_size=500_000):
     print(f"Loading regions from {regions}...")
