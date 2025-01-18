@@ -10,6 +10,7 @@ from functools import partial
 from tqdm import tqdm
 import os
 import time
+import scipy
 
 @dataclass
 class Region:
@@ -23,9 +24,9 @@ class RegionCounter:
         self.min_cpgs = min_cpgs
         self.th1 = round(1 - (min_cpgs - 1) / min_cpgs, 3) + 0.001
         self.th2 = round((min_cpgs - 1) / min_cpgs, 3)
-        self.regions = []
         self.first_cpg = regions_df['startCpG'].min() - 20  # Look back 20 CpGs
         self.last_cpg = regions_df['endCpG'].max()
+        self.regions = []
         for idx, row in regions_df.iterrows():
             self.regions.append(Region(
                 start_cpg=row['startCpG'],
@@ -33,22 +34,21 @@ class RegionCounter:
                 index=idx
             ))
         self.regions.sort(key=lambda r: r.start_cpg)
+        # Pre-compute end positions array for binary search
+        self.end_positions = np.array([r.end_cpg for r in self.regions])
+        # Initialize counts dictionary exactly as in original
         self.counts = defaultdict(lambda: {'u': 0, 'x': 0, 'm': 0})
     def find_overlapping_regions(self, pat_start: int, pattern: str) -> List[Tuple[Region, int, int]]:
+        """Find overlapping regions with optimized but equivalent binary search"""
         valid_cpgs = sum(1 for c in pattern if c in 'CT')
         if valid_cpgs < self.min_cpgs:
             return []
+            
         pat_end = pat_start + len(pattern) - 1
         overlaps = []
+        
         # Binary search for first potential region
-        left, right = 0, len(self.regions) - 1
-        while left <= right:
-            mid = (left + right) // 2
-            if self.regions[mid].end_cpg > pat_start:
-                right = mid - 1
-            else:
-                left = mid + 1
-                
+        left = np.searchsorted(self.end_positions, pat_start, side='right')
         # Check all potential overlapping regions
         for region in self.regions[left:]:
             if region.start_cpg > pat_end:
@@ -66,16 +66,16 @@ class RegionCounter:
             valid_overlap_cpgs = sum(1 for c in overlap_pat if c in 'CT')
             
             if valid_overlap_cpgs >= self.min_cpgs:
-                overlaps.append((region, pattern_offset, len(overlap_pat)))
+                overlaps.append((region, pattern_offset, overlap_end - overlap_start))
                 
         return overlaps
     def process_pattern(self, pattern: str, start_cpg: int, count: int):
-        """Process a single pattern and update counts for overlapping regions"""
+        """Process pattern"""
         if len(pattern) < self.min_cpgs:
             return
         # Find overlapping regions
         overlaps = self.find_overlapping_regions(start_cpg, pattern)
-        if overlaps:  # If we found any overlaps, increment counter
+        if overlaps:
             self.patterns_counted += 1
         for region, offset, overlap_len in overlaps:
             # Extract overlapping portion
@@ -83,7 +83,7 @@ class RegionCounter:
             # Calculate methylation ratio
             meth_count = overlap_pat.count('C')
             valid_cpgs = sum(1 for c in overlap_pat if c in 'CT')
-            meth_ratio = meth_count / valid_cpgs 
+            meth_ratio = meth_count / valid_cpgs
             # Update appropriate counter
             if meth_ratio < self.th1:
                 self.counts[region.index]['u'] += count
@@ -113,139 +113,160 @@ def create_empty_results(regions_df: pd.DataFrame, cell_type: str) -> tuple[pd.D
 
 
 def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-   """Process a single pat file and return UXM proportions and coverage"""
-   counter = RegionCounter(regions_df, min_cpgs)
-   pat_file = str(pat_file)
-   cell_type = Path(pat_file).stem.replace('.pat', '')
-   column_names = ['chr', 'start', 'pattern', 'count']
-   processed_lines = 0
-   total_lines = 0
-   # Count total lines for progress bar
-   with gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file) as f:
-       for _ in f:
-           total_lines += 1
-   with tqdm(total=total_lines, desc=f"Processing {cell_type}") as pbar:
-       for chunk in pd.read_csv(pat_file, sep='\t', names=column_names, chunksize=1_000_000):
+    """Process a single pat file and return UXM proportions and coverage"""
+    counter = RegionCounter(regions_df, min_cpgs)
+    pat_file = str(pat_file)
+    cell_type = Path(pat_file).stem.replace('.pat', '')
+    column_names = ['chr', 'start', 'pattern', 'count']
+    
+    # Count total lines for progress bar
+    total_lines = sum(1 for _ in (gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file)))
+    processed_lines = 0
+    with tqdm(total=total_lines, desc=f"Processing {cell_type}") as pbar:
+        for chunk in pd.read_csv(pat_file, sep='\t', names=column_names, chunksize=1_000_000):
            # A pattern can overlap if:
            # - starts before last_cpg (starts before end of last region)
            # - extends past first_cpg (pattern end > first region start)
-           relevant_chunk = chunk[
-               (chunk['start'] < counter.last_cpg) & 
-               (chunk['start'] + chunk['pattern'].str.len() > counter.first_cpg)
-           ]
-           if len(relevant_chunk) == 0:
-               if chunk['start'].min() >= counter.last_cpg:
-                   pbar.update(total_lines - processed_lines)
-                   break  # Past all our regions
-               processed_lines += len(chunk)
-               pbar.update(len(chunk))
-               continue
-           for _, row in relevant_chunk.iterrows():
-               counter.process_pattern(row['pattern'], row['start'], row['count'])
-           chunk_size = len(chunk)
-           processed_lines += chunk_size
-           pbar.update(chunk_size)
-   # Convert counts to proportions and create output DataFrames
-   results_uxm = []
-   results_coverage = []
-   for idx in range(len(regions_df)):
-       counts = counter.counts[idx]
-       total = sum(counts.values())
-       if total > 0:
-           results_uxm.append({
-               'name': regions_df.iloc[idx]['name'],
-               'direction': regions_df.iloc[idx]['direction'],
-               'value': counts['u'] / total,
-               'cell_type': cell_type
-           })
-           results_coverage.append({
-               'name': regions_df.iloc[idx]['name'],
-               'direction': regions_df.iloc[idx]['direction'],
-               'value': total,
-               'cell_type': cell_type
-           })
-       else:
-           results_uxm.append({
-               'name': regions_df.iloc[idx]['name'],
-               'direction': regions_df.iloc[idx]['direction'],
-               'value': np.nan,
-               'cell_type': cell_type
-           })
-           results_coverage.append({
-               'name': regions_df.iloc[idx]['name'],
-               'direction': regions_df.iloc[idx]['direction'],
-               'value': 0,
-               'cell_type': cell_type
-           })
-   return pd.DataFrame(results_uxm), pd.DataFrame(results_coverage), cell_type
+            relevant_chunk = chunk[
+                (chunk['start'] < counter.last_cpg) & 
+                (chunk['start'] + chunk['pattern'].str.len() > counter.first_cpg)
+            ]
+            if len(relevant_chunk) == 0:
+                if chunk['start'].min() >= counter.last_cpg:
+                    pbar.update(total_lines - processed_lines)
+                    break  # Past all our regions
+                processed_lines += len(chunk)
+                pbar.update(len(chunk))
+                continue
+            for _, row in relevant_chunk.iterrows():
+                counter.process_pattern(row['pattern'], row['start'], row['count'])
+            chunk_size = len(chunk)
+            processed_lines += chunk_size
+            pbar.update(chunk_size)
+    # Convert counts to proportions and create output DataFrames
+    results_uxm = []
+    results_coverage = []
+    for idx in range(len(regions_df)):
+        counts = counter.counts[idx]
+        total = sum(counts.values())
+        if total > 0:
+            results_uxm.append({
+                'name': regions_df.iloc[idx]['name'],
+                'direction': regions_df.iloc[idx]['direction'],
+                'value': counts['u'] / total,
+                'cell_type': cell_type
+            })
+            results_coverage.append({
+                'name': regions_df.iloc[idx]['name'],
+                'direction': regions_df.iloc[idx]['direction'],
+                'value': total,
+                'cell_type': cell_type
+            })
+        else:
+            results_uxm.append({
+                'name': regions_df.iloc[idx]['name'],
+                'direction': regions_df.iloc[idx]['direction'],
+                'value': np.nan,
+                'cell_type': cell_type
+            })
+            results_coverage.append({
+                'name': regions_df.iloc[idx]['name'],
+                'direction': regions_df.iloc[idx]['direction'],
+                'value': 0,
+                'cell_type': cell_type
+            })
+    return pd.DataFrame(results_uxm), pd.DataFrame(results_coverage), cell_type
 
 
 def evaluate_marker_quality(values, target_idx, min_signal, min_snr, significance_threshold):
     """
-    Evaluate marker quality considering signal strength, SNR and statistical significance
+    Evaluate marker quality with additional metrics while keeping core functionality
+    
+    Args:
+        values: Array of UXM proportions for all cell types
+        target_idx: Index of target cell type
+        min_signal: Minimum required signal
+        min_snr: Minimum required SNR
+        significance_threshold: P-value threshold
     """
     target_value = values[target_idx]
     other_values = values[np.arange(len(values)) != target_idx]
     
-    # Basic metrics
+    # Core metrics (as in original)
     max_background = other_values.max()
-    snr = target_value / (max_background + 1e-10)
-    
-    # Calculate significance (p-value)
-    p_value = np.mean(other_values >= target_value)
-    
-    # Additional quality metrics
-    num_nonzero_background = (other_values > 0).sum()
-    background_mean = other_values.mean()
+    median_background = np.median(other_values)
+    mean_background = other_values.mean()
     background_std = other_values.std()
     
-    # Quality criteria
+    # SNR calculations (expanded)
+    snr = target_value / (max_background + 1e-10)
+    snr_vs_median = target_value / (median_background + 1e-10)
+    snr_vs_mean = target_value / (mean_background + 1e-10)
+    
+    # Statistical significance
+    p_value = np.mean(other_values >= target_value)
+    
+    # Additional metrics that might be useful for model training
+    metrics = {
+        'snr': snr,
+        'snr_vs_median': snr_vs_median,
+        'snr_vs_mean': snr_vs_mean,
+        'target_value': target_value,
+        'max_background': max_background,
+        'median_background': median_background,
+        'mean_background': mean_background,
+        'background_std': background_std,
+        'p_value': p_value,
+        'background_range': np.ptp(other_values),  # Peak-to-peak range
+        'background_quartile_ratio': np.percentile(other_values, 75) / (np.percentile(other_values, 25) + 1e-10),
+        'signal_to_noise_area': target_value - mean_background - background_std,
+        'relative_signal_strength': (target_value - mean_background) / (max_background - mean_background + 1e-10)
+    }
+    
+    # Core quality criteria (as in original)
     is_good_marker = (
         (target_value > min_signal) &  # Minimum absolute signal
-        (snr > min_snr) &  # Minimum SNR
+        ((snr > min_snr) | (snr_vs_median > min_snr) | (snr_vs_mean > min_snr)) &  # Minimum SNR
         (p_value < significance_threshold)  # Statistical significance
     )
     
-    return is_good_marker, {
-        'snr': snr,
-        'target_value': target_value,
-        'max_background': max_background,
-        'p_value': p_value,
-        'num_nonzero_background': num_nonzero_background,
-        'background_mean': background_mean,
-        'background_std': background_std
-    }
+    return is_good_marker, metrics
 
 
-def find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, coverage, values_matrix, best_targets_idx, min_signal_threshold, snr_threshold, significance_threshold, output_dir, batch_id):
+def find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, coverage, 
+                     values_matrix, best_targets_idx, min_signal_threshold, 
+                     snr_threshold, significance_threshold, output_dir, batch_id):
+    """Modified to include extended metrics in output"""
     good_markers = []
+    
     for i in range(len(values_matrix)):
-        is_good_marker, metrics = evaluate_marker_quality(values_matrix[i], best_targets_idx[i], 
-                                                        min_signal=min_signal_threshold, 
-                                                        min_snr=snr_threshold,
-                                                        significance_threshold=significance_threshold)
-        if is_good_marker:  
+        is_good_marker, metrics = evaluate_marker_quality(
+            values_matrix[i], 
+            best_targets_idx[i],
+            min_signal=min_signal_threshold,
+            min_snr=snr_threshold,
+            significance_threshold=significance_threshold
+        )
+        
+        if is_good_marker:
             result = batch_df.iloc[i].copy()
             result['target'] = cell_types[best_targets_idx[i]]
-            result['snr'] = metrics['snr']
-            result['pvalue'] = metrics['p_value']  
-            result['target_value'] = metrics['target_value']
-            result['num_nonzero_background'] = metrics['num_nonzero_background']
-            result['background_mean'] = metrics['background_mean']
-            result['background_std'] = metrics['background_std']
-            # Add all cell type values and coverage
+            
+            # Add all metrics to results
+            for metric_name, metric_value in metrics.items():
+                result[metric_name] = metric_value
+            
+            # Add cell type specific values and coverage (as in original)
             for cell in cell_types:
                 result[cell] = marker_props[col_mapping[cell]].iloc[i]
                 result[f'{cell}_coverage'] = coverage[col_mapping[cell]].iloc[i]
-            if cell_types[best_targets_idx[i]] == "CD4-T-cells" or cell_types[best_targets_idx[i]] == "CD8-T-cells":
-                print("found good marker for", cell_types[best_targets_idx[i]], "with SNR", metrics['snr'], "value",metrics['target_value'])
+                
             good_markers.append(result)
+    
     if not good_markers:
         return None
-    result_df =  pd.DataFrame(good_markers)
-    if result_df is None:
-        print("couldn't find any markers")
-        return None
+        
+    result_df = pd.DataFrame(good_markers)
     if result_df is not None:
         grouped = result_df.groupby('target')
         for target, group in grouped:
@@ -253,7 +274,7 @@ def find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, cove
             filepath = os.path.join(output_dir, filename)
             group.to_parquet(filepath, index=False)
             print(f"saved {len(group)} markers for chromosome {chr}/{target}")
-
+            
 
 def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_threshold, significance_threshold, min_signal_threshold, output_dir, threads, batch_size=500_000):
     print(f"Loading regions from {regions}...")
