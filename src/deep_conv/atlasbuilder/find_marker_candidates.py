@@ -10,7 +10,6 @@ from functools import partial
 from tqdm import tqdm
 import os
 import time
-import scipy
 
 @dataclass
 class Region:
@@ -24,9 +23,9 @@ class RegionCounter:
         self.min_cpgs = min_cpgs
         self.th1 = round(1 - (min_cpgs - 1) / min_cpgs, 3) + 0.001
         self.th2 = round((min_cpgs - 1) / min_cpgs, 3)
+        self.regions = []
         self.first_cpg = regions_df['startCpG'].min() - 20  # Look back 20 CpGs
         self.last_cpg = regions_df['endCpG'].max()
-        self.regions = []
         for idx, row in regions_df.iterrows():
             self.regions.append(Region(
                 start_cpg=row['startCpG'],
