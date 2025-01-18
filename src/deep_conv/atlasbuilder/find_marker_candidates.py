@@ -280,9 +280,13 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
     t0 = time.time()
     batch_id=0
     for batch in pd.read_csv(regions, sep='\t', chunksize=batch_size):
-        regions_df = batch.reset_index(drop=True) 
-        t_batch = time.time()
         batch_id+=1
+        output_file = f'{output_dir}/{chr}_raw_markers_{batch_id}.l{min_cpgs}.bed.gz'
+        if os.path.exists(output_file):
+            print(f"Skipping batch {batch_id} as it was already processed")
+            continue
+        t_batch = time.time()
+        regions_df = batch.reset_index(drop=True) 
         print(f"Loaded {len(regions_df)} regions")
         pat_files = list(Path(pat_dir).glob('*.pat.gz'))
         if not pat_files:
