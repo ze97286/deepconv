@@ -113,23 +113,31 @@ def create_empty_results(regions_df: pd.DataFrame, cell_type: str) -> tuple[pd.D
 
 def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Process a single pat file and return UXM proportions and coverage"""
+    t_start = time.time()
     counter = RegionCounter(regions_df, min_cpgs)
     pat_file = str(pat_file)
     cell_type = Path(pat_file).stem.replace('.pat', '')
     column_names = ['chr', 'start', 'pattern', 'count']
+    profiling_stats = defaultdict(float)
     
     # Count total lines for progress bar
+    t0 = time.time()
     total_lines = sum(1 for _ in (gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file)))
+    profiling_stats['count_lines'] = time.time() - t0
+    
     processed_lines = 0
     with tqdm(total=total_lines, desc=f"Processing {cell_type}") as pbar:
         for chunk in pd.read_csv(pat_file, sep='\t', names=column_names, chunksize=1_000_000):
-           # A pattern can overlap if:
-           # - starts before last_cpg (starts before end of last region)
-           # - extends past first_cpg (pattern end > first region start)
+            t0 = time.time()
+            # A pattern can overlap if:
+            # - starts before last_cpg (starts before end of last region)
+            # - extends past first_cpg (pattern end > first region start)
             relevant_chunk = chunk[
                 (chunk['start'] < counter.last_cpg) & 
                 (chunk['start'] + chunk['pattern'].str.len() > counter.first_cpg)
             ]
+            profiling_stats['chunk_filtering'] += time.time() - t0
+            
             if len(relevant_chunk) == 0:
                 if chunk['start'].min() >= counter.last_cpg:
                     pbar.update(total_lines - processed_lines)
@@ -137,12 +145,18 @@ def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> 
                 processed_lines += len(chunk)
                 pbar.update(len(chunk))
                 continue
+                
+            t0 = time.time()
             for _, row in relevant_chunk.iterrows():
                 counter.process_pattern(row['pattern'], row['start'], row['count'])
+            profiling_stats['pattern_processing'] += time.time() - t0
+            
             chunk_size = len(chunk)
             processed_lines += chunk_size
             pbar.update(chunk_size)
+            
     # Convert counts to proportions and create output DataFrames
+    t0 = time.time()
     results_uxm = []
     results_coverage = []
     for idx in range(len(regions_df)):
@@ -174,6 +188,13 @@ def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> 
                 'value': 0,
                 'cell_type': cell_type
             })
+    profiling_stats['results_creation'] = time.time() - t0
+    
+    profiling_stats['total_time'] = time.time() - t_start
+    print(f"\nProfiling for {cell_type}:")
+    for key, value in profiling_stats.items():
+        print(f"{key}: {value:.2f}s")
+    
     return pd.DataFrame(results_uxm), pd.DataFrame(results_coverage), cell_type
 
 
@@ -278,16 +299,19 @@ def find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, cove
 def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_threshold, significance_threshold, min_signal_threshold, output_dir, threads, batch_size=500_000):
     print(f"Loading regions from {regions}...")
     t0 = time.time()
-    batch_id=0
+    batch_id = 0
+    profiling_stats = defaultdict(float)
     for batch in pd.read_csv(regions, sep='\t', chunksize=batch_size):
-        batch_id+=1
+        batch_id += 1
+        t_batch = time.time()
         output_file = f'{output_dir}/{chr}_raw_markers_{batch_id}.l{min_cpgs}.bed.gz'
         if os.path.exists(output_file):
             print(f"Skipping batch {batch_id} as it was already processed")
             continue
-        t_batch = time.time()
-        regions_df = batch.reset_index(drop=True) 
-        print(f"Loaded {len(regions_df)} regions")
+        regions_df = batch.reset_index(drop=True)
+        print(f"Processing batch {batch_id} with {len(regions_df)} regions")
+        # Process pat files
+        t1 = time.time()
         pat_files = list(Path(pat_dir).glob('*.pat.gz'))
         if not pat_files:
             raise ValueError(f"No .pat.gz files found in {pat_dir}")
@@ -298,8 +322,9 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
                 total=len(pat_files),
                 desc="Overall progress"
             ))
+        profiling_stats['pat_processing'] += time.time() - t1
         print("\nBuilding final matrices...")
-        
+        t1 = time.time()
         # Separate UXM and coverage results
         uxm_dfs = []
         coverage_dfs = []
@@ -308,22 +333,15 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
             uxm_dfs.append(uxm_df)
             coverage_dfs.append(coverage_df)
             cell_types.append(cell_type)
-
         # Create final matrices
-        # First, create the base DataFrame with name and direction
         base_df = regions_df[['name', 'direction']]
-        # Create UXM matrix
         uxm_matrix = base_df.copy()
         for df, cell_type in zip(uxm_dfs, cell_types):
-            # First merge base_df with current results
             merged = pd.merge(base_df, 
                             df[['name', 'direction', 'value']], 
                             on=['name', 'direction'], 
                             how='left')
-            # Then assign to new column
             uxm_matrix[f"{cell_type}_merged"] = merged['value']
-
-        # Create coverage matrix                           
         coverage_matrix = base_df.copy()
         for df, cell_type in zip(coverage_dfs, cell_types):
             merged = pd.merge(base_df, 
@@ -331,16 +349,17 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
                             on=['name', 'direction'], 
                             how='left')
             coverage_matrix[f"{cell_type}_merged"] = merged['value']
+        profiling_stats['matrix_building'] += time.time() - t1
+        t1 = time.time()
         marker_props, coverage = uxm_matrix, coverage_matrix
         col_mapping = {col.split('_')[0]: col for col in marker_props.columns if col not in ['name', 'direction']}
         cell_types = list(col_mapping.keys())
         valid_rows = ~marker_props.iloc[:, 2:].isna().any(axis=1)
         marker_props = marker_props[valid_rows]
         coverage = coverage[valid_rows]
-        batch_df = regions_df
-        batch_df = batch_df[valid_rows].reset_index(drop=True)
+        batch_df = regions_df[valid_rows].reset_index(drop=True)
         if len(batch_df) == 0:
-            print("finished batch with no coverage",batch_id,"in",time.time()-t_batch)    
+            print(f"finished batch with no coverage {batch_id} in {time.time()-t_batch}")    
             continue 
         coverage.index = marker_props.index
         batch_df.index = marker_props.index
@@ -348,16 +367,33 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
         marker_props = marker_props[sufficient_coverage].reset_index(drop=True)
         coverage = coverage[sufficient_coverage].reset_index(drop=True)
         batch_df = batch_df[sufficient_coverage].reset_index(drop=True)
+        profiling_stats['filtering'] += time.time() - t1
         if len(batch_df) == 0:
-            print("finished batch with insufficient coverage",batch_id,"in",time.time()-t_batch)
+            print(f"finished batch with insufficient coverage {batch_id} in {time.time()-t_batch}")
             continue
-        marker_props.to_csv(f'{output_dir}/{chr}_raw_markers_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
+        t1 = time.time()
+        marker_props.to_csv(output_file, sep='\t', index=False, compression='gzip')
         coverage.to_csv(f'{output_dir}/{chr}_raw_coverage_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
+        profiling_stats['file_writing'] += time.time() - t1
+        t1 = time.time()
         values_matrix = marker_props.iloc[:, 2:].values
         best_targets_idx = values_matrix.argmax(axis=1)
         find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, coverage, values_matrix, best_targets_idx, min_signal_threshold, snr_threshold, significance_threshold, output_dir, batch_id)
-        print("finished batch",batch_id,"in",time.time()-t_batch)
-    print("finished",chr, "in",time.time()-t0)
+        profiling_stats['marker_evaluation'] += time.time() - t1
+        batch_time = time.time() - t_batch
+        print(f"Batch {batch_id} profiling:")
+        print(f"{'Operation':<20} {'Time (s)':<10} {'Percentage':>10}")
+        print("-" * 45)
+        for operation, duration in profiling_stats.items():
+            percentage = (duration / batch_time) * 100
+            print(f"{operation:<20} {duration:>10.2f}s {percentage:>10.1f}%")
+        print(f"\nfinished batch {batch_id} in {batch_time:.2f}s")
+    total_time = time.time() - t0
+    print(f"\nTotal chromosome processing time: {total_time:.2f}s")
+    print("\nOverall profiling:")
+    for operation, duration in profiling_stats.items():
+        percentage = (duration / total_time) * 100
+        print(f"{operation:<20} {duration:>10.2f}s {percentage:>10.1f}%")
 
 
 # python -m deep_conv.atlasbuilder.find_marker_candidates \
