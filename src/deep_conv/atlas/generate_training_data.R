@@ -170,14 +170,7 @@ generate_stratified_concentrations <- function(n_samples, cell_types) {
     return(concentrations)
 }
 
-# Function to generate a single mixture and its replicas
-# Function to generate a single mixture and its replicas
 generate_mixture <- function(conc_table, reads_by_celltype, target_depth, prefix, tmp_dir, out_dir, pat_dir, reps_per_combo) {
-   # Check write permissions
-   cat(sprintf("Checking write permissions:\n"))
-   cat(sprintf("tmp_dir: %s, writable: %s\n", tmp_dir, file.access(tmp_dir, mode=2) == 0))
-   cat(sprintf("out_dir: %s, writable: %s\n", out_dir, file.access(out_dir, mode=2) == 0))
-   
    # Setup target dilutions once for all replicas
    setkey(conc_table, celltype)
    setkey(reads_by_celltype, sample)
@@ -217,62 +210,54 @@ generate_mixture <- function(conc_table, reads_by_celltype, target_depth, prefix
                cat(sprintf("%s: %d bytes\n", basename(f), size))
            }
            
-           # Merge files - step by step without piping
-            out_file <- file.path(out_dir, paste0(rep_prefix, ".pat.gz"))
-            merged_temp <- file.path(rep_tmp_dir, "merged.tmp")
-            sorted_temp <- file.path(rep_tmp_dir, "sorted.tmp")
-
-            # 1. First zcat each file sequentially to a temp file
-            file.create(merged_temp)
-            for (pat_file in sort(list.files(rep_tmp_dir, pattern=paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names=TRUE))) {
-                size <- file.info(pat_file)$size
-                if (size == 0 || size == 28) {  # Skip empty or likely-empty files
-                    cat(sprintf("Skipping empty/near-empty file %s (%d bytes)\n", basename(pat_file), size))
-                    next
-                }
-                
-                # Verify file has actual content
-                check_cmd <- sprintf('zcat %s | head -n 1', pat_file)
-                content_check <- system2("sh", c("-c", check_cmd), stdout=TRUE, stderr=NULL)
-                if (length(content_check) == 0) {
-                    cat(sprintf("Skipping file with no content: %s\n", basename(pat_file)))
-                    next
-                }
-                
-                cmd <- sprintf('zcat %s >> %s', pat_file, merged_temp)
-                cat(sprintf("Processing %s\n", basename(pat_file)))
-                result <- system2("sh", c("-c", cmd))
-                if (result != 0) stop(sprintf("Failed to process %s", basename(pat_file)))
-            }
-
-            # Check intermediate file
-            cat(sprintf("Merged temp file size: %d\n", file.info(merged_temp)$size))
-
-            # 2. Sort to another temp file
-            sort_cmd <- sprintf('sort -k1,1V -k2,2n -k3,3 %s > %s', merged_temp, sorted_temp)
-            cat(sprintf("Running sort: %s\n", sort_cmd))
-            result <- system2("sh", c("-c", sort_cmd))
-            if (result != 0) stop("sort failed")
-
-            # Check intermediate file
-            cat(sprintf("Sorted temp file size: %d\n", file.info(sorted_temp)$size))
-
-            # 3. Deduplicate and compress
-            dedup_cmd <- sprintf('cat %s | perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s',
-                                sorted_temp, out_file)
-            cat(sprintf("Running deduplicate and compress: %s\n", dedup_cmd))
-            result <- system2("sh", c("-c", dedup_cmd))
-            if (result != 0) stop("deduplicate/compress failed")
-
-            # Check output file
-            if (!file.exists(out_file) || file.info(out_file)$size == 0) {
-                stop(sprintf("Final output file %s is empty or missing", out_file))
-            }
-
-            # 4. Index
-            index_cmd <- sprintf('tabix -s 1 -b 2 -e 2 -C %s', out_file)
-            result <- system2("sh", c("-c", index_cmd))
-            if (result != 0) stop("indexing failed")
+           # Merge files - step by step
+           out_file <- file.path(out_dir, paste0(rep_prefix, ".pat.gz"))
+           merged_temp <- file.path(rep_tmp_dir, "merged.tmp")
+           sorted_temp <- file.path(rep_tmp_dir, "sorted.tmp")
+           
+           # 1. First zcat all files to a temp file
+           file.create(merged_temp)
+           for (pat_file in sort(list.files(rep_tmp_dir, pattern=paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names=TRUE))) {
+               size <- file.info(pat_file)$size
+               if (size == 0 || size == 28) {  # Skip empty or likely-empty files
+                   cat(sprintf("Skipping empty/near-empty file %s (%d bytes)\n", basename(pat_file), size))
+                   next
+               }
+               
+               cmd <- sprintf('zcat %s >> %s', pat_file, merged_temp)
+               cat(sprintf("Processing %s (%d bytes)\n", basename(pat_file), size))
+               result <- system2("sh", c("-c", cmd))
+               if (result != 0) stop(sprintf("Failed to process %s", basename(pat_file)))
+           }
+           
+           # Check intermediate file
+           cat(sprintf("Merged temp file size: %d\n", file.info(merged_temp)$size))
+           
+           # 2. Sort to another temp file
+           sort_cmd <- sprintf('sort -k1,1V -k2,2n -k3,3 %s > %s', merged_temp, sorted_temp)
+           cat(sprintf("Running sort: %s\n", sort_cmd))
+           result <- system2("sh", c("-c", sort_cmd))
+           if (result != 0) stop("sort failed")
+           
+           # Check intermediate file
+           cat(sprintf("Sorted temp file size: %d\n", file.info(sorted_temp)$size))
+           
+           # 3. Deduplicate and compress
+           dedup_cmd <- sprintf('cat %s | perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s',
+                              sorted_temp, out_file)
+           cat(sprintf("Running deduplicate and compress: %s\n", dedup_cmd))
+           result <- system2("sh", c("-c", dedup_cmd))
+           if (result != 0) stop("deduplicate/compress failed")
+           
+           # Check output file
+           if (!file.exists(out_file) || file.info(out_file)$size == 0) {
+               stop(sprintf("Final output file %s is empty or missing", out_file))
+           }
+           
+           # 4. Index
+           index_cmd <- sprintf('tabix -s 1 -b 2 -e 2 -C %s', out_file)
+           result <- system2("sh", c("-c", index_cmd))
+           if (result != 0) stop("indexing failed")
            
            # Calculate and save true concentrations
            counts <- lapply(target_dilutions$celltype, function(ct) {
@@ -289,7 +274,7 @@ generate_mixture <- function(conc_table, reads_by_celltype, target_depth, prefix
            wide_counts <- dcast(counts, . ~ celltype, value.var = "true_concentration")
            wide_counts[, `:=`(. = NULL, sample = rep_prefix)]
            
-           # Save true concentrations with explicit error handling
+           # Save true concentrations
            true_conc_file <- file.path(out_dir, paste0(rep_prefix, "_true_concentrations.csv"))
            cat(sprintf("Saving true concentrations to: %s\n", true_conc_file))
            fwrite(wide_counts, true_conc_file)
