@@ -206,12 +206,26 @@ merge_pat_files <- function(prefix, rep, tmp_dir, out_dir) {
     if (length(pat_files) == 0) stop("No valid files found to merge")
     cat("Input files for merge:\n", paste(pat_files, collapse = "\n"), "\n")
     
-    merge_cmd <- sprintf('for f in %s; do zcat "$f"; done > %s',
-                         paste(pat_files, collapse = " "), merged_temp)
+    merge_cmd <- sprintf(
+        'for f in %s; do zcat "$f"; done > %s',
+        paste(shQuote(pat_files), collapse = " "),
+        merged_temp
+    )
     cat("Running merge command:\n", merge_cmd, "\n")
-    result <- system2("sh", c("-c", merge_cmd), stdout = TRUE, stderr = TRUE)
-    if (file.info(merged_temp)$size == 0) stop("Merge step produced an empty file")
-    cat("Merge step completed successfully. Merged file size:", file.info(merged_temp)$size, "\n")
+    result <- tryCatch(
+        {
+            system2("sh", c("-c", merge_cmd), stdout = TRUE, stderr = TRUE)
+        },
+        error = function(e) {
+            cat("Error executing merge command:\n", merge_cmd, "\n")
+            stop(e$message)
+        }
+    )
+
+    if (is.null(result) || file.info(merged_temp)$size == 0) {
+        stop("Merge step failed or produced an empty file")
+    }
+    cat("Merge step completed successfully. File size:", file.info(merged_temp)$size, "\n")
     
     # Step 2: Sort the merged file
     cat("Sorting merged file\n")
