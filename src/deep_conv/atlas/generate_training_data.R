@@ -200,15 +200,19 @@ merge_pat_files <- function(prefix, rep, tmp_dir, out_dir) {
     merged_temp <- file.path(tmp_dir, paste0("merged_", rep, ".tmp"))
     sorted_temp <- file.path(tmp_dir, paste0("sorted_", rep, ".tmp"))
     
-    # Step 1: Merge files
-    cat("Merging files for replica:", rep_prefix, "\n")
+    # Create a temporary file list for zcat
+    files_list <- file.path(tmp_dir, "files_to_merge.txt")
     pat_files <- list.files(tmp_dir, pattern = paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names = TRUE)
-    if (length(pat_files) == 0) stop("No valid files found to merge")
-    cat("Input files for merge:\n", paste(pat_files, collapse = "\n"), "\n")
+    writeLines(pat_files, files_list)
     
-    merge_cmd <- sprintf('zcat %s > %s', paste(shQuote(pat_files), collapse = " "), shQuote(merged_temp))
+    # Use xargs to handle the file list
+    merge_cmd <- sprintf('cat %s | tr "\\n" "\\0" | xargs -0 zcat > %s', 
+                        files_list, merged_temp)
+    
     cat("Running merge command:\n", merge_cmd, "\n")
-    result <- system2("sh", c("-c", merge_cmd), stdout = TRUE, stderr = TRUE)
+    result <- system2("sh", c("-c", merge_cmd))
+    unlink(files_list)  # Clean up the files list
+    
     if (!file.exists(merged_temp) || file.info(merged_temp)$size == 0) {
         stop("Merge step failed or produced an empty file")
     }
