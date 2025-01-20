@@ -172,64 +172,78 @@ generate_stratified_concentrations <- function(n_samples, cell_types) {
 
 # Function to generate a single mixture and its replicas
 generate_mixture <- function(conc_table, reads_by_celltype, target_depth, prefix, tmp_dir, out_dir, pat_dir, reps_per_combo) {
-   # Setup target dilutions once for all replicas
-   setkey(conc_table, celltype)
-   setkey(reads_by_celltype, sample)
-   
-   target_dilutions <- conc_table[reads_by_celltype, nomatch=NULL][
-       , list(celltype, filename=file.path(pat_dir, paste0(celltype, ".pat.gz")), 
-             fraction=target_depth * fraction/fragments)
-   ]
-   
-   # Process each replica serially
-   for (rep in 1:reps_per_combo) {
-       rep_prefix <- paste0(prefix, "_", rep)
-       
-       # Create separate temp directory for each replica
-       rep_tmp_dir <- file.path(tmp_dir, sprintf("rep_%d", rep))
-       dir.create(rep_tmp_dir, recursive=TRUE, showWarnings=FALSE)
-       
-       # Sample from each cell type
-       for (ct in target_dilutions$celltype) {
-           sub.dt <- target_dilutions[celltype == ct]
-           # Generate sampled pat file
-           cmd <- sprintf('"/users/zetzioni/sharedscratch/pattools sample -s %.8f %s | bgzip -c > %s/%s_%s.pat.gz"',
-                         sub.dt$fraction, sub.dt$filename, rep_tmp_dir, rep_prefix, ct)
-           result <- system2("sh", c("-c", cmd))
-           if (result != 0) {
-               stop(sprintf("Failed to sample reads for %s in replica %d", ct, rep))
-           }
-       }
-       
-       # Merge pat files for this replica
-       out_file <- file.path(out_dir, paste0(rep_prefix, ".pat.gz"))
-       system2("sh", c("-c", paste0(
-           '"zcat ', rep_tmp_dir, '/', rep_prefix, '_*.pat.gz | ',
-           'sort -k1,1V -k2,2n -k3,3 | ',
-           'perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | ',
-           'bgzip -c > ', out_file,
-           '; tabix -s 1 -b 2 -e 2 -C ', out_file, '"'
-       )))
-       
-       # Calculate and save true concentrations for this replica
-       counts <- lapply(target_dilutions$celltype, function(ct) {
-           tmp_file <- file.path(rep_tmp_dir, paste0(rep_prefix, "_", ct, ".pat.gz"))
-           cmd <- sprintf("zcat %s | wc -l", tmp_file)
-           count <- as.numeric(system2("sh", c("-c", cmd), stdout=TRUE))
-           data.table(celltype=ct, count=count)
-       })
-       counts <- rbindlist(counts)
-       
-       total_reads <- sum(counts$count)
-       counts[, true_concentration := count/total_reads]
-       
-       wide_counts <- dcast(counts, . ~ celltype, value.var = "true_concentration")
-       wide_counts[, `:=`(. = NULL, sample = rep_prefix)]
-       fwrite(wide_counts, file.path(out_dir, paste0(rep_prefix, "_true_concentrations.csv")))
-       
-       # Cleanup this replica's temp files
-       unlink(rep_tmp_dir, recursive=TRUE)
-   }
+    setkey(conc_table, celltype)
+    setkey(reads_by_celltype, sample)
+    
+    target_dilutions <- conc_table[reads_by_celltype, nomatch=NULL][
+        , list(celltype, filename=file.path(pat_dir, paste0(celltype, ".pat.gz")), 
+              fraction=target_depth * fraction/fragments)
+    ]
+    
+    # Process each replica serially
+    for (rep in 1:reps_per_combo) {
+        rep_prefix <- paste0(prefix, "_", rep)
+        
+        # Create separate temp directory for each replica
+        rep_tmp_dir <- file.path(tmp_dir, sprintf("rep_%d", rep))
+        dir.create(rep_tmp_dir, recursive=TRUE, showWarnings=FALSE)
+        
+        cat(sprintf("Processing replica %d for %s\n", rep, prefix))  # Add logging
+        
+        # Sample from each cell type
+        for (ct in target_dilutions$celltype) {
+            sub.dt <- target_dilutions[celltype == ct]
+            # Generate sampled pat file
+            cmd <- sprintf('"/users/zetzioni/sharedscratch/pattools sample -s %.8f %s | bgzip -c > %s/%s_%s.pat.gz"',
+                          sub.dt$fraction, sub.dt$filename, rep_tmp_dir, rep_prefix, ct)
+            result <- system2("sh", c("-c", cmd))
+            if (result != 0) {
+                stop(sprintf("Failed to sample reads for %s in replica %d", ct, rep))
+            }
+        }
+        
+        # Merge pat files for this replica
+        out_file <- file.path(out_dir, paste0(rep_prefix, ".pat.gz"))
+        merge_cmd <- paste0(
+            '"zcat ', rep_tmp_dir, '/', rep_prefix, '_*.pat.gz | ',
+            'sort -k1,1V -k2,2n -k3,3 | ',
+            'perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | ',
+            'bgzip -c > ', out_file,
+            '; tabix -s 1 -b 2 -e 2 -C ', out_file, '"'
+        )
+        cat(sprintf("Running merge command: %s\n", merge_cmd))  # Add logging
+        result <- system2("sh", c("-c", merge_cmd))
+        if (result != 0) {
+            stop(sprintf("Failed to merge pat files for replica %d", rep))
+        }
+        
+        # Calculate and save true concentrations for this replica
+        counts <- lapply(target_dilutions$celltype, function(ct) {
+            tmp_file <- file.path(rep_tmp_dir, paste0(rep_prefix, "_", ct, ".pat.gz"))
+            cmd <- sprintf("zcat %s | wc -l", tmp_file)
+            count <- as.numeric(system2("sh", c("-c", cmd), stdout=TRUE))
+            data.table(celltype=ct, count=count)
+        })
+        counts <- rbindlist(counts)
+        
+        total_reads <- sum(counts$count)
+        counts[, true_concentration := count/total_reads]
+        
+        wide_counts <- dcast(counts, . ~ celltype, value.var = "true_concentration")
+        wide_counts[, `:=`(. = NULL, sample = rep_prefix)]
+        
+        # Save true concentrations with explicit error checking
+        true_conc_file <- file.path(out_dir, paste0(rep_prefix, "_true_concentrations.csv"))
+        cat(sprintf("Saving true concentrations to %s\n", true_conc_file))  # Add logging
+        tryCatch({
+            fwrite(wide_counts, true_conc_file)
+        }, error = function(e) {
+            cat(sprintf("Error writing true concentrations: %s\n", e$message))
+        })
+        
+        # Cleanup this replica's temp files
+        unlink(rep_tmp_dir, recursive=TRUE)
+    }
 }
 
 # Function to process a batch of samples in parallel
@@ -237,7 +251,11 @@ generate_mixture <- function(conc_table, reads_by_celltype, target_depth, prefix
 process_batch <- function(concentrations, prefix, out_dir, threads, tmp_base_dir, pat_dir, target_depth, reads_by_celltype, reps_per_combo) {
     registerDoParallel(cores=threads)
     
-    foreach(i=1:nrow(concentrations)) %dopar% {
+    # Add progress tracking
+    cat(sprintf("Starting to process %d samples with %d threads\n", nrow(concentrations), threads))
+    
+    results <- foreach(i=1:nrow(concentrations), .errorhandling='pass') %dopar% {
+        cat(sprintf("Starting mixture %d\n", i))  # Add logging
         tmp_dir <- file.path(tmp_base_dir, sprintf("tmp_%s_%d", prefix, i))
         dir.create(tmp_dir, recursive=TRUE, showWarnings=FALSE)
         
@@ -247,11 +265,23 @@ process_batch <- function(concentrations, prefix, out_dir, threads, tmp_base_dir
                           variable.name = "celltype",
                           value.name = "fraction")
         
-        # Generate mixture and its replicas serially
-        generate_mixture(conc_table, reads_by_celltype, target_depth, 
-                       paste0(prefix, "_", i), tmp_dir, out_dir, pat_dir, reps_per_combo)
+        tryCatch({
+            # Generate mixture and its replicas serially
+            generate_mixture(conc_table, reads_by_celltype, target_depth, 
+                           paste0(prefix, "_", i), tmp_dir, out_dir, pat_dir, reps_per_combo)
+            cat(sprintf("Completed mixture %d\n", i))  # Add logging
+        }, error = function(e) {
+            cat(sprintf("Error in mixture %d: %s\n", i, e$message))
+            return(NULL)
+        })
         
         unlink(tmp_dir, recursive=TRUE)
+    }
+    
+    # Check results
+    failed <- which(sapply(results, is.null))
+    if (length(failed) > 0) {
+        cat(sprintf("Failed mixtures: %s\n", paste(failed, collapse=", ")))
     }
 }
 
