@@ -200,29 +200,46 @@ merge_pat_files <- function(prefix, rep, tmp_dir, out_dir) {
     merged_temp <- file.path(tmp_dir, paste0("merged_", rep, ".tmp"))
     sorted_temp <- file.path(tmp_dir, paste0("sorted_", rep, ".tmp"))
     
-    # Merge files
-    merge_cmd <- sprintf('cat %s | gunzip -c > %s', 
-                         paste(list.files(tmp_dir, pattern = paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names = TRUE), collapse = " "),
-                         merged_temp)
-    result <- system2("sh", c("-c", merge_cmd))
-    if (result != 0 || file.info(merged_temp)$size == 0) stop("Merge failed")
+    # Step 1: Merge files
+    cat("Merging files for replica:", rep_prefix, "\n")
+    pat_files <- list.files(tmp_dir, pattern = paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names = TRUE)
+    if (length(pat_files) == 0) stop("No valid files found to merge")
+    cat("Input files for merge:\n", paste(pat_files, collapse = "\n"), "\n")
     
-    # Sort the merged file
+    merge_cmd <- sprintf('for f in %s; do zcat "$f"; done > %s',
+                         paste(pat_files, collapse = " "), merged_temp)
+    cat("Running merge command:\n", merge_cmd, "\n")
+    result <- system2("sh", c("-c", merge_cmd), stdout = TRUE, stderr = TRUE)
+    if (file.info(merged_temp)$size == 0) stop("Merge step produced an empty file")
+    cat("Merge step completed successfully. Merged file size:", file.info(merged_temp)$size, "\n")
+    
+    # Step 2: Sort the merged file
+    cat("Sorting merged file\n")
     sort_cmd <- sprintf('sort -k1,1V -k2,2n -k3,3 %s > %s', merged_temp, sorted_temp)
-    result <- system2("sh", c("-c", sort_cmd))
-    if (result != 0 || file.info(sorted_temp)$size == 0) stop("Sort failed")
+    cat("Running sort command:\n", sort_cmd, "\n")
+    result <- system2("sh", c("-c", sort_cmd), stdout = TRUE, stderr = TRUE)
+    if (file.info(sorted_temp)$size == 0) stop("Sort step produced an empty file")
+    cat("Sort step completed successfully. Sorted file size:", file.info(sorted_temp)$size, "\n")
     
-    # Deduplicate and compress
+    # Step 3: Deduplicate and compress
+    cat("Deduplicating and compressing sorted file\n")
     dedup_cmd <- sprintf('cat %s | perl /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s', sorted_temp, out_file)
-    result <- system2("sh", c("-c", dedup_cmd))
-    if (result != 0 || file.info(out_file)$size == 0) stop("Deduplication failed")
+    cat("Running deduplication command:\n", dedup_cmd, "\n")
+    result <- system2("sh", c("-c", dedup_cmd), stdout = TRUE, stderr = TRUE)
+    if (file.info(out_file)$size == 0) stop("Deduplication step produced an empty file")
+    cat("Deduplication and compression completed successfully. Output file size:", file.info(out_file)$size, "\n")
     
-    # Index the final file
-    result <- system2("tabix", c("-s", "1", "-b", "2", "-e", "2", "-C", out_file))
+    # Step 4: Index the final file
+    cat("Indexing compressed file\n")
+    index_cmd <- sprintf('tabix -s 1 -b 2 -e 2 -C %s', out_file)
+    cat("Running index command:\n", index_cmd, "\n")
+    result <- system2("sh", c("-c", index_cmd), stdout = TRUE, stderr = TRUE)
     if (result != 0) stop("Indexing failed")
+    cat("Indexing completed successfully\n")
     
     # Cleanup temporary files
     unlink(c(merged_temp, sorted_temp))
+    cat("Temporary files cleaned up\n")
 }
 
 # Function to process a batch of samples in parallel
