@@ -206,46 +206,38 @@ merge_pat_files <- function(prefix, rep, tmp_dir, out_dir) {
     if (length(pat_files) == 0) stop("No valid files found to merge")
     cat("Input files for merge:\n", paste(pat_files, collapse = "\n"), "\n")
     
-    merge_cmd <- sprintf(
-        'for f in %s; do zcat "$f"; done > %s',
-        paste(shQuote(pat_files), collapse = " "),
-        merged_temp
-    )
+    merge_cmd <- sprintf('zcat %s > %s', paste(shQuote(pat_files), collapse = " "), shQuote(merged_temp))
     cat("Running merge command:\n", merge_cmd, "\n")
-    result <- tryCatch(
-        {
-            system2("sh", c("-c", merge_cmd), stdout = TRUE, stderr = TRUE)
-        },
-        error = function(e) {
-            cat("Error executing merge command:\n", merge_cmd, "\n")
-            stop(e$message)
-        }
-    )
-
-    if (is.null(result) || file.info(merged_temp)$size == 0) {
+    result <- system2("sh", c("-c", merge_cmd), stdout = TRUE, stderr = TRUE)
+    if (!file.exists(merged_temp) || file.info(merged_temp)$size == 0) {
         stop("Merge step failed or produced an empty file")
     }
     cat("Merge step completed successfully. File size:", file.info(merged_temp)$size, "\n")
     
     # Step 2: Sort the merged file
     cat("Sorting merged file\n")
-    sort_cmd <- sprintf('sort -k1,1V -k2,2n -k3,3 %s > %s', merged_temp, sorted_temp)
+    sort_cmd <- sprintf('sort -k1,1V -k2,2n -k3,3 %s > %s', shQuote(merged_temp), shQuote(sorted_temp))
     cat("Running sort command:\n", sort_cmd, "\n")
     result <- system2("sh", c("-c", sort_cmd), stdout = TRUE, stderr = TRUE)
-    if (file.info(sorted_temp)$size == 0) stop("Sort step produced an empty file")
+    if (!file.exists(sorted_temp) || file.info(sorted_temp)$size == 0) {
+        stop("Sort step failed or produced an empty file")
+    }
     cat("Sort step completed successfully. Sorted file size:", file.info(sorted_temp)$size, "\n")
     
     # Step 3: Deduplicate and compress
     cat("Deduplicating and compressing sorted file\n")
-    dedup_cmd <- sprintf('cat %s | perl /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s', sorted_temp, out_file)
+    dedup_cmd <- sprintf('cat %s | perl /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s', 
+                         shQuote(sorted_temp), shQuote(out_file))
     cat("Running deduplication command:\n", dedup_cmd, "\n")
     result <- system2("sh", c("-c", dedup_cmd), stdout = TRUE, stderr = TRUE)
-    if (file.info(out_file)$size == 0) stop("Deduplication step produced an empty file")
+    if (!file.exists(out_file) || file.info(out_file)$size == 0) {
+        stop("Deduplication step failed or produced an empty file")
+    }
     cat("Deduplication and compression completed successfully. Output file size:", file.info(out_file)$size, "\n")
     
     # Step 4: Index the final file
     cat("Indexing compressed file\n")
-    index_cmd <- sprintf('tabix -s 1 -b 2 -e 2 -C %s', out_file)
+    index_cmd <- sprintf('tabix -s 1 -b 2 -e 2 -C %s', shQuote(out_file))
     cat("Running index command:\n", index_cmd, "\n")
     result <- system2("sh", c("-c", index_cmd), stdout = TRUE, stderr = TRUE)
     if (result != 0) stop("Indexing failed")
