@@ -98,7 +98,7 @@ generate_stratified_concentrations <- function(n_samples, cell_types) {
 }
 
 # Function to process one batch of samples in parallel
-process_batch <- function(concentrations, prefix, out_dir, threads, tmp_base_dir) {
+process_batch <- function(concentrations, prefix, out_dir, threads, tmp_base_dir, pat_dir, target_depth, reps_per_combo) {
     registerDoParallel(cores=threads)
     
     foreach(i=1:nrow(concentrations)) %dopar% {
@@ -111,14 +111,14 @@ process_batch <- function(concentrations, prefix, out_dir, threads, tmp_base_dir
         # Call the admixing script
         system2("Rscript", c(
             "/users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/admix_pats.R",
-            "--pat_dir", args$pat_dir,
+            "--pat_dir", pat_dir,
             "--output_dir", out_dir,
             "--tmp_dir", tmp_dir,
-            "--target_depth", args$target_depth,
+            "--target_depth", target_depth,
             "--threads", "1",  # Single thread here since we're parallel at combination level
             "--concentrations", shQuote(conc_json),
             "--prefix", paste0(prefix, "_", i),
-            "--repeats", args$reps_per_combo
+            "--repeats", reps_per_combo
         ))
         
         # Cleanup temp directory after processing
@@ -168,10 +168,16 @@ main <- function() {
     
     # Process training and evaluation sets
     cat(sprintf("Processing %d training samples with %d threads...\n", args$n_train, args$threads))
-    process_batch(train_concentrations, "train", train_dir, args$threads, tmp_base_dir)
+    process_batch(
+        train_concentrations, "train", train_dir, args$threads, tmp_base_dir,
+        args$pat_dir, args$target_depth, args$reps_per_combo
+    )
     
     cat(sprintf("Processing %d evaluation samples with %d threads...\n", args$n_eval, args$threads))
-    process_batch(eval_concentrations, "eval", eval_dir, args$threads, tmp_base_dir)
+    process_batch(
+        eval_concentrations, "eval", eval_dir, args$threads, tmp_base_dir,
+        args$pat_dir, args$target_depth, args$reps_per_combo
+    )
     
     # Final cleanup
     unlink(tmp_base_dir, recursive=TRUE)
