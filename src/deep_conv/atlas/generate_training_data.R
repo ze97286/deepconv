@@ -218,44 +218,47 @@ generate_mixture <- function(conc_table, reads_by_celltype, target_depth, prefix
            }
            
            # Merge files - step by step without piping
-           out_file <- file.path(out_dir, paste0(rep_prefix, ".pat.gz"))
-           merged_temp <- file.path(rep_tmp_dir, "merged.tmp")
-           sorted_temp <- file.path(rep_tmp_dir, "sorted.tmp")
-           
-           # 1. First zcat all files to a temp file
-           zcat_cmd <- sprintf('zcat %s/%s_*.pat.gz > %s', rep_tmp_dir, rep_prefix, merged_temp)
-           cat(sprintf("Running zcat: %s\n", zcat_cmd))
-           result <- system2("sh", c("-c", zcat_cmd))
-           if (result != 0) stop("zcat failed")
-           
-           # Check intermediate file
-           cat(sprintf("Merged temp file size: %d\n", file.info(merged_temp)$size))
-           
-           # 2. Sort to another temp file
-           sort_cmd <- sprintf('sort -k1,1V -k2,2n -k3,3 %s > %s', merged_temp, sorted_temp)
-           cat(sprintf("Running sort: %s\n", sort_cmd))
-           result <- system2("sh", c("-c", sort_cmd))
-           if (result != 0) stop("sort failed")
-           
-           # Check intermediate file
-           cat(sprintf("Sorted temp file size: %d\n", file.info(sorted_temp)$size))
-           
-           # 3. Deduplicate and compress
-           dedup_cmd <- sprintf('cat %s | perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s',
-                              sorted_temp, out_file)
-           cat(sprintf("Running deduplicate and compress: %s\n", dedup_cmd))
-           result <- system2("sh", c("-c", dedup_cmd))
-           if (result != 0) stop("deduplicate/compress failed")
-           
-           # Check output file
-           if (!file.exists(out_file) || file.info(out_file)$size == 0) {
-               stop(sprintf("Final output file %s is empty or missing", out_file))
-           }
-           
-           # 4. Index
-           index_cmd <- sprintf('tabix -s 1 -b 2 -e 2 -C %s', out_file)
-           result <- system2("sh", c("-c", index_cmd))
-           if (result != 0) stop("indexing failed")
+            out_file <- file.path(out_dir, paste0(rep_prefix, ".pat.gz"))
+            merged_temp <- file.path(rep_tmp_dir, "merged.tmp")
+            sorted_temp <- file.path(rep_tmp_dir, "sorted.tmp")
+
+            # 1. First zcat each file sequentially to a temp file
+            file.create(merged_temp)
+            for (pat_file in sort(list.files(rep_tmp_dir, pattern=paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names=TRUE))) {
+                cmd <- sprintf('zcat %s >> %s', pat_file, merged_temp)
+                cat(sprintf("Processing %s\n", basename(pat_file)))
+                result <- system2("sh", c("-c", cmd))
+                if (result != 0) stop(sprintf("Failed to process %s", basename(pat_file)))
+            }
+
+            # Check intermediate file
+            cat(sprintf("Merged temp file size: %d\n", file.info(merged_temp)$size))
+
+            # 2. Sort to another temp file
+            sort_cmd <- sprintf('sort -k1,1V -k2,2n -k3,3 %s > %s', merged_temp, sorted_temp)
+            cat(sprintf("Running sort: %s\n", sort_cmd))
+            result <- system2("sh", c("-c", sort_cmd))
+            if (result != 0) stop("sort failed")
+
+            # Check intermediate file
+            cat(sprintf("Sorted temp file size: %d\n", file.info(sorted_temp)$size))
+
+            # 3. Deduplicate and compress
+            dedup_cmd <- sprintf('cat %s | perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s',
+                                sorted_temp, out_file)
+            cat(sprintf("Running deduplicate and compress: %s\n", dedup_cmd))
+            result <- system2("sh", c("-c", dedup_cmd))
+            if (result != 0) stop("deduplicate/compress failed")
+
+            # Check output file
+            if (!file.exists(out_file) || file.info(out_file)$size == 0) {
+                stop(sprintf("Final output file %s is empty or missing", out_file))
+            }
+
+            # 4. Index
+            index_cmd <- sprintf('tabix -s 1 -b 2 -e 2 -C %s', out_file)
+            result <- system2("sh", c("-c", index_cmd))
+            if (result != 0) stop("indexing failed")
            
            # Calculate and save true concentrations
            counts <- lapply(target_dilutions$celltype, function(ct) {
