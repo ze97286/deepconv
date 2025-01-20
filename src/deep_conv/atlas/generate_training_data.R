@@ -225,6 +225,20 @@ generate_mixture <- function(conc_table, reads_by_celltype, target_depth, prefix
             # 1. First zcat each file sequentially to a temp file
             file.create(merged_temp)
             for (pat_file in sort(list.files(rep_tmp_dir, pattern=paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names=TRUE))) {
+                size <- file.info(pat_file)$size
+                if (size == 0 || size == 28) {  # Skip empty or likely-empty files
+                    cat(sprintf("Skipping empty/near-empty file %s (%d bytes)\n", basename(pat_file), size))
+                    next
+                }
+                
+                # Verify file has actual content
+                check_cmd <- sprintf('zcat %s | head -n 1', pat_file)
+                content_check <- system2("sh", c("-c", check_cmd), stdout=TRUE, stderr=NULL)
+                if (length(content_check) == 0) {
+                    cat(sprintf("Skipping file with no content: %s\n", basename(pat_file)))
+                    next
+                }
+                
                 cmd <- sprintf('zcat %s >> %s', pat_file, merged_temp)
                 cat(sprintf("Processing %s\n", basename(pat_file)))
                 result <- system2("sh", c("-c", cmd))
