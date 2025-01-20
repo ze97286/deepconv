@@ -200,59 +200,28 @@ merge_pat_files <- function(prefix, rep, tmp_dir, out_dir) {
     merged_temp <- file.path(tmp_dir, paste0("merged_", rep, ".tmp"))
     sorted_temp <- file.path(tmp_dir, paste0("sorted_", rep, ".tmp"))
     
-    # List and check files
-    pat_files <- sort(list.files(tmp_dir, pattern=paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names=TRUE))
-    valid_files <- character()
-    for (f in pat_files) {
-        size <- file.info(f)$size
-        if (size > 28) {
-            valid_files <- c(valid_files, f)
-        }
-    }
-    
-    if (length(valid_files) == 0) {
-        stop("No valid files to merge")
-    }
-    
-    # Single command merge
+    # Merge files
     merge_cmd <- sprintf('cat %s | gunzip -c > %s', 
-                        paste(valid_files, collapse=" "), 
-                        merged_temp)
+                         paste(list.files(tmp_dir, pattern = paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names = TRUE), collapse = " "),
+                         merged_temp)
     result <- system2("sh", c("-c", merge_cmd))
-    if (result != 0) stop("Merge failed")
+    if (result != 0 || file.info(merged_temp)$size == 0) stop("Merge failed")
     
-    # Sort
+    # Sort the merged file
     sort_cmd <- sprintf('sort -k1,1V -k2,2n -k3,3 %s > %s', merged_temp, sorted_temp)
     result <- system2("sh", c("-c", sort_cmd))
-    if (result != 0) stop("Sort failed")
+    if (result != 0 || file.info(sorted_temp)$size == 0) stop("Sort failed")
     
     # Deduplicate and compress
-    dedup_cmd <- sprintf('cat %s | perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s',
-                        sorted_temp, out_file)
+    dedup_cmd <- sprintf('cat %s | perl /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s', sorted_temp, out_file)
     result <- system2("sh", c("-c", dedup_cmd))
-    if (result != 0) stop("Deduplicate failed")
+    if (result != 0 || file.info(out_file)$size == 0) stop("Deduplication failed")
     
-    # Index
-    result <- system2("sh", c("-c", sprintf('tabix -s 1 -b 2 -e 2 -C %s', out_file)))
-    if (result != 0) stop("Index failed")
+    # Index the final file
+    result <- system2("tabix", c("-s", "1", "-b", "2", "-e", "2", "-C", out_file))
+    if (result != 0) stop("Indexing failed")
     
-    # Calculate and save true concentrations
-    counts <- lapply(pat_files, function(f) {
-        cmd <- sprintf("zcat %s | wc -l", f)
-        count <- as.numeric(system2("sh", c("-c", cmd), stdout=TRUE))
-        data.table(celltype=sub(paste0(rep_prefix, "_(.*)\\.pat\\.gz"), "\\1", basename(f)), 
-                  count=count)
-    })
-    counts <- rbindlist(counts)
-    
-    total_reads <- sum(counts$count)
-    counts[, true_concentration := count/total_reads]
-    
-    wide_counts <- dcast(counts, . ~ celltype, value.var = "true_concentration")
-    wide_counts[, `:=`(. = NULL, sample = rep_prefix)]
-    fwrite(wide_counts, file.path(out_dir, paste0(rep_prefix, "_true_concentrations.csv")))
-    
-    # Cleanup
+    # Cleanup temporary files
     unlink(c(merged_temp, sorted_temp))
 }
 
