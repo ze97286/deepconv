@@ -339,81 +339,101 @@ process_batch <- function(concentrations, prefix, out_dir, threads, tmp_base_dir
 }
 
 main <- function() {
-    # Parse arguments
-    parser <- OptionParser(option_list=option_list)
-    args <- parse_args(parser)
-    
-    # Check required arguments
-    if (is.null(args$pat_dir) || is.null(args$output_dir)) {
-        print_help(parser)
-        stop("Missing required arguments")
-    }
-    
-    if(is.null(args$tmp_dir)) {
-        args$tmp_dir <- paste0(args$output_dir, "/tmp")
-    }
-    
-    # Get list of cell types from pat_dir
-    cell_types <- gsub("\\.pat\\.gz$", "", list.files(args$pat_dir, pattern="\\.pat\\.gz$"))
-    cat("Found cell types:", paste(cell_types, collapse=", "), "\n")
-    
-    # Check for cached read counts or calculate them
-    counts_cache_file <- file.path(args$pat_dir, "read_counts.rds")
-    if (file.exists(counts_cache_file)) {
-        cat("Loading cached read counts...\n")
-        reads_by_celltype <- readRDS(counts_cache_file)
-        cat("Loaded counts:\n")
-        print(reads_by_celltype)  # See what we loaded
-    } else {
-        cat("Calculating read counts...\n")
-        reads_by_celltype <- read_count_table(args$pat_dir)
-        cat("Calculated counts to be saved:\n")
-        print(reads_by_celltype)  # See what we're about to save
-        saveRDS(reads_by_celltype, counts_cache_file)
-        
-        # Verify what was saved
-        cat("Verifying saved data:\n")
-        verification <- readRDS(counts_cache_file)
-        print(verification)
-    }
-    
-    # Generate training concentrations
-    cat("Generating training concentrations...\n")
-    train_concentrations <- generate_stratified_concentrations(args$n_train, cell_types)
-    cat("Generating evaluation concentrations...\n")
-    eval_concentrations <- generate_stratified_concentrations(args$n_eval, cell_types)
-    
-    # Create output directories
-    train_dir <- file.path(args$output_dir, "train")
-    eval_dir <- file.path(args$output_dir, "eval")
-    dir.create(train_dir, recursive=TRUE, showWarnings=FALSE)
-    dir.create(eval_dir, recursive=TRUE, showWarnings=FALSE)
-    
-    # Save initial concentration tables
-    cat("Saving initial concentration tables...\n")
-    fwrite(train_concentrations, file.path(args$output_dir, "train_concentrations.csv"))
-    fwrite(eval_concentrations, file.path(args$output_dir, "eval_concentrations.csv"))
-    
-    # Create base tmp directory
-    tmp_base_dir <- if(is.null(args$tmp_dir)) file.path(args$output_dir, "tmp") else args$tmp_dir
-    dir.create(tmp_base_dir, recursive=TRUE, showWarnings=FALSE)
-    
-    # Process training and evaluation sets
-    cat(sprintf("Processing %d training samples with %d threads...\n", args$n_train, args$threads))
-    process_batch(
-        train_concentrations, "train", train_dir, args$threads, 
-        tmp_base_dir, args$pat_dir, args$target_depth, reads_by_celltype, args$reps_per_combo
-    )
-    
-    cat(sprintf("Processing %d evaluation samples with %d threads...\n", args$n_eval, args$threads))
-    process_batch(
-        eval_concentrations, "eval", eval_dir, args$threads, 
-        tmp_base_dir, args$pat_dir, args$target_depth, reads_by_celltype, args$reps_per_combo
-    )
-    
-    # Final cleanup
-    unlink(tmp_base_dir, recursive=TRUE)
-    cat("Processing completed.\n")
+   # Parse arguments
+   parser <- OptionParser(option_list=option_list)
+   args <- parse_args(parser)
+   
+   # Check required arguments
+   if (is.null(args$pat_dir) || is.null(args$output_dir)) {
+       print_help(parser)
+       stop("Missing required arguments")
+   }
+   
+   if(is.null(args$tmp_dir)) {
+       args$tmp_dir <- paste0(args$output_dir, "/tmp")
+   }
+   
+   # Get list of cell types from pat_dir
+   cell_types <- gsub("\\.pat\\.gz$", "", list.files(args$pat_dir, pattern="\\.pat\\.gz$"))
+   cat("Found cell types:", paste(cell_types, collapse=", "), "\n")
+   
+   # Check for cached read counts or calculate them
+   counts_cache_file <- file.path(args$pat_dir, "read_counts.rds")
+   counts_cache_file_R <- file.path(args$pat_dir, "read_counts.RData")
+   
+   if (file.exists(counts_cache_file)) {
+       cat("Loading cached read counts...\n")
+       reads_by_celltype <- readRDS(counts_cache_file)
+       cat("Loaded data structure:\n")
+       str(reads_by_celltype)
+       
+       # Validate the cache
+       if (nrow(reads_by_celltype) != length(cell_types)) {
+           cat("Cache appears invalid, recalculating...\n")
+           reads_by_celltype <- read_count_table(args$pat_dir)
+       }
+   } else {
+       cat("Calculating read counts...\n")
+       reads_by_celltype <- read_count_table(args$pat_dir)
+       
+       cat("Object class:", class(reads_by_celltype), "\n")
+       cat("Object structure before saving:\n")
+       str(reads_by_celltype)
+       print(reads_by_celltype)
+       
+       cat("Saving count data...\n")
+       # Try both RDS and RData formats
+       saveRDS(data.table::copy(reads_by_celltype), counts_cache_file)
+       save(reads_by_celltype, file=counts_cache_file_R)
+       
+       # Verify what was saved
+       cat("Verifying RDS save:\n")
+       verification_rds <- readRDS(counts_cache_file)
+       str(verification_rds)
+       print(verification_rds)
+       
+       cat("Verifying RData save:\n")
+       verification_env <- new.env()
+       load(counts_cache_file_R, envir=verification_env)
+       str(verification_env$reads_by_celltype)
+       print(verification_env$reads_by_celltype)
+   }
+   
+   # Generate training concentrations
+   cat("Generating training concentrations...\n")
+   train_concentrations <- generate_stratified_concentrations(args$n_train, cell_types)
+   cat("Generating evaluation concentrations...\n")
+   eval_concentrations <- generate_stratified_concentrations(args$n_eval, cell_types)
+   
+   # Create output directories
+   train_dir <- file.path(args$output_dir, "train")
+   eval_dir <- file.path(args$output_dir, "eval")
+   dir.create(train_dir, recursive=TRUE, showWarnings=FALSE)
+   dir.create(eval_dir, recursive=TRUE, showWarnings=FALSE)
+   
+   # Save initial concentration tables
+   cat("Saving initial concentration tables...\n")
+   fwrite(train_concentrations, file.path(args$output_dir, "train_concentrations.csv"))
+   fwrite(eval_concentrations, file.path(args$output_dir, "eval_concentrations.csv"))
+   
+   # Create base tmp directory
+   tmp_base_dir <- if(is.null(args$tmp_dir)) file.path(args$output_dir, "tmp") else args$tmp_dir
+   dir.create(tmp_base_dir, recursive=TRUE, showWarnings=FALSE)
+   
+   # Process training and evaluation sets
+   cat(sprintf("Processing %d training samples with %d threads...\n", args$n_train, args$threads))
+   process_batch(train_concentrations, "train", train_dir, args$threads, 
+                tmp_base_dir, args$pat_dir, args$target_depth, reads_by_celltype, 
+                args$reps_per_combo)
+   
+   cat(sprintf("Processing %d evaluation samples with %d threads...\n", args$n_eval, args$threads))
+   process_batch(eval_concentrations, "eval", eval_dir, args$threads, 
+                tmp_base_dir, args$pat_dir, args$target_depth, reads_by_celltype,
+                args$reps_per_combo)
+   
+   # Final cleanup
+   unlink(tmp_base_dir, recursive=TRUE)
+   cat("Processing completed.\n")
 }
 
 if(sys.nframe() == 0) {
