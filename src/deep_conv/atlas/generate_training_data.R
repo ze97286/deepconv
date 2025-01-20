@@ -241,9 +241,11 @@ process_batch <- function(concentrations, prefix, out_dir, threads, tmp_base_dir
         tmp_dir <- file.path(tmp_base_dir, sprintf("tmp_%s_%d", prefix, i))
         dir.create(tmp_dir, recursive=TRUE, showWarnings=FALSE)
         
-        # Create concentration table
-        conc_table <- as.data.table(as.list(concentrations[i]))
-        conc_table[, celltype := names(concentrations[i])]
+        # Create concentration table properly
+        conc_table <- melt(concentrations[i], 
+                          measure.vars = names(concentrations),
+                          variable.name = "celltype",
+                          value.name = "fraction")
         
         # Generate mixture and its replicas serially
         generate_mixture(conc_table, reads_by_celltype, target_depth, 
