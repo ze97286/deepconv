@@ -3,10 +3,12 @@ suppressPackageStartupMessages({
     library(data.table)
     library(optparse)
     library(jsonlite)
+    library(doParallel)
 })
 
 # R_LIBS_USER=~/R/library Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/generate_training_data.R --pat_dir /users/zetzioni/sharedscratch/pat/snr_fixed.blood+gi+tum.l4/Song/celltypes --output_dir /users/zetzioni/sharedscratch/atlas/training --tmp_dir /users/zetzioni/sharedscratch/atlas/tmp --threads 5 --n_train 10 --n_eval 2
 
+# Helper function for Dirichlet sampling
 rdirichlet <- function(n, alpha) {
     # Generate gamma samples and normalize
     gamma_samples <- matrix(0, nrow=n, ncol=length(alpha))
@@ -34,10 +36,10 @@ option_list <- list(
     make_option(c("--n_eval"), type="integer", default=20000,
                 help="Number of evaluation samples to generate [default %default]"),
     make_option(c("--reps_per_combo"), type="integer", default=10,
-            help="Number of repetitions per combination [default %default]")                                         
+                help="Number of repetitions per combination [default %default]")
 )
 
-# Function to generate random concentrations following the python script's strategy
+# Function to generate random concentrations
 generate_stratified_concentrations <- function(n_samples, cell_types) {
     # Define proportion ranges similar to the Python script
     ranges <- list(
@@ -54,7 +56,6 @@ generate_stratified_concentrations <- function(n_samples, cell_types) {
     # Calculate samples per range
     for (range in ranges) {
         n_range_samples <- ceiling(n_samples * range$frac)
-        
         for (i in 1:n_range_samples) {
             # Randomly select number of cell types for this range
             n_types_in_range <- sample(1:max(2, n_cell_types %/% 2), 1)
@@ -96,6 +97,35 @@ generate_stratified_concentrations <- function(n_samples, cell_types) {
     return(concentrations)
 }
 
+# Function to process one batch of samples in parallel
+process_batch <- function(concentrations, prefix, out_dir, threads, tmp_base_dir) {
+    registerDoParallel(cores=threads)
+    
+    foreach(i=1:nrow(concentrations)) %dopar% {
+        # Create unique temp dir for this combination
+        tmp_dir <- file.path(tmp_base_dir, sprintf("tmp_%s_%d", prefix, i))
+        dir.create(tmp_dir, recursive=TRUE, showWarnings=FALSE)
+        
+        conc_json <- toJSON(as.list(concentrations[i]))
+        
+        # Call the admixing script
+        system2("Rscript", c(
+            "/users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/admix_pats.R",
+            "--pat_dir", args$pat_dir,
+            "--output_dir", out_dir,
+            "--tmp_dir", tmp_dir,
+            "--target_depth", args$target_depth,
+            "--threads", "1",  # Single thread here since we're parallel at combination level
+            "--concentrations", shQuote(conc_json),
+            "--prefix", paste0(prefix, "_", i),
+            "--repeats", args$reps_per_combo
+        ))
+        
+        # Cleanup temp directory after processing
+        unlink(tmp_dir, recursive=TRUE)
+    }
+}
+
 main <- function() {
     # Parse arguments
     parser <- OptionParser(option_list=option_list)
@@ -113,9 +143,12 @@ main <- function() {
     
     # Get list of cell types from pat_dir
     cell_types <- gsub("\\.pat\\.gz$", "", list.files(args$pat_dir, pattern="\\.pat\\.gz$"))
+    cat("Found cell types:", paste(cell_types, collapse=", "), "\n")
     
     # Generate training concentrations
+    cat("Generating training concentrations...\n")
     train_concentrations <- generate_stratified_concentrations(args$n_train, cell_types)
+    cat("Generating evaluation concentrations...\n")
     eval_concentrations <- generate_stratified_concentrations(args$n_eval, cell_types)
     
     # Create output directories
@@ -125,32 +158,24 @@ main <- function() {
     dir.create(eval_dir, recursive=TRUE, showWarnings=FALSE)
     
     # Save concentration ground truth
+    cat("Saving initial concentration tables...\n")
     fwrite(train_concentrations, file.path(args$output_dir, "train_concentrations.csv"))
     fwrite(eval_concentrations, file.path(args$output_dir, "eval_concentrations.csv"))
     
-    # Function to process one batch of samples
-    process_batch <- function(concentrations, prefix, out_dir) {
-        for (i in 1:nrow(concentrations)) {
-            conc_json <- toJSON(as.list(concentrations[i]))
-            
-            # Call the admixing script
-            system2("Rscript", c(
-                "deep_conv/atlas/admix_pats.R",
-                "--pat_dir", args$pat_dir,
-                "--output_dir", out_dir,
-                "--tmp_dir", args$tmp_dir,
-                "--target_depth", args$target_depth,
-                "--threads", args$threads,
-                "--concentrations", shQuote(conc_json),
-                "--prefix", paste0(prefix, "_", i),
-                "--repeats", args$reps_per_combo
-            ))
-        }
-    }
+    # Create base tmp directory
+    tmp_base_dir <- if(is.null(args$tmp_dir)) file.path(args$output_dir, "tmp") else args$tmp_dir
+    dir.create(tmp_base_dir, recursive=TRUE, showWarnings=FALSE)
     
     # Process training and evaluation sets
-    process_batch(train_concentrations, "train", train_dir)
-    process_batch(eval_concentrations, "eval", eval_dir)
+    cat(sprintf("Processing %d training samples with %d threads...\n", args$n_train, args$threads))
+    process_batch(train_concentrations, "train", train_dir, args$threads, tmp_base_dir)
+    
+    cat(sprintf("Processing %d evaluation samples with %d threads...\n", args$n_eval, args$threads))
+    process_batch(eval_concentrations, "eval", eval_dir, args$threads, tmp_base_dir)
+    
+    # Final cleanup
+    unlink(tmp_base_dir, recursive=TRUE)
+    cat("Processing completed.\n")
 }
 
 if(sys.nframe() == 0) {
