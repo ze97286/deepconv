@@ -1,12 +1,11 @@
 #!/usr/bin/env Rscript
+
 suppressPackageStartupMessages({
     library(data.table)
     library(optparse)
     library(jsonlite)
     library(doParallel)
 })
-
-# R_LIBS_USER=~/R/library Rscript /users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/generate_training_data.R --pat_dir /users/zetzioni/sharedscratch/pat/snr_fixed.blood+gi+tum.l4/Song/celltypes --output_dir /users/zetzioni/sharedscratch/atlas/training --tmp_dir /users/zetzioni/sharedscratch/atlas/tmp --threads 5 --n_train 10 --n_eval 2
 
 # Helper function for Dirichlet sampling
 rdirichlet <- function(n, alpha) {
@@ -38,6 +37,80 @@ option_list <- list(
     make_option(c("--reps_per_combo"), type="integer", default=10,
                 help="Number of repetitions per combination [default %default]")
 )
+
+# Function to read count table from pat files
+read_count_table <- function(patdir) {
+    # First check the directory exists
+    if (!dir.exists(patdir)) {
+        stop(sprintf("Directory does not exist: %s", patdir))
+    }
+
+    # List and check files
+    files <- list.files(patdir, pattern = ".*\\.pat\\.gz$", full.names = TRUE)
+    if (length(files) == 0) {
+        stop(sprintf("No .pat.gz files found in: %s", patdir))
+    }
+    
+    cat("Found files:\n")
+    print(files)
+    
+    # Assign names to files
+    names(files) <- gsub(".pat.gz", "", basename(files), fixed = TRUE)
+    
+    # Initialize list to store fragment counts
+    all_frags_list <- lapply(files, function(file_name) {
+        cat(sprintf("\nProcessing file: %s\n", file_name))
+        
+        # Check if file exists
+        if (!file.exists(file_name)) {
+            stop(sprintf("File does not exist: %s", file_name))
+        }
+        
+        # Check file size
+        file_info <- file.info(file_name)
+        if (file_info$size == 0) {
+            cat(sprintf("Skipping empty file: %s\n", file_name))
+            return(NULL)
+        }
+        
+        # Construct and run the command
+        cmd <- sprintf("zcat %s", shQuote(file_name))
+        cat(sprintf("Running command: %s\n", cmd))
+        
+        # Read the data using fread
+        data <- tryCatch({
+            fread(cmd = cmd, stringsAsFactors = TRUE, header = FALSE, select = 4)
+        }, error = function(e) {
+            warning(sprintf("Error reading file %s: %s", file_name, e$message))
+            return(NULL)
+        })
+        
+        if (is.null(data) || ncol(data) == 0) {
+            warning(sprintf("Failed to read data from: %s", file_name))
+            return(NULL)
+        }
+        
+        setnames(data, "V4", "counts")
+        total_counts <- sum(data$counts, na.rm = TRUE)
+        cat(sprintf("Total counts for %s: %d\n", file_name, total_counts))
+        return(total_counts)
+    })
+    
+    # Remove NULL entries
+    valid_indices <- !sapply(all_frags_list, is.null)
+    all_frags_list <- all_frags_list[valid_indices]
+    
+    if (length(all_frags_list) == 0) {
+        stop("No valid .pat.gz files were processed")
+    }
+    
+    all_frags <- data.table(
+        sample = names(all_frags_list),
+        fragments = unlist(all_frags_list)
+    )
+    
+    return(all_frags)
+}
 
 # Function to generate random concentrations
 generate_stratified_concentrations <- function(n_samples, cell_types) {
@@ -97,31 +170,85 @@ generate_stratified_concentrations <- function(n_samples, cell_types) {
     return(concentrations)
 }
 
-# Function to process one batch of samples in parallel
-process_batch <- function(concentrations, prefix, out_dir, threads, tmp_base_dir, pat_dir, target_depth, reps_per_combo) {
+# Function to generate a single mixture and its replicas
+generate_mixture <- function(conc_table, reads_by_celltype, target_depth, prefix, tmp_dir, out_dir, pat_dir, reps_per_combo) {
+   # Setup target dilutions once for all replicas
+   setkey(conc_table, celltype)
+   setkey(reads_by_celltype, sample)
+   
+   target_dilutions <- conc_table[reads_by_celltype, nomatch=NULL][
+       , list(celltype, filename=file.path(pat_dir, paste0(celltype, ".pat.gz")), 
+             fraction=target_depth * fraction/fragments)
+   ]
+   
+   # Process each replica serially
+   for (rep in 1:reps_per_combo) {
+       rep_prefix <- paste0(prefix, "_", rep)
+       
+       # Create separate temp directory for each replica
+       rep_tmp_dir <- file.path(tmp_dir, sprintf("rep_%d", rep))
+       dir.create(rep_tmp_dir, recursive=TRUE, showWarnings=FALSE)
+       
+       # Sample from each cell type
+       for (ct in target_dilutions$celltype) {
+           sub.dt <- target_dilutions[celltype == ct]
+           # Generate sampled pat file
+           cmd <- sprintf('"/users/zetzioni/sharedscratch/pattools sample -s %.8f %s | bgzip -c > %s/%s_%s.pat.gz"',
+                         sub.dt$fraction, sub.dt$filename, rep_tmp_dir, rep_prefix, ct)
+           result <- system2("sh", c("-c", cmd))
+           if (result != 0) {
+               stop(sprintf("Failed to sample reads for %s in replica %d", ct, rep))
+           }
+       }
+       
+       # Merge pat files for this replica
+       out_file <- file.path(out_dir, paste0(rep_prefix, ".pat.gz"))
+       system2("sh", c("-c", paste0(
+           '"zcat ', rep_tmp_dir, '/', rep_prefix, '_*.pat.gz | ',
+           'sort -k1,1V -k2,2n -k3,3 | ',
+           'perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | ',
+           'bgzip -c > ', out_file,
+           '; tabix -s 1 -b 2 -e 2 -C ', out_file, '"'
+       )))
+       
+       # Calculate and save true concentrations for this replica
+       counts <- lapply(target_dilutions$celltype, function(ct) {
+           tmp_file <- file.path(rep_tmp_dir, paste0(rep_prefix, "_", ct, ".pat.gz"))
+           cmd <- sprintf("zcat %s | wc -l", tmp_file)
+           count <- as.numeric(system2("sh", c("-c", cmd), stdout=TRUE))
+           data.table(celltype=ct, count=count)
+       })
+       counts <- rbindlist(counts)
+       
+       total_reads <- sum(counts$count)
+       counts[, true_concentration := count/total_reads]
+       
+       wide_counts <- dcast(counts, . ~ celltype, value.var = "true_concentration")
+       wide_counts[, `:=`(. = NULL, sample = rep_prefix)]
+       fwrite(wide_counts, file.path(out_dir, paste0(rep_prefix, "_true_concentrations.csv")))
+       
+       # Cleanup this replica's temp files
+       unlink(rep_tmp_dir, recursive=TRUE)
+   }
+}
+
+# Function to process a batch of samples in parallel
+# Inside process_batch:
+process_batch <- function(concentrations, prefix, out_dir, threads, tmp_base_dir, pat_dir, target_depth, reads_by_celltype, reps_per_combo) {
     registerDoParallel(cores=threads)
     
     foreach(i=1:nrow(concentrations)) %dopar% {
-        # Create unique temp dir for this combination
         tmp_dir <- file.path(tmp_base_dir, sprintf("tmp_%s_%d", prefix, i))
         dir.create(tmp_dir, recursive=TRUE, showWarnings=FALSE)
         
-        conc_json <- toJSON(as.list(concentrations[i]))
+        # Create concentration table
+        conc_table <- as.data.table(as.list(concentrations[i]))
+        conc_table[, celltype := names(concentrations[i])]
         
-        # Call the admixing script
-        system2("Rscript", c(
-            "/users/zetzioni/sharedscratch/deepconv/src/deep_conv/atlas/admix_pats.R",
-            "--pat_dir", pat_dir,
-            "--output_dir", out_dir,
-            "--tmp_dir", tmp_dir,
-            "--target_depth", target_depth,
-            "--threads", "1",  # Single thread here since we're parallel at combination level
-            "--concentrations", shQuote(conc_json),
-            "--prefix", paste0(prefix, "_", i),
-            "--repeats", reps_per_combo
-        ))
+        # Generate mixture and its replicas serially
+        generate_mixture(conc_table, reads_by_celltype, target_depth, 
+                       paste0(prefix, "_", i), tmp_dir, out_dir, pat_dir, reps_per_combo)
         
-        # Cleanup temp directory after processing
         unlink(tmp_dir, recursive=TRUE)
     }
 }
@@ -145,6 +272,10 @@ main <- function() {
     cell_types <- gsub("\\.pat\\.gz$", "", list.files(args$pat_dir, pattern="\\.pat\\.gz$"))
     cat("Found cell types:", paste(cell_types, collapse=", "), "\n")
     
+    # Read counts once at the start
+    cat("Reading counts from pat files...\n")
+    reads_by_celltype <- read_count_table(args$pat_dir)
+    
     # Generate training concentrations
     cat("Generating training concentrations...\n")
     train_concentrations <- generate_stratified_concentrations(args$n_train, cell_types)
@@ -157,7 +288,7 @@ main <- function() {
     dir.create(train_dir, recursive=TRUE, showWarnings=FALSE)
     dir.create(eval_dir, recursive=TRUE, showWarnings=FALSE)
     
-    # Save concentration ground truth
+    # Save initial concentration tables
     cat("Saving initial concentration tables...\n")
     fwrite(train_concentrations, file.path(args$output_dir, "train_concentrations.csv"))
     fwrite(eval_concentrations, file.path(args$output_dir, "eval_concentrations.csv"))
@@ -169,14 +300,14 @@ main <- function() {
     # Process training and evaluation sets
     cat(sprintf("Processing %d training samples with %d threads...\n", args$n_train, args$threads))
     process_batch(
-        train_concentrations, "train", train_dir, args$threads, tmp_base_dir,
-        args$pat_dir, args$target_depth, args$reps_per_combo
+        train_concentrations, "train", train_dir, args$threads, 
+        tmp_base_dir, args$pat_dir, args$target_depth, reads_by_celltype, args$reps_per_combo
     )
     
     cat(sprintf("Processing %d evaluation samples with %d threads...\n", args$n_eval, args$threads))
     process_batch(
-        eval_concentrations, "eval", eval_dir, args$threads, tmp_base_dir,
-        args$pat_dir, args$target_depth, args$reps_per_combo
+        eval_concentrations, "eval", eval_dir, args$threads, 
+        tmp_base_dir, args$pat_dir, args$target_depth, reads_by_celltype, args$reps_per_combo
     )
     
     # Final cleanup
