@@ -171,111 +171,129 @@ generate_stratified_concentrations <- function(n_samples, cell_types) {
 }
 
 # Function to generate a single mixture and its replicas
+# Function to generate a single mixture and its replicas
 generate_mixture <- function(conc_table, reads_by_celltype, target_depth, prefix, tmp_dir, out_dir, pat_dir, reps_per_combo) {
-    setkey(conc_table, celltype)
-    setkey(reads_by_celltype, sample)
-    
-    target_dilutions <- conc_table[reads_by_celltype, nomatch=NULL][
-        , list(celltype, filename=file.path(pat_dir, paste0(celltype, ".pat.gz")), 
-              fraction=target_depth * fraction/fragments)
-    ]
-    
-    for (rep in 1:reps_per_combo) {
-        tryCatch({
-            rep_prefix <- paste0(prefix, "_", rep)
-            rep_tmp_dir <- file.path(tmp_dir, sprintf("rep_%d", rep))
-            dir.create(rep_tmp_dir, recursive=TRUE, showWarnings=FALSE)
-            
-            cat(sprintf("Processing replica %d for %s\n", rep, prefix))
-            
-            # Sample from each cell type
-            for (ct in target_dilutions$celltype) {
-                sub.dt <- target_dilutions[celltype == ct]
-                sample_cmd <- sprintf('"/users/zetzioni/sharedscratch/pattools sample -s %.8f %s | bgzip -c > %s/%s_%s.pat.gz"',
-                                    sub.dt$fraction, sub.dt$filename, rep_tmp_dir, rep_prefix, ct)
-                cat(sprintf("Running sample command for %s\n", ct))
-                result <- system2("sh", c("-c", sample_cmd), stderr=TRUE)
-                if (!is.null(attr(result, "status")) && attr(result, "status") != 0) {
-                    stop(sprintf("Failed to sample reads for %s: %s", ct, paste(result, collapse="\n")))
-                }
-            }
-            
-            temp_files <- list.files(rep_tmp_dir, pattern=paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names=TRUE)
-            cat(sprintf("Temp files before merge (%s):\n", rep_tmp_dir))
-            for (f in temp_files) {
-                size <- file.info(f)$size
-                cat(sprintf("%s: %d bytes\n", basename(f), size))
-            }
-            # Merge files - step by step with checks
-            out_file <- file.path(out_dir, paste0(rep_prefix, ".pat.gz"))
-            cat("Merging files...\n")
-            
-            # 1. First just try zcat to check files are readable
-            zcat_check <- sprintf('zcat %s/%s_*.pat.gz | head -n 5', rep_tmp_dir, rep_prefix)
-            cat("Checking zcat...\n")
-            result <- system2("sh", c("-c", zcat_check), stdout=TRUE, stderr=TRUE)
-            cat(sprintf("zcat check result: %s\n", paste(result, collapse="\n")))
-            
-            # 2. Try sort separately
-            sort_check <- sprintf('zcat %s/%s_*.pat.gz | sort -k1,1V -k2,2n -k3,3 | head -n 5', 
-                                rep_tmp_dir, rep_prefix)
-            cat("Checking sort...\n")
-            result <- system2("sh", c("-c", sort_check), stdout=TRUE, stderr=TRUE)
-            cat(sprintf("sort check result: %s\n", paste(result, collapse="\n")))
-            
-            # 3. Full command but with error capture
-            full_cmd <- sprintf('zcat %s/%s_*.pat.gz | sort -k1,1V -k2,2n -k3,3 | perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s',
-                              rep_tmp_dir, rep_prefix, out_file)
-            cat(sprintf("Running full merge: %s\n", full_cmd))
-            result <- system2("sh", c("-c", full_cmd), stdout=TRUE, stderr=TRUE)
-            cat(sprintf("Full merge result: %s\n", paste(result, collapse="\n")))
-            
-            # 4. Check output file
-            if (file.exists(out_file)) {
-                size <- file.info(out_file)$size
-                cat(sprintf("Output file size: %d bytes\n", size))
-                if (size == 0) {
-                    stop("Output file is empty")
-                }
-            } else {
-                stop("Output file was not created")
-            }
-            
-            # Calculate true concentrations
-            cat("Calculating true concentrations...\n")
-            counts <- lapply(target_dilutions$celltype, function(ct) {
-                tmp_file <- file.path(rep_tmp_dir, paste0(rep_prefix, "_", ct, ".pat.gz"))
-                count_cmd <- sprintf("zcat %s | wc -l", tmp_file)
-                count <- as.numeric(system2("sh", c("-c", count_cmd), stdout=TRUE))
-                data.table(celltype=ct, count=count)
-            })
-            counts <- rbindlist(counts)
-            
-            total_reads <- sum(counts$count)
-            counts[, true_concentration := count/total_reads]
-            
-            wide_counts <- dcast(counts, . ~ celltype, value.var = "true_concentration")
-            wide_counts[, `:=`(. = NULL, sample = rep_prefix)]
-            
-            # Save true concentrations with explicit error handling
-            true_conc_file <- file.path(out_dir, paste0(rep_prefix, "_true_concentrations.csv"))
-            cat(sprintf("Saving true concentrations to: %s\n", true_conc_file))
-            fwrite(wide_counts, true_conc_file)
-            cat(sprintf("Completed replica %d for %s\n", rep, prefix))
-            
-        }, error = function(e) {
-            cat(sprintf("Error in replica %d: %s\n", rep, e$message))
-            if (file.exists(rep_tmp_dir)) {
-                unlink(rep_tmp_dir, recursive=TRUE)
-            }
-            stop(e$message)  # Re-throw to handle in outer error handler
-        })
-        
-        # Cleanup only if successful
-        if (file.exists(rep_tmp_dir)) {
-            unlink(rep_tmp_dir, recursive=TRUE)
-        }
-    }
+   # Check write permissions
+   cat(sprintf("Checking write permissions:\n"))
+   cat(sprintf("tmp_dir: %s, writable: %s\n", tmp_dir, file.access(tmp_dir, mode=2) == 0))
+   cat(sprintf("out_dir: %s, writable: %s\n", out_dir, file.access(out_dir, mode=2) == 0))
+   
+   # Setup target dilutions once for all replicas
+   setkey(conc_table, celltype)
+   setkey(reads_by_celltype, sample)
+   
+   target_dilutions <- conc_table[reads_by_celltype, nomatch=NULL][
+       , list(celltype, filename=file.path(pat_dir, paste0(celltype, ".pat.gz")), 
+             fraction=target_depth * fraction/fragments)
+   ]
+   
+   # Process each replica serially
+   for (rep in 1:reps_per_combo) {
+       tryCatch({
+           rep_prefix <- paste0(prefix, "_", rep)
+           rep_tmp_dir <- file.path(tmp_dir, sprintf("rep_%d", rep))
+           dir.create(rep_tmp_dir, recursive=TRUE, showWarnings=FALSE)
+           
+           cat(sprintf("Processing replica %d for %s\n", rep, prefix))
+           
+           # Sample from each cell type
+           for (ct in target_dilutions$celltype) {
+               sub.dt <- target_dilutions[celltype == ct]
+               # Generate sampled pat file
+               cmd <- sprintf('"/users/zetzioni/sharedscratch/pattools sample -s %.8f %s | bgzip -c > %s/%s_%s.pat.gz"',
+                            sub.dt$fraction, sub.dt$filename, rep_tmp_dir, rep_prefix, ct)
+               cat(sprintf("Running sample command for %s\n", ct))
+               result <- system2("sh", c("-c", cmd))
+               if (result != 0) {
+                   stop(sprintf("Failed to sample reads for %s in replica %d", ct, rep))
+               }
+           }
+           
+           # Check temp files before merge
+           temp_files <- list.files(rep_tmp_dir, pattern=paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names=TRUE)
+           cat(sprintf("Temp files before merge (%s):\n", rep_tmp_dir))
+           for (f in temp_files) {
+               size <- file.info(f)$size
+               cat(sprintf("%s: %d bytes\n", basename(f), size))
+           }
+           
+           # Merge files - step by step without piping
+           out_file <- file.path(out_dir, paste0(rep_prefix, ".pat.gz"))
+           merged_temp <- file.path(rep_tmp_dir, "merged.tmp")
+           sorted_temp <- file.path(rep_tmp_dir, "sorted.tmp")
+           
+           # 1. First zcat all files to a temp file
+           zcat_cmd <- sprintf('zcat %s/%s_*.pat.gz > %s', rep_tmp_dir, rep_prefix, merged_temp)
+           cat(sprintf("Running zcat: %s\n", zcat_cmd))
+           result <- system2("sh", c("-c", zcat_cmd))
+           if (result != 0) stop("zcat failed")
+           
+           # Check intermediate file
+           cat(sprintf("Merged temp file size: %d\n", file.info(merged_temp)$size))
+           
+           # 2. Sort to another temp file
+           sort_cmd <- sprintf('sort -k1,1V -k2,2n -k3,3 %s > %s', merged_temp, sorted_temp)
+           cat(sprintf("Running sort: %s\n", sort_cmd))
+           result <- system2("sh", c("-c", sort_cmd))
+           if (result != 0) stop("sort failed")
+           
+           # Check intermediate file
+           cat(sprintf("Sorted temp file size: %d\n", file.info(sorted_temp)$size))
+           
+           # 3. Deduplicate and compress
+           dedup_cmd <- sprintf('cat %s | perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s',
+                              sorted_temp, out_file)
+           cat(sprintf("Running deduplicate and compress: %s\n", dedup_cmd))
+           result <- system2("sh", c("-c", dedup_cmd))
+           if (result != 0) stop("deduplicate/compress failed")
+           
+           # Check output file
+           if (!file.exists(out_file) || file.info(out_file)$size == 0) {
+               stop(sprintf("Final output file %s is empty or missing", out_file))
+           }
+           
+           # 4. Index
+           index_cmd <- sprintf('tabix -s 1 -b 2 -e 2 -C %s', out_file)
+           result <- system2("sh", c("-c", index_cmd))
+           if (result != 0) stop("indexing failed")
+           
+           # Calculate and save true concentrations
+           counts <- lapply(target_dilutions$celltype, function(ct) {
+               tmp_file <- file.path(rep_tmp_dir, paste0(rep_prefix, "_", ct, ".pat.gz"))
+               cmd <- sprintf("zcat %s | wc -l", tmp_file)
+               count <- as.numeric(system2("sh", c("-c", cmd), stdout=TRUE))
+               data.table(celltype=ct, count=count)
+           })
+           counts <- rbindlist(counts)
+           
+           total_reads <- sum(counts$count)
+           counts[, true_concentration := count/total_reads]
+           
+           wide_counts <- dcast(counts, . ~ celltype, value.var = "true_concentration")
+           wide_counts[, `:=`(. = NULL, sample = rep_prefix)]
+           
+           # Save true concentrations with explicit error handling
+           true_conc_file <- file.path(out_dir, paste0(rep_prefix, "_true_concentrations.csv"))
+           cat(sprintf("Saving true concentrations to: %s\n", true_conc_file))
+           fwrite(wide_counts, true_conc_file)
+           cat(sprintf("Completed replica %d for %s\n", rep, prefix))
+           
+           # Cleanup intermediate files
+           unlink(c(merged_temp, sorted_temp))
+           
+       }, error = function(e) {
+           cat(sprintf("Error in replica %d: %s\n", rep, e$message))
+           if (file.exists(rep_tmp_dir)) {
+               unlink(rep_tmp_dir, recursive=TRUE)
+           }
+           stop(e$message)
+       })
+       
+       # Cleanup only if successful
+       if (file.exists(rep_tmp_dir)) {
+           unlink(rep_tmp_dir, recursive=TRUE)
+       }
+   }
 }
 
 # Function to process a batch of samples in parallel
@@ -336,9 +354,16 @@ main <- function() {
     cell_types <- gsub("\\.pat\\.gz$", "", list.files(args$pat_dir, pattern="\\.pat\\.gz$"))
     cat("Found cell types:", paste(cell_types, collapse=", "), "\n")
     
-    # Read counts once at the start
-    cat("Reading counts from pat files...\n")
-    reads_by_celltype <- read_count_table(args$pat_dir)
+    # Check for cached read counts or calculate them
+    counts_cache_file <- file.path(args$pat_dir, "read_counts.rds")
+    if (file.exists(counts_cache_file)) {
+        cat("Loading cached read counts...\n")
+        reads_by_celltype <- readRDS(counts_cache_file)
+    } else {
+        cat("Calculating read counts...\n")
+        reads_by_celltype <- read_count_table(args$pat_dir)
+        saveRDS(reads_by_celltype, counts_cache_file)
+    }
     
     # Generate training concentrations
     cat("Generating training concentrations...\n")

@@ -4,7 +4,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
-from deep_conv.deconvolution.preprocess_pats import pats_to_homog
 from deep_conv.benchmark.benchmark_utils import *
 from deep_conv.benchmark.nnls import run_weighted_nnls
 from tqdm import tqdm
@@ -12,6 +11,7 @@ import torch.nn.functional as F
 import random
 import os
 import pywt
+from deep_conv.atlasbuilder.find_marker_candidates import *
 
 
 class TissueDeconvolutionDataset(Dataset):
@@ -254,17 +254,137 @@ def train_and_eval(training_path, num_threads, output_path):
     log_metrics(nnls_eval_metrics)
     return model, data
     
+def process_pat_file_with_name(regions_df, pat_file, min_cpgs):
+    return {'file': pat_file.name, 'result': process_pat_file(pat_file=pat_file, min_cpgs=min_cpgs, regions_df=regions_df)}
 
-def evaluate_cell_type_concentration(atlas_path, model, wgbs_tools_exec_path, mixed_path, cell_type, data, output_path):
+
+def create_marker_matrices(atlas_path: str, pat_dir: str, min_cpgs: int, threads=4) -> tuple[pd.DataFrame, pd.DataFrame]:
+   """
+   Create marker values matrix and coverage matrix from atlas markers and pat files.
+   
+   Args:
+       atlas_path: Path to atlas file containing markers
+       pat_dir: Directory containing pat files
+       min_cpgs: Minimum CpGs required for overlap
+   
+   Returns:
+       tuple of (marker_matrix, coverage_matrix) where:
+       - Rows are markers from atlas
+       - First columns are name, direction
+       - Remaining columns are values/coverage for each pat file
+   """
+   # Read atlas
+   print(f"Loading markers from {atlas_path}...")
+   markers_df = pd.read_csv(atlas_path, sep='\t')
+   # Get pat files
+   pat_files = list(Path(pat_dir).glob('*.pat.gz'))
+   print(f"Found {len(pat_files)} pat files in {pat_dir}")
+   with mp.Pool(threads) as pool:
+        process_func = partial(process_pat_file_with_name, markers_df, min_cpgs=min_cpgs)
+        results = list(tqdm(
+            pool.imap(process_func, pat_files),
+            total=len(pat_files),
+            desc="Processing pat files"
+        ))
+    # Sort results by filename
+   results = sorted(results, key=lambda x: x['file'])  # or key=lambda x: x[0] if using tuples
+    # If you need just the results in order:
+   results = [r['result'] for r in results]
+   # Create base matrix with name and direction
+   base_df = markers_df[['name', 'direction']]
+   # Build matrices
+   marker_matrix = base_df.copy()
+   coverage_matrix = base_df.copy()
+   for uxm_df, coverage_df, cell_type in results:
+       # Add columns for this pat file's values
+       marker_matrix[cell_type] = pd.merge(
+           base_df, 
+           uxm_df[['name', 'direction', 'value']], 
+           on=['name', 'direction'], 
+           how='left'
+       )['value']
+       coverage_matrix[cell_type] = pd.merge(
+           base_df, 
+           coverage_df[['name', 'direction', 'value']], 
+           on=['name', 'direction'], 
+           how='left'
+       )['value'].fillna(0)
+   
+   return marker_matrix, coverage_matrix
+
+
+def generate_mixture_from_atlas(marker_matrix: pd.DataFrame, mixture_props: dict, n_samples: int = 1000,
+                              coverage_mean: float = 10, coverage_std: float = 5, 
+                              base_noise_std: float = 0.02):
+    """
+    Generate more realistic mixture data from atlas.
+    
+    Args:
+        marker_matrix: DataFrame with markers' UXM values for each cell type
+        mixture_props: Dictionary of cell type -> proportion
+        n_samples: Number of mixture samples to generate
+        coverage_mean: Mean coverage to simulate
+        coverage_std: Standard deviation of coverage
+        base_noise_std: Base level of noise
+    """
+    mixture_markers = marker_matrix[['name', 'direction']].copy()
+    mixture_coverage = marker_matrix[['name', 'direction']].copy()
+    
+    # Calculate base mixed values
+    marker_values = np.zeros(len(marker_matrix))
+    
+    # Add concentration-dependent effects
+    for cell_type, prop in mixture_props.items():
+        cell_values = marker_matrix[cell_type].values
+        
+        # Add non-linear effect at low concentrations
+        if prop < 0.02:  # For concentrations below 2%
+            # Reduce effective signal and increase noise
+            effective_prop = prop * (0.8 + 0.2 * np.random.random())  # Random reduction 20-40%
+            noise_multiplier = 1 + (0.02 - prop) * 10  # More noise at lower concentrations
+        else:
+            effective_prop = prop
+            noise_multiplier = 1
+            
+        # Add cell-type specific noise
+        cell_noise = np.random.normal(0, base_noise_std * noise_multiplier, size=len(cell_values))
+        marker_values += cell_values * effective_prop + cell_noise
+    
+    # Generate n_samples with varying noise levels
+    for i in range(n_samples):
+        # Add marker-specific noise (some markers are noisier than others)
+        marker_noise = np.random.normal(0, base_noise_std, size=len(marker_values))
+        marker_noise *= (1 + np.random.random(size=len(marker_values)))  # Varying noise per marker
+        
+        noisy_values = marker_values + marker_noise
+        
+        # Add background interference
+        background = np.random.normal(0.02, 0.01, size=len(marker_values))  # Base background level
+        background *= (1 + np.random.random(size=len(marker_values)) * 0.5)  # Varying background
+        noisy_values += background
+        
+        # Clip to valid range [0,1]
+        noisy_values = np.clip(noisy_values, 0, 1)
+        
+        mixture_markers[f'mixture_{i+1}'] = noisy_values
+        
+        # Generate coverage with more realistic distribution
+        coverage = np.random.negative_binomial(n=coverage_mean, p=0.5, size=len(marker_values))
+        mixture_coverage[f'mixture_{i+1}'] = coverage
+    
+    return mixture_markers, mixture_coverage
+
+
+def evaluate_cell_type_concentration(atlas_path, model, mixed_path, cell_type, data, output_path):
     atlas = pd.read_csv(atlas_path,sep="\t").dropna()
     atlas = atlas.drop_duplicates(atlas.columns[8:]).dropna()
     atlas_names = set(atlas.name.unique())
-    cell_type_index = atlas_names.index(cell_type)
-    marker_read_proportions, counts = pats_to_homog(atlas_path,mixed_path, wgbs_tools_exec_path)
+    cell_type_index = list(atlas.columns[8:]).index(cell_type)
+    marker_read_proportions, counts = create_marker_matrices(atlas_path,mixed_path, min_cpgs=4, threads=4)
     counts = counts[counts.name.isin(atlas_names)]
     marker_read_proportions = marker_read_proportions[marker_read_proportions.name.isin(atlas_names)]
-    marker_read_proportions = marker_read_proportions.drop(columns=["name", "direction"])[columns()].T.to_numpy()
-    counts = counts.drop(columns=["name", "direction"])[columns()].T.to_numpy()
+    marker_read_proportions = marker_read_proportions.drop(columns=["name", "direction"]).T.to_numpy()
+    counts = counts.drop(columns=["name", "direction"]).T.to_numpy()
     estimated_val = predict(model, marker_read_proportions, counts)
     cell_type_contribution = estimated_val[:, cell_type_index]
     results_df = pd.DataFrame({"dilution": dilutions(), "contribution": cell_type_contribution})
@@ -273,6 +393,7 @@ def evaluate_cell_type_concentration(atlas_path, model, wgbs_tools_exec_path, mi
     os.makedirs(output_path+cell_type, exist_ok=True)
     all_predictions_df = pd.DataFrame(estimated_val,columns=data['cell_types'],index=columns())
     plot_dilution_results(results_df, cell_type, all_predictions_df, output_path+cell_type)
+    
     nnls_estimation = run_weighted_nnls(marker_read_proportions, counts, data['reference_profiles'])
     cell_type_contribution = nnls_estimation[:, cell_type_index]
     results_df = pd.DataFrame({"dilution": dilutions(), "contribution": cell_type_contribution})
@@ -296,21 +417,20 @@ def main():
     evaluate_cell_type_concentration(
         atlas_path=args.atlas_path, 
         model=model, 
-        wgbs_tools_exec_path=args.wgbs_tools_exec_path, 
         mixed_path=cd4_pats_path, 
         cell_type="CD4-T-cells", 
         output_path=args.output_path,
         data=data
     )
-    evaluate_cell_type_concentration(
-        atlas_path=args.atlas_path, 
-        model=model, 
-        wgbs_tools_exec_path=args.wgbs_tools_exec_path, 
-        mixed_path=cd8_pats_path, 
-        cell_type="CD8-T-cells", 
-        output_path=args.output_path,
-        data=data
-    )
+    # evaluate_cell_type_concentration(
+    #     atlas_path=args.atlas_path, 
+    #     model=model, 
+    #     wgbs_tools_exec_path=args.wgbs_tools_exec_path, 
+    #     mixed_path=cd8_pats_path, 
+    #     cell_type="CD8-T-cells", 
+    #     output_path=args.output_path,
+    #     data=data
+    # )
 
 
 if __name__ == "__main__":    
