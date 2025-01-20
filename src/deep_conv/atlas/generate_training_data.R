@@ -200,28 +200,45 @@ generate_mixture <- function(conc_table, reads_by_celltype, target_depth, prefix
                 }
             }
             
-            # Merge pat files - break into steps
+            temp_files <- list.files(rep_tmp_dir, pattern=paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names=TRUE)
+            cat(sprintf("Temp files before merge (%s):\n", rep_tmp_dir))
+            for (f in temp_files) {
+                size <- file.info(f)$size
+                cat(sprintf("%s: %d bytes\n", basename(f), size))
+            }
+            # Merge files - step by step with checks
             out_file <- file.path(out_dir, paste0(rep_prefix, ".pat.gz"))
             cat("Merging files...\n")
             
-            # 1. zcat and sort
-            zcat_cmd <- sprintf('zcat %s/%s_*.pat.gz | sort -k1,1V -k2,2n -k3,3', rep_tmp_dir, rep_prefix)
-            # 2. deduplicate and compress
-            dedup_cmd <- sprintf('perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s', out_file)
+            # 1. First just try zcat to check files are readable
+            zcat_check <- sprintf('zcat %s/%s_*.pat.gz | head -n 5', rep_tmp_dir, rep_prefix)
+            cat("Checking zcat...\n")
+            result <- system2("sh", c("-c", zcat_check), stdout=TRUE, stderr=TRUE)
+            cat(sprintf("zcat check result: %s\n", paste(result, collapse="\n")))
             
-            full_cmd <- paste(zcat_cmd, "|", dedup_cmd)
-            cat(sprintf("Running merge: %s\n", full_cmd))
-            result <- system2("sh", c("-c", full_cmd), stderr=TRUE)
-            if (!is.null(attr(result, "status")) && attr(result, "status") != 0) {
-                stop(sprintf("Failed to merge files: %s", paste(result, collapse="\n")))
-            }
+            # 2. Try sort separately
+            sort_check <- sprintf('zcat %s/%s_*.pat.gz | sort -k1,1V -k2,2n -k3,3 | head -n 5', 
+                                rep_tmp_dir, rep_prefix)
+            cat("Checking sort...\n")
+            result <- system2("sh", c("-c", sort_check), stdout=TRUE, stderr=TRUE)
+            cat(sprintf("sort check result: %s\n", paste(result, collapse="\n")))
             
-            # 3. Index separately
-            cat("Indexing...\n")
-            index_cmd <- sprintf('tabix -s 1 -b 2 -e 2 -C %s', out_file)
-            result <- system2("sh", c("-c", index_cmd), stderr=TRUE)
-            if (!is.null(attr(result, "status")) && attr(result, "status") != 0) {
-                stop(sprintf("Failed to index: %s", paste(result, collapse="\n")))
+            # 3. Full command but with error capture
+            full_cmd <- sprintf('zcat %s/%s_*.pat.gz | sort -k1,1V -k2,2n -k3,3 | perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s',
+                              rep_tmp_dir, rep_prefix, out_file)
+            cat(sprintf("Running full merge: %s\n", full_cmd))
+            result <- system2("sh", c("-c", full_cmd), stdout=TRUE, stderr=TRUE)
+            cat(sprintf("Full merge result: %s\n", paste(result, collapse="\n")))
+            
+            # 4. Check output file
+            if (file.exists(out_file)) {
+                size <- file.info(out_file)$size
+                cat(sprintf("Output file size: %d bytes\n", size))
+                if (size == 0) {
+                    stop("Output file is empty")
+                }
+            } else {
+                stop("Output file was not created")
             }
             
             # Calculate true concentrations
