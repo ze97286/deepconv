@@ -359,10 +359,19 @@ main <- function() {
     if (file.exists(counts_cache_file)) {
         cat("Loading cached read counts...\n")
         reads_by_celltype <- readRDS(counts_cache_file)
+        cat("Loaded counts:\n")
+        print(reads_by_celltype)  # See what we loaded
     } else {
         cat("Calculating read counts...\n")
         reads_by_celltype <- read_count_table(args$pat_dir)
+        cat("Calculated counts to be saved:\n")
+        print(reads_by_celltype)  # See what we're about to save
         saveRDS(reads_by_celltype, counts_cache_file)
+        
+        # Verify what was saved
+        cat("Verifying saved data:\n")
+        verification <- readRDS(counts_cache_file)
+        print(verification)
     }
     
     # Generate training concentrations
