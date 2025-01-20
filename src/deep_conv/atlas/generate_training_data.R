@@ -359,46 +359,14 @@ main <- function() {
    
    # Check for cached read counts or calculate them
    counts_cache_file <- file.path(args$pat_dir, "read_counts.rds")
-   counts_cache_file_R <- file.path(args$pat_dir, "read_counts.RData")
-   
    if (file.exists(counts_cache_file)) {
        cat("Loading cached read counts...\n")
        reads_by_celltype <- readRDS(counts_cache_file)
-       cat("Loaded data structure:\n")
-       str(reads_by_celltype)
-       
-       # Validate the cache
-       if (nrow(reads_by_celltype) != length(cell_types)) {
-           cat("Cache appears invalid, recalculating...\n")
-           reads_by_celltype <- read_count_table(args$pat_dir)
-       }
    } else {
        cat("Calculating read counts...\n")
        reads_by_celltype <- read_count_table(args$pat_dir)
-       
-       cat("Object class:", class(reads_by_celltype), "\n")
-       cat("Object structure before saving:\n")
-       str(reads_by_celltype)
-       print(reads_by_celltype)
-       
-       cat("Saving count data...\n")
-       # Try both RDS and RData formats
-       saveRDS(data.table::copy(reads_by_celltype), counts_cache_file)
-       save(reads_by_celltype, file=counts_cache_file_R)
-       
-       # Verify what was saved
-       cat("Verifying RDS save:\n")
-       verification_rds <- readRDS(counts_cache_file)
-       str(verification_rds)
-       print(verification_rds)
-       
-       cat("Verifying RData save:\n")
-       verification_env <- new.env()
-       load(counts_cache_file_R, envir=verification_env)
-       str(verification_env$reads_by_celltype)
-       print(verification_env$reads_by_celltype)
+       saveRDS(reads_by_celltype, counts_cache_file)
    }
-   
    # Generate training concentrations
    cat("Generating training concentrations...\n")
    train_concentrations <- generate_stratified_concentrations(args$n_train, cell_types)
