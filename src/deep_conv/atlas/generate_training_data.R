@@ -197,59 +197,17 @@ generate_samples <- function(conc_table, reads_by_celltype, target_depth, prefix
 merge_pat_files <- function(prefix, rep, tmp_dir, out_dir) {
     rep_prefix <- paste0(prefix, "_", rep)
     out_file <- file.path(out_dir, paste0(rep_prefix, ".pat.gz"))
-    merged_temp <- file.path(tmp_dir, paste0("merged_", rep, ".tmp"))
-    sorted_temp <- file.path(tmp_dir, paste0("sorted_", rep, ".tmp"))
     
-    # Create a temporary file list for zcat
-    files_list <- file.path(tmp_dir, "files_to_merge.txt")
-    pat_files <- list.files(tmp_dir, pattern = paste0(rep_prefix, "_.*\\.pat\\.gz$"), full.names = TRUE)
-    writeLines(pat_files, files_list)
-    
-    # Use xargs to handle the file list
-    merge_cmd <- sprintf('cat %s | tr "\\n" "\\0" | xargs -0 zcat > %s', 
-                        files_list, merged_temp)
-    
-    cat("Running merge command:\n", merge_cmd, "\n")
-    result <- system2("sh", c("-c", merge_cmd))
-    unlink(files_list)  # Clean up the files list
-    
-    if (!file.exists(merged_temp) || file.info(merged_temp)$size == 0) {
-        stop("Merge step failed or produced an empty file")
-    }
-    cat("Merge step completed successfully. File size:", file.info(merged_temp)$size, "\n")
-    
-    # Step 2: Sort the merged file
-    cat("Sorting merged file\n")
-    sort_cmd <- sprintf('sort -k1,1V -k2,2n -k3,3 %s > %s', shQuote(merged_temp), shQuote(sorted_temp))
-    cat("Running sort command:\n", sort_cmd, "\n")
-    result <- system2("sh", c("-c", sort_cmd), stdout = TRUE, stderr = TRUE)
-    if (!file.exists(sorted_temp) || file.info(sorted_temp)$size == 0) {
-        stop("Sort step failed or produced an empty file")
-    }
-    cat("Sort step completed successfully. Sorted file size:", file.info(sorted_temp)$size, "\n")
-    
-    # Step 3: Deduplicate and compress
-    cat("Deduplicating and compressing sorted file\n")
-    dedup_cmd <- sprintf('cat %s | perl /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | bgzip -c > %s', 
-                         shQuote(sorted_temp), shQuote(out_file))
-    cat("Running deduplication command:\n", dedup_cmd, "\n")
-    result <- system2("sh", c("-c", dedup_cmd), stdout = TRUE, stderr = TRUE)
-    if (!file.exists(out_file) || file.info(out_file)$size == 0) {
-        stop("Deduplication step failed or produced an empty file")
-    }
-    cat("Deduplication and compression completed successfully. Output file size:", file.info(out_file)$size, "\n")
-    
-    # Step 4: Index the final file
-    cat("Indexing compressed file\n")
-    index_cmd <- sprintf('tabix -s 1 -b 2 -e 2 -C %s', shQuote(out_file))
-    cat("Running index command:\n", index_cmd, "\n")
-    result <- system2("sh", c("-c", index_cmd), stdout = TRUE, stderr = TRUE)
-    if (result != 0) stop("Indexing failed")
-    cat("Indexing completed successfully\n")
-    
-    # Cleanup temporary files
-    unlink(c(merged_temp, sorted_temp))
-    cat("Temporary files cleaned up\n")
+    # Use the exact same command structure that works in admix script
+    merge_cmd <- paste0(
+        '"zcat ', tmp_dir, '/', rep_prefix, '_*.pat.gz | ',
+        'sort -k1,1V -k2,2n -k3,3 | ',
+        'perl -n /users/zetzioni/sharedscratch/atlas/deduplicate_pat.pl | ',
+        'bgzip -c > ', out_file,
+        '; tabix -s 1 -b 2 -e 2 -C ', out_file, '"'
+    )
+    cat("running merged command\n", merge_cmd,"\n")
+    system2("sh", c("-c", merge_cmd))
 }
 
 # Function to process a batch of samples in parallel
