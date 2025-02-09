@@ -557,8 +557,8 @@ def run_oac_analysis():
     cd_tissue_mapping = None
     none_tissue_mapping = None
 
-    zohar_model = "deepconv"
-    zohar_model_name="zohar"
+    zohar_model = "oac"
+    zohar_model_name="oac"
     zohar_atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
 
     zohar_atlas_name = "atlas_oac.blood+gi+tum.l4"
