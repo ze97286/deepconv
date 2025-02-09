@@ -145,7 +145,7 @@ def improved_loss(predictions, targets, eps=1e-8):
 
 def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, patience=10, lr=1e-4):  # Reduced learning rate
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = optim.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
 
     os.makedirs(model_path, exist_ok=True)
     best_val_loss = float('inf')
