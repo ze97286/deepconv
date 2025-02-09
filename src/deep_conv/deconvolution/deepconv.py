@@ -50,31 +50,37 @@ class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types):
         super().__init__()
         
-        # Separate pathways for low and high concentration detection
-        self.shared_encoder = nn.Sequential(
-            nn.Linear(num_markers, 512),
+        # Deeper encoder with skip connections
+        self.encoder1 = nn.Sequential(
+            nn.Linear(num_markers, 1024),
+            nn.LayerNorm(1024),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        self.encoder2 = nn.Sequential(
+            nn.Linear(1024, 512),
             nn.LayerNorm(512),
             nn.ReLU(),
-            nn.Dropout(0.2)
+            nn.Dropout(0.1)
         )
         
-        # Low concentration pathway (<1%)
-        self.low_conc_path = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.LayerNorm(256),
+        # Concentration estimator
+        self.regressor = nn.Sequential(
+            nn.Linear(1536),  # 1024 + 512 from skip connection
+            nn.LayerNorm(512),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(256, num_cell_types),
-            nn.Sigmoid()
+            nn.Dropout(0.1),
+            nn.Linear(512, num_cell_types)
         )
         
-        # High concentration pathway (>1%)
-        self.high_conc_path = nn.Sequential(
-            nn.Linear(512, 256),
-            nn.LayerNorm(256),
+        # Uncertainty estimator
+        self.uncertainty = nn.Sequential(
+            nn.Linear(1536, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(256, num_cell_types)
+            nn.Linear(512, num_cell_types),
+            nn.Softplus()  # Ensure positive uncertainty
         )
 
     def forward(self, X, coverage):
@@ -83,49 +89,50 @@ class CellTypeDeconvolutionModel(nn.Module):
         coverage = coverage * valid_mask
         X_weighted = X * torch.log1p(coverage)
         
-        features = self.shared_encoder(X_weighted)
+        # Forward pass with skip connection
+        e1 = self.encoder1(X_weighted)
+        e2 = self.encoder2(e1)
         
-        # Low concentration predictions (0-1%)
-        low_pred = self.low_conc_path(features) * 0.01  # Scale to 0-1%
+        # Combine features
+        combined = torch.cat([e1, e2], dim=1)
         
-        # High concentration predictions (>1%)
-        high_logits = self.high_conc_path(features)
-        high_pred = F.softmax(high_logits, dim=1) * 0.99  # Scale to ensure sum ≤ 99%
+        # Get predictions and uncertainty
+        pred = F.softmax(self.regressor(combined), dim=1)
+        uncert = self.uncertainty(combined)
         
-        # Combine predictions
-        final_pred = low_pred + high_pred
-        
-        return final_pred
+        return pred, uncert
 
-def improved_loss(predictions, targets, eps=1e-8):
-    # Split predictions into low/high concentration components
-    low_mask = targets <= 0.01
-    high_mask = targets > 0.01
+def improved_loss(predictions, targets):
+    pred, uncert = predictions
     
-    # MSE for low concentrations (0-1%)
-    low_mse = ((predictions[low_mask] - targets[low_mask]) ** 2).mean() if low_mask.any() else 0
+    # NLL loss with learned uncertainty
+    nll_loss = (torch.log(uncert) + (pred - targets)**2 / (2 * uncert)).mean()
     
-    # MSE for high concentrations (>1%)
-    high_mse = ((predictions[high_mask] - targets[high_mask]) ** 2).mean() if high_mask.any() else 0
+    # Additional loss terms
+    # 1. Encourage higher certainty for concentrations > 1%
+    high_conc_mask = targets > 0.01
+    certainty_loss = (uncert[high_conc_mask]).mean() if high_conc_mask.any() else 0
     
-    # Zero concentration penalty
+    # 2. Relative error loss focusing on 0.5% - 2% range
+    mid_range_mask = (targets >= 0.005) & (targets <= 0.02)
+    if mid_range_mask.any():
+        mid_range_loss = (torch.abs(pred[mid_range_mask] - targets[mid_range_mask]) / 
+                         targets[mid_range_mask]).mean()
+    else:
+        mid_range_loss = 0
+        
+    # 3. Zero concentration penalty
     zero_mask = targets < 0.001
-    zero_penalty = (predictions[zero_mask] ** 2).mean() if zero_mask.any() else 0
-    
-    # Relative error term for maintaining proportions
-    pred_sum = predictions.sum(dim=1, keepdim=True)
-    target_sum = targets.sum(dim=1, keepdim=True)
-    relative_error = ((predictions/pred_sum - targets/target_sum) ** 2).mean()
+    zero_loss = (pred[zero_mask]**2).mean() if zero_mask.any() else 0
     
     total_loss = (
-        low_mse * 5.0 +      # Higher weight for low concentrations
-        high_mse * 1.0 +     # Normal weight for high concentrations
-        zero_penalty * 10.0 + # Strong penalty for false positives
-        relative_error * 0.5  # Moderate weight for proportion maintenance
+        nll_loss * 1.0 +
+        certainty_loss * 0.5 +
+        mid_range_loss * 2.0 +
+        zero_loss * 5.0
     )
     
     return total_loss
-
 
 def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, patience=10, lr=1e-3):  # Increased learning rate
     optimizer = optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
@@ -316,7 +323,7 @@ def train_and_evaluate(model_name):
     output_path = Path("/users/zetzioni/sharedscratch/atlas/saved_models/"+model_name+"/")
     atlas = pd.read_csv(atlas_path,sep="\t")
     cell_types = list(atlas.columns[8:])
-    train_and_eval(atlas_path=atlas_path, 
+    return train_and_eval(atlas_path=atlas_path, 
                             train_pat_dir=train_pat_dir, 
                             eval_pat_dir=eval_pat_dir, 
                             min_cpgs=min_cpgs, 
@@ -328,7 +335,7 @@ def train_and_evaluate(model_name):
 def eval_model(model_name):
     atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_zohar.blood+gi+tum.l4.bed"
     atlas = pd.read_csv(atlas_path,sep="\t")
-    model = CellTypeDeconvolutionModel(num_markers=len(atlas),num_cell_types=len(atlas.columns[8:]), cell_types=list(atlas.columns[8:]))
+    model = CellTypeDeconvolutionModel(num_markers=len(atlas),num_cell_types=len(atlas.columns[8:]))
     model.load_state_dict(torch.load(f"/users/zetzioni/sharedscratch/atlas/saved_models/{model_name}/best_model.pt"))
     eval_pat_dir4 = "/users/zetzioni/sharedscratch/atlas/training/CD4/"
     eval_pat_dir8 = "/users/zetzioni/sharedscratch/atlas/training/CD8/"
