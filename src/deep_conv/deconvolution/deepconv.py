@@ -67,7 +67,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         # Concentration estimator
         self.regressor = nn.Sequential(
-            nn.Linear(1536),  # 1024 + 512 from skip connection
+            nn.Linear(1536, 512),  # Fixed: added out_features
             nn.LayerNorm(512),
             nn.ReLU(),
             nn.Dropout(0.1),
@@ -76,7 +76,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         # Uncertainty estimator
         self.uncertainty = nn.Sequential(
-            nn.Linear(1536, 512),
+            nn.Linear(1536, 512),  # Fixed: added out_features
             nn.LayerNorm(512),
             nn.ReLU(),
             nn.Linear(512, num_cell_types),
@@ -101,7 +101,8 @@ class CellTypeDeconvolutionModel(nn.Module):
         uncert = self.uncertainty(combined)
         
         return pred, uncert
-
+    
+    
 def improved_loss(predictions, targets):
     pred, uncert = predictions
     
