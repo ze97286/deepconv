@@ -125,60 +125,70 @@ class ResidualBlock(nn.Module):
         return out
     
 
-def simple_loss(predictions, targets, model, eps=1e-8):
+def improved_loss(predictions, targets, eps=1e-8):
     # Unpack predictions from model's forward pass
     concentration_pred, range_pred = predictions
     
-    # Basic MSE
+    # MSE with stronger emphasis on low concentrations
     mse = (concentration_pred - targets) ** 2
+    low_conc_mask = (targets > 0.001) & (targets < 0.01)
+    mse[low_conc_mask] *= 5.0  # Increase weight for important range
     
-    # Range classification loss with clipping to prevent log(0)
+    # Range classification loss with clipping
     range_targets = (targets > 0.01).float()
     range_pred_clipped = torch.clamp(range_pred, eps, 1-eps)
     range_loss = F.binary_cross_entropy(range_pred_clipped, range_targets, reduction='mean')
     
-    # Specificity loss - penalize predictions when target is zero
+    # Stronger specificity loss
     zero_mask = targets < 0.001
     if zero_mask.any():
-        false_positive_loss = (concentration_pred[zero_mask] ** 2).mean()
+        false_positive_loss = (concentration_pred[zero_mask] ** 2).mean() * 5.0  # Increased weight
     else:
         false_positive_loss = torch.tensor(0.0, device=concentration_pred.device)
     
-    # Basic confidence weighting
-    confidence_weights = torch.exp(-torch.abs(range_pred - 0.5))
-    weighted_mse = (mse * confidence_weights).mean()
+    # Simpler MSE weighting
+    weighted_mse = mse.mean()
     
-    # Combine losses with appropriate weights
+    # Combine losses with adjusted weights
     total_loss = (
-        weighted_mse * 1.0 +
-        range_loss * 0.5 +
-        false_positive_loss * 2.0
+        weighted_mse * 2.0 +      # Increased base MSE weight
+        range_loss * 1.0 +        # Increased range loss weight
+        false_positive_loss * 5.0  # Much stronger penalty for false positives
     )
     
     return total_loss
 
-def train_model(model, train_loader, val_loader, model_path, num_epochs=100, patience=10, lr=1e-4):
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, patience=10, lr=1e-3):  # Increased learning rate
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)  # Increased weight decay
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    
     os.makedirs(model_path, exist_ok=True)
     best_val_loss = float('inf')
     patience_counter = 0
+    
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0
-        # Temperature scheduling (gradually reduce temperature)
-        temperature = max(2.0 - epoch * 0.05, 0.5)  # Start at 2.0, reduce to 0.5
+        max_grad_norm = 0
+        
         for batch in tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]'):
             X, y = batch['X'], batch['y']
             coverage = batch['coverage']
+            
             optimizer.zero_grad()
             predictions = model(X, coverage)
-            loss = simple_loss(predictions, y, model)
+            loss = improved_loss(predictions, y)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # Gradient clipping
+            
+            # Monitor gradients
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            max_grad_norm = max(max_grad_norm, grad_norm.item())
+            
             optimizer.step()
             train_loss += loss.item()
+            
         train_loss /= len(train_loader)
+        
         model.eval()
         val_loss = 0
         with torch.no_grad():
@@ -186,16 +196,18 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=100, pat
                 X, y = batch['X'], batch['y']
                 coverage = batch['coverage']
                 predictions = model(X, coverage)
-                loss = simple_loss(predictions, y, model)
+                loss = improved_loss(predictions, y)
                 val_loss += loss.item()
+                
         val_loss /= len(val_loader)
+        
         print(f"Epoch {epoch+1}/{num_epochs}, "
               f"Train Loss: {train_loss:.8f}, "
               f"Val Loss: {val_loss:.8f}, "
-              f"Temperature: {temperature:.2f}")
-        # Step the learning rate scheduler
+              f"Max Grad Norm: {max_grad_norm:.4f}")
+        
         scheduler.step(val_loss)
-        # Early stopping and model checkpointing
+        
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
@@ -205,10 +217,9 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=100, pat
             if patience_counter >= patience:
                 print("Early stopping triggered.")
                 break
-    # Load the best model at the end of training
+    
     model.load_state_dict(torch.load(os.path.join(model_path, "best_model.pt")))
     return model
-
 
 def predict(model, X, coverage):
    """Prediction function that processes samples one at a time"""
