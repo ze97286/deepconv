@@ -50,117 +50,86 @@ class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types):
         super().__init__()
         
-        # Deeper feature extraction with residual connections
-        self.encoder = nn.Sequential(
-            nn.Linear(num_markers, 1024),
-            nn.LayerNorm(1024),
+        # Separate pathways for low and high concentration detection
+        self.shared_encoder = nn.Sequential(
+            nn.Linear(num_markers, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
-            ResidualBlock(1024, 512),
+            nn.Dropout(0.2)
+        )
+        
+        # Low concentration pathway (<1%)
+        self.low_conc_path = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
             nn.Dropout(0.2),
-            ResidualBlock(512, 256),
+            nn.Linear(256, num_cell_types),
+            nn.Sigmoid()
+        )
+        
+        # High concentration pathway (>1%)
+        self.high_conc_path = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
             nn.Dropout(0.2),
-            ResidualBlock(256, 128),
-            nn.Dropout(0.1)
+            nn.Linear(256, num_cell_types)
         )
-        
-        # Separate heads for concentration range and final values
-        self.range_head = nn.Sequential(
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, num_cell_types),
-            nn.Sigmoid()  # Predict if concentration > threshold
-        )
-        
-        self.value_head = nn.Sequential(
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, num_cell_types)
-        )
-        
-        self.final_activation = nn.Softmax(dim=1)
 
     def forward(self, X, coverage):
-        # Handle missing values
         valid_mask = ~torch.isnan(X)
         X = torch.where(valid_mask, X, torch.zeros_like(X))
         coverage = coverage * valid_mask
         X_weighted = X * torch.log1p(coverage)
         
-        # Extract features
-        features = self.encoder(X_weighted)
+        features = self.shared_encoder(X_weighted)
         
-        # Get range predictions and values
-        range_pred = self.range_head(features)
-        values = self.value_head(features)
+        # Low concentration predictions (0-1%)
+        low_pred = self.low_conc_path(features) * 0.01  # Scale to 0-1%
+        
+        # High concentration predictions (>1%)
+        high_logits = self.high_conc_path(features)
+        high_pred = F.softmax(high_logits, dim=1) * 0.99  # Scale to ensure sum ≤ 99%
         
         # Combine predictions
-        final_values = self.final_activation(values) * range_pred
-        return final_values, range_pred
-
-
-class ResidualBlock(nn.Module):
-    def __init__(self, in_features, out_features):
-        super().__init__()
-        self.linear1 = nn.Linear(in_features, out_features)
-        self.ln1 = nn.LayerNorm(out_features)
-        self.linear2 = nn.Linear(out_features, out_features)
-        self.ln2 = nn.LayerNorm(out_features)
-        self.downsample = None if in_features == out_features else nn.Linear(in_features, out_features)
+        final_pred = low_pred + high_pred
         
-    def forward(self, x):
-        identity = x
-        
-        out = self.linear1(x)
-        out = self.ln1(out)
-        out = F.relu(out)
-        
-        out = self.linear2(out)
-        out = self.ln2(out)
-        
-        if self.downsample is not None:
-            identity = self.downsample(x)
-            
-        out += identity
-        out = F.relu(out)
-        return out
-    
+        return final_pred
 
 def improved_loss(predictions, targets, eps=1e-8):
-    # Unpack predictions from model's forward pass
-    concentration_pred, range_pred = predictions
+    # Split predictions into low/high concentration components
+    low_mask = targets <= 0.01
+    high_mask = targets > 0.01
     
-    # MSE with stronger emphasis on low concentrations
-    mse = (concentration_pred - targets) ** 2
-    low_conc_mask = (targets > 0.001) & (targets < 0.01)
-    mse[low_conc_mask] *= 5.0  # Increase weight for important range
+    # MSE for low concentrations (0-1%)
+    low_mse = ((predictions[low_mask] - targets[low_mask]) ** 2).mean() if low_mask.any() else 0
     
-    # Range classification loss with clipping
-    range_targets = (targets > 0.01).float()
-    range_pred_clipped = torch.clamp(range_pred, eps, 1-eps)
-    range_loss = F.binary_cross_entropy(range_pred_clipped, range_targets, reduction='mean')
+    # MSE for high concentrations (>1%)
+    high_mse = ((predictions[high_mask] - targets[high_mask]) ** 2).mean() if high_mask.any() else 0
     
-    # Stronger specificity loss
+    # Zero concentration penalty
     zero_mask = targets < 0.001
-    if zero_mask.any():
-        false_positive_loss = (concentration_pred[zero_mask] ** 2).mean() * 5.0  # Increased weight
-    else:
-        false_positive_loss = torch.tensor(0.0, device=concentration_pred.device)
+    zero_penalty = (predictions[zero_mask] ** 2).mean() if zero_mask.any() else 0
     
-    # Simpler MSE weighting
-    weighted_mse = mse.mean()
+    # Relative error term for maintaining proportions
+    pred_sum = predictions.sum(dim=1, keepdim=True)
+    target_sum = targets.sum(dim=1, keepdim=True)
+    relative_error = ((predictions/pred_sum - targets/target_sum) ** 2).mean()
     
-    # Combine losses with adjusted weights
     total_loss = (
-        weighted_mse * 2.0 +      # Increased base MSE weight
-        range_loss * 1.0 +        # Increased range loss weight
-        false_positive_loss * 5.0  # Much stronger penalty for false positives
+        low_mse * 5.0 +      # Higher weight for low concentrations
+        high_mse * 1.0 +     # Normal weight for high concentrations
+        zero_penalty * 10.0 + # Strong penalty for false positives
+        relative_error * 0.5  # Moderate weight for proportion maintenance
     )
     
     return total_loss
 
+
 def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, patience=10, lr=1e-3):  # Increased learning rate
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)  # Increased weight decay
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    optimizer = optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
+    scheduler = optim.ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=10, verbose=True)
     
     os.makedirs(model_path, exist_ok=True)
     best_val_loss = float('inf')
