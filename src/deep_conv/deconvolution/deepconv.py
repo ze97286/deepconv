@@ -125,15 +125,15 @@ class ResidualBlock(nn.Module):
         return out
     
 
-def improved_loss(predictions, targets, range_predictions, model):
-    # Unpack predictions
+def simple_loss(predictions, targets):
+    # Unpack predictions from model's forward pass
     concentration_pred, range_pred = predictions
     
     # Base MSE with focus on precision at low concentrations
     mse = (concentration_pred - targets) ** 2
     
-    # Range classification loss
-    range_targets = (targets > 0.01).float()  # 1% threshold
+    # Range classification loss for 1% threshold
+    range_targets = (targets > 0.01).float()
     range_loss = F.binary_cross_entropy(range_pred, range_targets)
     
     # Specificity loss - heavily penalize false positives
@@ -158,7 +158,6 @@ def improved_loss(predictions, targets, range_predictions, model):
     )
     
     return total_loss
-
 
 def train_model(model, train_loader, val_loader, model_path, num_epochs=100, patience=10, lr=1e-4):
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
@@ -279,7 +278,11 @@ def train_and_eval(atlas_path, train_pat_dir, eval_pat_dir, min_cpgs, threads, o
     y_val = y_val / y_val.sum(dim=1, keepdim=True)
     train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
-    model = CellTypeDeconvolutionModel(num_markers=X_train.shape[1],num_cell_types=len(cell_types), cell_types=list(cell_types))
+    model = CellTypeDeconvolutionModel(
+        num_markers=X_train.shape[1],
+        num_cell_types=len(cell_types), 
+        # cell_types=list(cell_types)
+    )
     model = train_model(
         model=model,
         train_loader=train_loader,
