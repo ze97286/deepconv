@@ -102,43 +102,51 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         return pred, uncert
     
-    
-def improved_loss(predictions, targets):
+
+def improved_loss(predictions, targets, eps=1e-8):
     pred, uncert = predictions
     
-    # NLL loss with learned uncertainty
-    nll_loss = (torch.log(uncert) + (pred - targets)**2 / (2 * uncert)).mean()
+    # Clamp values for numerical stability
+    pred = torch.clamp(pred, eps, 1-eps)
+    uncert = torch.clamp(uncert, eps, 1.0)
     
-    # Additional loss terms
-    # 1. Encourage higher certainty for concentrations > 1%
-    high_conc_mask = targets > 0.01
-    certainty_loss = (uncert[high_conc_mask]).mean() if high_conc_mask.any() else 0
+    # MSE with uncertainty weighting
+    squared_error = (pred - targets) ** 2
+    uncertainty_term = torch.log(uncert)
+    base_loss = (squared_error / (2 * uncert) + uncertainty_term).mean()
     
-    # 2. Relative error loss focusing on 0.5% - 2% range
+    # Focused loss on 0.5% - 2% range
     mid_range_mask = (targets >= 0.005) & (targets <= 0.02)
     if mid_range_mask.any():
-        mid_range_loss = (torch.abs(pred[mid_range_mask] - targets[mid_range_mask]) / 
-                         targets[mid_range_mask]).mean()
+        mid_range_loss = torch.abs(pred[mid_range_mask] - targets[mid_range_mask]).mean()
     else:
         mid_range_loss = 0
-        
-    # 3. Zero concentration penalty
+    
+    # Zero concentration penalty
     zero_mask = targets < 0.001
-    zero_loss = (pred[zero_mask]**2).mean() if zero_mask.any() else 0
+    zero_loss = torch.clamp(pred[zero_mask], min=0).mean() if zero_mask.any() else 0
+    
+    # Relative error for higher concentrations
+    high_conc_mask = targets > 0.01
+    if high_conc_mask.any():
+        relative_error = torch.abs(pred[high_conc_mask] - targets[high_conc_mask]) / (targets[high_conc_mask] + eps)
+        high_conc_loss = relative_error.mean()
+    else:
+        high_conc_loss = 0
     
     total_loss = (
-        nll_loss * 1.0 +
-        certainty_loss * 0.5 +
+        base_loss * 1.0 +
         mid_range_loss * 2.0 +
-        zero_loss * 5.0
+        zero_loss * 5.0 +
+        high_conc_loss * 1.0
     )
     
     return total_loss
 
-def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, patience=10, lr=1e-3):  # Increased learning rate
-    optimizer = optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=10, verbose=True)
-    
+def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, patience=10, lr=1e-4):  # Reduced learning rate
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+    scheduler = optim.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+
     os.makedirs(model_path, exist_ok=True)
     best_val_loss = float('inf')
     patience_counter = 0
