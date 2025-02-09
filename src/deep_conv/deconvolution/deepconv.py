@@ -31,42 +31,69 @@ class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types):
         super().__init__()
         
-        # Direct linear transformation (like NNLS)
-        self.linear = nn.Linear(num_markers, num_cell_types)
+        # Marker-specific scaling layers - learn how to best use each marker
+        self.marker_scale = nn.Parameter(torch.ones(num_markers))
+        self.marker_offset = nn.Parameter(torch.zeros(num_markers))
         
-        # Small correction network
-        self.correction = nn.Sequential(
-            nn.Linear(num_cell_types, 64),
-            nn.LayerNorm(64),
+        # Non-linear signal processing path
+        self.signal_net = nn.Sequential(
+            nn.Linear(num_markers, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
-            nn.Linear(64, num_cell_types)
+            nn.Linear(512, 256),
+            nn.LayerNorm(256)
+        )
+        
+        # Linear processing path (like NNLS)
+        self.linear_net = nn.Linear(num_markers, num_cell_types)
+        
+        # Variance-aware output layer
+        self.concentration_net = nn.Sequential(
+            nn.Linear(256 + num_cell_types, 128),
+            nn.LayerNorm(128),
+            nn.ReLU(),
+            nn.Linear(128, num_cell_types)
         )
 
     def forward(self, X, coverage):
+        # Handle missing values
         valid_mask = ~torch.isnan(X)
         X = torch.where(valid_mask, X, torch.zeros_like(X))
         X_weighted = X * torch.log1p(coverage)
         
-        # Get linear prediction first (NNLS-like)
-        linear_pred = F.softmax(self.linear(X_weighted), dim=1)
+        # Apply marker-specific scaling
+        X_scaled = (X_weighted * self.marker_scale.unsqueeze(0) + 
+                   self.marker_offset.unsqueeze(0))
         
-        # Apply small correction
-        correction = self.correction(linear_pred)
-        final_pred = F.softmax(linear_pred + correction * 0.1, dim=1)
+        # Process through both paths
+        non_linear_features = self.signal_net(X_scaled)
+        linear_pred = self.linear_net(X_scaled)
         
-        return final_pred
+        # Combine both paths
+        combined = torch.cat([non_linear_features, linear_pred], dim=1)
+        logits = self.concentration_net(combined)
+        
+        # Output predictions
+        predictions = F.softmax(logits, dim=1)
+        return predictions
 
-def loss_fn(predictions, targets, eps=1e-8):
-    # Simple MSE with concentration-based weighting
+def loss_fn(predictions, targets):
+    # Basic MSE
     mse = (predictions - targets) ** 2
     
-    # Weight more heavily around 1%
-    weights = torch.ones_like(targets)
-    target_range = (targets > 0.008) & (targets < 0.012)
-    weights[target_range] *= 3.0
+    # Weight more heavily samples where signal-to-noise is good
+    # This uses the observation that variance increases with concentration
+    weights = 1.0 / (targets + 0.01)  # Add small constant to avoid division by zero
     
-    return (mse * weights).mean()
-
+    # Additional weighting for 1% range
+    target_range = (targets >= 0.008) & (targets <= 0.012)
+    weights = torch.where(target_range, weights * 3.0, weights)
+    
+    # Zero concentration penalty
+    zero_mask = targets < 0.001
+    zero_penalty = (predictions[zero_mask] ** 2).mean() if zero_mask.any() else 0
+    
+    return (mse * weights).mean() + zero_penalty * 2.0
 
 def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, patience=10, lr=1e-4):  # Reduced learning rate
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
