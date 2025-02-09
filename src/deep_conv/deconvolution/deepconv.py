@@ -31,15 +31,15 @@ class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types):
         super().__init__()
         
-        # Log-space transformation network
-        self.log_encoder = nn.Sequential(
-            nn.Linear(num_markers, 512),
-            nn.LayerNorm(512),
+        # Direct linear transformation (like NNLS)
+        self.linear = nn.Linear(num_markers, num_cell_types)
+        
+        # Small correction network
+        self.correction = nn.Sequential(
+            nn.Linear(num_cell_types, 64),
+            nn.LayerNorm(64),
             nn.ReLU(),
-            nn.Linear(512, 256),
-            nn.LayerNorm(256),
-            nn.ReLU(),
-            nn.Linear(256, num_cell_types)
+            nn.Linear(64, num_cell_types)
         )
 
     def forward(self, X, coverage):
@@ -47,32 +47,27 @@ class CellTypeDeconvolutionModel(nn.Module):
         X = torch.where(valid_mask, X, torch.zeros_like(X))
         X_weighted = X * torch.log1p(coverage)
         
-        # Predict in log space
-        log_predictions = self.log_encoder(X_weighted)
+        # Get linear prediction first (NNLS-like)
+        linear_pred = F.softmax(self.linear(X_weighted), dim=1)
         
-        # Transform back to concentration space
-        predictions = torch.exp(log_predictions)
-        predictions = predictions / (predictions.sum(dim=1, keepdim=True) + 1e-8)
+        # Apply small correction
+        correction = self.correction(linear_pred)
+        final_pred = F.softmax(linear_pred + correction * 0.1, dim=1)
         
-        return predictions
+        return final_pred
+
+def improved_loss(predictions, targets, eps=1e-8):
+    # Simple MSE with concentration-based weighting
+    mse = (predictions - targets) ** 2
+    
+    # Weight more heavily around 1%
+    weights = torch.ones_like(targets)
+    target_range = (targets > 0.008) & (targets < 0.012)
+    weights[target_range] *= 3.0
+    
+    return (mse * weights).mean()
 
 
-def loss_fn(predictions, targets, eps=1e-8):
-    # Convert to log space for comparison
-    log_pred = torch.log(predictions + eps)
-    log_targets = torch.log(targets + eps)
-    
-    # Basic MSE in log space
-    log_mse = (log_pred - log_targets) ** 2
-    
-    # Add KL divergence for distribution matching
-    kl_div = F.kl_div(
-        F.log_softmax(log_pred, dim=1),
-        targets,
-        reduction='batchmean'
-    )
-    
-    return log_mse.mean() + kl_div
 def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, patience=10, lr=1e-4):  # Reduced learning rate
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
