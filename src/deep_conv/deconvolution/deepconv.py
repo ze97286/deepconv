@@ -275,10 +275,14 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, pa
 
 def predict(model, X, coverage):
     model.eval()
+    # Convert numpy arrays to tensors
+    X_tensor = torch.tensor(X, dtype=torch.float32)
+    coverage_tensor = torch.tensor(coverage, dtype=torch.float32)
+    
     with torch.no_grad():
-        base_pred, final_pred = model(X, coverage)
-        # We want the final calibrated predictions
-        return final_pred.numpy()
+        base_pred, final_pred = model(X_tensor, coverage_tensor)
+        # Return only the final predictions as numpy array
+        return final_pred.cpu().numpy()
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
