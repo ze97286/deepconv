@@ -125,29 +125,39 @@ class ResidualBlock(nn.Module):
         return out
     
 
-def simple_loss(predictions, targets, model):
+def simple_loss(predictions, targets, model, eps=1e-8):
     # Unpack predictions from model's forward pass
     concentration_pred, range_pred = predictions
     
-    # Base MSE with focus on precision at low concentrations
+    # Basic MSE
     mse = (concentration_pred - targets) ** 2
     
-    # Range classification loss for 1% threshold
+    # Range classification loss with clipping to prevent log(0)
     range_targets = (targets > 0.01).float()
-    range_loss = F.binary_cross_entropy(range_pred, range_targets)
+    range_pred_clipped = torch.clamp(range_pred, eps, 1-eps)
+    range_loss = F.binary_cross_entropy(range_pred_clipped, range_targets, reduction='mean')
     
-    # Specificity loss - heavily penalize false positives
-    zero_mask = targets < 0.001  # True zeros
-    false_positive_loss = (concentration_pred[zero_mask] ** 2).mean() if zero_mask.any() else 0
+    # Specificity loss with safe handling of empty masks
+    zero_mask = targets < 0.001
+    if zero_mask.any():
+        false_positive_loss = (concentration_pred[zero_mask] ** 2).mean()
+    else:
+        false_positive_loss = torch.tensor(0.0, device=concentration_pred.device)
     
-    # Adaptive weighting based on prediction confidence
+    # Safer confidence weights
     confidence_weights = torch.exp(-torch.abs(range_pred - 0.5))
     weighted_mse = (mse * confidence_weights).mean()
     
-    # Correlation loss to maintain relative proportions
-    pred_corr = torch.corrcoef(concentration_pred.T)
-    target_corr = torch.corrcoef(targets.T)
-    correlation_loss = F.mse_loss(pred_corr, target_corr)
+    # Correlation loss only if we have enough variation
+    try:
+        if concentration_pred.std() > eps and targets.std() > eps:
+            pred_corr = torch.corrcoef(concentration_pred.T)
+            target_corr = torch.corrcoef(targets.T)
+            correlation_loss = F.mse_loss(pred_corr, target_corr)
+        else:
+            correlation_loss = torch.tensor(0.0, device=concentration_pred.device)
+    except:
+        correlation_loss = torch.tensor(0.0, device=concentration_pred.device)
     
     # Combine losses with appropriate weights
     total_loss = (
@@ -157,7 +167,16 @@ def simple_loss(predictions, targets, model):
         correlation_loss * 0.1
     )
     
+    # Add debugging prints
+    if torch.isnan(total_loss):
+        print(f"NaN detected in loss calculation:")
+        print(f"weighted_mse: {weighted_mse}")
+        print(f"range_loss: {range_loss}")
+        print(f"false_positive_loss: {false_positive_loss}")
+        print(f"correlation_loss: {correlation_loss}")
+        
     return total_loss
+
 
 def train_model(model, train_loader, val_loader, model_path, num_epochs=100, patience=10, lr=1e-4):
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
