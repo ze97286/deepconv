@@ -47,27 +47,38 @@ class TissueDeconvolutionDataset(Dataset):
 
 
 class CellTypeDeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types, cell_types):
+    def __init__(self, num_markers, num_cell_types):
         super().__init__()
         
-        # Store cell type indices for loss calculation
-        self.focus_types = ["CD4-T-cells", "CD8-T-cells"]
-        self.t_cell_idx = [cell_types.index(ct) for ct in self.focus_types]
-        
-        # Simple feature extraction
+        # Deeper feature extraction with residual connections
         self.encoder = nn.Sequential(
-            nn.Linear(num_markers, 512),
-            nn.LayerNorm(512),
+            nn.Linear(num_markers, 1024),
+            nn.LayerNorm(1024),
             nn.ReLU(),
+            ResidualBlock(1024, 512),
             nn.Dropout(0.2),
-            nn.Linear(512, 256),
-            nn.LayerNorm(256),
-            nn.ReLU(),
+            ResidualBlock(512, 256),
             nn.Dropout(0.2),
-            nn.Linear(256, num_cell_types)
+            ResidualBlock(256, 128),
+            nn.Dropout(0.1)
         )
         
-        self.softmax = nn.Softmax(dim=1)
+        # Separate heads for concentration range and final values
+        self.range_head = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, num_cell_types),
+            nn.Sigmoid()  # Predict if concentration > threshold
+        )
+        
+        self.value_head = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, num_cell_types)
+        )
+        
+        self.final_activation = nn.Softmax(dim=1)
+
     def forward(self, X, coverage):
         # Handle missing values
         valid_mask = ~torch.isnan(X)
@@ -75,37 +86,78 @@ class CellTypeDeconvolutionModel(nn.Module):
         coverage = coverage * valid_mask
         X_weighted = X * torch.log1p(coverage)
         
-        # Simple forward pass
-        logits = self.encoder(X_weighted)
-        return self.softmax(logits)
+        # Extract features
+        features = self.encoder(X_weighted)
+        
+        # Get range predictions and values
+        range_pred = self.range_head(features)
+        values = self.value_head(features)
+        
+        # Combine predictions
+        final_values = self.final_activation(values) * range_pred
+        return final_values, range_pred
 
 
-def simple_loss(predictions, targets, model):
-    # Base MSE loss
-    mse = (predictions - targets) ** 2
+class ResidualBlock(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.linear1 = nn.Linear(in_features, out_features)
+        self.ln1 = nn.LayerNorm(out_features)
+        self.linear2 = nn.Linear(out_features, out_features)
+        self.ln2 = nn.LayerNorm(out_features)
+        self.downsample = None if in_features == out_features else nn.Linear(in_features, out_features)
+        
+    def forward(self, x):
+        identity = x
+        
+        out = self.linear1(x)
+        out = self.ln1(out)
+        out = F.relu(out)
+        
+        out = self.linear2(out)
+        out = self.ln2(out)
+        
+        if self.downsample is not None:
+            identity = self.downsample(x)
+            
+        out += identity
+        out = F.relu(out)
+        return out
     
-    # Create weights based on concentration ranges - gentler weights
-    weights = torch.ones_like(targets)
+
+def improved_loss(predictions, targets, range_predictions, model):
+    # Unpack predictions
+    concentration_pred, range_pred = predictions
     
-    # Less extreme weights for concentration ranges
-    ultra_low_mask = (targets > 0) & (targets <= 0.001)  # 0-0.1%
-    low_mask = (targets > 0.001) & (targets <= 0.01)     # 0.1-1%
-    medium_mask = (targets > 0.01) & (targets <= 0.05)   # 1-5%
+    # Base MSE with focus on precision at low concentrations
+    mse = (concentration_pred - targets) ** 2
     
-    weights[ultra_low_mask] = 3.0
-    weights[low_mask] = 2.0
-    weights[medium_mask] = 1.5
+    # Range classification loss
+    range_targets = (targets > 0.01).float()  # 1% threshold
+    range_loss = F.binary_cross_entropy(range_pred, range_targets)
     
-    # Modest additional weight for T cells
-    weights[:, model.t_cell_idx] *= 1.5
+    # Specificity loss - heavily penalize false positives
+    zero_mask = targets < 0.001  # True zeros
+    false_positive_loss = (concentration_pred[zero_mask] ** 2).mean() if zero_mask.any() else 0
     
-    # Weighted MSE
-    weighted_loss = weights * mse
+    # Adaptive weighting based on prediction confidence
+    confidence_weights = torch.exp(-torch.abs(range_pred - 0.5))
+    weighted_mse = (mse * confidence_weights).mean()
     
-    # Much smaller L2 regularization
-    l2_reg = sum(p.pow(2.0).sum() for p in model.parameters()) * 1e-6
+    # Correlation loss to maintain relative proportions
+    pred_corr = torch.corrcoef(concentration_pred.T)
+    target_corr = torch.corrcoef(targets.T)
+    correlation_loss = F.mse_loss(pred_corr, target_corr)
     
-    return weighted_loss.mean() + l2_reg
+    # Combine losses with appropriate weights
+    total_loss = (
+        weighted_mse * 1.0 +
+        range_loss * 0.5 +
+        false_positive_loss * 2.0 +
+        correlation_loss * 0.1
+    )
+    
+    return total_loss
 
 
 def train_model(model, train_loader, val_loader, model_path, num_epochs=100, patience=10, lr=1e-4):
@@ -317,122 +369,6 @@ def eval_model(model_name):
             min_cpgs=4,
             cell_types=list(atlas.columns[8:]),
             threads=10)
-
-
-# def plot_deconvolution(df, title, cell_types):
-#     """
-#     Create an interactive stacked bar plot using plotly with consistent colors
-#     Args:
-#         df: pandas DataFrame with 'sample' column and at least 15 other columns
-#         title: str, plot title (default: "Stacked Bar Plot")
-#     Returns:
-#         plotly Figure object
-#     """
-#     cols = cell_types
-    
-#     # Get a fixed color sequence
-#     colors = px.colors.qualitative.Set3[:len(cols)]  # Using Set3 palette which has 12 colors
-#     if len(cols) > 12:  # If we need more colors, extend with default plotly colors
-#         colors.extend(px.colors.qualitative.Plotly[:(len(cols)-12)])
-    
-#     # Create figure
-#     fig = go.Figure()
-    
-#     # Add traces for each column with consistent colors
-#     for col, color in zip(cols, colors):
-#         fig.add_trace(go.Bar(
-#             name=col,
-#             x=df['sample'],
-#             y=df[col],
-#             marker_color=color,
-#             hovertemplate=f"{col}: %{{y}}<extra></extra>"
-#         ))
-    
-#     # Update layout
-#     fig.update_layout(
-#         title=title,
-#         barmode='stack',
-#         xaxis=dict(
-#             tickangle=90,
-#             title='Sample'
-#         ),
-#         yaxis=dict(
-#             title='Value'
-#         ),
-#         hovermode='closest',
-#         showlegend=True
-#     )
-    
-#     return fig
-
-
-# def create_heatmap(df, title, cell_types):
-#     """
-#     Create an interactive heatmap using plotly with custom blue-white-red colorscale
-#     and fixed cell type order
-#     Args:
-#         df: pandas DataFrame with 'sample' column and cell types as other columns
-#         title: str, plot title (default: "Cell Type Expression Heatmap")
-#     Returns:
-#         plotly Figure object
-#     """
-#     # Define fixed cell type order
-    
-    
-#     # Create the heatmap matrix
-#     samples = df['sample'].unique()
-#     matrix = []
-    
-#     # Create matrix of values in the specified cell type order
-#     for cell_type in cell_types:
-#         row = []
-#         for sample in samples:
-#             value = df[df['sample'] == sample][cell_type].iloc[0]
-#             row.append(value)
-#         matrix.append(row)
-    
-#     # Create custom colorscale going from blue (low) to white (mid) to red (high)
-#     colors = [
-#         [0, 'rgb(0, 0, 255)'],      # Blue for low values
-#         [0.2, 'rgb(115, 155, 255)'], # Light blue
-#         [0.4, 'rgb(230, 230, 255)'], # Very light blue
-#         [0.5, 'rgb(255, 255, 255)'], # White for middle values
-#         [0.6, 'rgb(255, 230, 230)'], # Very light red
-#         [0.8, 'rgb(255, 155, 115)'], # Light red
-#         [1, 'rgb(255, 0, 0)']        # Red for high values
-#     ]
-    
-#     # Create heatmap
-#     fig = go.Figure(data=go.Heatmap(
-#         z=matrix,
-#         x=samples,
-#         y=cell_types,
-#         colorscale=colors,
-#         hoverongaps=False,
-#         hovertemplate='Sample: %{x}<br>Cell Type: %{y}<br>Value: %{z:.3f}<extra></extra>'
-#     ))
-    
-#     # Update layout
-#     fig.update_layout(
-#         title=title,
-#         xaxis=dict(
-#             tickangle=90,
-#             title='Sample',
-#             side='bottom',
-#             tickmode='array',
-#             ticktext=samples,
-#             tickvals=list(range(len(samples)))
-#         ),
-#         yaxis=dict(
-#             title='Cell Type',
-#             autorange='reversed'  # To match the example image
-#         ),
-#         height=800,  # Increase height for better readability
-#         width=1200,  # Increase width for better readability
-#         plot_bgcolor='white'
-#     )
-    
-#     return fig
 
 
 def plot_analysis(df, cell_types, title):
