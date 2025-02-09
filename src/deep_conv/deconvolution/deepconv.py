@@ -1,3 +1,5 @@
+# best deepconv (zohar)
+
 import argparse
 import torch
 import torch.nn as nn
@@ -27,105 +29,91 @@ class TissueDeconvolutionDataset(Dataset):
             'y': self.y[idx]
         }
 
+
 class CellTypeDeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types):
+    def __init__(self, num_markers, num_cell_types, cell_types):
         super().__init__()
         
-        # Marker-specific scaling layers - learn how to best use each marker
-        self.marker_scale = nn.Parameter(torch.ones(num_markers))
-        self.marker_offset = nn.Parameter(torch.zeros(num_markers))
+        # Store cell type indices for loss calculation
+        self.focus_types = ["CD4-T-cells", "CD8-T-cells"]
+        self.t_cell_idx = [cell_types.index(ct) for ct in self.focus_types]
         
-        # Non-linear signal processing path
-        self.signal_net = nn.Sequential(
+        # Simple feature extraction
+        self.encoder = nn.Sequential(
             nn.Linear(num_markers, 512),
             nn.LayerNorm(512),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Linear(512, 256),
-            nn.LayerNorm(256)
-        )
-        
-        # Linear processing path (like NNLS)
-        self.linear_net = nn.Linear(num_markers, num_cell_types)
-        
-        # Variance-aware output layer
-        self.concentration_net = nn.Sequential(
-            nn.Linear(256 + num_cell_types, 128),
-            nn.LayerNorm(128),
+            nn.LayerNorm(256),
             nn.ReLU(),
-            nn.Linear(128, num_cell_types)
+            nn.Dropout(0.2),
+            nn.Linear(256, num_cell_types)
         )
-
+        
+        self.softmax = nn.Softmax(dim=1)
     def forward(self, X, coverage):
         # Handle missing values
         valid_mask = ~torch.isnan(X)
         X = torch.where(valid_mask, X, torch.zeros_like(X))
+        coverage = coverage * valid_mask
         X_weighted = X * torch.log1p(coverage)
         
-        # Apply marker-specific scaling
-        X_scaled = (X_weighted * self.marker_scale.unsqueeze(0) + 
-                   self.marker_offset.unsqueeze(0))
-        
-        # Process through both paths
-        non_linear_features = self.signal_net(X_scaled)
-        linear_pred = self.linear_net(X_scaled)
-        
-        # Combine both paths
-        combined = torch.cat([non_linear_features, linear_pred], dim=1)
-        logits = self.concentration_net(combined)
-        
-        # Output predictions
-        predictions = F.softmax(logits, dim=1)
-        return predictions
+        # Simple forward pass
+        logits = self.encoder(X_weighted)
+        return self.softmax(logits)
 
-def loss_fn(predictions, targets):
-    # Basic MSE
+
+def simple_loss(predictions, targets, model):
+    # Base MSE loss
     mse = (predictions - targets) ** 2
     
-    # Weight more heavily samples where signal-to-noise is good
-    # This uses the observation that variance increases with concentration
-    weights = 1.0 / (targets + 0.01)  # Add small constant to avoid division by zero
+    # Create weights based on concentration ranges - gentler weights
+    weights = torch.ones_like(targets)
     
-    # Additional weighting for 1% range
-    target_range = (targets >= 0.008) & (targets <= 0.012)
-    weights = torch.where(target_range, weights * 3.0, weights)
+    # Less extreme weights for concentration ranges
+    ultra_low_mask = (targets > 0) & (targets <= 0.001)  # 0-0.1%
+    low_mask = (targets > 0.001) & (targets <= 0.01)     # 0.1-1%
+    medium_mask = (targets > 0.01) & (targets <= 0.05)   # 1-5%
     
-    # Zero concentration penalty
-    zero_mask = targets < 0.001
-    zero_penalty = (predictions[zero_mask] ** 2).mean() if zero_mask.any() else 0
+    weights[ultra_low_mask] = 3.0
+    weights[low_mask] = 2.0
+    weights[medium_mask] = 1.5
     
-    return (mse * weights).mean() + zero_penalty * 2.0
+    # Modest additional weight for T cells
+    weights[:, model.t_cell_idx] *= 1.5
+    
+    # Weighted MSE
+    weighted_loss = weights * mse
+    
+    # Much smaller L2 regularization
+    l2_reg = sum(p.pow(2.0).sum() for p in model.parameters()) * 1e-6
+    
+    return weighted_loss.mean() + l2_reg
 
-def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, patience=10, lr=1e-4):  # Reduced learning rate
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+
+def train_model(model, train_loader, val_loader, model_path, num_epochs=100, patience=10, lr=1e-4):
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
-
     os.makedirs(model_path, exist_ok=True)
     best_val_loss = float('inf')
     patience_counter = 0
-    
     for epoch in range(num_epochs):
         model.train()
         train_loss = 0
-        max_grad_norm = 0
-        
+        # Temperature scheduling (gradually reduce temperature)
+        temperature = max(2.0 - epoch * 0.05, 0.5)  # Start at 2.0, reduce to 0.5
         for batch in tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]'):
             X, y = batch['X'], batch['y']
             coverage = batch['coverage']
-            
             optimizer.zero_grad()
             predictions = model(X, coverage)
-            loss = loss_fn(predictions, y)
+            loss = simple_loss(predictions, y, model)
             loss.backward()
-            
-            # Monitor gradients
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            max_grad_norm = max(max_grad_norm, grad_norm.item())
-            
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # Gradient clipping
             optimizer.step()
             train_loss += loss.item()
-            
         train_loss /= len(train_loader)
-        
         model.eval()
         val_loss = 0
         with torch.no_grad():
@@ -133,18 +121,16 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, pa
                 X, y = batch['X'], batch['y']
                 coverage = batch['coverage']
                 predictions = model(X, coverage)
-                loss = loss_fn(predictions, y)
+                loss = simple_loss(predictions, y, model)
                 val_loss += loss.item()
-                
         val_loss /= len(val_loader)
-        
         print(f"Epoch {epoch+1}/{num_epochs}, "
               f"Train Loss: {train_loss:.8f}, "
               f"Val Loss: {val_loss:.8f}, "
-              f"Max Grad Norm: {max_grad_norm:.4f}")
-        
+              f"Temperature: {temperature:.2f}")
+        # Step the learning rate scheduler
         scheduler.step(val_loss)
-        
+        # Early stopping and model checkpointing
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
@@ -154,22 +140,25 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, pa
             if patience_counter >= patience:
                 print("Early stopping triggered.")
                 break
-    
+    # Load the best model at the end of training
     model.load_state_dict(torch.load(os.path.join(model_path, "best_model.pt")))
     return model
 
 
 def predict(model, X, coverage):
-    model.eval()
-    # Convert numpy arrays to tensors
-    X_tensor = torch.tensor(X, dtype=torch.float32)
-    coverage_tensor = torch.tensor(coverage, dtype=torch.float32)
-    
-    with torch.no_grad():
-        predictions = model(X_tensor, coverage_tensor)
-        # Return predictions as numpy array
-        return predictions.cpu().numpy()
-    
+   """Prediction function that processes samples one at a time"""
+   model.eval()
+   predictions_list = []
+   
+   with torch.no_grad():
+       for i in range(len(X)):
+           x = torch.tensor(X[i:i+1], dtype=torch.float32)
+           c = torch.tensor(coverage[i:i+1], dtype=torch.float32)
+           pred = model(x, c)
+           predictions_list.append(pred.numpy())
+   
+   return np.vstack(predictions_list)
+
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
@@ -222,10 +211,7 @@ def train_and_eval(atlas_path, train_pat_dir, eval_pat_dir, min_cpgs, threads, o
     y_val = y_val / y_val.sum(dim=1, keepdim=True)
     train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
-    model = CellTypeDeconvolutionModel(
-        num_markers=X_train.shape[1],
-        num_cell_types=len(cell_types), 
-    )
+    model = CellTypeDeconvolutionModel(num_markers=X_train.shape[1],num_cell_types=len(cell_types), cell_types=list(cell_types))
     model = train_model(
         model=model,
         train_loader=train_loader,
@@ -277,23 +263,23 @@ def train_and_evaluate(model_name):
     train_pat_dir = "/users/zetzioni/sharedscratch/atlas/training/general/train/"
     eval_pat_dir = "/users/zetzioni/sharedscratch/atlas/training/TCELLS"
     min_cpgs = 4
-    threads = 10
+    threads = 32
     output_path = Path("/users/zetzioni/sharedscratch/atlas/saved_models/"+model_name+"/")
     atlas = pd.read_csv(atlas_path,sep="\t")
     cell_types = list(atlas.columns[8:])
-    return train_and_eval(atlas_path=atlas_path, 
-                            train_pat_dir=train_pat_dir, 
-                            eval_pat_dir=eval_pat_dir, 
-                            min_cpgs=min_cpgs, 
-                            threads=threads,
-                            output_path=output_path, 
-                            cell_types=cell_types)
+    train_and_eval(atlas_path=atlas_path, 
+                           train_pat_dir=train_pat_dir, 
+                           eval_pat_dir=eval_pat_dir, 
+                           min_cpgs=min_cpgs, 
+                           threads=threads,
+                           output_path=output_path, 
+                           cell_types=cell_types)
     
 
 def eval_model(model_name):
     atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_zohar.blood+gi+tum.l4.bed"
     atlas = pd.read_csv(atlas_path,sep="\t")
-    model = CellTypeDeconvolutionModel(num_markers=len(atlas),num_cell_types=len(atlas.columns[8:]))
+    model = CellTypeDeconvolutionModel(num_markers=len(atlas),num_cell_types=len(atlas.columns[8:]), cell_types=list(atlas.columns[8:]))
     model.load_state_dict(torch.load(f"/users/zetzioni/sharedscratch/atlas/saved_models/{model_name}/best_model.pt"))
     eval_pat_dir4 = "/users/zetzioni/sharedscratch/atlas/training/CD4/"
     eval_pat_dir8 = "/users/zetzioni/sharedscratch/atlas/training/CD8/"
@@ -315,6 +301,7 @@ def eval_model(model_name):
             min_cpgs=4,
             cell_types=list(atlas.columns[8:]),
             threads=10)
+
 
 
 def plot_analysis(df, cell_types, title):
@@ -694,9 +681,6 @@ def main():
         cell_types=CELL_TYPES,
         threads=args.threads)
     
- 
-
-
 
 if __name__ == "__main__":    
     main()
