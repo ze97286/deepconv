@@ -1,6 +1,6 @@
 import torch
 import pandas as pd
-from deep_conv.deconvolution.deconv import *
+from deep_conv.deconvolution.model import *
 from sklearn.metrics import r2_score, mean_squared_error
 import plotly.graph_objects as go
 import plotly.express as px
@@ -81,7 +81,8 @@ def predict_cell_type_contribution(model_path, marker_read_proportions, marker_r
 
    # Initialize model
    model = DeconvolutionModel(n_regions=n_regions, n_cell_types=n_cell_types)
-   model.load_state_dict(torch.load(model_path, map_location=device))
+   checkpoint = torch.load(model_path, map_location=device)
+   model.load_state_dict(checkpoint['model_state_dict'])
    model = model.to(device)
    model.eval()
 

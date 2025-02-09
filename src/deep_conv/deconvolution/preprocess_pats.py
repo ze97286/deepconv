@@ -195,7 +195,6 @@ def pat2homog(markers, pat, tmp_dir_l, rlen, verb, force, nodump, debug, wgbs_to
 
 def gen_homogs(markers, pats, tmp_dir, verb, rlen, force, nodump, debug, threads, wgbs_tools_exec):
     check_executable(wgbs_tools_exec)
-    print(markers.head())
     # arguments cleanup
     markers = markers[coord_cols]          # keep only coords columns
     # change to abs path (for mem files), validate existance, drop dups
@@ -228,9 +227,8 @@ def load_pats_homog(atlas, pats, tmp_dir, verb, rlen, force, nodump, debug, thre
     return samples_df, counts
 
 
-def pats_to_homog(atlas_path, pats_path, wgbs_tools_exec_path, output_path=None):
-    atlas = pd.read_csv(atlas_path, sep='\t')
-    r_len = 4
+def pats_to_homog(atlas_path, pats_path, wgbs_tools_exec_path, r_len = 4, output_path=None, threads=4):
+    atlas = pd.read_csv(atlas_path, sep='\t')    
     pats = glob.glob(pats_path+"/*.pat.gz")
     marker_read_proportions, marker_read_coverage  = load_pats_homog(
         atlas=atlas,
@@ -240,8 +238,8 @@ def pats_to_homog(atlas_path, pats_path, wgbs_tools_exec_path, output_path=None)
         rlen=r_len,
         force=False,
         nodump=False,
-        debug=True,
-        threads=4,
+        debug=False,
+        threads=threads,
         wgbs_tools_exec=wgbs_tools_exec_path,
     )
     if output_path is not None:
