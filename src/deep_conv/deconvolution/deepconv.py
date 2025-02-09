@@ -27,84 +27,52 @@ class TissueDeconvolutionDataset(Dataset):
             'y': self.y[idx]
         }
 
-
 class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types):
         super().__init__()
         
-        # Learn marker importance weights
-        self.marker_weights = nn.Parameter(torch.ones(num_markers))
-        
-        # Initial signal processing
-        self.signal_encoder = nn.Sequential(
+        # Log-space transformation network
+        self.log_encoder = nn.Sequential(
             nn.Linear(num_markers, 512),
             nn.LayerNorm(512),
             nn.ReLU(),
-            nn.Dropout(0.1)
-        )
-        
-        # Concentration prediction with marker attention
-        self.concentration_predictor = nn.Sequential(
             nn.Linear(512, 256),
             nn.LayerNorm(256),
             nn.ReLU(),
-            nn.Dropout(0.1),
             nn.Linear(256, num_cell_types)
         )
 
     def forward(self, X, coverage):
         valid_mask = ~torch.isnan(X)
         X = torch.where(valid_mask, X, torch.zeros_like(X))
+        X_weighted = X * torch.log1p(coverage)
         
-        # Apply learned marker weights
-        X_weighted = X * self.marker_weights.unsqueeze(0)
+        # Predict in log space
+        log_predictions = self.log_encoder(X_weighted)
         
-        # Apply coverage
-        X_weighted = X_weighted * torch.log1p(coverage)
-        
-        # Process signal
-        features = self.signal_encoder(X_weighted)
-        
-        # Get predictions
-        logits = self.concentration_predictor(features)
-        
-        # Scale predictions based on marker confidence
-        predictions = F.softmax(logits, dim=1)
+        # Transform back to concentration space
+        predictions = torch.exp(log_predictions)
+        predictions = predictions / (predictions.sum(dim=1, keepdim=True) + 1e-8)
         
         return predictions
 
 
-def loss_fn(predictions, targets):
-    # Basic MSE
-    mse = (predictions - targets) ** 2
+def loss_fn(predictions, targets, eps=1e-8):
+    # Convert to log space for comparison
+    log_pred = torch.log(predictions + eps)
+    log_targets = torch.log(targets + eps)
     
-    # Concentration-specific weights
-    concentration_weights = torch.ones_like(targets)
+    # Basic MSE in log space
+    log_mse = (log_pred - log_targets) ** 2
     
-    # Very specific about the 1% range (0.8% - 1.2%)
-    target_range_mask = (targets >= 0.008) & (targets <= 0.012)
-    concentration_weights[target_range_mask] *= 10.0  # Increased from 5.0
+    # Add KL divergence for distribution matching
+    kl_div = F.kl_div(
+        F.log_softmax(log_pred, dim=1),
+        targets,
+        reduction='batchmean'
+    )
     
-    # Penalize variance in this range more strongly
-    if target_range_mask.any():
-        batch_std = predictions[target_range_mask].std()
-        std_penalty = batch_std * 5.0
-    else:
-        std_penalty = 0.0
-    
-    # Asymmetric loss around 1% - penalize underestimation more heavily
-    underestimation_mask = target_range_mask & (predictions < targets)
-    if underestimation_mask.any():
-        under_penalty = ((targets[underestimation_mask] - predictions[underestimation_mask]) ** 2).mean() * 8.0
-    else:
-        under_penalty = 0.0
-    
-    weighted_mse = (mse * concentration_weights).mean()
-    
-    total_loss = weighted_mse + std_penalty + under_penalty
-    
-    return total_loss
-
+    return log_mse.mean() + kl_div
 def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, patience=10, lr=1e-4):  # Reduced learning rate
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
