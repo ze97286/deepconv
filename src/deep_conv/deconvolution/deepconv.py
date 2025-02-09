@@ -56,7 +56,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         return final_pred
 
-def improved_loss(predictions, targets, eps=1e-8):
+def loss_fn(predictions, targets, eps=1e-8):
     # Simple MSE with concentration-based weighting
     mse = (predictions - targets) ** 2
     
