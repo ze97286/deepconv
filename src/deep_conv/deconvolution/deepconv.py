@@ -46,6 +46,79 @@ class TissueDeconvolutionDataset(Dataset):
         }
 
 
+class CalibratedDeconvModel(nn.Module):
+    def __init__(self, num_markers, num_cell_types):
+        super().__init__()
+        
+        # Core deconvolution module
+        self.signal_weights = nn.Parameter(torch.randn(num_markers, num_cell_types))
+        self.marker_bias = nn.Parameter(torch.zeros(num_markers))
+        
+        # Calibration network - purposely simple
+        self.calibration = nn.Sequential(
+            nn.Linear(num_cell_types, 256),
+            nn.LayerNorm(256),
+            nn.ReLU(),
+            nn.Linear(256, num_cell_types)
+        )
+        
+    def get_base_predictions(self, X, coverage):
+        # Handle missing values
+        valid_mask = ~torch.isnan(X)
+        X = torch.where(valid_mask, X, torch.zeros_like(X))
+        coverage = coverage * valid_mask
+        X_weighted = X * torch.log1p(coverage)
+        
+        # Initial signal unmixing (similar to NNLS)
+        signal = X_weighted - self.marker_bias.unsqueeze(0)
+        raw_proportions = F.linear(signal, self.signal_weights.t())
+        
+        # Ensure non-negativity and sum-to-one
+        base_pred = F.softmax(raw_proportions, dim=1)
+        return base_pred
+        
+    def forward(self, X, coverage):
+        # Get base predictions
+        base_pred = self.get_base_predictions(X, coverage)
+        
+        # Calibrate predictions
+        calibrated = self.calibration(base_pred)
+        final_pred = F.softmax(calibrated, dim=1)
+        
+        return base_pred, final_pred
+
+def calibrated_loss(predictions, targets, eps=1e-8):
+    base_pred, final_pred = predictions
+    
+    # Base prediction loss - standard cross-entropy
+    base_loss = -torch.sum(targets * torch.log(base_pred + eps), dim=1).mean()
+    
+    # Calibrated prediction losses
+    # MSE weighted by concentration range
+    mse = (final_pred - targets) ** 2
+    
+    # Higher weight for critical range (0.5% - 2%)
+    mid_range_mask = (targets >= 0.005) & (targets <= 0.02)
+    mse[mid_range_mask] *= 5.0
+    
+    # Highest weight for exact zeros
+    zero_mask = targets < 0.001
+    mse[zero_mask] *= 10.0
+    
+    calibrated_loss = mse.mean()
+    
+    # Add constraint that base predictions should be close to NNLS-like behavior
+    constraint_loss = F.mse_loss(base_pred, targets)
+    
+    total_loss = (
+        base_loss * 0.5 +        # Guide base predictions
+        calibrated_loss * 1.0 +   # Focus on final calibrated predictions
+        constraint_loss * 0.3     # Maintain NNLS-like behavior in base predictions
+    )
+    
+    return total_loss
+
+
 class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types):
         super().__init__()
@@ -156,7 +229,7 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, pa
             
             optimizer.zero_grad()
             predictions = model(X, coverage)
-            loss = improved_loss(predictions, y)
+            loss = calibrated_loss(predictions, y)
             loss.backward()
             
             # Monitor gradients
@@ -175,7 +248,7 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, pa
                 X, y = batch['X'], batch['y']
                 coverage = batch['coverage']
                 predictions = model(X, coverage)
-                loss = improved_loss(predictions, y)
+                loss = calibrated_loss(predictions, y)
                 val_loss += loss.item()
                 
         val_loss /= len(val_loader)
@@ -266,7 +339,7 @@ def train_and_eval(atlas_path, train_pat_dir, eval_pat_dir, min_cpgs, threads, o
     y_val = y_val / y_val.sum(dim=1, keepdim=True)
     train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
-    model = CellTypeDeconvolutionModel(
+    model = CalibratedDeconvModel(
         num_markers=X_train.shape[1],
         num_cell_types=len(cell_types), 
         # cell_types=list(cell_types)
