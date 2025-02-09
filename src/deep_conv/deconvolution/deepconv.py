@@ -78,27 +78,32 @@ def loss_fn(predictions, targets):
     # Basic MSE
     mse = (predictions - targets) ** 2
     
-    # Scale losses based on concentration ranges
+    # Concentration-specific weights
     concentration_weights = torch.ones_like(targets)
     
-    # Critical range (0.5% - 2%) gets higher weight
-    mid_range_mask = (targets >= 0.005) & (targets <= 0.02)
-    concentration_weights[mid_range_mask] *= 5.0
+    # Very specific about the 1% range (0.8% - 1.2%)
+    target_range_mask = (targets >= 0.008) & (targets <= 0.012)
+    concentration_weights[target_range_mask] *= 10.0  # Increased from 5.0
     
-    # Scale loss based on marker signal strength
+    # Penalize variance in this range more strongly
+    if target_range_mask.any():
+        batch_std = predictions[target_range_mask].std()
+        std_penalty = batch_std * 5.0
+    else:
+        std_penalty = 0.0
+    
+    # Asymmetric loss around 1% - penalize underestimation more heavily
+    underestimation_mask = target_range_mask & (predictions < targets)
+    if underestimation_mask.any():
+        under_penalty = ((targets[underestimation_mask] - predictions[underestimation_mask]) ** 2).mean() * 8.0
+    else:
+        under_penalty = 0.0
+    
     weighted_mse = (mse * concentration_weights).mean()
     
-    # Add regularization to prevent underestimation
-    underestimation_penalty = torch.where(
-        predictions < targets,
-        (targets - predictions) ** 2,
-        torch.zeros_like(predictions)
-    ).mean()
-    
-    total_loss = weighted_mse + underestimation_penalty * 2.0
+    total_loss = weighted_mse + std_penalty + under_penalty
     
     return total_loss
-
 
 def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, patience=10, lr=1e-4):  # Reduced learning rate
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
