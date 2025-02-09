@@ -268,7 +268,7 @@ def eval_dilution(atlas_path, eval_pat_dir, cell_type, model, output_dir, cell_t
      
 
 def train_and_evaluate(model_name):
-    atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_zohar.blood+gi+tum.l4.bed"
+    atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
     train_pat_dir = "/users/zetzioni/sharedscratch/atlas/training/general/train/"
     eval_pat_dir = "/users/zetzioni/sharedscratch/atlas/training/TCELLS"
     min_cpgs = 4
@@ -286,7 +286,7 @@ def train_and_evaluate(model_name):
     
 
 def eval_model(model_name):
-    atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_zohar.blood+gi+tum.l4.bed"
+    atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
     atlas = pd.read_csv(atlas_path,sep="\t")
     model = CellTypeDeconvolutionModel(num_markers=len(atlas),num_cell_types=len(atlas.columns[8:]), cell_types=list(atlas.columns[8:]))
     model.load_state_dict(torch.load(f"/users/zetzioni/sharedscratch/atlas/saved_models/{model_name}/best_model.pt"))
@@ -559,31 +559,31 @@ def run_oac_analysis():
 
     zohar_model = "deepconv"
     zohar_model_name="zohar"
-    zohar_atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_zohar.blood+gi+tum.l4.bed"
+    zohar_atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
 
-    zohar_atlas_name = "atlas_zohar.blood+gi+tum.l4"
+    zohar_atlas_name = "atlas_oac.blood+gi+tum.l4"
     zohar_batch="AB"
     zohar_type = "tissue"
     zohar_prefix_ab_tissue = "deep_conv_ab_tissue"
-    zohar_pat_dir_ab_tissue = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_zohar.blood+gi+tum.l4/AB/tissue"
+    zohar_pat_dir_ab_tissue = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/tissue"
     zohar_title_ab_tissue=f"DeepConv deconvolution using atlas {zohar_atlas_path} on AB tissue"
     eval_OAC(zohar_atlas_path, zohar_pat_dir_ab_tissue, zohar_title_ab_tissue, zohar_prefix_ab_tissue, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name)
 
     zohar_type = "cfDNA"
     zohar_prefix_ab_cf = "deep_conv_ab_cfDNA"
-    zohar_pat_dir_ab_cf = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_zohar.blood+gi+tum.l4/AB/cfDNA"
+    zohar_pat_dir_ab_cf = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA"
     zohar_title_ab_cf=f"DeepConv deconvolution using atlas {zohar_atlas_path} on AB cfDNA"
     eval_OAC(zohar_atlas_path, zohar_pat_dir_ab_cf, zohar_title_ab_cf, zohar_prefix_ab_cf, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name)
 
     zohar_batch="CD"
     zohar_prefix_cd_tissue = "deep_conv_cd_tissue"
-    zohar_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_zohar.blood+gi+tum.l4/CD/tissue"
+    zohar_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/tissue"
     zohar_title_cd_tissue=f"DeepConv deconvolution using atlas {zohar_atlas_path} on CD tissue"
     eval_OAC(zohar_atlas_path, zohar_pat_dir_cd_tissue, zohar_title_cd_tissue, zohar_prefix_cd_tissue, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, cd_tissue_mapping, zohar_model_name)
 
     zohar_type = "cfDNA"
     zohar_prefix_cd_cf = "deep_conv_cd_cfDNA"
-    zohar_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_zohar.blood+gi+tum.l4/CD/cfDNA"
+    zohar_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/cfDNA"
     zohar_title_cd_cf=f"DeepConv deconvolution using atlas {zohar_atlas_path} on CD cfDNA"
     eval_OAC(zohar_atlas_path, zohar_pat_dir_cd_cf, zohar_title_cd_cf, zohar_prefix_cd_cf, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name)
 
