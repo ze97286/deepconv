@@ -274,19 +274,11 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, pa
     return model
 
 def predict(model, X, coverage):
-   """Prediction function that processes samples one at a time"""
-   model.eval()
-   predictions_list = []
-   
-   with torch.no_grad():
-       for i in range(len(X)):
-           x = torch.tensor(X[i:i+1], dtype=torch.float32)
-           c = torch.tensor(coverage[i:i+1], dtype=torch.float32)
-           pred = model(x, c)
-           predictions_list.append(pred.numpy())
-   
-   return np.vstack(predictions_list)
-
+    model.eval()
+    with torch.no_grad():
+        base_pred, final_pred = model(X, coverage)
+        # We want the final calibrated predictions
+        return final_pred.numpy()
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
