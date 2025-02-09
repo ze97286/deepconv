@@ -106,42 +106,36 @@ class CellTypeDeconvolutionModel(nn.Module):
 def improved_loss(predictions, targets, eps=1e-8):
     pred, uncert = predictions
     
-    # Clamp values for numerical stability
+    # Ensure predictions and uncertainty are positive and in valid range
     pred = torch.clamp(pred, eps, 1-eps)
     uncert = torch.clamp(uncert, eps, 1.0)
     
-    # MSE with uncertainty weighting
-    squared_error = (pred - targets) ** 2
-    uncertainty_term = torch.log(uncert)
-    base_loss = (squared_error / (2 * uncert) + uncertainty_term).mean()
+    # Basic squared error
+    mse = (pred - targets) ** 2
     
-    # Focused loss on 0.5% - 2% range
+    # Weighted MSE based on uncertainty
+    weighted_mse = (mse / uncert).mean()
+    
+    # Uncertainty regularization (prevent too small/large uncertainties)
+    uncertainty_reg = uncert.mean()
+    
+    # Mid-range focus (0.5% - 2%)
     mid_range_mask = (targets >= 0.005) & (targets <= 0.02)
-    if mid_range_mask.any():
-        mid_range_loss = torch.abs(pred[mid_range_mask] - targets[mid_range_mask]).mean()
-    else:
-        mid_range_loss = 0
+    mid_range_loss = mse[mid_range_mask].mean() if mid_range_mask.any() else torch.tensor(0.0, device=pred.device)
     
     # Zero concentration penalty
     zero_mask = targets < 0.001
-    zero_loss = torch.clamp(pred[zero_mask], min=0).mean() if zero_mask.any() else 0
-    
-    # Relative error for higher concentrations
-    high_conc_mask = targets > 0.01
-    if high_conc_mask.any():
-        relative_error = torch.abs(pred[high_conc_mask] - targets[high_conc_mask]) / (targets[high_conc_mask] + eps)
-        high_conc_loss = relative_error.mean()
-    else:
-        high_conc_loss = 0
+    zero_loss = pred[zero_mask].mean() if zero_mask.any() else torch.tensor(0.0, device=pred.device)
     
     total_loss = (
-        base_loss * 1.0 +
+        weighted_mse +
         mid_range_loss * 2.0 +
         zero_loss * 5.0 +
-        high_conc_loss * 1.0
+        uncertainty_reg * 0.1
     )
     
     return total_loss
+
 
 def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, patience=10, lr=1e-4):  # Reduced learning rate
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
