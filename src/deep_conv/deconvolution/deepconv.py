@@ -125,7 +125,7 @@ class ResidualBlock(nn.Module):
         return out
     
 
-def simple_loss(predictions, targets):
+def simple_loss(predictions, targets, model):
     # Unpack predictions from model's forward pass
     concentration_pred, range_pred = predictions
     
@@ -334,17 +334,17 @@ def train_and_evaluate(model_name):
     train_pat_dir = "/users/zetzioni/sharedscratch/atlas/training/general/train/"
     eval_pat_dir = "/users/zetzioni/sharedscratch/atlas/training/TCELLS"
     min_cpgs = 4
-    threads = 32
-    output_path = "/users/zetzioni/sharedscratch/atlas/saved_models/"+model_name+"/",
+    threads = 10
+    output_path = Path("/users/zetzioni/sharedscratch/atlas/saved_models/"+model_name+"/")
     atlas = pd.read_csv(atlas_path,sep="\t")
     cell_types = list(atlas.columns[8:])
     train_and_eval(atlas_path=atlas_path, 
-                           train_pat_dir=train_pat_dir, 
-                           eval_pat_dir=eval_pat_dir, 
-                           min_cpgs=min_cpgs, 
-                           threads=threads,
-                           output_path=output_path, 
-                           cell_types=cell_types)
+                            train_pat_dir=train_pat_dir, 
+                            eval_pat_dir=eval_pat_dir, 
+                            min_cpgs=min_cpgs, 
+                            threads=threads,
+                            output_path=output_path, 
+                            cell_types=cell_types)
     
 
 def eval_model(model_name):
