@@ -163,6 +163,7 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, pa
     model.load_state_dict(torch.load(os.path.join(model_path, "best_model.pt")))
     return model
 
+
 def predict(model, X, coverage):
     model.eval()
     # Convert numpy arrays to tensors
@@ -170,9 +171,10 @@ def predict(model, X, coverage):
     coverage_tensor = torch.tensor(coverage, dtype=torch.float32)
     
     with torch.no_grad():
-        base_pred, final_pred = model(X_tensor, coverage_tensor)
-        # Return only the final predictions as numpy array
-        return final_pred.cpu().numpy()
+        predictions = model(X_tensor, coverage_tensor)
+        # Return predictions as numpy array
+        return predictions.cpu().numpy()
+    
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
