@@ -13,24 +13,6 @@ import os
 from deep_conv.atlasbuilder.find_marker_candidates import *
 
 
-def custom_loss(predictions, targets, epoch, alpha=0.25, gamma=2.0):
-    # Binary classification loss (focal loss)
-    is_high = (targets >= 0.01).float()
-    pred_high = (predictions >= 0.01).float()
-    bce_loss = F.binary_cross_entropy(pred_high, is_high, reduction='none')
-    pt = torch.exp(-bce_loss)
-    focal_loss = alpha * (1 - pt) ** gamma * bce_loss
-    focal_loss = focal_loss.mean()
-    # Weighted regression loss
-    high_mask = targets >= 0.01
-    weights = torch.where(targets < 0.01, 10.0, 1.0)  # Higher weight for low concentrations
-    regression_loss = F.mse_loss(predictions[high_mask], targets[high_mask], reduction='none')
-    regression_loss = (regression_loss * weights[high_mask]).mean()
-    # Dynamic binary loss weight (gradually reduce over epochs)
-    binary_weight = max(10.0 - epoch * 0.1, 1.0)  # Start at 10.0, reduce to 1.0
-    return binary_weight * focal_loss + regression_loss
-
-
 class TissueDeconvolutionDataset(Dataset):
     def __init__(self, X, coverage, y):
         self.X = torch.tensor(X, dtype=torch.float32)
@@ -46,166 +28,74 @@ class TissueDeconvolutionDataset(Dataset):
         }
 
 
-class CalibratedDeconvModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types):
-        super().__init__()
-        
-        # Core deconvolution module
-        self.signal_weights = nn.Parameter(torch.randn(num_markers, num_cell_types))
-        self.marker_bias = nn.Parameter(torch.zeros(num_markers))
-        
-        # Calibration network - purposely simple
-        self.calibration = nn.Sequential(
-            nn.Linear(num_cell_types, 256),
-            nn.LayerNorm(256),
-            nn.ReLU(),
-            nn.Linear(256, num_cell_types)
-        )
-        
-    def get_base_predictions(self, X, coverage):
-        # Handle missing values
-        valid_mask = ~torch.isnan(X)
-        X = torch.where(valid_mask, X, torch.zeros_like(X))
-        coverage = coverage * valid_mask
-        X_weighted = X * torch.log1p(coverage)
-        
-        # Initial signal unmixing (similar to NNLS)
-        signal = X_weighted - self.marker_bias.unsqueeze(0)
-        raw_proportions = F.linear(signal, self.signal_weights.t())
-        
-        # Ensure non-negativity and sum-to-one
-        base_pred = F.softmax(raw_proportions, dim=1)
-        return base_pred
-        
-    def forward(self, X, coverage):
-        # Get base predictions
-        base_pred = self.get_base_predictions(X, coverage)
-        
-        # Calibrate predictions
-        calibrated = self.calibration(base_pred)
-        final_pred = F.softmax(calibrated, dim=1)
-        
-        return base_pred, final_pred
-
-def calibrated_loss(predictions, targets, eps=1e-8):
-    base_pred, final_pred = predictions
-    
-    # Base prediction loss - standard cross-entropy
-    base_loss = -torch.sum(targets * torch.log(base_pred + eps), dim=1).mean()
-    
-    # Calibrated prediction losses
-    # MSE weighted by concentration range
-    mse = (final_pred - targets) ** 2
-    
-    # Higher weight for critical range (0.5% - 2%)
-    mid_range_mask = (targets >= 0.005) & (targets <= 0.02)
-    mse[mid_range_mask] *= 5.0
-    
-    # Highest weight for exact zeros
-    zero_mask = targets < 0.001
-    mse[zero_mask] *= 10.0
-    
-    calibrated_loss = mse.mean()
-    
-    # Add constraint that base predictions should be close to NNLS-like behavior
-    constraint_loss = F.mse_loss(base_pred, targets)
-    
-    total_loss = (
-        base_loss * 0.5 +        # Guide base predictions
-        calibrated_loss * 1.0 +   # Focus on final calibrated predictions
-        constraint_loss * 0.3     # Maintain NNLS-like behavior in base predictions
-    )
-    
-    return total_loss
-
-
 class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types):
         super().__init__()
         
-        # Deeper encoder with skip connections
-        self.encoder1 = nn.Sequential(
-            nn.Linear(num_markers, 1024),
-            nn.LayerNorm(1024),
-            nn.ReLU(),
-            nn.Dropout(0.1)
-        )
+        # Learn marker importance weights
+        self.marker_weights = nn.Parameter(torch.ones(num_markers))
         
-        self.encoder2 = nn.Sequential(
-            nn.Linear(1024, 512),
+        # Initial signal processing
+        self.signal_encoder = nn.Sequential(
+            nn.Linear(num_markers, 512),
             nn.LayerNorm(512),
             nn.ReLU(),
             nn.Dropout(0.1)
         )
         
-        # Concentration estimator
-        self.regressor = nn.Sequential(
-            nn.Linear(1536, 512),  # Fixed: added out_features
-            nn.LayerNorm(512),
+        # Concentration prediction with marker attention
+        self.concentration_predictor = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(512, num_cell_types)
-        )
-        
-        # Uncertainty estimator
-        self.uncertainty = nn.Sequential(
-            nn.Linear(1536, 512),  # Fixed: added out_features
-            nn.LayerNorm(512),
-            nn.ReLU(),
-            nn.Linear(512, num_cell_types),
-            nn.Softplus()  # Ensure positive uncertainty
+            nn.Linear(256, num_cell_types)
         )
 
     def forward(self, X, coverage):
         valid_mask = ~torch.isnan(X)
         X = torch.where(valid_mask, X, torch.zeros_like(X))
-        coverage = coverage * valid_mask
-        X_weighted = X * torch.log1p(coverage)
         
-        # Forward pass with skip connection
-        e1 = self.encoder1(X_weighted)
-        e2 = self.encoder2(e1)
+        # Apply learned marker weights
+        X_weighted = X * self.marker_weights.unsqueeze(0)
         
-        # Combine features
-        combined = torch.cat([e1, e2], dim=1)
+        # Apply coverage
+        X_weighted = X_weighted * torch.log1p(coverage)
         
-        # Get predictions and uncertainty
-        pred = F.softmax(self.regressor(combined), dim=1)
-        uncert = self.uncertainty(combined)
+        # Process signal
+        features = self.signal_encoder(X_weighted)
         
-        return pred, uncert
-    
+        # Get predictions
+        logits = self.concentration_predictor(features)
+        
+        # Scale predictions based on marker confidence
+        predictions = F.softmax(logits, dim=1)
+        
+        return predictions
 
-def improved_loss(predictions, targets, eps=1e-8):
-    pred, uncert = predictions
+
+def loss_fn(predictions, targets):
+    # Basic MSE
+    mse = (predictions - targets) ** 2
     
-    # Ensure predictions and uncertainty are positive and in valid range
-    pred = torch.clamp(pred, eps, 1-eps)
-    uncert = torch.clamp(uncert, eps, 1.0)
+    # Scale losses based on concentration ranges
+    concentration_weights = torch.ones_like(targets)
     
-    # Basic squared error
-    mse = (pred - targets) ** 2
-    
-    # Weighted MSE based on uncertainty
-    weighted_mse = (mse / uncert).mean()
-    
-    # Uncertainty regularization (prevent too small/large uncertainties)
-    uncertainty_reg = uncert.mean()
-    
-    # Mid-range focus (0.5% - 2%)
+    # Critical range (0.5% - 2%) gets higher weight
     mid_range_mask = (targets >= 0.005) & (targets <= 0.02)
-    mid_range_loss = mse[mid_range_mask].mean() if mid_range_mask.any() else torch.tensor(0.0, device=pred.device)
+    concentration_weights[mid_range_mask] *= 5.0
     
-    # Zero concentration penalty
-    zero_mask = targets < 0.001
-    zero_loss = pred[zero_mask].mean() if zero_mask.any() else torch.tensor(0.0, device=pred.device)
+    # Scale loss based on marker signal strength
+    weighted_mse = (mse * concentration_weights).mean()
     
-    total_loss = (
-        weighted_mse +
-        mid_range_loss * 2.0 +
-        zero_loss * 5.0 +
-        uncertainty_reg * 0.1
-    )
+    # Add regularization to prevent underestimation
+    underestimation_penalty = torch.where(
+        predictions < targets,
+        (targets - predictions) ** 2,
+        torch.zeros_like(predictions)
+    ).mean()
+    
+    total_loss = weighted_mse + underestimation_penalty * 2.0
     
     return total_loss
 
@@ -229,7 +119,7 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, pa
             
             optimizer.zero_grad()
             predictions = model(X, coverage)
-            loss = calibrated_loss(predictions, y)
+            loss = loss_fn(predictions, y)
             loss.backward()
             
             # Monitor gradients
@@ -248,7 +138,7 @@ def train_model(model, train_loader, val_loader, model_path, num_epochs=1000, pa
                 X, y = batch['X'], batch['y']
                 coverage = batch['coverage']
                 predictions = model(X, coverage)
-                loss = calibrated_loss(predictions, y)
+                loss = loss_fn(predictions, y)
                 val_loss += loss.item()
                 
         val_loss /= len(val_loader)
@@ -335,10 +225,9 @@ def train_and_eval(atlas_path, train_pat_dir, eval_pat_dir, min_cpgs, threads, o
     y_val = y_val / y_val.sum(dim=1, keepdim=True)
     train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False)
-    model = CalibratedDeconvModel(
+    model = CellTypeDeconvolutionModel(
         num_markers=X_train.shape[1],
         num_cell_types=len(cell_types), 
-        # cell_types=list(cell_types)
     )
     model = train_model(
         model=model,
