@@ -180,6 +180,10 @@ def train_and_eval(atlas_path, train_pat_dir, eval_pat_dir, min_cpgs, threads, o
     else:
         X_train, coverage_train = create_marker_matrices(atlas_path, train_pat_dir, min_cpgs, threads)
 
+    atlas = pd.read_csv(atlas_path, sep="\t")
+    names = set(atlas.name.unique()) 
+    X_train = X_train[X_train.name.isin(names)]
+    coverage_train = coverage_train[coverage_train.name.isin(names)]
     X_train = X_train.drop(columns=["name", "direction"]).T.to_numpy()
     coverage_train = coverage_train.drop(columns=["name", "direction"]).T.to_numpy()
     
@@ -194,6 +198,9 @@ def train_and_eval(atlas_path, train_pat_dir, eval_pat_dir, min_cpgs, threads, o
         coverage_val = pd.read_parquet(Path(eval_pat_dir)/"coverage.parquet")
     else:
         X_val, coverage_val = create_marker_matrices(atlas_path, eval_pat_dir, min_cpgs,threads)
+
+    X_val = X_val[X_val.name.isin(names)]
+    coverage_val = coverage_val[coverage_val.name.isin(names)]    
     X_val = X_val.drop(columns=["name", "direction"]).T.to_numpy()
     coverage_val = coverage_val.drop(columns=["name", "direction"]).T.to_numpy()
 
@@ -229,18 +236,20 @@ def train_and_eval(atlas_path, train_pat_dir, eval_pat_dir, min_cpgs, threads, o
 
 def eval_dilution(atlas_path, eval_pat_dir, cell_type, model, output_dir, cell_types=None, min_cpgs=None, threads=None):
     atlas = pd.read_csv(atlas_path, sep="\t")
+    names = set(atlas.name.unique())
     cell_type_index = list(atlas.columns[8:]).index(cell_type)
     # load marker values, coverage, and ground truth
     if os.path.exists(Path(eval_pat_dir)/"marker_values.parquet") and os.path.exists(Path(eval_pat_dir)/"coverage.parquet"):
-        X_val = pd.read_parquet(Path(eval_pat_dir)/"marker_values.parquet").drop(columns=["name", "direction"]).T.to_numpy()
-        coverage_val = pd.read_parquet(Path(eval_pat_dir)/"coverage.parquet").drop(columns=["name", "direction"]).T.to_numpy()
-        y_val = pd.read_parquet(Path(eval_pat_dir)/"ground_truth_y.parquet").to_numpy()
+        X_val = pd.read_parquet(Path(eval_pat_dir)/"marker_values.parquet")
+        coverage_val = pd.read_parquet(Path(eval_pat_dir)/"coverage.parquet")
+        y_val = pd.read_parquet(Path(eval_pat_dir)/"ground_truth_y.parquet").to_numpy()        
     else:
         X_val, coverage_val = create_marker_matrices(atlas_path, eval_pat_dir, min_cpgs,threads)
-        X_val = X_val.drop(columns=["name", "direction"]).T.to_numpy()
-        coverage_val = coverage_val.drop(columns=["name", "direction"]).T.to_numpy()
         y_val = get_ground_truth(eval_pat_dir,X_val.columns[2:], cell_types).to_numpy()
         y_val = y_val.to_numpy()
+        
+    X_val = X_val[X_val.name.isin(names)].drop(columns=["name", "direction"]).T.to_numpy()
+    coverage_val = coverage_val[coverage_val.name.isin(names)].drop(columns=["name", "direction"]).T.to_numpy()    
     y_val = torch.tensor(y_val, dtype=torch.float32)
     y_val = y_val / y_val.sum(dim=1, keepdim=True)
     # nnls estimation
