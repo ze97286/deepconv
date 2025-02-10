@@ -170,7 +170,7 @@ def set_seed(seed: int = 42):
     torch.backends.cudnn.benchmark = False
 
 
-def train_and_eval(atlas_path, train_pat_dir, eval_pat_dir, min_cpgs, threads, output_path, cell_types):
+def train_and_eval(atlas_path, train_pat_dir, eval_pat_dir, min_cpgs, threads, output_path, cell_types, min_coverage=10):
     set_seed()
     torch.set_num_threads(threads)
     torch.set_num_interop_threads(1)
@@ -185,8 +185,9 @@ def train_and_eval(atlas_path, train_pat_dir, eval_pat_dir, min_cpgs, threads, o
     X_train = X_train[X_train.name.isin(names)]
     coverage_train = coverage_train[coverage_train.name.isin(names)]
     X_train = X_train.drop(columns=["name", "direction"]).T.to_numpy()
-    coverage_train = coverage_train.drop(columns=["name", "direction"]).T.to_numpy()
-    
+    coverage_train = coverage_train.drop(columns=["name", "direction"]).T.to_numpy()    
+    X_train, coverage_train = mask_low_coverage(X_train, coverage_train, min_coverage)
+
     if os.path.exists(Path(train_pat_dir)/"ground_truth_y.parquet"):
         y_train = pd.read_parquet(Path(train_pat_dir)/"ground_truth_y.parquet")
     else:
@@ -203,6 +204,7 @@ def train_and_eval(atlas_path, train_pat_dir, eval_pat_dir, min_cpgs, threads, o
     coverage_val = coverage_val[coverage_val.name.isin(names)]    
     X_val = X_val.drop(columns=["name", "direction"]).T.to_numpy()
     coverage_val = coverage_val.drop(columns=["name", "direction"]).T.to_numpy()
+    X_val, coverage_val = mask_low_coverage(X_val, coverage_val, min_coverage)
 
     if os.path.exists(Path(eval_pat_dir)/"ground_truth_y.parquet"):
         y_val = pd.read_parquet(Path(eval_pat_dir)/"ground_truth_y.parquet")
@@ -234,7 +236,7 @@ def train_and_eval(atlas_path, train_pat_dir, eval_pat_dir, min_cpgs, threads, o
     return model
     
 
-def eval_dilution(atlas_path, eval_pat_dir, cell_type, model, output_dir, cell_types=None, min_cpgs=None, threads=None):
+def eval_dilution(atlas_path, eval_pat_dir, cell_type, model, output_dir, cell_types=None, min_cpgs=None, threads=None, min_coverage=10):
     atlas = pd.read_csv(atlas_path, sep="\t")
     names = set(atlas.name.unique())
     cell_type_index = list(atlas.columns[8:]).index(cell_type)
@@ -250,6 +252,8 @@ def eval_dilution(atlas_path, eval_pat_dir, cell_type, model, output_dir, cell_t
         
     X_val = X_val[X_val.name.isin(names)].drop(columns=["name", "direction"]).T.to_numpy()
     coverage_val = coverage_val[coverage_val.name.isin(names)].drop(columns=["name", "direction"]).T.to_numpy()    
+    X_val, coverage_val = mask_low_coverage(X_val, coverage_val, min_coverage)
+
     y_val = torch.tensor(y_val, dtype=torch.float32)
     y_val = y_val / y_val.sum(dim=1, keepdim=True)
     # nnls estimation
@@ -435,7 +439,13 @@ def plot_analysis(df, cell_types, title):
     return fig
 
 
-def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type, out_dir,cd_tissue_mapping, model_name=None, min_cpgs=4, threads=10):
+def mask_low_coverage(X: np.ndarray, coverage: np.ndarray, n: float):
+    X = X.astype(float)  
+    X[coverage < n] = np.nan
+    return X, coverage
+
+
+def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type, out_dir,cd_tissue_mapping, model_name=None, min_cpgs=4, min_coverage=10, threads=10):
     pat_dir = Path(pat_dir)
     atlas = pd.read_csv(atlas_path,sep="\t")
     if os.path.exists(Path(pat_dir)/"marker_values.parquet"):
@@ -452,6 +462,8 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
     coverage_val = coverage_val[coverage_val.name.isin(names)]
     X_val = X_val.drop(columns=["name", "direction"]).T.to_numpy()
     coverage_val = coverage_val.drop(columns=["name", "direction"]).T.to_numpy()
+    X_val, coverage_val = mask_low_coverage(X_val, coverage_val, min_coverage)
+
     if model_name is not None:
         model = CellTypeDeconvolutionModel(num_markers=len(atlas),num_cell_types=len(atlas.columns[8:]), cell_types=list(atlas.columns[8:]))
         model.load_state_dict(torch.load(f"/users/zetzioni/sharedscratch/atlas/saved_models/{model_name}/best_model.pt"))
@@ -625,6 +637,7 @@ def run_oac_analysis():
     ichorcna_cf_ab = pd.read_csv(out_dir+"/ab_ichorcna_cfdna.csv", sep="\t")
     ichorcna_cf_ab.columns=['sample', 'tf','ploidy']
     merged_cf_ab_oac = merged_cf_ab_oac.merge(ichorcna_cf_ab,on="sample", how="outer").dropna()
+    merged_cf_ab_oac.to_csv(out_dir+"/ab_cf_vs_ichorcna.csv",sep="\t",index=False)
     name = out_dir+"/ab_cf_vs_ichorcna"
     plot_oac_analysis(merged_cf_ab_oac, name)
 
@@ -635,6 +648,7 @@ def run_oac_analysis():
     ichorcna_cf_cd = pd.read_csv(out_dir+"/cd_ichorcna_cfdna.csv", sep="\t")
     ichorcna_cf_cd.columns=['sample', 'tf','ploidy']
     merged_cf_cd_oac = merged_cf_cd_oac.merge(ichorcna_cf_cd,on="sample", how="outer").dropna()
+    merged_cf_cd_oac.to_csv(out_dir+"/cd_cf_vs_ichorcna.csv",sep="\t",index=False)
     name = out_dir+"/cd_cf_vs_ichorcna"
     plot_oac_analysis(merged_cf_cd_oac, name)
 
