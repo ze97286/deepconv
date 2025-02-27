@@ -82,105 +82,72 @@ Most existing methods solve this problem using Non-negative Least Squares (NNLS)
 ## Model Architecture
 
 ### Input Features
-- Methylation values (0-1) for each genomic region
-- Coverage information (read counts) for each region
+- Marker values: Methylation values for each marker region (can contain NaNs where coverage=0)
+- Coverage: Number of reads covering each marker value
 
-### Design Rationale
+### Core Architecture
 
-1. **Parallel Encoders**
-   - Separate processing paths for methylation and coverage
-   - Allows the model to learn different feature patterns:
-     * Methylation encoder: Pattern recognition in methylation signals
-     * Coverage encoder: Quality and confidence assessment
-   - Each encoder can specialize in its domain
+1. Feature Extraction:
 
-2. **Dimensionality Choices**
-   - Initial expansion to 512 dimensions:
-     * Allows learning of rich feature representations
-     * Captures complex interactions between regions
-   - Reduction to 256 dimensions:
-     * Compresses information to most relevant features
-     * Reduces risk of overfitting
+Uses a two-layer network to transform each marker value into a rich feature representation
+The non-linear LeakyReLU activation allows capturing complex methylation patterns
 
-3. **Regularization Strategy**
-   - Heavy dropout (0.4):
-     * Prevents over-reliance on specific markers
-     * Improves robustness to missing data
-   - Batch normalization:
-     * Stabilizes training
-     * Handles varying scales of methylation and coverage
 
-4. **Feature Fusion**
-   - Concatenation rather than addition:
-     * Preserves distinct information from both streams
-     * Allows model to learn optimal combination
-   - No additional processing:
-     * Lets final layer learn direct mapping to proportions
+2. Cell Type-Specific Aggregation:
 
-5. **Output Design**
-   - Single linear layer to proportions:
-     * Simple mapping from learned features
-     * Avoids overfitting in final stages
-   - Softmax activation:
-     * Ensures biological constraints
-     * Naturally handles proportion requirements
+Each marker is assigned to exactly one target cell type (via target_ids)
+Features from markers targeting the same cell type are aggregated
+Features are weighted by coverage, giving more reliable markers more influence
+Effective zero coverage handling ensures NaN markers don't contribute
 
-### Architecture motivation
 
-1. **Biological Motivation**
-   - Mirrors the two key aspects of methylation data:
-     * Signal (methylation values)
-     * Confidence (coverage)
-   - Handles sparsity and noise in real data
+3. Proportion Prediction (Encoder):
 
-2. **Technical Advantages**
-   - End-to-end differentiable
-   - Relatively simple to train
-   - Computationally efficient
-   - Easy to interpret feature importance
+The aggregated features for each cell type are processed through a neural network
+The output is transformed via sigmoid and normalised to ensure proportions sum to 1
 
-3. **Practical Benefits**
-   - Can process variable-length inputs
-   - Robust to missing data
-   - Scales well with number of markers
-   - Easily adaptable to different reference panels
 
-### Network Structure
-1. Parallel encoders for methylation and coverage data:
-   - Process methylation patterns
-   - Account for varying coverage depths
-2. Feature fusion through concatenation
-3. Final layer producing cell type proportions
+4. Marker Reconstruction (Decoder):
 
-### Non-negativity and Sum-to-one Constraints
-The model enforces biological constraints through its architecture:
-1. Softmax activation in the final layer ensures:
-   - All proportions are positive (0-1 range)
-   - Proportions sum to 1
-   - Differentiable end-to-end training
+For interpretability, the model can reconstruct the original marker values
+This helps ensure the predicted proportions explain the observed methylation patterns
 
-This architectural choice is superior to post-processing normalisation because:
-- It incorporates constraints during training
-- Allows the model to learn within the constrained space
-- Maintains differentiability for gradient-based optimisation
 
-### Key Components
-- Batch normalisation: Stabilises training with varying methylation levels
-- Dropout (0.4): Prevents overfitting to specific methylation patterns
-- ReLU activation: Introduces non-linearity while maintaining non-negativity
+### Loss function - Enhanced Weighted Approach for Cell-Type Deconvolution
+The loss function implements a specialised approach to tackle the challenge of low SNR cell types like CD4/CD8:
 
-## Training Strategy
+#### Core Components
 
-### Data Generation
-- Synthetic mixtures created from reference methylation profiles
-- Realistic coverage simulation using negative binomial distribution
-- Technical noise simulation
+1. Concentration-Weighted Loss:
+Applies importance weights based on true cell type concentrations
+Creates progressively stronger penalties for higher CD4/CD8 concentrations
+For CD4/CD8 cells at 10% concentration, the weight is ~8x stronger than baseline
 
-### Training Process
-- KL divergence loss function
-- Adam optimiser with learning rate scheduling
-- Early stopping based on validation loss
-- L2 regularisation to prevent overfitting
+2. Asymmetric Error Penalties:
+Differentiates between underestimation and overestimation
+Applies an additional 1.5x penalty to CD4/CD8 underestimation
+Effectively prioritises reducing false negatives for these critical cell types
+
+1. Coverage-Weighted Reconstruction:
+Weights reconstruction errors by read coverage
+Places more emphasis on markers with higher confidence (more reads)
+Ignores markers with zero coverage (NaN values)
+
+
+4. Combined Loss With Balance Control:
+Uses alpha/beta parameters to balance proportion prediction vs. reconstruction
+Typically weights proportion prediction much higher (alpha=0.999)
+Maintains reconstruction as a regularising constraint (beta=0.001)
+
+#### Design Rationale
+The loss function's design addresses key challenges in methylation-based deconvolution:
+
+Low SNR Compensation: CD4/CD8 cells have 8x lower SNR than OAC, requiring special handling
+Concentration-Dependent Scaling: Higher concentration predictions need higher accuracy
+Penalty Asymmetry: Underestimation has worse clinical implications than overestimation
+Coverage Integration: Leverages sequencing depth as confidence measure
+
+This approach effectively focuses the model's learning on the most challenging aspects of the problem, improving performance on low-SNR cell types while maintaining overall accuracy.
 
 ## Usage
 
@@ -188,24 +155,6 @@ This architectural choice is superior to post-processing normalisation because:
 ```bash
 git clone https://github.com/username/deepconv
 cd deepconv
-```
-
-### Training a model 
-```
-cd deepconv/src
-python -m deep_conv.deconvolution.train --batch_size 32 --n_train 100000 --n_val 20000 --atlas_path /mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/Atlas_dmr_by_read.blood+gi+tum.U100.l4.bed --model_save_path /users/zetzioni/sharedscratch/deepconv/src/deep_conv/saved_models/
-```
-
-### Evaluating a model using diluted admixtures
-```
-cd deepconv/src
-python -m deep_conv.deconvolution.estimate_cell_type \
---model_path /users/zetzioni/sharedscratch/deconvolution_model.pt \
---cell_type CD4-T-cells \
---atlas_path /mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/Atlas_blood+gi+tum.U100.l4.bed \
---wgbs_tools_exec_path /users/zetzioni/sharedscratch/wgbs_tools/wgbstools \
---pats_path /mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/Benchmark/pat/blood+gi+tum.U100/Song/mixed/CD4 \
---output_path /users/zetzioni/sharedscratch/cd4 
 ```
 
 ### Requirements
