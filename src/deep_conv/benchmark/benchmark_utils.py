@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
@@ -9,6 +10,9 @@ from typing import Dict, List, Optional, Tuple
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+from sklearn.metrics import (mean_squared_error, mean_absolute_error, r2_score,
+                             accuracy_score, precision_score, recall_score, f1_score)
+
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
@@ -46,8 +50,11 @@ def load_dataset(dataset_path: str) -> Dict[str, np.ndarray]:
 def evaluate_performance(
     true_proportions: np.ndarray,
     estimated_proportions: np.ndarray,
-    cell_types: List[str]
-) -> Dict[str, Dict[str, float]]:
+    cell_types: list,
+    analyse_proportion_ranges=None,
+    min_range_samples: int = 5,
+    zero_threshold: float = 0.001
+):
     """
     Evaluate performance metrics between true and estimated proportions.
 
@@ -55,67 +62,115 @@ def evaluate_performance(
         true_proportions (np.ndarray): True cell type proportions (n_samples x n_cell_types).
         estimated_proportions (np.ndarray): Estimated cell type proportions (n_samples x n_cell_types).
         cell_types (List[str]): List of cell type names.
+        analyse_proportion_ranges (callable, optional): Function that returns a dict of range metrics.
+        min_range_samples (int, optional): Minimum number of samples required to report bin stats.
+        zero_threshold (float, optional): Threshold for zero vs. non-zero classification.
 
     Returns:
-        Dict[str, Dict[str, float]]: Nested dictionary containing metrics per cell type and overall.
+        Dict[str, Any]: Nested dictionary containing metrics per cell type, overall metrics, and range breakdown.
     """
+    # ----------------------------------------------------------------------
+    # Per-cell-type metrics
+    # ----------------------------------------------------------------------
     metrics_per_cell = {}
+
     for i, cell_type in enumerate(cell_types):
         true = true_proportions[:, i]
         est = estimated_proportions[:, i]
-        rmse = np.sqrt(mean_squared_error(true, est))
+        
+        rmse = math.sqrt(mean_squared_error(true, est))
         mae = mean_absolute_error(true, est)
-        # Handle cases where the variance is zero to avoid NaN in correlation
-        if np.std(est) == 0 or np.std(true) == 0:
+        
+        # Check zero variance in true or est
+        if np.std(true) < 1e-12:
+            # If they're essentially identical:
+            if np.allclose(true, est, atol=1e-12):
+                corr = 1.0
+                r2 = 1.0
+            else:
+                corr = 0.0
+                r2  = 0.0
+        elif np.std(est) < 1e-12:
+            # est is constant but true is not
             corr = 0.0
-            r2 = 0.0
-            logger.warning(f"Zero variance detected for cell type '{cell_type}'. Setting Correlation and R² to 0.")
+            r2   = 0.0
         else:
             corr, _ = pearsonr(true, est)
-            r2 = r2_score(true, est)
+            r2      = r2_score(true, est)
+        
+        # Zero vs. Non-Zero classification metrics
+        # (Only useful if your domain cares about absent vs. present.)
+        true_binary = (true >= zero_threshold).astype(int)
+        est_binary  = (est >= zero_threshold).astype(int)
+        
+        zero_acc  = accuracy_score(true_binary, est_binary)
+        zero_prec = precision_score(true_binary, est_binary, zero_division=0)
+        zero_rec  = recall_score(true_binary, est_binary, zero_division=0)
+        zero_f1   = f1_score(true_binary, est_binary, zero_division=0)
+        
         metrics_per_cell[cell_type] = {
-            'RMSE': rmse,
-            'MAE': mae,
-            'Pearson Correlation': corr,
-            'R²': r2
+            "N_Samples": len(true),
+            "RMSE": rmse,
+            "MAE": mae,
+            "Pearson Correlation": corr,
+            "R²": r2,
+            "Zero/NonZero Accuracy": zero_acc,
+            "Zero/NonZero Precision": zero_prec,
+            "Zero/NonZero Recall": zero_rec,
+            "Zero/NonZero F1": zero_f1
         }
     
-    # Overall metrics
-    overall_rmse = np.sqrt(mean_squared_error(true_proportions, estimated_proportions))
-    overall_mae = mean_absolute_error(true_proportions, estimated_proportions)
+    # ----------------------------------------------------------------------
+    # Overall metrics across ALL cell types (flattened errors)
+    # ----------------------------------------------------------------------
+    overall_rmse = math.sqrt(mean_squared_error(true_proportions, estimated_proportions))
+    overall_mae  = mean_absolute_error(true_proportions, estimated_proportions)
+
+    # Calculate average of per-cell-type R²
+    r2_scores = [m["R²"] for m in metrics_per_cell.values()]
+    average_r2 = np.mean(r2_scores)
     
-    # Compute R² for each cell type and average
-    r2_scores = []
-    for i in range(len(cell_types)):
-        true = true_proportions[:, i]
-        est = estimated_proportions[:, i]
-        if np.std(est) == 0 or np.std(true) == 0:
-            r2 = 0.0
+    # "Flattened" global R² (treating all data points as one array)
+    true_flat = true_proportions.ravel()
+    est_flat  = estimated_proportions.ravel()
+    if np.std(true_flat) < 1e-12:
+        # all true are constant
+        if np.allclose(true_flat, est_flat, atol=1e-12):
+            global_r2 = 1.0
         else:
-            r2 = r2_score(true, est)
-        r2_scores.append(r2)
-    overall_r2 = np.mean(r2_scores)
+            global_r2 = 0.0
+    else:
+        global_r2 = r2_score(true_flat, est_flat)
     
-    # Compute Pearson correlations for each cell type and average
+    # Per-cell Pearson correlation can be averaged, but let's do the same approach
+    # for correlation we do for R²:
     correlations = []
-    for i in range(len(cell_types)):
-        true = true_proportions[:, i]
-        est = estimated_proportions[:, i]
-        if np.std(est) == 0 or np.std(true) == 0:
-            corr = 0.0
-        else:
-            corr, _ = pearsonr(true, est)
-        correlations.append(corr)
-    overall_corr = np.mean(correlations)
+    for i, cell_type in enumerate(cell_types):
+        c = metrics_per_cell[cell_type]["Pearson Correlation"]
+        correlations.append(c)
+    average_corr = np.mean(correlations)
     
     metrics_overall = {
-        'Overall RMSE': overall_rmse,
-        'Overall MAE': overall_mae,
-        'Overall R²': overall_r2,
-        'Average Pearson Correlation': overall_corr
+        "Overall RMSE": overall_rmse,
+        "Overall MAE": overall_mae,
+        "Average R² (Per-Cell)": average_r2,
+        "Global R² (Flattened)": global_r2,
+        "Average Pearson Correlation": average_corr
     }
     
-    range_metrics = analyse_proportion_ranges(pred=estimated_proportions, true=true_proportions, cell_types=cell_types)
+    # ----------------------------------------------------------------------
+    # Range-based metrics
+    # ----------------------------------------------------------------------
+    range_metrics = {}
+    if analyse_proportion_ranges is not None:
+        # e.g. range_metrics = analyse_proportion_ranges(pred=estimated_proportions, 
+        #                                               true=true_proportions, 
+        #                                               cell_types=cell_types)
+        range_metrics = analyse_proportion_ranges(pred=estimated_proportions, 
+                                                  true=true_proportions, 
+                                                  cell_types=cell_types)
+    
+    # Print a table of range stats, skipping bins with too few samples
     header = (f"{'Cell Type':<20} {'Range':<25} {'MAE':<8} {'RMSE':<8} {'R²':<8} {'N':<8}")
     print(header)
     print("-" * len(header))
@@ -123,20 +178,33 @@ def evaluate_performance(
     for cell_type in cell_types:
         if cell_type in range_metrics:
             cell_range_metrics = range_metrics[cell_type]
-            for range_name, range_m in cell_range_metrics.items():
-                mae = range_m.get('mae', np.nan)
-                rmse = range_m.get('rmse', np.nan)
-                r2 = range_m.get('r2', np.nan)
-                n = range_m.get('n_samples', 0)
-                r2_str = '-'.rjust(7) if np.isnan(r2) else f"{r2:7.4f}"
+            for range_name, stats_dict in cell_range_metrics.items():
+                n_samples = stats_dict.get('n_samples', 0)
+                # Skip if below threshold
+                if n_samples < min_range_samples:
+                    continue
+                
+                mae_ = stats_dict.get('mae', float('nan'))
+                rmse_ = stats_dict.get('rmse', float('nan'))
+                r2_ = stats_dict.get('r2', float('nan'))
+                
+                r2_str = '-' if np.isnan(r2_) else f"{r2_:7.4f}"
                 print(f"{cell_type[:20]:<20} "
-                        f"{range_name:<25} "
-                        f"{mae:7.4f} "
-                        f"{rmse:7.4f} "
-                        f"{r2_str} "
-                        f"{n:7}")
-                    
-    return {'Per_Cell_Type': metrics_per_cell, 'Overall': metrics_overall}
+                      f"{range_name:<25} "
+                      f"{mae_:7.4f} "
+                      f"{rmse_:7.4f} "
+                      f"{r2_str:>7} "
+                      f"{n_samples:7d}")
+    
+    # ----------------------------------------------------------------------
+    # Return a comprehensive dictionary
+    # ----------------------------------------------------------------------
+    results = {
+        "Per_Cell_Type": metrics_per_cell,
+        "Overall": metrics_overall,
+        "Range_Breakdown": range_metrics
+    }
+    return results
 
 
 def analyse_proportion_ranges(pred: np.ndarray, 
@@ -286,37 +354,38 @@ def save_estimated_proportions(
 
 def columns():
     return [
-        f"d0_{i}" for i in range(1, 101)
+        f"d1e-1_{i}" for i in range(1, 1001)
     ] + [
-        f"d1e-04_{i}" for i in range(1, 101)
+        f"d5e-2_{i}" for i in range(1, 1001)
     ] + [
-        f"d0.001_{i}" for i in range(1, 101)
+        f"d1e-2_{i}" for i in range(1, 1001)
     ] + [
-        f"d0.005_{i}" for i in range(1, 101)
+        f"d5e-3_{i}" for i in range(1, 1001)
     ] + [
-        f"d0.01_{i}" for i in range(1, 101)
+        f"d1e-3_{i}" for i in range(1, 1001)
     ] + [
-        f"d0.05_{i}" for i in range(1, 101)
+        f"d1e-4_{i}" for i in range(1, 1001)
     ] + [
-        f"d0.1_{i}" for i in range(1, 101)
+        f"d1e-5_{i}" for i in range(1, 1001)
     ]
+
 
 def dilutions():
     return [
-        0 for i in range(1, 101)
+        1e-1 for i in range(1, 1001)
     ] + [
-        1e-4 for i in range(1, 101)
+        5e-2 for i in range(1, 1001)
     ] + [
-        1e-3 for i in range(1, 101)
+        1e-2 for i in range(1, 1001)
     ] + [
-        0.005 for i in range(1, 101)
+        5e-3 for i in range(1, 1001)
     ] + [
-        0.01 for i in range(1, 101)
+        1e-3 for i in range(1, 1001)
     ] + [
-        0.05 for i in range(1, 101)
+        1e-4 for i in range(1, 1001)
     ] + [
-        0.1 for i in range(1, 101)
-    ]
+        1e-5 for i in range(1, 1001)
+    ] 
 
 
 def process_atlas(atlas_path: str, fillna: str) -> Tuple[np.ndarray, List[str]]:
@@ -384,8 +453,6 @@ def plot_dilution_results(results_df, cell_type, all_predictions_df, output_path
     # Calculate mean and std per dilution
     summary = results_df.groupby('dilution').agg({'contribution': ['mean', 'std']}).reset_index()
     summary.columns = ['dilution', 'mean', 'std']
-    # Ensure all cell types are included
-    all_cell_types = all_predictions_df.columns.tolist()
     # Calculate the mean proportion for each cell type
     cell_type_means = all_predictions_df.mean(axis=0)
     # Sort the cell types by descending mean proportion (for red at top, blue at bottom)
@@ -543,12 +610,557 @@ def plot_dilution_results(results_df, cell_type, all_predictions_df, output_path
     metrics_df.to_csv(f"{output_path}{cell_type}_model_performance_metrics.csv", index=False)
     fig.write_html(f"{output_path}{cell_type}.html")
     fig.write_image(f"{output_path}{cell_type}.png", scale=2)
-    return fig, metrics_df
+
+    fig = plot_concentrations_by_dilution(results_df)
+    fig.write_html(f"{output_path}{cell_type}_expected_vs_actual.html")
 
 
+def calculate_classification_metrics(y_true, y_pred, thresholds):
+    """
+    Calculate sensitivity, specificity and accuracy at different ground truth thresholds
+    
+    Args:
+        y_true: Ground truth values
+        y_pred: Predicted values
+        thresholds: List of threshold values to evaluate at
+    
+    Returns:
+        DataFrame with metrics for each threshold
+    """
+    metrics = []
+    for threshold in thresholds:
+        # Create binary classifications
+        true_positive = (y_true >= threshold) & (y_pred >= threshold)
+        true_negative = (y_true < threshold) & (y_pred < threshold)
+        false_positive = (y_true < threshold) & (y_pred >= threshold)
+        false_negative = (y_true >= threshold) & (y_pred < threshold)
+        
+        # Calculate metrics
+        sensitivity = np.sum(true_positive) / (np.sum(true_positive) + np.sum(false_negative))
+        specificity = np.sum(true_negative) / (np.sum(true_negative) + np.sum(false_positive))
+        accuracy = (np.sum(true_positive) + np.sum(true_negative)) / len(y_true)
+        precision = np.sum(true_positive) / (np.sum(true_positive) + np.sum(false_positive))
+        f1 = 2 * (precision * sensitivity) / (precision + sensitivity)
+        
+        metrics.append({
+            'threshold': threshold,
+            'sensitivity': sensitivity,
+            'specificity': specificity,
+            'accuracy': accuracy,
+            'precision': precision,
+            'f1': f1,
+            'n_positive': np.sum(y_true >= threshold),
+            'n_total': len(y_true)
+        })
+    
+    return pd.DataFrame(metrics)
 
-    
-    
 
+def calculate_roc_points(y_true, y_pred, thresholds):
+    """
+    Calculate ROC curve points manually for continuous values
+    """
+    fpr_list = []
+    tpr_list = []
     
+    for threshold in thresholds:
+        y_true_binary = (y_true >= threshold).astype(int)
+        y_pred_binary = (y_pred >= threshold).astype(int)
+        fp = np.sum((y_pred_binary == 1) & (y_true_binary == 0))
+        tp = np.sum((y_pred_binary == 1) & (y_true_binary == 1))
+        fn = np.sum((y_pred_binary == 0) & (y_true_binary == 1))
+        tn = np.sum((y_pred_binary == 0) & (y_true_binary == 0))
+        fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+        tpr = tp / (tp + fn) if (tp + fn) > 0 else 0
+        fpr_list.append(fpr)
+        tpr_list.append(tpr)
+    return np.array(fpr_list), np.array(tpr_list)
+
+
+def calculate_classification_metrics(y_true, y_pred, thresholds):
+    """
+    Calculate sensitivity, specificity and accuracy at different ground truth thresholds
+    """
+    metrics = []
+    for threshold in thresholds:
+        # Create binary classifications
+        y_true_binary = (y_true >= threshold)
+        y_pred_binary = (y_pred >= threshold)
+        tp = np.sum(y_true_binary & y_pred_binary)
+        tn = np.sum(~y_true_binary & ~y_pred_binary)
+        fp = np.sum(~y_true_binary & y_pred_binary)
+        fn = np.sum(y_true_binary & ~y_pred_binary)
+        # Calculate metrics
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+        accuracy = (tp + tn) / len(y_true)
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        f1 = 2 * (precision * sensitivity) / (precision + sensitivity) if (precision + sensitivity) > 0 else 0
+        metrics.append({
+            'threshold': threshold,
+            'sensitivity': sensitivity,
+            'specificity': specificity,
+            'accuracy': accuracy,
+            'precision': precision,
+            'f1': f1,
+            'n_positive': np.sum(y_true >= threshold),
+            'n_total': len(y_true)
+        })
+    return pd.DataFrame(metrics)
+
+
+def calculate_performance_metrics(y_true, y_pred, rel_tolerances=[0.1, 0.2, 0.5]):
+    """
+    Calculate performance metrics using relative tolerances
     
+    Args:
+        y_true: Ground truth values
+        y_pred: Predicted values
+        rel_tolerances: List of relative tolerance values (e.g. 0.1 = 10% tolerance)
+    """
+    metrics = []
+    
+    for tolerance in rel_tolerances:
+        # Consider prediction correct if within X% of true value
+        relative_error = np.abs(y_pred - y_true) / np.maximum(y_true, 1e-10)
+        correct_predictions = relative_error <= tolerance
+        
+        # Only consider cases where true value is significant
+        significant_true = y_true > 0.001  # Minimum significant concentration
+        
+        # Calculate metrics
+        tp = np.sum(correct_predictions & significant_true)
+        fp = np.sum(~correct_predictions & significant_true)
+        tn = np.sum(correct_predictions & ~significant_true)
+        fn = np.sum(~correct_predictions & ~significant_true)
+        
+        # Calculate performance metrics
+        sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+        accuracy = (tp + tn) / len(y_true)
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        f1 = 2 * (precision * sensitivity) / (precision + sensitivity) if (precision + sensitivity) > 0 else 0
+        
+        metrics.append({
+            'tolerance': tolerance,
+            'sensitivity': sensitivity,
+            'specificity': specificity,
+            'accuracy': accuracy,
+            'precision': precision,
+            'f1': f1,
+            'mean_relative_error': np.mean(relative_error[significant_true]),
+            'median_relative_error': np.median(relative_error[significant_true])
+        })
+    
+    return pd.DataFrame(metrics)
+
+
+def evaluate_cell_type_performance(y_true, predictions, intended_dilutions):
+    """
+    Evaluate model performance for a single cell type
+    """
+    metrics = []
+    
+    for dilution in sorted(intended_dilutions.unique()):
+        # Get samples for this intended dilution
+        dilution_mask = intended_dilutions == dilution
+        
+        if not np.any(dilution_mask):
+            continue
+            
+        y_true_dilution = y_true[dilution_mask]
+        pred_dilution = predictions[dilution_mask]
+        
+        # Calculate detection metrics using actual values
+        true_positives = np.sum((pred_dilution >= y_true_dilution * 0.8) & (y_true_dilution > 0.001))
+        false_positives = np.sum((pred_dilution >= y_true_dilution * 1.2) & (y_true_dilution > 0.001))
+        true_negatives = np.sum((pred_dilution < 0.001) & (y_true_dilution <= 0.001))
+        false_negatives = np.sum((pred_dilution < y_true_dilution * 0.8) & (y_true_dilution > 0.001))
+        
+        total_positive_cases = np.sum(y_true_dilution > 0.001)
+        total_negative_cases = np.sum(y_true_dilution <= 0.001)
+        
+        # Calculate metrics
+        sensitivity = true_positives / total_positive_cases if total_positive_cases > 0 else 0
+        specificity = true_negatives / total_negative_cases if total_negative_cases > 0 else 0
+        accuracy = (true_positives + true_negatives) / len(y_true_dilution)
+        
+        # Calculate relative errors for significant concentrations
+        significant_mask = y_true_dilution > 0.001
+        rel_errors = np.abs(pred_dilution[significant_mask] - y_true_dilution[significant_mask]) / y_true_dilution[significant_mask]
+        
+        metrics.append({
+            'intended_dilution': dilution,
+            'actual_mean': np.mean(y_true_dilution),
+            'actual_std': np.std(y_true_dilution),
+            'sensitivity': sensitivity,
+            'specificity': specificity,
+            'accuracy': accuracy,
+            'median_rel_error': np.median(rel_errors) if len(rel_errors) > 0 else np.nan,
+            'mean_rel_error': np.mean(rel_errors) if len(rel_errors) > 0 else np.nan,
+            'n_samples': len(y_true_dilution)
+        })
+    
+    return pd.DataFrame(metrics)
+
+
+def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions, output_path, samples_per_dilution=1000):
+    """Create evaluation plots with the requested layout/fixes."""
+    os.makedirs(output_path, exist_ok=True)
+    
+    significant_cell_types = []
+    for cell_type in y_true_df.columns:
+        if np.any(y_true_df[cell_type] > 0.001):
+            significant_cell_types.append(cell_type)
+    
+    # Sample for heatmap
+    sampled_indices = []
+    for dilution in sorted(intended_dilutions.unique()):
+        dilution_indices = intended_dilutions[intended_dilutions == dilution].index
+        if len(dilution_indices) > samples_per_dilution:
+            sampled_indices.extend(np.random.choice(dilution_indices, samples_per_dilution, replace=False))
+        else:
+            sampled_indices.extend(dilution_indices)
+    
+    results = {}
+    
+    for cell_type in significant_cell_types:
+        # Calculate overall R² and Pearson correlation
+        y_true_vals = y_true_df[cell_type].values
+        y_pred_vals = predictions_df[cell_type].values
+        
+        r2 = r2_score(y_true_vals, y_pred_vals)
+        pearson_r = np.corrcoef(y_true_vals, y_pred_vals)[0, 1]
+        
+        # Create 4-row layout (one plot per row)
+        fig = make_subplots(
+            rows=4, cols=1,
+            subplot_titles=[
+                "Cell Type Proportions Heatmap", 
+                "Predicted vs Ground Truth",
+                "Relative Error Rate",    
+                None                             
+            ],
+            specs=[
+                [{"type": "heatmap"}],
+                [{"type": "scatter"}],
+                [{"type": "scatter"}],
+                [{"type": "box"}]
+            ],
+            vertical_spacing=0.05
+        )
+        
+        # --------------------- Row 1: Heatmap --------------------- #
+        heatmap_data = predictions_df.loc[sampled_indices]
+        cell_type_means = heatmap_data.mean(axis=0)
+        sorted_cell_types = cell_type_means.sort_values(ascending=False).index.tolist()
+        
+        fig.add_trace(
+            go.Heatmap(
+                z=heatmap_data[sorted_cell_types].T.values,
+                x=np.arange(len(sampled_indices)),
+                y=sorted_cell_types,
+                colorscale='RdBu_r',
+                colorbar=dict(title='Proportion', len=0.2, y=0.9),  # Heatmap legend (row 1)
+                zmin=0,
+                zmax=0.4
+            ),
+            row=1, col=1
+        )
+        
+        # ----------------- Row 2: Predicted vs. True ---------------- #
+        fig.add_trace(
+            go.Scatter(
+                x=y_true_vals,
+                y=y_pred_vals,
+                mode='markers',
+                marker=dict(
+                    color=np.log10(intended_dilutions),
+                    colorscale='Viridis',
+                    showscale=True,
+                    colorbar=dict(title='log10(Intended Dilution)', len=0.2, y=0.65), 
+                    size=3,
+                    opacity=0.6
+                ),
+                showlegend=False
+            ),
+            row=2, col=1
+        )
+        
+        # Perfect prediction line
+        fig.add_trace(
+            go.Scatter(
+                x=[y_true_vals.min(), y_true_vals.max()],
+                y=[y_true_vals.min(), y_true_vals.max()],
+                mode='lines',
+                line=dict(color='red', dash='dash'),
+                name='Perfect Prediction'
+            ),
+            row=2, col=1
+        )
+        
+        # -------- Row 3: Performance Metrics by Dilution --------- #
+        metrics_df = calculate_metrics_by_dilution(y_true_vals, y_pred_vals, intended_dilutions)
+        metrics_df = metrics_df.sort_values('dilution', ascending=True)
+        
+        fig.add_trace(
+            go.Scatter(
+                x=metrics_df['dilution'],
+                y=metrics_df['within_20pct'],
+                mode='lines+markers',
+                name='% Within ±20%',
+                line=dict(color='blue')
+            ),
+            row=3, col=1
+        )
+        
+        fig.add_trace(
+            go.Scatter(
+                x=metrics_df['dilution'],
+                y=metrics_df['median_rel_error'],
+                error_y=dict(
+                    type='data',
+                    symmetric=False,
+                    array=metrics_df['q75_rel_error'] - metrics_df['median_rel_error'],
+                    arrayminus=metrics_df['median_rel_error'] - metrics_df['q25_rel_error']
+                ),
+                mode='lines+markers',
+                name='Relative Error',
+                line=dict(color='red')
+            ),
+            row=3, col=1
+        )
+        
+        # Add reference lines for row=3
+        fig.add_hline(y=0, line_dash="dot", line_color="gray", row=3, col=1)
+        fig.add_hline(y=20, line_dash="dot", line_color="gray", row=3, col=1)
+        fig.add_hline(y=-20, line_dash="dot", line_color="gray", row=3, col=1)
+        
+        # Legend for row 3
+        fig.update_layout(
+            legend=dict(
+                y=0.4, x=1.02,  # Row 3 legend properly positioned
+                bgcolor="rgba(255,255,255,0.8)"
+            )
+        )
+        
+        # --------- Row 4: Error by Concentration Range ---------- #
+        concentration_ranges = [
+            ('Low (<0.1%)', y_true_vals < 0.001),
+            ('Med (0.1-1%)', (y_true_vals >= 0.001) & (y_true_vals < 0.01)),
+            ('Med-High (1-5%)', (y_true_vals >= 0.01) & (y_true_vals < 0.05)),
+            ('High (5-10%)', (y_true_vals >= 0.05) & (y_true_vals < 0.10)),
+            ('Very High (≥10%)', y_true_vals >= 0.10)
+        ]
+        
+        for conc_type, mask in concentration_ranges:
+            if np.any(mask):
+                fig.add_trace(
+                    go.Box(
+                        y=2 * (y_pred_vals[mask] - y_true_vals[mask]) / (y_pred_vals[mask] + y_true_vals[mask] + 1e-6) * 100,
+                        name=conc_type
+                    ),
+                    row=4, col=1
+                )
+        
+        # Legend for row 4
+        fig.update_layout(
+            legend2=dict(
+                y=0.15, x=1.02,  # Row 4 legend properly positioned
+                bgcolor="rgba(255,255,255,0.8)"
+            )
+        )
+        
+        # --------------------- Axis Updates (Restored) ---------------------- #
+        # Row 1: Heatmap
+        fig.update_xaxes(showticklabels=False, title="Samples", row=1, col=1)
+        fig.update_yaxes(title="Cell Types", row=1, col=1)
+        
+        # Row 2: Predicted vs. True
+        fig.update_xaxes(
+            title="True Value (%)", 
+            type="log", 
+            row=2, col=1,
+            ticktext=[f"{x*100:.3g}%" for x in [0.00001, 0.0001, 0.001, 0.01, 0.1]],
+            tickvals=[0.00001, 0.0001, 0.001, 0.01, 0.1]
+        )
+        fig.update_yaxes(title="Predicted Value (%)", type="log", row=2, col=1)
+        
+        # Row 3: Performance Metrics
+        fig.update_xaxes(
+            title="Intended Dilution (%)", 
+            type="log", 
+            row=3, col=1,
+            ticktext=[f"{x*100:.3g}%" for x in [0.00001, 0.0001, 0.001, 0.01, 0.1]],
+            tickvals=[0.00001, 0.0001, 0.001, 0.01, 0.1]
+        )
+        fig.update_yaxes(title="Percentage / Error", row=3, col=1)
+        
+        # Row 4: Error by Concentration Range
+        fig.update_xaxes(title="Concentration Range", row=4, col=1)
+        fig.update_yaxes(title="Relative Error (%)", row=4, col=1)
+        
+        # --------------------- Layout -------------------- #
+        fig.update_layout(
+            height=1800,
+            width=1400,
+            title=f"Cell Type Analysis: {cell_type} (R²={r2:.3f}, Pearson r={pearson_r:.3f})"
+        )
+        
+        html_file = os.path.join(output_path, f"{cell_type}_evaluation.html")
+        csv_file = os.path.join(output_path, f"{cell_type}_metrics.csv")
+        print(f"Saving {html_file}")
+        fig.write_html(html_file)
+        metrics_df.to_csv(csv_file, index=False)
+        results[cell_type] = {
+            'overall_r2': r2,
+            'pearson_r': pearson_r,
+            'metrics_by_dilution': metrics_df
+        }
+    
+    return results
+
+
+def calculate_metrics_per_dilution(y_true, y_pred, intended_dilution):
+    """
+    Calculate comprehensive metrics for a specific dilution level
+    """
+    # R-squared for this dilution
+    r2 = r2_score(y_true, y_pred)
+    
+    # Mean absolute percentage error (excluding very small values)
+    significant_mask = y_true > 0.001
+    mape = np.mean(np.abs((y_true[significant_mask] - y_pred[significant_mask]) / y_true[significant_mask]))
+    
+    # Calculate detection metrics
+    # True positive: Predicted high when actually high
+    # False positive: Predicted high when actually low
+    # Using median of true values at this dilution as threshold
+    threshold = np.median(y_true)
+    
+    tp = np.sum((y_pred >= threshold) & (y_true >= threshold))
+    fp = np.sum((y_pred >= threshold) & (y_true < threshold))
+    tn = np.sum((y_pred < threshold) & (y_true < threshold))
+    fn = np.sum((y_pred < threshold) & (y_true >= threshold))
+    
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+    accuracy = (tp + tn) / len(y_true)
+    
+    # Correlation coefficient
+    correlation = np.corrcoef(y_true, y_pred)[0, 1]
+    
+    return {
+        'intended_dilution': intended_dilution,
+        'r2': r2,
+        'mape': mape,
+        'sensitivity': sensitivity,
+        'specificity': specificity,
+        'accuracy': accuracy,
+        'correlation': correlation,
+        'mean_true': np.mean(y_true),
+        'mean_pred': np.mean(y_pred),
+        'std_true': np.std(y_true),
+        'std_pred': np.std(y_pred),
+        'n_samples': len(y_true)
+    }
+
+
+def calculate_performance_metrics(y_true, y_pred):
+    """Calculate performance metrics for continuous values"""
+    # Overall R² score
+    r2 = r2_score(y_true, y_pred)
+    
+    # RMSE
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    
+    # MAE
+    mae = np.mean(np.abs(y_true - y_pred))
+    
+    # Relative errors
+    rel_errors = (y_pred - y_true) / np.maximum(y_true, 1e-10)
+    
+    # Percentage within ±20% of true value
+    within_20pct = np.mean(np.abs(rel_errors) <= 0.2)
+    
+    return {
+        'r2': r2,
+        'rmse': rmse,
+        'mae': mae,
+        'within_20pct': within_20pct,
+        'median_rel_error': np.median(rel_errors),
+        'mean_rel_error': np.mean(rel_errors)
+    }
+
+
+def calculate_metrics_by_dilution(y_true, y_pred, intended_dilutions):
+    """Calculate metrics for each dilution level"""
+    metrics = []
+    for dilution in sorted(np.unique(intended_dilutions)):
+        mask = intended_dilutions == dilution
+        y_true_dil = y_true[mask]
+        y_pred_dil = y_pred[mask]
+        
+        # Use symmetric relative error to handle small values better
+        rel_errors = 2 * (y_pred_dil - y_true_dil) / (y_pred_dil + y_true_dil + 1e-6)
+        
+        # Calculate percentage within 20% of true value
+        within_20pct = np.mean(np.abs(rel_errors) <= 0.2) * 100
+        
+        metrics.append({
+            'dilution': dilution,
+            'within_20pct': within_20pct,
+            'median_rel_error': np.median(rel_errors) * 100,  # Convert to percentage
+            'q25_rel_error': np.percentile(rel_errors, 25) * 100,
+            'q75_rel_error': np.percentile(rel_errors, 75) * 100,
+            'mean_rel_error': np.mean(rel_errors) * 100,
+            'n_samples': len(y_true_dil)
+        })
+    
+    return pd.DataFrame(metrics)
+
+
+def plot_concentrations_by_dilution(df):
+    """
+    Create a violin plot of contributions by dilution using Plotly
+    
+    Parameters:
+    df (pandas.DataFrame): DataFrame with 'dilution' and 'contribution' columns
+    """
+    
+    # Create the violin plot
+    fig = go.Figure()
+    
+    # Add violin plot for each dilution
+    for dilution in sorted(df['dilution'].unique()):
+        subset = df[df['dilution'] == dilution]['contribution']
+        
+        fig.add_trace(go.Violin(
+            x=df[df['dilution'] == dilution]['dilution'],
+            y=subset,
+            name=str(dilution),
+            box_visible=True,
+            meanline_visible=True,
+            points='outliers'
+        ))
+    
+    # Update layout
+    fig.update_layout(
+        title='Distribution of Contributions by Dilution',
+        xaxis_title='Dilution',
+        yaxis_title='Contribution',
+        yaxis_type='log',  # Set y-axis to log scale
+        xaxis={'type': 'category', 'categoryorder': 'array', 'categoryarray': sorted(df['dilution'].unique())},  # Set x-axis as categorical
+        violinmode='group',
+        width=1600,
+        height=900,
+        showlegend=False
+    )
+    
+    # Update y-axis for better log scale visualization
+    fig.update_yaxes(
+        type='log',
+        exponentformat='power'
+    )
+    
+    return fig
