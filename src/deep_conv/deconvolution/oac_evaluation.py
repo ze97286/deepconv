@@ -1,4 +1,5 @@
 from deep_conv.deconvolution.deepconv import *
+from collections import defaultdict
 
 from pathlib import Path
 from deep_conv.benchmark.nnls import run_weighted_nnls
@@ -475,7 +476,7 @@ def prepare_deconv_input(atlas_path, eval_pat_dir, dilutions, min_cpgs=4,threads
 def deepconv_estimate(atlas_path, eval_pat_dir,model, dilutions, min_cpgs=4,threads=10):
     X_val, coverage_val, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions, min_cpgs, threads)
     print("median coverage", np.median(coverage_val, axis=1), np.median(np.median(coverage_val, axis=1)), np.median(coverage_val, axis=1).mean())
-    predictions = predict(model, X_val,coverage_val)
+    predictions = predict_with_consensus(model, X_val,coverage_val)
     predictions_df = pd.DataFrame(predictions, columns=list(y_true_df.columns))
     return y_true_df,predictions_df, y_dilutions 
 
@@ -499,12 +500,15 @@ def eval_admixtures_deepconv(model_name, use_low_depth=True, use_cd48_model=Fals
     deepconv_eval_pat_dir4 = f"/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval{suffix}CD4/"
     deepconv_eval_pat_dir8 = f"/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval{suffix}CD8/"
     deepconv_eval_pat_dir_oac = f"/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
+    deepconv_eval_pat_dir4_8 = f"/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval{suffix}CD4_CD8/"
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(deepconv_atlas_path, deepconv_eval_pat_dir4,model, tcell_dilutions)
     plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir4+"deepconv/")
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(deepconv_atlas_path, deepconv_eval_pat_dir8,model,tcell_dilutions)
     plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir8+"deepconv/")
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(deepconv_atlas_path, deepconv_eval_pat_dir_oac,model, oac_dilutions)
     plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir_oac+"deepconv/")
+    y_true_df, predictions_df, y_dilutions = deepconv_estimate(deepconv_atlas_path, deepconv_eval_pat_dir4_8,model, tcell_dilutions)
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir4_8+"deepconv/")
 
 
 def filter_by_coverage(fractions: np.ndarray, coverage: np.ndarray, min_cov: int):
@@ -527,13 +531,16 @@ def eval_admixtures_nnls(atlas_path, pat_dir):
     pat_dir4 = pat_dir+"CD4/"
     pat_dir8 = pat_dir+"CD8/"
     pat_dir_oac = pat_dir+"OAC/"
+    pat_dir4_8 = pat_dir+"CD4_CD8/"
     y_true_df, predictions_df, y_dilutions= nnls_estimate(atlas_path, pat_dir4, tcell_dilutions)
     plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir4+"nnls/")
     y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir8, tcell_dilutions)
     plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir8+"nnls/")
     y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir_oac, oac_dilutions)
     plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_oac+"nnls/")
- 
+    y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir4_8, tcell_dilutions)
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir4_8+"nnls/")
+
 
 def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type, out_dir,cd_tissue_mapping, model_name=None,ichorCNA=None, clinical_benefit=None, cancer_type=None, min_cpgs=4, threads=10):
     pat_dir = Path(pat_dir)
@@ -560,7 +567,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         model = CellTypeDeconvolutionModel(num_markers=len(atlas),num_cell_types=len(cell_types), target_ids=target_ids)
         checkpoint = torch.load(f"/users/zetzioni/sharedscratch/atlas/saved_models/{model_name}/best_model.pt")
         model.load_state_dict(checkpoint['model_state_dict'])
-        estimation = predict(model, X_val,coverage_val)
+        estimation = predict_with_consensus(model, X_val,coverage_val)
     else:
         estimation = run_weighted_nnls(X_val, coverage_val, atlas[atlas.columns[8:]].T.values)
     df = pd.DataFrame(estimation, columns=list(atlas.columns[8:]))
