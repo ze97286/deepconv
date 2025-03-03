@@ -87,65 +87,56 @@ Most existing methods solve this problem using Non-negative Least Squares (NNLS)
 
 ### Core Architecture
 
-1. Feature Extraction:
+1. **Feature Extraction**
+   - Uses a two-layer network to transform each marker value into a rich feature representation
+   - The non-linear LeakyReLU activation allows capturing complex methylation patterns
 
-Uses a two-layer network to transform each marker value into a rich feature representation
-The non-linear LeakyReLU activation allows capturing complex methylation patterns
+2. **Cell Type-Specific Aggregation**
+   - Each marker is assigned to exactly one target cell type (via target_ids)
+   - Features from markers targeting the same cell type are aggregated
+   - Features are weighted by coverage, giving more reliable markers more influence
+   - Effective zero coverage handling ensures NaN markers don't contribute
 
+3. **Proportion Prediction (Encoder)**
+   - The aggregated features for each cell type are processed through a neural network
+   - The output is transformed via sigmoid and normalised to ensure proportions sum to 1
 
-2. Cell Type-Specific Aggregation:
+4. **Marker Reconstruction (Decoder)**
+   - For interpretability, the model can reconstruct the original marker values
+   - This helps ensure the predicted proportions explain the observed methylation patterns
 
-Each marker is assigned to exactly one target cell type (via target_ids)
-Features from markers targeting the same cell type are aggregated
-Features are weighted by coverage, giving more reliable markers more influence
-Effective zero coverage handling ensures NaN markers don't contribute
-
-
-3. Proportion Prediction (Encoder):
-
-The aggregated features for each cell type are processed through a neural network
-The output is transformed via sigmoid and normalised to ensure proportions sum to 1
-
-
-4. Marker Reconstruction (Decoder):
-
-For interpretability, the model can reconstruct the original marker values
-This helps ensure the predicted proportions explain the observed methylation patterns
-
-
-### Loss function - Enhanced Weighted Approach for Cell-Type Deconvolution
+### Loss Function - Enhanced Weighted Approach for Cell-Type Deconvolution
 The loss function implements a specialised approach to tackle the challenge of low SNR cell types like CD4/CD8:
 
 #### Core Components
 
-1. Concentration-Weighted Loss:
-Applies importance weights based on true cell type concentrations
-Creates progressively stronger penalties for higher CD4/CD8 concentrations
-For CD4/CD8 cells at 10% concentration, the weight is ~8x stronger than baseline
+1. **Concentration-Weighted Loss:**
+   - Applies importance weights based on true cell type concentrations
+   - Creates progressively stronger penalties for higher CD4/CD8 concentrations
+   - For CD4/CD8 cells at 10% concentration, the weight is ~8x stronger than baseline
 
-2. Asymmetric Error Penalties:
-Differentiates between underestimation and overestimation
-Applies an additional 1.5x penalty to CD4/CD8 underestimation
-Effectively prioritises reducing false negatives for these critical cell types
+2. **Asymmetric Error Penalties:**
+   - Differentiates between underestimation and overestimation
+   - Applies an additional 1.5x penalty to CD4/CD8 underestimation
+   - Effectively prioritises reducing false negatives for these critical cell types
 
-1. Coverage-Weighted Reconstruction:
-Weights reconstruction errors by read coverage
-Places more emphasis on markers with higher confidence (more reads)
-Ignores markers with zero coverage (NaN values)
+3. **Coverage-Weighted Reconstruction:**
+   - Weights reconstruction errors by read coverage
+   - Places more emphasis on markers with higher confidence (more reads)
+   - Ignores markers with zero coverage (NaN values)
 
-
-4. Combined Loss With Balance Control:
-Uses alpha/beta parameters to balance proportion prediction vs. reconstruction
-Typically weights proportion prediction much higher (alpha=0.999)
-Maintains reconstruction as a regularising constraint (beta=0.001)
+4. **Combined Loss With Balance Control:**
+   - Uses alpha/beta parameters to balance proportion prediction vs. reconstruction
+   - Typically weights proportion prediction much higher (alpha=0.999)
+   - Maintains reconstruction as a regularising constraint (beta=0.001)
 
 #### Design Rationale
 The loss function's design addresses key challenges in methylation-based deconvolution:
 
-Low SNR Compensation: CD4/CD8 cells have 8x lower SNR than OAC, requiring special handling
-Concentration-Dependent Scaling: Higher concentration predictions need higher accuracy
-Penalty Asymmetry: Underestimation has worse clinical implications than overestimation
-Coverage Integration: Leverages sequencing depth as confidence measure
+- **Low SNR Compensation:** CD4/CD8 cells have 8x lower SNR than OAC, requiring special handling
+- **Concentration-Dependent Scaling:** Higher concentration predictions need higher accuracy
+- **Penalty Asymmetry:** Underestimation has worse clinical implications than overestimation
+- **Coverage Integration:** Leverages sequencing depth as confidence measure
 
 This approach effectively focuses the model's learning on the most challenging aspects of the problem, improving performance on low-SNR cell types while maintaining overall accuracy.
 
@@ -158,14 +149,10 @@ cd deepconv
 ```
 
 ### Requirements
-Python 3.9+
-PyTorch
-NumPy
-Pandas
-scikit-learn
-wgbs_tools
-plotly
-kaleido
-
-
+- Python 3.9+
+- PyTorch
+- NumPy
+- Pandas
+- scikit-learn
+- plotly
 
