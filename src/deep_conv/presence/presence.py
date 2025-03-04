@@ -206,11 +206,10 @@ def load_training(base_dir: str, atlas: pd.DataFrame, names: set, num_files: int
     # Return a DataLoader for training
     return DataLoader(
         train_dataset,
-        batch_size=64,
-        # shuffle=True,
+        batch_size=256,
+        shuffle=True,  
         num_workers=4,
-        sampler=create_targeted_sampler(train_dataset),
-        # persistent_workers=True
+        persistent_workers=True
     )
    
 

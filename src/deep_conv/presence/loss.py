@@ -7,10 +7,14 @@ def presence_loss_fn(
     true_props: torch.Tensor,
     valid_mask: torch.Tensor,
     presence_threshold: float = 0.0005,  # 0.05% threshold 
-    device: torch.device = None
+    device: torch.device = None,
+    cell_type_names=None
 ):
     """
-    Loss function for cell type presence detection with stronger penalty for false positives.
+    Loss function for cell type presence detection with:
+    1. Stronger penalty for false positives
+    2. Weighting by valid marker ratio to prioritize samples with more valid data
+    3. Detailed per-cell-type logging
     
     Args:
         presence_logits: [B, C] Raw logits for presence prediction
@@ -18,6 +22,7 @@ def presence_loss_fn(
         valid_mask: [B, M] Mask of valid markers
         presence_threshold: Threshold for considering a cell type present
         device: Device for computation
+        cell_type_names: Optional list of cell type names for better reporting
         
     Returns:
         loss: Scalar loss value
@@ -44,10 +49,17 @@ def presence_loss_fn(
     
     pos_weight = pos_weight.to(device)
     
-    # Binary cross-entropy with logits and class weighting
-    loss = F.binary_cross_entropy_with_logits(
-        presence_logits, presence_targets, pos_weight=pos_weight, reduction='mean'
+    # Calculate the proportion of valid markers per sample
+    valid_ratio_per_sample = torch.sum(valid_mask.float(), dim=1) / valid_mask.size(1)
+    
+    # Get per-element BCE loss
+    bce_loss = F.binary_cross_entropy_with_logits(
+        presence_logits, presence_targets, pos_weight=pos_weight, reduction='none'
     )
+    
+    # Weight the loss by valid ratio to prioritize samples with more valid markers
+    sample_weights = valid_ratio_per_sample.unsqueeze(1).expand_as(bce_loss)
+    weighted_loss = (bce_loss * sample_weights).mean()
     
     # Calculate metrics for monitoring
     with torch.no_grad():
@@ -65,7 +77,13 @@ def presence_loss_fn(
         false_negatives = torch.sum((1 - presence_preds) * presence_targets, dim=0)
         true_negatives = torch.sum((1 - presence_preds) * (1 - presence_targets), dim=0)
         
-        # Metrics per class
+        # Total counts across all cell types
+        total_tp = torch.sum(true_positives).item()
+        total_fp = torch.sum(false_positives).item()
+        total_tn = torch.sum(true_negatives).item()
+        total_fn = torch.sum(false_negatives).item()
+        
+        # Per-cell-type metrics
         precision = true_positives / (true_positives + false_positives + 1e-8)
         recall = true_positives / (true_positives + false_negatives + 1e-8)
         specificity = true_negatives / (true_negatives + false_positives + 1e-8)
@@ -76,22 +94,88 @@ def presence_loss_fn(
         avg_recall = torch.mean(recall)
         avg_specificity = torch.mean(specificity)
         avg_f1 = torch.mean(f1)
+        
+        # Find worst-performing cell types
+        if precision.numel() > 0 and not torch.all(torch.isnan(precision)):
+            valid_precision = precision[~torch.isnan(precision)]
+            worst_precision_idx = torch.argmin(valid_precision).item() if valid_precision.numel() > 0 else -1
+        else:
+            worst_precision_idx = -1
+            
+        if recall.numel() > 0 and not torch.all(torch.isnan(recall)):
+            valid_recall = recall[~torch.isnan(recall)]
+            worst_recall_idx = torch.argmin(valid_recall).item() if valid_recall.numel() > 0 else -1
+        else:
+            worst_recall_idx = -1
+            
+        if specificity.numel() > 0 and not torch.all(torch.isnan(specificity)):
+            valid_specificity = specificity[~torch.isnan(specificity)]
+            worst_specificity_idx = torch.argmin(valid_specificity).item() if valid_specificity.numel() > 0 else -1
+        else:
+            worst_specificity_idx = -1
+        
+        # Get proportions of cell types present in this batch
+        cell_type_present_percent = torch.mean(presence_targets, dim=0) * 100
     
-    # Compile metrics
+    # Compile metrics with confusion matrix counts and per-cell-type details
     details = {
-        'loss': loss.item(),
+        'loss': weighted_loss.item(),
         'accuracy': accuracy.item(),
         'precision': avg_precision.item(),
         'recall': avg_recall.item(),
         'specificity': avg_specificity.item(),
         'f1': avg_f1.item(),
+        'valid_ratio_mean': torch.mean(valid_ratio_per_sample).item(),
+        'confusion_counts': {
+            'tp': total_tp,
+            'fp': total_fp,
+            'tn': total_tn,
+            'fn': total_fn
+        },
         'metrics_per_class': {
             'precision': precision.cpu().numpy(),
             'recall': recall.cpu().numpy(),
             'specificity': specificity.cpu().numpy(),
-            'f1': f1.cpu().numpy()
-        },
-        'valid_ratio': torch.mean(valid_mask.float()).item()
+            'f1': f1.cpu().numpy(),
+            'tp': true_positives.cpu().numpy(),
+            'fp': false_positives.cpu().numpy(),
+            'tn': true_negatives.cpu().numpy(),
+            'fn': false_negatives.cpu().numpy(),
+            'present_percent': cell_type_present_percent.cpu().numpy()
+        }
     }
     
-    return loss, details
+    # Add worst-performing cell types if applicable
+    worst_performers = {}
+    
+    if worst_precision_idx >= 0:
+        worst_performers['worst_precision'] = {
+            'index': int(worst_precision_idx),
+            'name': cell_type_names[worst_precision_idx] if cell_type_names else f"Cell type {worst_precision_idx}",
+            'value': precision[worst_precision_idx].item(),
+            'tp': true_positives[worst_precision_idx].item(),
+            'fp': false_positives[worst_precision_idx].item()
+        }
+    
+    if worst_recall_idx >= 0:
+        worst_performers['worst_recall'] = {
+            'index': int(worst_recall_idx),
+            'name': cell_type_names[worst_recall_idx] if cell_type_names else f"Cell type {worst_recall_idx}",
+            'value': recall[worst_recall_idx].item(),
+            'tp': true_positives[worst_recall_idx].item(),
+            'fn': false_negatives[worst_recall_idx].item()
+        }
+    
+    if worst_specificity_idx >= 0:
+        worst_performers['worst_specificity'] = {
+            'index': int(worst_specificity_idx),
+            'name': cell_type_names[worst_specificity_idx] if cell_type_names else f"Cell type {worst_specificity_idx}",
+            'value': specificity[worst_specificity_idx].item(),
+            'tn': true_negatives[worst_specificity_idx].item(),
+            'fp': false_positives[worst_specificity_idx].item()
+        }
+    
+    if worst_performers:
+        details['worst_performers'] = worst_performers
+    
+    return weighted_loss, details
