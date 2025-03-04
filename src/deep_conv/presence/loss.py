@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 
-def presence_loss(
+def presence_loss_fn(
     presence_logits: torch.Tensor,
     true_props: torch.Tensor,
     valid_mask: torch.Tensor,
