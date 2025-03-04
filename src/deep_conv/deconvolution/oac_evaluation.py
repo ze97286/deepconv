@@ -453,18 +453,13 @@ def prepare_deconv_input(atlas_path, eval_pat_dir, dilutions, min_cpgs=4,threads
     atlas = pd.read_csv(atlas_path, sep="\t").dropna()
     names = set(atlas.name.unique())
     # load marker values, coverage, and ground truth
-    if os.path.exists(Path(eval_pat_dir)/"marker_values.parquet") and os.path.exists(Path(eval_pat_dir)/"coverage.parquet"):
-        X_val = pd.read_parquet(Path(eval_pat_dir)/"marker_values.parquet")
-        coverage_val = pd.read_parquet(Path(eval_pat_dir)/"coverage.parquet")
-        y_val = pd.read_parquet(Path(eval_pat_dir)/"ground_truth_y.parquet") 
-        y_val['sample'] = list(X_val.columns[2:])
-        y_val['dilution'] = y_val['sample'].apply(sample_to_dilution).apply(lambda x: dilutions[x])
-        y_dilutions = pd.DataFrame(y_val['dilution'].values, columns=['dilution'])
-        y_val = y_val.drop(columns=['dilution','sample']).to_numpy()               
-    else:
-        X_val, coverage_val = create_marker_matrices(atlas_path, eval_pat_dir, min_cpgs,threads)
-        y_val = get_ground_truth(eval_pat_dir,X_val.columns[2:]).to_numpy()
-        y_val = y_val.to_numpy()
+    X_val = pd.read_parquet(Path(eval_pat_dir)/"marker_values.parquet")
+    coverage_val = pd.read_parquet(Path(eval_pat_dir)/"coverage.parquet")
+    y_val = pd.read_parquet(Path(eval_pat_dir)/"ground_truth_y.parquet") 
+    y_val['sample'] = list(X_val.columns[2:])
+    y_val['dilution'] = y_val['sample'].apply(sample_to_dilution).apply(lambda x: dilutions[x])
+    y_dilutions = pd.DataFrame(y_val['dilution'].values, columns=['dilution'])
+    y_val = y_val.drop(columns=['dilution','sample']).to_numpy()                   
     X_val = X_val[X_val.name.isin(names)].drop(columns=["name", "direction"]).T.to_numpy()
     coverage_val = coverage_val[coverage_val.name.isin(names)].drop(columns=["name", "direction"]).T.to_numpy()    
     y_val = torch.tensor(y_val, dtype=torch.float32)
@@ -502,13 +497,13 @@ def eval_admixtures_deepconv(model_name, use_low_depth=True, use_cd48_model=Fals
     deepconv_eval_pat_dir_oac = f"/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
     deepconv_eval_pat_dir4_8 = f"/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval{suffix}CD4_CD8/"
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(deepconv_atlas_path, deepconv_eval_pat_dir4,model, tcell_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir4+"deepconv/")
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir4+f"{model_name}/")
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(deepconv_atlas_path, deepconv_eval_pat_dir8,model,tcell_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir8+"deepconv/")
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir8+f"{model_name}/")
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(deepconv_atlas_path, deepconv_eval_pat_dir_oac,model, oac_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir_oac+"deepconv/")
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir_oac+f"{model_name}/")
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(deepconv_atlas_path, deepconv_eval_pat_dir4_8,model, tcell_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir4_8+"deepconv/")
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir4_8+f"{model_name}/")
 
 
 def filter_by_coverage(fractions: np.ndarray, coverage: np.ndarray, min_cov: int):
@@ -545,13 +540,8 @@ def eval_admixtures_nnls(atlas_path, pat_dir):
 def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type, out_dir,cd_tissue_mapping, model_name=None,ichorCNA=None, clinical_benefit=None, cancer_type=None, min_cpgs=4, threads=10):
     pat_dir = Path(pat_dir)
     atlas = pd.read_csv(atlas_path,sep="\t")
-    if os.path.exists(Path(pat_dir)/"marker_values.parquet"):
-        X_val = pd.read_parquet(Path(pat_dir)/"marker_values.parquet")
-        coverage_val = pd.read_parquet(Path(pat_dir)/"coverage.parquet")
-    else:
-         X_val, coverage_val = create_marker_matrices(atlas_path, pat_dir, min_cpgs, threads)
-         X_val.to_parquet(pat_dir/"marker_values.parquet", index=False)
-         coverage_val.to_parquet(pat_dir/"coverage.parquet", index=False)
+    X_val = pd.read_parquet(Path(pat_dir)/"marker_values.parquet")
+    coverage_val = pd.read_parquet(Path(pat_dir)/"coverage.parquet")
     samples = list(X_val.columns[2:])
     atlas = atlas.dropna()
     names = set(atlas.name.unique()) 
@@ -839,28 +829,28 @@ def run_oac_analysis(model_name):
     zohar_prefix_ab_tissue = "deep_conv_ab_tissue"
     zohar_pat_dir_ab_tissue = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/tissue"
     zohar_title_ab_tissue=f"DeepConv deconvolution using atlas {zohar_atlas_path} on AB tissue"
-    out_dir = str(Path(out_base_dir)/"AB"/"tissue"/"deepconv")
+    out_dir = str(Path(out_base_dir)/"AB"/"tissue"/model_name)
     # eval_OAC(zohar_atlas_path, zohar_pat_dir_ab_tissue, zohar_title_ab_tissue, zohar_prefix_ab_tissue, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name)
 
     zohar_type = "cfDNA"
     zohar_prefix_ab_cf = "deep_conv_ab_cfDNA"
     zohar_pat_dir_ab_cf = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA"
     zohar_title_ab_cf=f"DeepConv deconvolution using atlas {zohar_atlas_path} on AB cfDNA"
-    out_dir = str(Path(out_base_dir)/"AB"/"cfDNA"/"deepconv")
+    out_dir = str(Path(out_base_dir)/"AB"/"cfDNA"/model_name)
     eval_OAC(zohar_atlas_path, zohar_pat_dir_ab_cf, zohar_title_ab_cf, zohar_prefix_ab_cf, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name, ichorcna_cf_ab, ab_sample_to_cb, ab_sample_to_ct)
 
     zohar_batch="CD"
     zohar_prefix_cd_tissue = "deep_conv_cd_tissue"
     zohar_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/tissue"
     zohar_title_cd_tissue=f"DeepConv deconvolution using atlas {zohar_atlas_path} on CD tissue"
-    out_dir = str(Path(out_base_dir)/"CD"/"tissue"/"deepconv")
+    out_dir = str(Path(out_base_dir)/"CD"/"tissue"/model_name)
     # eval_OAC(zohar_atlas_path, zohar_pat_dir_cd_tissue, zohar_title_cd_tissue, zohar_prefix_cd_tissue, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, cd_tissue_mapping, zohar_model_name, ichorcna_cf_cd)
 
     zohar_type = "cfDNA"
     zohar_prefix_cd_cf = "deep_conv_cd_cfDNA"
     zohar_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/cfDNA"
     zohar_title_cd_cf=f"DeepConv deconvolution using atlas {zohar_atlas_path} on CD cfDNA"
-    out_dir = str(Path(out_base_dir)/"CD"/"cfDNA"/"deepconv")
+    out_dir = str(Path(out_base_dir)/"CD"/"cfDNA"/model_name)
     eval_OAC(zohar_atlas_path, zohar_pat_dir_cd_cf, zohar_title_cd_cf, zohar_prefix_cd_cf, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name)
 
     ben_model_name = None
