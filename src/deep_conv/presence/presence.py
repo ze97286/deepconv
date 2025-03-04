@@ -278,7 +278,8 @@ def train_and_eval(
         learning_rate=0.0001,
         weight_decay=1e-5,
         presence_threshold=0.001,  
-        patience=10
+        patience=10,
+        cell_types=cell_types,
     )
     
     # 7) Evaluate final model predictions on each validation set
