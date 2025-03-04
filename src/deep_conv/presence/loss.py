@@ -43,7 +43,7 @@ def presence_loss_fn(
     if num_positives > 0:
         neg_to_pos_ratio = num_negatives / num_positives
         pos_weight = 1.0 / (neg_to_pos_ratio + 1e-6)  # Inverse ratio
-        pos_weight = torch.clamp(pos_weight, min=0.1, max=1.0)  # Limit range
+        pos_weight = torch.clamp(pos_weight, min=0.05, max=0.5)
     else:
         pos_weight = torch.tensor(0.1)  # Default if no positives
     
@@ -65,7 +65,7 @@ def presence_loss_fn(
     with torch.no_grad():
         # Convert logits to probabilities and binary predictions
         presence_probs = torch.sigmoid(presence_logits)
-        presence_preds = (presence_probs > 0.5).float()
+        presence_preds = (presence_probs > 0.8).float()
         
         # Calculate accuracy, precision, recall
         correct = (presence_preds == presence_targets).float()
