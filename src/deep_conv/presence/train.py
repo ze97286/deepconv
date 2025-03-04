@@ -12,12 +12,12 @@ def train_presence_model(
     train_loader: torch.utils.data.DataLoader,
     val_loaders: dict,
     model_path: str,
-    cell_types: list[str] = None, 
     num_epochs: int = 1000,
     learning_rate: float = 1e-3,
     weight_decay: float = 1e-5,
-    presence_threshold: float = 0.0005,  # 0.05%
+    presence_threshold: float = 0.0005,  # 0.05% threshold
     patience: int = 10,
+    cell_types: list[str] = None, 
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ):
     """
@@ -33,6 +33,7 @@ def train_presence_model(
         weight_decay: L2 regularization parameter
         presence_threshold: Threshold for considering a cell type present
         patience: Patience for early stopping
+        cell_types: List of cell type names for better reporting
         device: Device to train on
         
     Returns:
@@ -84,7 +85,8 @@ def train_presence_model(
                 true_props=true_props,
                 valid_mask=valid_mask,
                 presence_threshold=presence_threshold,
-                device=device
+                device=device,
+                cell_type_names=cell_types
             )
             
             # Backward pass
@@ -93,7 +95,7 @@ def train_presence_model(
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
-            # Accumulate metrics
+            # Accumulate metrics (only scalar metrics for training)
             for metric, value in details.items():
                 if isinstance(value, dict):
                     continue
@@ -117,7 +119,7 @@ def train_presence_model(
         val_metrics = defaultdict(lambda: defaultdict(float))
         
         for val_name, val_loader in val_loaders.items():
-            val_set_metrics = defaultdict(float)
+            val_set_metrics = {}
             num_val_batches = 0
             
             with torch.no_grad():
@@ -140,20 +142,53 @@ def train_presence_model(
                         cell_type_names=cell_types,
                     )
                     
-                    # Accumulate metrics
-                    for metric, value in details.items():
-                        if isinstance(value, dict):
-                            continue
-                        val_set_metrics[metric] += value
+                    # For the first batch, initialize all metrics
+                    if num_val_batches == 0:
+                        val_set_metrics = details.copy()
+                    else:
+                        # Accumulate scalar metrics
+                        for metric, value in details.items():
+                            if not isinstance(value, dict):
+                                val_set_metrics[metric] += value
+                            
+                            # Handle special dictionaries
+                            elif metric == 'confusion_counts':
+                                for count_key, count_value in value.items():
+                                    val_set_metrics[metric][count_key] += count_value
+                            
+                            elif metric == 'metrics_per_class':
+                                for key, array_value in value.items():
+                                    val_set_metrics[metric][key] += array_value
+                            
+                            # For worst_performers, just keep the last batch's values
+                            elif metric == 'worst_performers':
+                                val_set_metrics[metric] = value
                     
                     num_val_batches += 1
             
-            # Average validation metrics
-            for metric in val_set_metrics:
-                val_set_metrics[metric] /= num_val_batches
-                val_metrics[val_name][metric] = val_set_metrics[metric]
-                history[f"val_{val_name}_{metric}"].append(val_set_metrics[metric])
+            # Average scalar metrics and per-class metrics
+            for metric, value in val_set_metrics.items():
+                if not isinstance(value, dict):
+                    val_set_metrics[metric] /= num_val_batches
+                elif metric == 'metrics_per_class':
+                    for key in val_set_metrics[metric]:
+                        val_set_metrics[metric][key] /= num_val_batches
             
+            # Store in val_metrics and history
+            val_metrics[val_name] = val_set_metrics
+            
+            # Store scalar metrics in history
+            for metric, value in val_set_metrics.items():
+                if not isinstance(value, dict):
+                    history[f"val_{val_name}_{metric}"].append(value)
+            
+            # Print evaluation metrics
+            print(f"{val_name} - F1: {val_set_metrics['f1']:.4f}, "
+                  f"Precision: {val_set_metrics['precision']:.4f}, "
+                  f"Recall: {val_set_metrics['recall']:.4f}, "
+                  f"Specificity: {val_set_metrics['specificity']:.4f}")
+            
+            # Print detailed evaluation
             print(f"\n===== Evaluation on {val_name} dataset =====")
             print(f"Overall Metrics:")
             print(f"  Accuracy: {val_set_metrics['accuracy']:.4f}")
@@ -164,33 +199,40 @@ def train_presence_model(
 
             # Confusion matrix counts
             print(f"\nConfusion Matrix Counts:")
-            print(f"  True Positives: {val_set_metrics['confusion_counts']['tp']}")
-            print(f"  False Positives: {val_set_metrics['confusion_counts']['fp']}")
-            print(f"  True Negatives: {val_set_metrics['confusion_counts']['tn']}")
-            print(f"  False Negatives: {val_set_metrics['confusion_counts']['fn']}")
+            if 'confusion_counts' in val_set_metrics:
+                print(f"  True Positives: {val_set_metrics['confusion_counts']['tp']}")
+                print(f"  False Positives: {val_set_metrics['confusion_counts']['fp']}")
+                print(f"  True Negatives: {val_set_metrics['confusion_counts']['tn']}")
+                print(f"  False Negatives: {val_set_metrics['confusion_counts']['fn']}")
 
             # Valid marker ratio
-            print(f"Mean Valid Marker Ratio: {val_set_metrics['valid_ratio_mean']:.4f}")
+            if 'valid_ratio_mean' in val_set_metrics:
+                print(f"Mean Valid Marker Ratio: {val_set_metrics['valid_ratio_mean']:.4f}")
 
             # Per-cell-type metrics
-            print("\nPer-Cell-Type Metrics:")
-            for i in range(len(val_set_metrics['metrics_per_class']['precision'])):
-                cell_name = cell_types[i] if cell_types else f"Cell type {i}"
-                print(f"\n  {cell_name}:")
-                print(f"    Present in {val_set_metrics['metrics_per_class']['present_percent'][i]:.2f}% of samples")
-                print(f"    TP: {val_set_metrics['metrics_per_class']['tp'][i]}, FP: {val_set_metrics['metrics_per_class']['fp'][i]}")
-                print(f"    TN: {val_set_metrics['metrics_per_class']['tn'][i]}, FN: {val_set_metrics['metrics_per_class']['fn'][i]}")
-                print(f"    Precision: {val_set_metrics['metrics_per_class']['precision'][i]:.4f}")
-                print(f"    Recall: {val_set_metrics['metrics_per_class']['recall'][i]:.4f}")
-                print(f"    Specificity: {val_set_metrics['metrics_per_class']['specificity'][i]:.4f}")
-                print(f"    F1: {val_set_metrics['metrics_per_class']['f1'][i]:.4f}")
+            if 'metrics_per_class' in val_set_metrics:
+                print("\nPer-Cell-Type Metrics:")
+                metrics_per_class = val_set_metrics['metrics_per_class']
+                if 'precision' in metrics_per_class:
+                    for i in range(len(metrics_per_class['precision'])):
+                        cell_name = cell_types[i] if cell_types else f"Cell type {i}"
+                        print(f"\n  {cell_name}:")
+                        if 'present_percent' in metrics_per_class:
+                            print(f"    Present in {metrics_per_class['present_percent'][i]:.2f}% of samples")
+                        if all(k in metrics_per_class for k in ['tp', 'fp', 'tn', 'fn']):
+                            print(f"    TP: {metrics_per_class['tp'][i]}, FP: {metrics_per_class['fp'][i]}")
+                            print(f"    TN: {metrics_per_class['tn'][i]}, FN: {metrics_per_class['fn'][i]}")
+                        print(f"    Precision: {metrics_per_class['precision'][i]:.4f}")
+                        print(f"    Recall: {metrics_per_class['recall'][i]:.4f}")
+                        print(f"    Specificity: {metrics_per_class['specificity'][i]:.4f}")
+                        print(f"    F1: {metrics_per_class['f1'][i]:.4f}")
 
             # Worst performers
             if 'worst_performers' in val_set_metrics:
                 print("\nWorst Performing Cell Types:")
                 for category, info in val_set_metrics['worst_performers'].items():
                     print(f"  {category.replace('_', ' ').title()}: {info['name']} ({info['value']:.4f})")
-                    
+        
         # Calculate average F1 across validation sets
         avg_val_f1 = np.mean([metrics['f1'] for metrics in val_metrics.values()])
         
