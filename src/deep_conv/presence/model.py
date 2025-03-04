@@ -65,26 +65,30 @@ class CellTypePresenceModel(nn.Module):
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
 
-        # Store marker-to-cell-type mapping
+        # Store cell-type mapping
         target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
         self.register_buffer("target_ids", target_ids_t)
 
-        # Extract features from methylation values
+        # Feature extraction with higher dimension and more dropout
         self.marker_feature_extractor = nn.Sequential(
             nn.Linear(1, feature_dim),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim, feature_dim)
+            nn.Linear(feature_dim, feature_dim),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout_rate/2)
         )
 
-        # Core presence detection network
+        # Deeper presence detection network
         self.presence_detector = nn.Sequential(
-            nn.Linear(num_cell_types * feature_dim, 128),
-            nn.ReLU(),
+            nn.Linear(num_cell_types * feature_dim, 256),
+            nn.LeakyReLU(),
             nn.Dropout(dropout_rate),
+            nn.Linear(256, 128),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout_rate/2),
             nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
+            nn.LeakyReLU(),
             nn.Linear(64, num_cell_types)
         )
 

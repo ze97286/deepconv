@@ -93,6 +93,26 @@ def get_validation_set(eval_pat_dir: str, atlas: pd.DataFrame, names: set) -> Tu
     return val_loader, y_val
 
 
+def create_targeted_sampler(dataset, cd4_idx=3, cd8_idx=4, presence_threshold=0.0005):
+    weights = []
+    for i in range(len(dataset)):
+        sample = dataset[i]
+        y = sample['y']
+        
+        # Higher weight for samples with low concentration CD4 or CD8
+        if ((presence_threshold < y[cd4_idx] <= 0.01) or 
+            (presence_threshold < y[cd8_idx] <= 0.01)):
+            weights.append(10.0)  # Much higher chance of selection
+        else:
+            weights.append(1.0)
+    
+    return torch.utils.data.WeightedRandomSampler(
+        weights=weights,
+        num_samples=len(weights),
+        replacement=True
+    )
+
+
 def load_training(base_dir: str, atlas: pd.DataFrame, names: set, num_files: int = 4) -> DataLoader:
     """
     Loads and merges multiple parquet files containing training data (marker_values, coverage, ground_truth_y),
@@ -186,10 +206,11 @@ def load_training(base_dir: str, atlas: pd.DataFrame, names: set, num_files: int
     # Return a DataLoader for training
     return DataLoader(
         train_dataset,
-        batch_size=256,
-        shuffle=True,
+        batch_size=64,
+        # shuffle=True,
         num_workers=4,
-        persistent_workers=True
+        sampler=create_targeted_sampler(train_dataset),
+        # persistent_workers=True
     )
    
 
@@ -255,7 +276,7 @@ def train_and_eval(
         val_loaders=validation_dls,
         model_path=output_path,
         num_epochs=1000,
-        learning_rate=0.001,
+        learning_rate=0.0001,
         weight_decay=1e-5,
         presence_threshold=0.001,  
         patience=10
