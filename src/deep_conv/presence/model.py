@@ -91,6 +91,8 @@ class CellTypePresenceModel(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(64, num_cell_types)
         )
+        self.presence_detector[-1].bias.data.fill_(-1.0)
+
 
     def forward(self, marker_values, coverage):
         """
