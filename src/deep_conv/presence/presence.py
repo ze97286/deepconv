@@ -257,7 +257,7 @@ def train_and_eval(
         num_epochs=1000,
         learning_rate=0.001,
         weight_decay=1e-5,
-        presence_threshold=0.0005,  
+        presence_threshold=0.001,  
         patience=10
     )
     
