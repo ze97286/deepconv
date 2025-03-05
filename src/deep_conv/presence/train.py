@@ -4,7 +4,7 @@ import os
 import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
-from deep_conv.presence.loss import presence_loss_fn
+from deep_conv.presence.loss import *
 from deep_conv.presence.model import *
 
 def train_single_cell_model(

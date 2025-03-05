@@ -11,8 +11,8 @@ from typing import Tuple
 
 from deep_conv.benchmark.benchmark_utils import *
 from deep_conv.presence.model import *
-from deep_conv.presence.train import train_presence_model, train_single_cell_model
-from deep_conv.presence.evaluate import evaluate_presence_model
+from deep_conv.presence.train import *
+from deep_conv.presence.evaluate import *
 
 
 def set_seed(seed: int = 42):
