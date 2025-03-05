@@ -3,42 +3,41 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 
 
-class TissueDeconvolutionDataset(Dataset):
+class BinaryCellTypeDataset(Dataset):
     """
-    An optimized PyTorch Dataset for loading cfDNA methylation data.
+    A PyTorch Dataset that treats cell type detection as a binary classification problem.
     
-    Key optimizations:
-    1. Precomputes and caches target cell type masks
-    2. Handles NaN values more efficiently
-    3. Uses pin_memory for faster data transfer to GPU
+    Args:
+        fraction: Methylation fraction values [num_samples, num_markers]
+        coverage: Coverage values [num_samples, num_markers]
+        y: Ground truth proportions [num_samples, num_cell_types]
+        target_cell_type: Index of the target cell type
+        target_ids: Marker to cell type mapping
+        presence_threshold: Threshold for considering a cell type present
     """
-    def __init__(self, fraction, coverage, atlas, y=None, 
-                target_ids=None, target_cell_type=None, 
-                precompute_targets=True, presence_threshold=0.0005):
-        # Convert to tensors if they're not already
+    def __init__(self, fraction, coverage, y, target_cell_type, target_ids=None, 
+                 presence_threshold=0.0005):
+        # Convert inputs to tensors
         self.fraction = torch.tensor(fraction, dtype=torch.float32)
         self.coverage = torch.tensor(coverage, dtype=torch.float32)
-        self.atlas = torch.tensor(atlas, dtype=torch.float32)
         
+        # Extract the binary label for the target cell type
         if y is not None:
-            self.y = torch.tensor(y, dtype=torch.float32)
+            y_tensor = torch.tensor(y, dtype=torch.float32)
+            self.target_prop = y_tensor[:, target_cell_type]
+            self.label = (self.target_prop > presence_threshold).float()
         else:
-            self.y = None
-            
-        # Precompute masks for target cell type if provided
-        self.target_masks = {}
+            self.target_prop = None
+            self.label = None
         
-        # Only precompute for the specific target cell type if specified
-        if precompute_targets and target_ids is not None and target_cell_type is not None:
-            # Create mask for this cell type's markers
-            target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
-            cell_mask = (target_ids_t == target_cell_type)
-            self.target_masks['target_markers'] = cell_mask
-            
-            # Precompute presence labels if ground truth is available
-            if self.y is not None and presence_threshold is not None:
-                presence = (self.y[:, target_cell_type] > presence_threshold).float()
-                self.target_masks['target_presence'] = presence
+        self.target_cell_type = target_cell_type
+        
+        # Create marker mask for the target cell type
+        if target_ids is not None:
+            target_ids_t = torch.tensor(target_ids, dtype=torch.long)
+            self.target_markers_mask = (target_ids_t == target_cell_type)
+        else:
+            self.target_markers_mask = None
 
     def __len__(self):
         return self.fraction.size(0)
@@ -48,272 +47,200 @@ class TissueDeconvolutionDataset(Dataset):
         Return a dictionary containing:
             'X': The methylation fraction row for this sample
             'coverage': The coverage row for this sample
-            'y': The ground-truth proportions, if available
+            'label': Binary label indicating presence/absence of target cell type
+            'concentration': Concentration of the target cell type (if available)
         """
-        # Get the base item
         item = {
             'X': self.fraction[idx],
             'coverage': self.coverage[idx],
         }
         
-        # Add ground truth if available
-        if self.y is not None:
-            item['y'] = self.y[idx]
+        if self.label is not None:
+            item['label'] = self.label[idx]
             
-        # Add any precomputed target masks for this sample
-        if 'target_presence' in self.target_masks:
-            item['target_presence'] = self.target_masks['target_presence'][idx]
-                
+        if self.target_prop is not None:
+            item['concentration'] = self.target_prop[idx]
+            
+        if self.target_markers_mask is not None:
+            item['target_markers_mask'] = self.target_markers_mask
+            
         return item
 
 
-
 class SingleCellTypePresenceModel(nn.Module):
-    def __init__(self, num_markers, target_ids, target_cell_type, 
-                 feature_dim=32, dropout_rate=0.3, l2_reg=1e-4):
+    """
+    A binary classifier for detecting the presence of a specific cell type.
+    
+    Key features:
+    1. Uses only the markers relevant to the target cell type
+    2. Processes markers with varying coverage appropriately
+    3. Uses attention mechanism to focus on the most informative markers
+    4. Employs a deep architecture with residual connections for better feature extraction
+    """
+    def __init__(self, num_markers, target_markers_mask=None, feature_dim=64, dropout_rate=0.3):
         super().__init__()
         self.num_markers = num_markers
-        self.target_cell_type = target_cell_type
         self.feature_dim = feature_dim
-        self.l2_reg = l2_reg
         
-        # Store marker-to-cell-type mapping
-        target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
-        self.register_buffer("target_ids", target_ids_t)
+        # Register target markers mask buffer if provided
+        if target_markers_mask is not None:
+            self.register_buffer("target_markers_mask", target_markers_mask)
         
-        # Create a mask for the target cell type markers (precomputed)
-        target_mask = (target_ids_t == target_cell_type)
-        self.register_buffer("target_markers_mask", target_mask)
+        # Input normalization
+        self.input_norm = nn.BatchNorm1d(1)
         
-        # Feature extraction with more regularization
-        self.marker_feature_extractor = nn.Sequential(
+        # Feature extraction
+        self.feature_extractor = nn.Sequential(
             nn.Linear(1, feature_dim),
-            nn.BatchNorm1d(feature_dim),  # Add batch normalization
+            nn.BatchNorm1d(feature_dim),
             nn.ReLU(),
-            nn.Dropout(dropout_rate),     # Add dropout
-            nn.Linear(feature_dim, feature_dim),
-            nn.BatchNorm1d(feature_dim)   # Add batch normalization
+            nn.Dropout(dropout_rate)
         )
         
-        # Deeper presence detection network with regularization
-        self.presence_detector = nn.Sequential(
+        # Feature transformation with residual connection
+        self.feature_transform = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim),
+            nn.BatchNorm1d(feature_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate)
+        )
+        
+        # Marker attention mechanism
+        self.attention = nn.Sequential(
+            nn.Linear(feature_dim, 1),
+            nn.Sigmoid()
+        )
+        
+        # Classification head
+        self.classifier = nn.Sequential(
             nn.Linear(feature_dim, 64),
-            nn.BatchNorm1d(64),          # Add batch normalization
             nn.ReLU(),
-            nn.Dropout(dropout_rate),    # Add dropout
+            nn.Dropout(dropout_rate),
             nn.Linear(64, 32),
-            nn.BatchNorm1d(32),          # Add batch normalization
             nn.ReLU(),
-            nn.Dropout(dropout_rate),    # Add dropout
+            nn.Dropout(dropout_rate),
             nn.Linear(32, 1)
         )
         
-        # Initialize the final layer with strong negative bias 
-        # This creates a stronger prior against positive predictions
-        self.presence_detector[-1].bias.data.fill_(-3.0)  # More negative bias
-        
-        # Apply weight initialization
+        # Initialize weights
         self._init_weights()
     
     def _init_weights(self):
-        """
-        Apply better weight initialization
-        """
+        """Initialize model weights for better convergence"""
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                # Kaiming/He initialization for ReLU activations
                 nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
-                if m.bias is not None and m != self.presence_detector[-1]:
-                    # Don't initialize the final layer bias (we do that separately)
-                    nn.init.constant_(m.bias, 0)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        
+        # Set a negative bias in the final layer to counter class imbalance
+        if hasattr(self.classifier[-1], 'bias'):
+            self.classifier[-1].bias.data.fill_(-1.0)
     
-    def forward(self, marker_values, coverage):
+    def forward(self, marker_values, coverage, target_markers_mask=None):
         """
-        Forward pass with better regularization and handling of class imbalance.
+        Forward pass of the binary classifier.
         
         Args:
             marker_values: [B, M] Methylation values
             coverage: [B, M] Coverage values
-            
+            target_markers_mask: [M] Mask indicating markers for target cell type
+                                 (if not provided, uses the one stored in the model)
+                               
         Returns:
-            presence_logit: [B, 1] Logit for presence prediction
-            valid_mask: [B, M] Mask of valid markers
-            l2_penalty: L2 regularization term
+            logits: [B, 1] Logits for binary classification
+            attention_weights: [B, M] Attention weights for each marker
         """
         B, M = marker_values.shape
         
-        # Create valid mask (coverage > 0)
+        # Get target markers mask (either from input or model)
+        if target_markers_mask is None:
+            if hasattr(self, 'target_markers_mask'):
+                target_markers_mask = self.target_markers_mask
+            else:
+                # If no mask provided, use all markers
+                target_markers_mask = torch.ones(M, dtype=torch.bool, device=marker_values.device)
+        
+        # Create valid markers mask (coverage > 0 AND is target marker)
         valid_mask = (coverage > 0)
+        target_valid_mask = valid_mask & target_markers_mask.expand(B, -1)
         
-        # Only focus on markers for the target cell type (using precomputed mask)
-        target_markers_valid = valid_mask & self.target_markers_mask.expand(B, -1)
+        # Replace NaNs with zeros (these will be masked out later)
+        marker_values_safe = torch.where(valid_mask, marker_values, torch.zeros_like(marker_values))
         
-        # If no valid target markers for any sample, return zeros
-        if not target_markers_valid.any():
-            return torch.zeros(B, 1, device=marker_values.device), valid_mask, 0.0
+        # Normalize marker values by coverage (improves stability and generalization)
+        coverage_safe = coverage.clone() + 1e-10  # Add epsilon to avoid division by zero
+        normalized_markers = marker_values_safe / torch.sqrt(coverage_safe)
         
-        # Create a safe version of marker_values where NaNs are replaced with zeros
-        # (these will be ignored in the aggregation step)
-        safe_markers = torch.where(valid_mask, marker_values, torch.zeros_like(marker_values))
+        # Process all markers through feature extraction
+        marker_values_flat = normalized_markers.reshape(-1, 1)  # [B*M, 1]
         
-        # Extract features from each marker
-        # Reshape for BatchNorm1d which expects [N, C] or [N, C, L]
-        marker_values_flat = safe_markers.reshape(-1, 1)  # [B*M, 1]
+        # Apply batch normalization to inputs
+        marker_values_norm = self.input_norm(marker_values_flat)
         
-        # Extract features - note we need to handle BatchNorm properly
-        features_flat = self.marker_feature_extractor(marker_values_flat)  # [B*M, feature_dim]
-        features = features_flat.reshape(B, M, self.feature_dim)  # [B, M, feature_dim]
+        # Extract features
+        features = self.feature_extractor(marker_values_norm)  # [B*M, feature_dim]
         
-        # Use the target marker mask to zero out non-target markers
-        target_mask_expanded = self.target_markers_mask.view(1, M, 1).expand(B, -1, self.feature_dim)
-        valid_mask_expanded = valid_mask.unsqueeze(2).expand(-1, -1, self.feature_dim)
+        # Apply feature transformation with residual connection
+        transformed_features = self.feature_transform(features)
+        features = features + transformed_features  # [B*M, feature_dim]
         
-        # Zero out features for non-target or invalid markers
-        masked_features = features * target_mask_expanded * valid_mask_expanded
+        # Calculate attention weights
+        attention_flat = self.attention(features).reshape(B, M)  # [B, M]
         
-        # Weight the features by coverage
-        coverage_expanded = coverage.unsqueeze(2).expand(-1, -1, self.feature_dim)
-        weighted_features = masked_features * coverage_expanded
+        # Apply target markers mask and valid mask to attention
+        masked_attention = attention_flat * target_valid_mask.float()
         
-        # Aggregate features per sample
-        summed_features = weighted_features.sum(dim=1)  # [B, feature_dim]
+        # Normalize attention weights to sum to 1 for each sample
+        attention_sum = masked_attention.sum(dim=1, keepdim=True)
+        attention_sum = torch.where(attention_sum > 0, attention_sum, torch.ones_like(attention_sum))
+        normalized_attention = masked_attention / attention_sum
         
-        # Calculate the sum of coverage for normalization
-        target_coverage = coverage * target_markers_valid
-        coverage_sum = target_coverage.sum(dim=1, keepdim=True)  # [B, 1]
+        # Reshape features back to batch form
+        features_reshaped = features.reshape(B, M, self.feature_dim)  # [B, M, feature_dim]
         
-        # Avoid divide-by-zero (replace zeros with ones for safe division)
-        safe_coverage_sum = torch.where(
-            coverage_sum > 0, 
-            coverage_sum, 
-            torch.ones_like(coverage_sum)
-        )
+        # Apply attention weights to features
+        expanded_attention = normalized_attention.unsqueeze(-1).expand(-1, -1, self.feature_dim)
+        weighted_features = features_reshaped * expanded_attention
         
-        # Normalize features by coverage
-        normalized_features = summed_features / safe_coverage_sum.expand(-1, self.feature_dim)
+        # Aggregate features across markers
+        aggregated_features = weighted_features.sum(dim=1)  # [B, feature_dim]
         
-        # Calculate L2 regularization term
-        l2_penalty = 0.0
-        if self.training and self.l2_reg > 0:
-            for param in self.parameters():
-                l2_penalty += torch.sum(param ** 2)
-            l2_penalty *= self.l2_reg
+        # Final classification
+        logits = self.classifier(aggregated_features)
         
-        # Predict presence
-        presence_logit = self.presence_detector(normalized_features)
+        return logits, normalized_attention
+    
+    def predict(self, marker_values, coverage, target_markers_mask=None, threshold=0.5):
+        """
+        Make binary predictions.
         
-        return presence_logit, valid_mask, l2_penalty
-
-# class CellTypePresenceModel(nn.Module):
-    # """
-    # A neural network that predicts presence/absence of cell types from methylation data.
-    # Presence is defined as a cell type concentration of 0.05% or higher.
-    # """
-    # def __init__(self, num_markers, num_cell_types, target_ids, feature_dim=32, dropout_rate=0.2):
-    #     super().__init__()
-    #     self.num_markers = num_markers
-    #     self.num_celltypes = num_cell_types
-    #     self.feature_dim = feature_dim
-
-    #     # Store cell-type mapping
-    #     target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
-    #     self.register_buffer("target_ids", target_ids_t)
-
-    #     # Feature extraction with higher dimension and more dropout
-    #     self.marker_feature_extractor = nn.Sequential(
-    #         nn.Linear(1, feature_dim),
-    #         nn.LeakyReLU(),
-    #         nn.Dropout(dropout_rate),
-    #         nn.Linear(feature_dim, feature_dim),
-    #         nn.LeakyReLU(),
-    #         nn.Dropout(dropout_rate/2)
-    #     )
-
-    #     # Deeper presence detection network
-    #     self.presence_detector = nn.Sequential(
-    #         nn.Linear(num_cell_types * feature_dim, 256),
-    #         nn.LeakyReLU(),
-    #         nn.Dropout(dropout_rate),
-    #         nn.Linear(256, 128),
-    #         nn.LeakyReLU(),
-    #         nn.Dropout(dropout_rate/2),
-    #         nn.Linear(128, 64),
-    #         nn.LeakyReLU(),
-    #         nn.Linear(64, num_cell_types)
-    #     )
-    #     self.presence_detector[-1].bias.data.fill_(-3.0)
-
-
-    # def forward(self, marker_values, coverage):
-    #     """
-    #     Predict presence/absence probabilities for each cell type.
+        Args:
+            marker_values: [B, M] Methylation values
+            coverage: [B, M] Coverage values
+            target_markers_mask: [M] Mask indicating markers for target cell type
+            threshold: Classification threshold
         
-    #     Args:
-    #         marker_values (Tensor): [B, M] methylation values
-    #         coverage (Tensor): [B, M] coverage values
-            
-    #     Returns:
-    #         presence_logits (Tensor): [B, C] logits for presence prediction
-    #         valid_mask (Tensor): [B, M] boolean mask of valid markers
-    #     """
-    #     B, M = marker_values.shape
-    #     C = self.num_celltypes
-
-    #     # Identify valid markers (coverage > 0)
-    #     valid_mask = (coverage > 0)
-
-    #     # Handle empty case
-    #     if not valid_mask.any():
-    #         return torch.zeros(B, C, device=marker_values.device), valid_mask
-
-    #     # Prepare data for feature extraction
-    #     coverage_flat = coverage.view(-1)
-    #     marker_values_flat = marker_values.view(-1)
+        Returns:
+            predictions: [B] Binary predictions (0/1)
+            probabilities: [B] Prediction probabilities
+        """
+        logits, _ = self.forward(marker_values, coverage, target_markers_mask)
+        probabilities = torch.sigmoid(logits).squeeze(-1)
+        predictions = (probabilities >= threshold).float()
+        return predictions, probabilities
+    
+    def get_marker_importance(self, marker_values, coverage, target_markers_mask=None):
+        """
+        Calculate importance scores for each marker based on attention weights.
         
-    #     # Get valid indices
-    #     valid_inds = torch.nonzero(coverage_flat, as_tuple=False).squeeze(1)
-    #     if valid_inds.numel() == 0:
-    #         return torch.zeros(B, C, device=marker_values.device), valid_mask
-            
-    #     coverage_valid = coverage_flat[valid_inds]
-    #     marker_values_valid = marker_values_flat[valid_inds]
-    #     batch_idx = valid_inds // M
-    #     marker_idx = valid_inds % M
-    #     celltype_idx = self.target_ids[marker_idx]
+        Args:
+            marker_values: [B, M] Methylation values
+            coverage: [B, M] Coverage values
+            target_markers_mask: [M] Mask indicating markers for target cell type
         
-    #     # Extract features
-    #     marker_values_valid_2d = marker_values_valid.unsqueeze(1)
-    #     features_valid = self.marker_feature_extractor(marker_values_valid_2d)
-        
-    #     # Aggregate features by cell type (coverage-weighted)
-    #     aggregator = marker_values.new_zeros(B, C, self.feature_dim)
-    #     coverage_sum = marker_values.new_zeros(B, C)
-        
-    #     # Flatten for efficient indexing
-    #     aggregator_2d = aggregator.view(B*C, self.feature_dim)
-    #     coverage_sum_1d = coverage_sum.view(B*C)
-        
-    #     # Calculate indices and weighted features
-    #     bc_index = batch_idx * C + celltype_idx
-    #     weighted_feats = coverage_valid.unsqueeze(1) * features_valid
-        
-    #     # Aggregate
-    #     aggregator_2d.index_add_(0, bc_index, weighted_feats)
-    #     coverage_sum_1d.index_add_(0, bc_index, coverage_valid)
-        
-    #     # Reshape and normalize
-    #     aggregator = aggregator_2d.view(B, C, self.feature_dim)
-    #     coverage_sum = coverage_sum_1d.view(B, C)
-        
-    #     # Avoid divide-by-zero
-    #     mask_cov = (coverage_sum == 0)
-    #     coverage_sum[mask_cov] = 1.0
-    #     aggregator = aggregator / coverage_sum.unsqueeze(-1)
-        
-    #     # Flatten for presence detection
-    #     agg_flat = aggregator.view(B, -1)
-        
-    #     # Predict presence logits
-    #     presence_logits = self.presence_detector(agg_flat)
-        
-    #     return presence_logits, valid_mask
+        Returns:
+            importance_scores: [B, M] Importance score for each marker
+        """
+        _, attention_weights = self.forward(marker_values, coverage, target_markers_mask)
+        return attention_weights
