@@ -222,7 +222,7 @@ def train_and_eval(
     names = set(atlas[atlas.target==target_cell_type_name].name.unique())
     cell_types = list(atlas.columns[8:])
     
-    target_cell_type=cell_types.index(target_cell_type)
+    target_cell_type=cell_types.index(target_cell_type_name)
 
     # 2) Build the training DataLoader from parquet files in train_pat_dir
     train_dl = load_training(train_pat_dir, atlas, names, target_cell_type=target_cell_type)
