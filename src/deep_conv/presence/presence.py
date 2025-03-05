@@ -306,8 +306,13 @@ def train_and_eval(
             target_cell_type=target_cell_type_name,
         )
 
-        pos_probs, neg_probs = check_prediction_distributions(trained_model, tier3_dl)
-        train_pos_probs, train_neg_probs = check_prediction_distributions(trained_model, train_dl)
+        if target_cell_type_name=="OAC":
+            pos_probs, neg_probs = check_prediction_distributions(trained_model, tier2_dl)    
+        if target_cell_type_name=="CD4-T-cells":
+            pos_probs, neg_probs = check_prediction_distributions(trained_model, tier3_dl)
+        if target_cell_type_name=="CD8-T-cells":
+            pos_probs, neg_probs = check_prediction_distributions(trained_model, tier4_dl)
+            train_pos_probs, train_neg_probs = check_prediction_distributions(trained_model, train_dl)
 
         results_df = analyze_detection_by_concentration(trained_model, tier2_dl, output_path, target_cell_type_name)
         find_minimum_detection_concentration(results_df, output_path, target_cell_type_name)
