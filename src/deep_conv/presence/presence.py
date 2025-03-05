@@ -185,7 +185,6 @@ def load_training(base_dir: str, atlas: pd.DataFrame, names: set, target_cell_ty
         coverage=coverage_train,
         y=y_train,
         target_cell_type=target_cell_type,
-        # target_ids=list(atlas.columns[8:]),
     )
     
     # Also create a normalized version of y for potential usage
@@ -276,6 +275,7 @@ def train_and_eval(
         print("training presence model for",target_cell_type_name)
         # The 'names' set ensures we only keep relevant markers
         names = set(atlas[atlas.target==target_cell_type_name].name.unique())
+        print("using", len(names), "markers for detection of presence of",target_cell_type_name)
         target_cell_type=cell_types.index(target_cell_type_name)
         # 2) Build the training DataLoader from parquet files in train_pat_dir
         train_dl = load_training(train_pat_dir, atlas, names, target_cell_type=target_cell_type)
@@ -310,7 +310,7 @@ def train_and_eval(
         train_pos_probs, train_neg_probs = check_prediction_distributions(trained_model, train_dl)
 
         results_df = analyze_detection_by_concentration(trained_model, tier2_dl, output_path, target_cell_type_name)
-        find_minimum_detection_concentration(results_df, target_cell_type_name, output_path)
+        find_minimum_detection_concentration(results_df, output_path, target_cell_type_name)
 
 
 def analyze_detection_by_concentration(model, dataloader, 
@@ -719,7 +719,7 @@ def find_minimum_detection_concentration(results_df, output_path, target_cell_ty
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
     
     # Show the plot
-    fig.write_html(f"{output_path}/{target_cell_type}_minimum_detection_concentration.html")
+    fig.write_html(f"{str(output_path)}/{target_cell_type}_minimum_detection_concentration.html")
     
     return min_reliable_conc, bin_stats
 
