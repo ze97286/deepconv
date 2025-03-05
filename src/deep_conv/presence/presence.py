@@ -208,7 +208,6 @@ def train_and_eval(
     eval_pat_dir: str,
     threads: int,
     output_path: str,  
-    target_cell_type_name:str="OAC",
 ) -> nn.Module:
     # Fix random seeds and threads for reproducibility
     set_seed()
@@ -217,46 +216,51 @@ def train_and_eval(
 
     # 1) Read the atlas of markers and cell types
     atlas = pd.read_csv(atlas_path, sep="\t")
-    
-    # The 'names' set ensures we only keep relevant markers
-    names = set(atlas[atlas.target==target_cell_type_name].name.unique())
     cell_types = list(atlas.columns[8:])
-    
-    target_cell_type=cell_types.index(target_cell_type_name)
+    for target_cell_type_name in cell_types:
+        print("training presence model for",target_cell_type_name)
+        # The 'names' set ensures we only keep relevant markers
+        names = set(atlas[atlas.target==target_cell_type_name].name.unique())
+        target_cell_type=cell_types.index(target_cell_type_name)
+        # 2) Build the training DataLoader from parquet files in train_pat_dir
+        train_dl = load_training(train_pat_dir, atlas, names, target_cell_type=target_cell_type)
+        # 3) Build DataLoaders for each validation subset
+        tier1_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "tier1"), atlas, target_cell_type, names)
+        tier2_dl = None
+        if target_cell_type_name=="OAC":
+            tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, target_cell_type, names)
+        elif target_cell_type_name=="CD4-T-cells":
+            tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD4"), atlas, target_cell_type, names)
+        elif target_cell_type_name=="CD8-T-cells":
+            tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD8"), atlas, target_cell_type, names)
 
-    # 2) Build the training DataLoader from parquet files in train_pat_dir
-    train_dl = load_training(train_pat_dir, atlas, names, target_cell_type=target_cell_type)
+        validation_dls = {
+            "tier1": tier1_dl,        
+        }
+        if not tier2_dl is None:
+            validation_dls['tier2'] = tier2_dl
 
-    # 3) Build DataLoaders for each validation subset
-    tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir) / "tier1"), atlas, target_cell_type, names)
-    # cd4_dl, cd4_yval = get_validation_set(str(Path(eval_pat_dir) / "CD4"), atlas, target_cell_type, names)
-    # cd8_dl, cd8_yval = get_validation_set(str(Path(eval_pat_dir) / "CD8"), atlas, target_cell_type, names)
-    oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, target_cell_type, names)
+        single_model = SingleCellTypePresenceModel(
+            num_markers=len(atlas),       
+        )
 
-    validation_dls = {
-        "tier1": tier1_dl,
-        "oac": oac_dl
-    }
+        # Train it
+        trained_model = train_binary_classifier(
+            model=single_model,
+            dataloaders={"train":train_dl, "val": validation_dls},
+            model_path=output_path,
+            num_epochs=100,
+            learning_rate=1e-3
+            target_cell_type=target_cell_type_name
+        )
 
-    single_model = SingleCellTypePresenceModel(
-        num_markers=len(atlas),       
-    )
-
-    # Train it
-    trained_model = train_binary_classifier(
-        model=single_model,
-        dataloaders={"train":train_dl, "val": validation_dls},
-        model_path=output_path,
-        num_epochs=100,
-        learning_rate=1e-3
-    )
-
-    analyze_detection_by_concentration(trained_model, oac_dl, output_path)
-    return trained_model
+        results_df = analyze_detection_by_concentration(trained_model, tier2_dl, output_path, target_cell_type_name)
+        find_minimum_detection_concentration(results_df, target_cell_type_name, output_path)
 
 
 def analyze_detection_by_concentration(model, dataloader, 
                                        output_path,
+                                       target_cell_type,
                                       concentration_groups=None,
                                       threshold=0.5,
                                       device=None):
@@ -497,7 +501,7 @@ def analyze_detection_by_concentration(model, dataloader,
     fig.update_yaxes(title_text='True Positive Rate', row=2, col=2)
     
     # Show the plot
-    fig.write_html(output_path/"model_analysis.html")
+    fig.write_html(output_path/f"{target_cell_type}_model_analysis.html")
     
     # Determine optimal thresholds for each concentration group
     opt_thresholds = {}
@@ -543,10 +547,12 @@ def analyze_detection_by_concentration(model, dataloader,
         if group in opt_thresholds:
             threshold_mapping[(min_conc, max_conc)] = opt_thresholds[group]['threshold']
     
-    return results_df, group_stats, threshold_mapping
+    group_stats.to_csv(output_path/f"{target_cell_type}_group_stats.csv")
+    print("threshold_mapping:",threshold_mapping)
+    return results_df
 
 
-def find_minimum_detection_concentration(results_df, detection_rate_threshold=0.95):
+def find_minimum_detection_concentration(results_df, output_path, target_cell_type, detection_rate_threshold=0.95):
     """
     Find the minimum concentration that can be reliably detected, with Plotly visualization.
     
@@ -658,7 +664,7 @@ def find_minimum_detection_concentration(results_df, detection_rate_threshold=0.
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
     
     # Show the plot
-    fig.show()
+    fig.write_html(output_path/f"{target_cell_type}_minimum_detection_concentration.html")
     
     return min_reliable_conc, bin_stats
 
