@@ -202,6 +202,61 @@ def load_training(base_dir: str, atlas: pd.DataFrame, names: set, target_cell_ty
     )
    
 
+def check_prediction_distributions(model, dataloader, device=None):
+    """Analyze the raw prediction probabilities for positive and negative samples."""
+    if device is None:
+        device = next(model.parameters()).device
+    
+    model.eval()
+    pos_probs = []
+    neg_probs = []
+    
+    with torch.no_grad():
+        for batch in dataloader:
+            marker_values = batch['X'].to(device)
+            coverage = batch['coverage'].to(device)
+            labels = batch['label'].to(device)
+            
+            # Forward pass
+            logits, _ = model(marker_values, coverage)
+            probs = torch.sigmoid(logits).cpu().numpy().flatten()
+            
+            # Store probabilities by true label
+            for i, (prob, label) in enumerate(zip(probs, labels)):
+                if label > 0.5:  # True positive
+                    pos_probs.append(prob)
+                else:  # True negative
+                    neg_probs.append(prob)
+        
+    # Print statistics
+    print(f"Positive samples: {len(pos_probs)}")
+    print(f"  - Mean probability: {np.mean(pos_probs):.4f}")
+    print(f"  - Median probability: {np.median(pos_probs):.4f}")
+    print(f"  - Min: {np.min(pos_probs):.4f}, Max: {np.max(pos_probs):.4f}")
+    
+    print(f"Negative samples: {len(neg_probs)}")
+    print(f"  - Mean probability: {np.mean(neg_probs):.4f}")
+    print(f"  - Median probability: {np.median(neg_probs):.4f}")
+    print(f"  - Min: {np.min(neg_probs):.4f}, Max: {np.max(neg_probs):.4f}")
+    
+    # Check threshold effect
+    for threshold in [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]:
+        tp = sum(p >= threshold for p in pos_probs)
+        fn = sum(p < threshold for p in pos_probs)
+        fp = sum(p >= threshold for p in neg_probs)
+        tn = sum(p < threshold for p in neg_probs)
+        
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        
+        print(f"Threshold {threshold:.1f}: Recall={recall:.4f}, Precision={precision:.4f}, "
+              f"Specificity={specificity:.4f}, F1={f1:.4f}")
+    
+    return pos_probs, neg_probs
+
+
 def train_and_eval(
     atlas_path: str,
     train_pat_dir: str,
@@ -250,6 +305,9 @@ def train_and_eval(
             learning_rate=1e-3,
             target_cell_type=target_cell_type_name,
         )
+
+        pos_probs, neg_probs = check_prediction_distributions(trained_model, tier3_dl)
+        train_pos_probs, train_neg_probs = check_prediction_distributions(trained_model, train_dl)
 
         results_df = analyze_detection_by_concentration(trained_model, tier2_dl, output_path, target_cell_type_name)
         find_minimum_detection_concentration(results_df, target_cell_type_name, output_path)
@@ -661,7 +719,7 @@ def find_minimum_detection_concentration(results_df, output_path, target_cell_ty
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
     
     # Show the plot
-    fig.write_html(output_path/f"{target_cell_type}_minimum_detection_concentration.html")
+    fig.write_html(f"{output_path}/{target_cell_type}_minimum_detection_concentration.html")
     
     return min_reliable_conc, bin_stats
 

@@ -135,7 +135,7 @@ class SingleCellTypePresenceModel(nn.Module):
         
         # Set a negative bias in the final layer to counter class imbalance
         if hasattr(self.classifier[-1], 'bias'):
-            self.classifier[-1].bias.data.fill_(-1.0)
+            self.classifier[-1].bias.data.fill_(0.0)
     
     def forward(self, marker_values, coverage, target_markers_mask=None):
         """
