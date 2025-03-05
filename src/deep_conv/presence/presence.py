@@ -242,14 +242,14 @@ def train_and_eval(
 
     validation_dls = {
         "tier1": tier1_dl,
-        "cd4": cd4_dl,
-        "cd8": cd8_dl,
+        # "cd4": cd4_dl,
+        # "cd8": cd8_dl,
         "oac": oac_dl
     }
 
     y_vals = {
         "tier1": t1_yval,
-        "cd4": cd4_yval,
+        # "cd4": cd4_yval,
         # "cd8": cd8_yval,
         "oac": oac_yval
     }
@@ -262,7 +262,7 @@ def train_and_eval(
 
     single_model = SingleCellTypePresenceModel(
         num_markers=len(atlas),
-        num_cell_types=len(cell_types),
+        target_cell_type=cell_types.index("OAC"),
         target_ids=target_ids,
     )
 
