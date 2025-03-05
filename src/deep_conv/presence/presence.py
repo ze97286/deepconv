@@ -207,8 +207,8 @@ def train_and_eval(
     train_pat_dir: str,
     eval_pat_dir: str,
     threads: int,
-    output_path: str,
-    target_cell_type_name: str="OAC",
+    output_path: str,  
+    target_cell_type_name:str="OAC",
 ) -> nn.Module:
     # Fix random seeds and threads for reproducibility
     set_seed()
@@ -285,7 +285,8 @@ def analyze_detection_by_concentration(model, dataloader,
             'high': (0.05, 0.2),        # 5% to 20%
             'medium': (0.01, 0.05),     # 1% to 5%
             'low': (0.001, 0.01),       # 0.1% to 1%
-            'very_low': (0.0001, 0.001) # 0.01% to 0.1%
+            'very_low': (0.0005, 0.001), # 0.05% to 0.1%
+            'ultra_low': (0.0001, 0.0005) # 0.001% to 0.05%
         }
     
     model.eval()
@@ -496,7 +497,7 @@ def analyze_detection_by_concentration(model, dataloader,
     fig.update_yaxes(title_text='True Positive Rate', row=2, col=2)
     
     # Show the plot
-    fig.write_html(output_path+"model_analysis.html")
+    fig.write_html(output_path/"model_analysis.html")
     
     # Determine optimal thresholds for each concentration group
     opt_thresholds = {}
