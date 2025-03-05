@@ -231,7 +231,8 @@ def train_and_eval(
     
     # The 'names' set ensures we only keep relevant markers
     names = set(atlas.name.unique())
-
+    cell_types = list(atlas.columns[8:])
+    
     target_cell_type=cell_types.index("OAC")
 
     # 2) Build the training DataLoader from parquet files in train_pat_dir
@@ -257,8 +258,7 @@ def train_and_eval(
         "oac": oac_yval
     }
 
-    # 4) Identify all cell type columns (atlas.columns[8:])
-    cell_types = list(atlas.columns[8:])
+    
 
     # Build an array mapping each marker to its cell type index
     target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
