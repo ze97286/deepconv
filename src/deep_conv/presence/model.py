@@ -5,35 +5,40 @@ from torch.utils.data import Dataset
 
 class TissueDeconvolutionDataset(Dataset):
     """
-    A PyTorch Dataset for loading cfDNA methylation data and optional labels.
+    An optimized PyTorch Dataset for loading cfDNA methylation data.
     
-    Each sample in this dataset includes:
-      - `fraction`: Methylation fractions across markers, in [0..1] (may contain NaNs if coverage=0).
-      - `coverage`: Read coverage array of the same shape as `fraction`.
-      - `atlas`: (Optional) if using some reference atlas or additional data, 
-                 you could store it here. (Currently not directly used in the model.)
-      - `y`: Ground-truth cell-type proportions for training/validation, if available.
-      
-    Args:
-        fraction (ndarray or Tensor): Shape [num_samples, num_markers].
-            Fractional methylation values. Some entries may be invalid if coverage=0.
-        coverage (ndarray or Tensor): Shape [num_samples, num_markers].
-            Coverage (read depth) for each sample-marker pair.
-        atlas (ndarray or Tensor): Arbitrary shape, often referencing 
-            a reference atlas. Not necessarily used in the model code, 
-            but stored for convenience.
-        y (ndarray or Tensor, optional): Shape [num_samples, num_cell_types].
-            Ground-truth proportions for each cell type (if supervised).
-            If None, dataset is for inference only.
+    Key optimizations:
+    1. Precomputes and caches target cell type masks
+    2. Handles NaN values more efficiently
+    3. Uses pin_memory for faster data transfer to GPU
     """
-    def __init__(self, fraction, coverage, atlas, y=None):
+    def __init__(self, fraction, coverage, atlas, y=None, 
+                target_ids=None, target_cell_type=None, 
+                precompute_targets=True, presence_threshold=0.0005):
+        # Convert to tensors if they're not already
         self.fraction = torch.tensor(fraction, dtype=torch.float32)
         self.coverage = torch.tensor(coverage, dtype=torch.float32)
-        self.atlas = torch.tensor(atlas, dtype=torch.float32)        
+        self.atlas = torch.tensor(atlas, dtype=torch.float32)
+        
         if y is not None:
             self.y = torch.tensor(y, dtype=torch.float32)
         else:
             self.y = None
+            
+        # Precompute masks for target cell type if provided
+        self.target_masks = {}
+        
+        # Only precompute for the specific target cell type if specified
+        if precompute_targets and target_ids is not None and target_cell_type is not None:
+            # Create mask for this cell type's markers
+            target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
+            cell_mask = (target_ids_t == target_cell_type)
+            self.target_masks['target_markers'] = cell_mask
+            
+            # Precompute presence labels if ground truth is available
+            if self.y is not None and presence_threshold is not None:
+                presence = (self.y[:, target_cell_type] > presence_threshold).float()
+                self.target_masks['target_presence'] = presence
 
     def __len__(self):
         return self.fraction.size(0)
@@ -45,22 +50,27 @@ class TissueDeconvolutionDataset(Dataset):
             'coverage': The coverage row for this sample
             'y': The ground-truth proportions, if available
         """
+        # Get the base item
         item = {
             'X': self.fraction[idx],
             'coverage': self.coverage[idx],
         }
+        
+        # Add ground truth if available
         if self.y is not None:
             item['y'] = self.y[idx]
-        return item  
+            
+        # Add any precomputed target masks for this sample
+        if 'target_presence' in self.target_masks:
+            item['target_presence'] = self.target_masks['target_presence'][idx]
+                
+        return item
 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 class SingleCellTypePresenceModel(nn.Module):
     """
-    A simplified model that predicts the presence of a single cell type.
+    A model that predicts the presence of a single cell type.
     """
     def __init__(self, num_markers, target_ids, target_cell_type, feature_dim=32):
         super().__init__()
@@ -71,6 +81,10 @@ class SingleCellTypePresenceModel(nn.Module):
         # Store marker-to-cell-type mapping
         target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
         self.register_buffer("target_ids", target_ids_t)
+        
+        # Create a mask for the target cell type markers (precomputed)
+        target_mask = (target_ids_t == target_cell_type)
+        self.register_buffer("target_markers_mask", target_mask)
 
         # Feature extraction
         self.marker_feature_extractor = nn.Sequential(
@@ -79,7 +93,7 @@ class SingleCellTypePresenceModel(nn.Module):
             nn.Linear(feature_dim, feature_dim)
         )
 
-        # Simple presence detection network
+        # Presence detection network
         self.presence_detector = nn.Sequential(
             nn.Linear(feature_dim, 64),
             nn.ReLU(),
@@ -105,53 +119,62 @@ class SingleCellTypePresenceModel(nn.Module):
         """
         B, M = marker_values.shape
         
-        # Valid mask indicates coverage>0
+        # Create valid mask (coverage > 0)
         valid_mask = (coverage > 0)
         
-        # Flatten for efficient processing
-        coverage_flat = coverage.view(-1)
-        marker_values_flat = marker_values.view(-1)
-        valid_inds = torch.nonzero(coverage_flat, as_tuple=False).squeeze(1)
+        # Only focus on markers for the target cell type (using precomputed mask)
+        target_markers_valid = valid_mask & self.target_markers_mask.expand(B, -1)
         
-        if valid_inds.numel() == 0:
+        # If no valid target markers for any sample, return zeros
+        if not target_markers_valid.any():
             return torch.zeros(B, 1, device=marker_values.device), valid_mask
-            
-        # Extract valid data
-        coverage_valid = coverage_flat[valid_inds]
-        marker_values_valid = marker_values_flat[valid_inds]
-        batch_idx = valid_inds // M
-        marker_idx = valid_inds % M
         
-        # Only use markers for the target cell type
-        target_mask = (self.target_ids[marker_idx] == self.target_cell_type)
-        if not target_mask.any():
+        # Create a safe version of marker_values where NaNs are replaced with zeros
+        # (these will be ignored in the aggregation step)
+        safe_markers = torch.where(valid_mask, marker_values, torch.zeros_like(marker_values))
+        
+        # Process only the target markers that are valid
+        # We'll expand the mask to find valid samples
+        samples_with_valid_targets = target_markers_valid.any(dim=1)
+        
+        # If no sample has valid target markers, return zeros
+        if not samples_with_valid_targets.any():
             return torch.zeros(B, 1, device=marker_values.device), valid_mask
-            
-        marker_values_target = marker_values_valid[target_mask]
-        coverage_target = coverage_valid[target_mask]
-        batch_idx_target = batch_idx[target_mask]
         
-        # Extract features for target markers
-        marker_values_2d = marker_values_target.unsqueeze(1)
-        features = self.marker_feature_extractor(marker_values_2d)
+        # Extract features for all markers in one operation
+        marker_values_2d = safe_markers.unsqueeze(2)  # [B, M, 1]
+        all_features = self.marker_feature_extractor(marker_values_2d)  # [B, M, feature_dim]
         
-        # Aggregate features per batch (weighted by coverage)
-        aggregator = marker_values.new_zeros(B, self.feature_dim)
-        coverage_sum = marker_values.new_zeros(B)
+        # Use the target marker mask to zero out non-target markers
+        target_mask_expanded = self.target_markers_mask.view(1, M, 1).expand(B, -1, self.feature_dim)
+        valid_mask_expanded = valid_mask.unsqueeze(2).expand(-1, -1, self.feature_dim)
         
-        # Use scatter_add for efficient aggregation
-        for i in range(len(batch_idx_target)):
-            b = batch_idx_target[i]
-            aggregator[b] += features[i] * coverage_target[i]
-            coverage_sum[b] += coverage_target[i]
+        # Zero out features for non-target or invalid markers
+        masked_features = all_features * target_mask_expanded * valid_mask_expanded
         
-        # Avoid divide-by-zero
-        mask_cov = (coverage_sum == 0)
-        coverage_sum[mask_cov] = 1.0
-        aggregator = aggregator / coverage_sum.unsqueeze(-1)
+        # Weight the features by coverage
+        coverage_expanded = coverage.unsqueeze(2).expand(-1, -1, self.feature_dim)
+        weighted_features = masked_features * coverage_expanded
+        
+        # Aggregate features per sample
+        summed_features = weighted_features.sum(dim=1)  # [B, feature_dim]
+        
+        # Calculate the sum of coverage for normalization
+        target_coverage = coverage * target_markers_valid
+        coverage_sum = target_coverage.sum(dim=1, keepdim=True)  # [B, 1]
+        
+        # Avoid divide-by-zero (replace zeros with ones for safe division)
+        safe_coverage_sum = torch.where(
+            coverage_sum > 0, 
+            coverage_sum, 
+            torch.ones_like(coverage_sum)
+        )
+        
+        # Normalize features by coverage
+        normalized_features = summed_features / safe_coverage_sum.expand(-1, self.feature_dim)
         
         # Predict presence
-        presence_logit = self.presence_detector(aggregator)
+        presence_logit = self.presence_detector(normalized_features)
         
         return presence_logit, valid_mask
 

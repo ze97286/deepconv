@@ -113,7 +113,7 @@ def create_targeted_sampler(dataset, cd4_idx=3, cd8_idx=4, presence_threshold=0.
     )
 
 
-def load_training(base_dir: str, atlas: pd.DataFrame, names: set, num_files: int = 4) -> DataLoader:
+def load_training(base_dir: str, atlas: pd.DataFrame, names: set, target_cell_type: int, num_files: int = 4) -> DataLoader:
     """
     Loads and merges multiple parquet files containing training data (marker_values, coverage, ground_truth_y),
     filters them to only include the markers in 'names', and returns a DataLoader for training.
@@ -196,7 +196,8 @@ def load_training(base_dir: str, atlas: pd.DataFrame, names: set, num_files: int
         X_train,
         coverage_train,
         atlas[atlas.columns[8:]].T.to_numpy(),
-        y_train
+        y_train,
+        target_cell_type,
     )
     
     # Also create a normalized version of y for potential usage
@@ -231,8 +232,10 @@ def train_and_eval(
     # The 'names' set ensures we only keep relevant markers
     names = set(atlas.name.unique())
 
+    target_cell_type=cell_types.index("OAC")
+
     # 2) Build the training DataLoader from parquet files in train_pat_dir
-    train_dl = load_training(train_pat_dir, atlas, names)
+    train_dl = load_training(train_pat_dir, atlas, names, target_cell_type=target_cell_type)
 
     # 3) Build DataLoaders for each validation subset
     tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir) / "tier1"), atlas, names)
@@ -262,7 +265,7 @@ def train_and_eval(
 
     single_model = SingleCellTypePresenceModel(
         num_markers=len(atlas),
-        target_cell_type=cell_types.index("OAC"),
+        target_cell_type=target_cell_type,
         target_ids=target_ids,
     )
 
@@ -272,7 +275,7 @@ def train_and_eval(
         train_loader=train_dl,
         val_loaders=validation_dls,
         model_path='./models/single_cell',
-        target_cell_type=cell_types.index("OAC"),
+        target_cell_type=target_cell_type,
         num_epochs=100,
         learning_rate=1e-3
     )

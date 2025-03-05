@@ -6,6 +6,7 @@ from tqdm import tqdm
 from collections import defaultdict
 from deep_conv.presence.loss import *
 from deep_conv.presence.model import *
+import time
 
 def train_single_cell_model(
     model: nn.Module,
@@ -18,14 +19,16 @@ def train_single_cell_model(
     weight_decay: float = 1e-5,
     presence_threshold: float = 0.0005,
     patience: int = 10,
-    device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+    batch_accumulation: int = 1,  # Number of batches to accumulate gradients
+    fp16_training: bool = True,   # Use mixed precision training if available
+    eval_every: int = 1           # Only evaluate every n epochs
 ):
     """
-    Train a model to predict the presence of a single cell type.
+    Training function for the cell type presence model.
     """
-    import os
-    import numpy as np
-    from tqdm import tqdm
+    # Enable mixed precision training if requested and available
+    scaler = torch.cuda.amp.GradScaler() if fp16_training and torch.cuda.is_available() else None
     
     # Move model to device
     model = model.to(device)
@@ -46,9 +49,32 @@ def train_single_cell_model(
     best_epoch = 0
     patience_counter = 0
     
+    # Create a simple profiler to track time spent in different parts
+    time_metrics = {'data_loading': 0, 'forward': 0, 'backward': 0, 'validation': 0}
+    
+    # Precompute target props for loss function
+    def precompute_target_props(loader):
+        targets = []
+        with torch.no_grad():
+            for batch in loader:
+                true_props = batch['y'].to(device)
+                true_props_target = true_props[:, target_cell_type].view(-1, 1)
+                # Convert to binary presence/absence
+                presence_target = (true_props_target > presence_threshold).float()
+                # Weight false positives more heavily
+                weights = torch.ones_like(presence_target)
+                weights[presence_target == 0] = 2.0  # More weight to false positives
+                targets.append((presence_target, weights))
+        return targets
+    
+    # Precompute targets for training data
+    print("Precomputing targets for training data...")
+    train_targets = precompute_target_props(train_loader)
+    
     # Training loop
     for epoch in range(num_epochs):
         print(f"\nEpoch {epoch+1}/{num_epochs}")
+        epoch_start = time.time()
         
         # Training phase
         model.train()
@@ -61,37 +87,114 @@ def train_single_cell_model(
             'f1': 0.0
         }
         num_batches = 0
+        optimizer.zero_grad()
         
-        for batch in tqdm(train_loader, desc="Training"):
+        # Reset time metrics
+        for k in time_metrics:
+            time_metrics[k] = 0
+            
+        batch_start = time.time()
+        
+        for batch_idx, batch in enumerate(tqdm(train_loader, desc="Training")):
+            data_time = time.time() - batch_start
+            time_metrics['data_loading'] += data_time
+            
             # Get batch data
             marker_values = batch['X'].to(device)
             coverage = batch['coverage'].to(device)
-            true_props = batch['y'].to(device)
             
-            # Forward pass
-            presence_logit, valid_mask = model(marker_values, coverage)
+            # Get precomputed targets
+            presence_target, weights = train_targets[batch_idx]
             
-            # Calculate loss
-            loss, details = single_cell_presence_loss(
-                presence_logit=presence_logit,
-                true_props=true_props,
-                valid_mask=valid_mask,
-                target_cell_type=target_cell_type,
-                presence_threshold=presence_threshold,
-                device=device
-            )
+            # Forward pass with mixed precision if enabled
+            forward_start = time.time()
+            if scaler is not None:
+                with torch.cuda.amp.autocast():
+                    presence_logit, valid_mask = model(marker_values, coverage)
+                    
+                    # Weighted BCE loss
+                    loss = F.binary_cross_entropy_with_logits(
+                        presence_logit, presence_target, weight=weights, reduction='mean'
+                    )
+            else:
+                presence_logit, valid_mask = model(marker_values, coverage)
+                
+                # Weighted BCE loss
+                loss = F.binary_cross_entropy_with_logits(
+                    presence_logit, presence_target, weight=weights, reduction='mean'
+                )
             
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            forward_time = time.time() - forward_start
+            time_metrics['forward'] += forward_time
             
-            # Accumulate metrics
-            for metric in train_metrics:
-                train_metrics[metric] += details[metric]
+            # Scale loss based on gradient accumulation
+            loss = loss / batch_accumulation
+            
+            # Backward pass with mixed precision if enabled
+            backward_start = time.time()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                if (batch_idx + 1) % batch_accumulation == 0 or batch_idx == len(train_loader) - 1:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+            else:
+                loss.backward()
+                if (batch_idx + 1) % batch_accumulation == 0 or batch_idx == len(train_loader) - 1:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    optimizer.zero_grad()
+            
+            backward_time = time.time() - backward_start
+            time_metrics['backward'] += backward_time
+            
+            # Calculate metrics (outside of grad computation)
+            with torch.no_grad():
+                presence_prob = torch.sigmoid(presence_logit)
+                presence_pred = (presence_prob > 0.5).float()
+                
+                # Accuracy
+                accuracy = torch.mean((presence_pred == presence_target).float())
+                
+                # Confusion matrix
+                tp = torch.sum((presence_pred == 1) & (presence_target == 1)).item()
+                fp = torch.sum((presence_pred == 1) & (presence_target == 0)).item()
+                tn = torch.sum((presence_pred == 0) & (presence_target == 0)).item()
+                fn = torch.sum((presence_pred == 0) & (presence_target == 1)).item()
+                
+                # Calculate metrics
+                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+                f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+                
+                # Accumulate metrics
+                train_metrics['loss'] += loss.item() * batch_accumulation
+                train_metrics['accuracy'] += accuracy.item()
+                train_metrics['precision'] += precision
+                train_metrics['recall'] += recall
+                train_metrics['specificity'] += specificity
+                train_metrics['f1'] += f1
             
             num_batches += 1
+            batch_start = time.time()
+            
+            # Print progress occasionally
+            if batch_idx % 50 == 0:
+                print(f"  Batch {batch_idx}/{len(train_loader)}, "
+                      f"Loss: {loss.item() * batch_accumulation:.4f}, "
+                      f"F1: {f1:.4f}")
+                
+                # Print timing information
+                total_time = sum(time_metrics.values())
+                if total_time > 0:
+                    time_percentages = {k: v/total_time*100 for k, v in time_metrics.items()}
+                    print(f"  Time breakdown: "
+                          f"Data: {time_percentages['data_loading']:.1f}%, "
+                          f"Forward: {time_percentages['forward']:.1f}%, "
+                          f"Backward: {time_percentages['backward']:.1f}%")
         
         # Average training metrics
         for metric in train_metrics:
@@ -103,104 +206,145 @@ def train_single_cell_model(
               f"Recall: {train_metrics['recall']:.4f}, "
               f"Specificity: {train_metrics['specificity']:.4f}")
         
-        # Validation phase
-        model.eval()
-        val_metrics = {}
-        
-        for val_name, val_loader in val_loaders.items():
-            val_set_metrics = {
-                'loss': 0.0,
-                'accuracy': 0.0,
-                'precision': 0.0,
-                'recall': 0.0,
-                'specificity': 0.0,
-                'f1': 0.0,
-                'confusion': {
-                    'tp': 0,
-                    'fp': 0,
-                    'tn': 0,
-                    'fn': 0
+        # Only do validation every eval_every epochs or on last epoch
+        if (epoch + 1) % eval_every == 0 or epoch == num_epochs - 1:
+            # Validation phase
+            validation_start = time.time()
+            model.eval()
+            val_metrics = {}
+            
+            for val_name, val_loader in val_loaders.items():
+                val_set_metrics = {
+                    'loss': 0.0,
+                    'accuracy': 0.0,
+                    'precision': 0.0,
+                    'recall': 0.0,
+                    'specificity': 0.0,
+                    'f1': 0.0,
+                    'confusion': {
+                        'tp': 0,
+                        'fp': 0,
+                        'tn': 0,
+                        'fn': 0
+                    }
                 }
-            }
-            num_val_batches = 0
+                num_val_batches = 0
+                
+                with torch.no_grad():
+                    for batch in tqdm(val_loader, desc=f"Validating {val_name}"):
+                        # Get batch data
+                        marker_values = batch['X'].to(device)
+                        coverage = batch['coverage'].to(device)
+                        true_props = batch['y'].to(device)
+                        
+                        # Extract ground truth for target cell type
+                        true_props_target = true_props[:, target_cell_type].view(-1, 1)
+                        # Convert to binary presence/absence
+                        presence_target = (true_props_target > presence_threshold).float()
+                        
+                        # Forward pass
+                        presence_logit, valid_mask = model(marker_values, coverage)
+                        
+                        # Calculate loss
+                        loss = F.binary_cross_entropy_with_logits(
+                            presence_logit, presence_target, reduction='mean'
+                        )
+                        
+                        # Calculate metrics
+                        presence_prob = torch.sigmoid(presence_logit)
+                        presence_pred = (presence_prob > 0.5).float()
+                        
+                        # Accuracy
+                        accuracy = torch.mean((presence_pred == presence_target).float())
+                        
+                        # Confusion matrix
+                        tp = torch.sum((presence_pred == 1) & (presence_target == 1)).item()
+                        fp = torch.sum((presence_pred == 1) & (presence_target == 0)).item()
+                        tn = torch.sum((presence_pred == 0) & (presence_target == 0)).item()
+                        fn = torch.sum((presence_pred == 0) & (presence_target == 1)).item()
+                        
+                        # Calculate metrics
+                        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+                        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+                        
+                        # Accumulate metrics
+                        val_set_metrics['loss'] += loss.item()
+                        val_set_metrics['accuracy'] += accuracy.item()
+                        val_set_metrics['precision'] += precision
+                        val_set_metrics['recall'] += recall
+                        val_set_metrics['specificity'] += specificity
+                        val_set_metrics['f1'] += f1
+                        val_set_metrics['confusion']['tp'] += tp
+                        val_set_metrics['confusion']['fp'] += fp
+                        val_set_metrics['confusion']['tn'] += tn
+                        val_set_metrics['confusion']['fn'] += fn
+                        
+                        num_val_batches += 1
+                
+                # Average validation metrics
+                for metric in val_set_metrics:
+                    if metric != 'confusion':
+                        val_set_metrics[metric] /= num_val_batches
+                
+                # Store metrics
+                val_metrics[val_name] = val_set_metrics
+                
+                print(f"{val_name} - F1: {val_set_metrics['f1']:.4f}, "
+                      f"Precision: {val_set_metrics['precision']:.4f}, "
+                      f"Recall: {val_set_metrics['recall']:.4f}, "
+                      f"Specificity: {val_set_metrics['specificity']:.4f}")
+                
+                # Detailed confusion matrix
+                cm = val_set_metrics['confusion']
+                print(f"Confusion Matrix - TP: {cm['tp']}, FP: {cm['fp']}, TN: {cm['tn']}, FN: {cm['fn']}")
             
-            with torch.no_grad():
-                for batch in tqdm(val_loader, desc=f"Validating {val_name}"):
-                    # Get batch data
-                    marker_values = batch['X'].to(device)
-                    coverage = batch['coverage'].to(device)
-                    true_props = batch['y'].to(device)
-                    
-                    # Forward pass
-                    presence_logit, valid_mask = model(marker_values, coverage)
-                    
-                    # Calculate metrics
-                    _, details = single_cell_presence_loss(
-                        presence_logit=presence_logit,
-                        true_props=true_props,
-                        valid_mask=valid_mask,
-                        target_cell_type=target_cell_type,
-                        presence_threshold=presence_threshold,
-                        device=device
-                    )
-                    
-                    # Accumulate metrics
-                    for metric in val_set_metrics:
-                        if metric != 'confusion':
-                            val_set_metrics[metric] += details[metric]
-                        else:
-                            for key in val_set_metrics['confusion']:
-                                val_set_metrics['confusion'][key] += details['confusion'][key]
-                    
-                    num_val_batches += 1
+            time_metrics['validation'] = time.time() - validation_start
             
-            # Average validation metrics
-            for metric in val_set_metrics:
-                if metric != 'confusion':
-                    val_set_metrics[metric] /= num_val_batches
+            # Calculate average F1 across validation sets
+            avg_val_f1 = np.mean([metrics['f1'] for metrics in val_metrics.values()])
             
-            # Store metrics
-            val_metrics[val_name] = val_set_metrics
+            # Update learning rate scheduler
+            scheduler.step(avg_val_f1)
             
-            print(f"{val_name} - F1: {val_set_metrics['f1']:.4f}, "
-                  f"Precision: {val_set_metrics['precision']:.4f}, "
-                  f"Recall: {val_set_metrics['recall']:.4f}, "
-                  f"Specificity: {val_set_metrics['specificity']:.4f}")
+            # Check for improvement
+            if avg_val_f1 > best_val_f1:
+                best_val_f1 = avg_val_f1
+                best_epoch = epoch
+                patience_counter = 0
+                
+                # Save best model
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'best_val_f1': best_val_f1
+                }
+                torch.save(checkpoint, os.path.join(model_path, f'best_model_celltype_{target_cell_type}.pt'))
+                
+                print(f"New best model saved! F1: {best_val_f1:.4f}")
+            else:
+                patience_counter += 1
+                print(f"No improvement. Patience: {patience_counter}/{patience}")
             
-            # Detailed confusion matrix
-            cm = val_set_metrics['confusion']
-            print(f"Confusion Matrix - TP: {cm['tp']}, FP: {cm['fp']}, TN: {cm['tn']}, FN: {cm['fn']}")
-        
-        # Calculate average F1 across validation sets
-        avg_val_f1 = np.mean([metrics['f1'] for metrics in val_metrics.values()])
-        
-        # Update learning rate scheduler
-        scheduler.step(avg_val_f1)
-        
-        # Check for improvement
-        if avg_val_f1 > best_val_f1:
-            best_val_f1 = avg_val_f1
-            best_epoch = epoch
-            patience_counter = 0
-            
-            # Save best model
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'best_val_f1': best_val_f1
-            }
-            torch.save(checkpoint, os.path.join(model_path, f'best_model_celltype_{target_cell_type}.pt'))
-            
-            print(f"New best model saved! F1: {best_val_f1:.4f}")
+            # Early stopping
+            if patience_counter >= patience:
+                print(f"Early stopping triggered after {epoch+1} epochs")
+                break
         else:
-            patience_counter += 1
-            print(f"No improvement. Patience: {patience_counter}/{patience}")
+            print(f"Skipping validation for epoch {epoch+1} (every {eval_every} epochs)")
         
-        # Early stopping
-        if patience_counter >= patience:
-            print(f"Early stopping triggered after {epoch+1} epochs")
-            break
+        # Print epoch timing information
+        epoch_time = time.time() - epoch_start
+        print(f"Epoch completed in {epoch_time:.2f}s")
+        if sum(time_metrics.values()) > 0:
+            time_percentages = {k: time_metrics[k]/epoch_time*100 for k in time_metrics}
+            print(f"Time breakdown: "
+                  f"Data: {time_percentages['data_loading']:.1f}%, "
+                  f"Forward: {time_percentages['forward']:.1f}%, "
+                  f"Backward: {time_percentages['backward']:.1f}%, "
+                  f"Validation: {time_percentages['validation']:.1f}%")
     
     # Load best model
     checkpoint = torch.load(os.path.join(model_path, f'best_model_celltype_{target_cell_type}.pt'))
