@@ -247,7 +247,6 @@ def train_and_eval(
         model=single_model,
         dataloaders={"train":train_dl, "val": validation_dls},
         model_path=output_path,
-        target_cell_type=target_cell_type,
         num_epochs=100,
         learning_rate=1e-3
     )
