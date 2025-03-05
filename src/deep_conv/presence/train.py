@@ -56,7 +56,7 @@ def train_binary_classifier(
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     
     # Learning rate scheduler
-    scheduler = torch.optim.ReduceLROnPlateau(
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='max', factor=0.5, patience=patience//2, verbose=True
     )
     
@@ -427,3 +427,5 @@ def evaluate_binary_classifier(
     print(f"Confusion Matrix - TP: {tp}, FP: {fp}, TN: {tn}, FN: {fn}")
     
     return metrics
+
+
