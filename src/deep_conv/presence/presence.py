@@ -216,7 +216,8 @@ def train_and_eval(
 
     # 1) Read the atlas of markers and cell types
     atlas = pd.read_csv(atlas_path, sep="\t")
-    cell_types = list(atlas.columns[8:])
+    # cell_types = list(atlas.columns[8:])
+    cell_types = ['CD4-T-cells', 'CD8-T-cells', 'OAC']
     for target_cell_type_name in cell_types:
         print("training presence model for",target_cell_type_name)
         # The 'names' set ensures we only keep relevant markers
@@ -226,20 +227,17 @@ def train_and_eval(
         train_dl = load_training(train_pat_dir, atlas, names, target_cell_type=target_cell_type)
         # 3) Build DataLoaders for each validation subset
         tier1_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "tier1"), atlas, target_cell_type, names)
-        tier2_dl = None
-        if target_cell_type_name=="OAC":
-            tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, target_cell_type, names)
-        elif target_cell_type_name=="CD4-T-cells":
-            tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD4"), atlas, target_cell_type, names)
-        elif target_cell_type_name=="CD8-T-cells":
-            tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD8"), atlas, target_cell_type, names)
+        tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, target_cell_type, names)
+        tier3_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD4"), atlas, target_cell_type, names)
+        tier4_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD8"), atlas, target_cell_type, names)
 
         validation_dls = {
             "tier1": tier1_dl,        
+            "tier2": tier2_dl,        
+            "tier3": tier3_dl,        
+            "tier4": tier4_dl,        
         }
-        if not tier2_dl is None:
-            validation_dls['tier2'] = tier2_dl
-
+        
         single_model = SingleCellTypePresenceModel(
             num_markers=len(atlas),       
         )
