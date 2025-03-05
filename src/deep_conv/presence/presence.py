@@ -11,7 +11,7 @@ from typing import Tuple
 
 from deep_conv.benchmark.benchmark_utils import *
 from deep_conv.presence.model import *
-from deep_conv.presence.train import train_presence_model
+from deep_conv.presence.train import train_presence_model, train_single_cell_model
 from deep_conv.presence.evaluate import evaluate_presence_model
 
 
@@ -250,7 +250,7 @@ def train_and_eval(
     y_vals = {
         "tier1": t1_yval,
         "cd4": cd4_yval,
-        "cd8": cd8_yval,
+        # "cd8": cd8_yval,
         "oac": oac_yval
     }
 
@@ -260,37 +260,55 @@ def train_and_eval(
     # Build an array mapping each marker to its cell type index
     target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
 
-    # 5) Create the model
-    model = CellTypePresenceModel(
+    single_model = SingleCellTypePresenceModel(
         num_markers=len(atlas),
         num_cell_types=len(cell_types),
         target_ids=target_ids,
-        feature_dim=32
     )
 
-    # 6) Train the model, saving best checkpoint to `output_path`
-    trained_model = train_presence_model(
-        model=model,
+    # Train it
+    trained_model = train_single_cell_model(
+        model=single_model,
         train_loader=train_dl,
         val_loaders=validation_dls,
-        model_path=output_path,
-        num_epochs=1000,
-        learning_rate=0.0001,
-        weight_decay=1e-5,
-        presence_threshold=0.001,  
-        patience=10,
-        cell_types=cell_types,
+        model_path='./models/single_cell',
+        target_cell_type=cell_types.index("OAC"),
+        num_epochs=100,
+        learning_rate=1e-3
     )
+
+
+    # # 5) Create the model
+    # model = CellTypePresenceModel(
+    #     num_markers=len(atlas),
+    #     num_cell_types=len(cell_types),
+    #     target_ids=target_ids,
+    #     feature_dim=32
+    # )
+
+    # # 6) Train the model, saving best checkpoint to `output_path`
+    # trained_model = train_presence_model(
+    #     model=model,
+    #     train_loader=train_dl,
+    #     val_loaders=validation_dls,
+    #     model_path=output_path,
+    #     num_epochs=1000,
+    #     learning_rate=0.0001,
+    #     weight_decay=1e-5,
+    #     presence_threshold=0.001,  
+    #     patience=10,
+    #     cell_types=cell_types,
+    # )
     
-    # 7) Evaluate final model predictions on each validation set
-    evaluate_presence_model(
-        model=trained_model,
-        val_loaders=validation_dls,
-        presence_threshold=0.0005,  
-        decision_threshold=0.5,
-        cell_type_names=cell_types
-    )
-    return model    
+    # # 7) Evaluate final model predictions on each validation set
+    # evaluate_presence_model(
+    #     model=trained_model,
+    #     val_loaders=validation_dls,
+    #     presence_threshold=0.0005,  
+    #     decision_threshold=0.5,
+    #     cell_type_names=cell_types
+    # )
+    # return model    
 
 
 def main():
