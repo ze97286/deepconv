@@ -69,15 +69,14 @@ class TissueDeconvolutionDataset(Dataset):
 
 
 class SingleCellTypePresenceModel(nn.Module):
-    """
-    A model that predicts the presence of a single cell type.
-    """
-    def __init__(self, num_markers, target_ids, target_cell_type, feature_dim=32):
+    def __init__(self, num_markers, target_ids, target_cell_type, 
+                 feature_dim=32, dropout_rate=0.3, l2_reg=1e-4):
         super().__init__()
         self.num_markers = num_markers
         self.target_cell_type = target_cell_type
         self.feature_dim = feature_dim
-
+        self.l2_reg = l2_reg
+        
         # Store marker-to-cell-type mapping
         target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
         self.register_buffer("target_ids", target_ids_t)
@@ -85,29 +84,52 @@ class SingleCellTypePresenceModel(nn.Module):
         # Create a mask for the target cell type markers (precomputed)
         target_mask = (target_ids_t == target_cell_type)
         self.register_buffer("target_markers_mask", target_mask)
-
-        # Feature extraction
+        
+        # Feature extraction with more regularization
         self.marker_feature_extractor = nn.Sequential(
             nn.Linear(1, feature_dim),
+            nn.BatchNorm1d(feature_dim),  # Add batch normalization
             nn.ReLU(),
-            nn.Linear(feature_dim, feature_dim)
+            nn.Dropout(dropout_rate),     # Add dropout
+            nn.Linear(feature_dim, feature_dim),
+            nn.BatchNorm1d(feature_dim)   # Add batch normalization
         )
-
-        # Presence detection network
+        
+        # Deeper presence detection network with regularization
         self.presence_detector = nn.Sequential(
             nn.Linear(feature_dim, 64),
+            nn.BatchNorm1d(64),          # Add batch normalization
             nn.ReLU(),
+            nn.Dropout(dropout_rate),    # Add dropout
             nn.Linear(64, 32),
+            nn.BatchNorm1d(32),          # Add batch normalization
             nn.ReLU(),
+            nn.Dropout(dropout_rate),    # Add dropout
             nn.Linear(32, 1)
         )
         
-        # Initialize the final layer with negative bias
-        self.presence_detector[-1].bias.data.fill_(-1.0)
-
+        # Initialize the final layer with strong negative bias 
+        # This creates a stronger prior against positive predictions
+        self.presence_detector[-1].bias.data.fill_(-3.0)  # More negative bias
+        
+        # Apply weight initialization
+        self._init_weights()
+    
+    def _init_weights(self):
+        """
+        Apply better weight initialization
+        """
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # Kaiming/He initialization for ReLU activations
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                if m.bias is not None and m != self.presence_detector[-1]:
+                    # Don't initialize the final layer bias (we do that separately)
+                    nn.init.constant_(m.bias, 0)
+    
     def forward(self, marker_values, coverage):
         """
-        Forward pass to predict presence of the target cell type.
+        Forward pass with better regularization and handling of class imbalance.
         
         Args:
             marker_values: [B, M] Methylation values
@@ -116,6 +138,7 @@ class SingleCellTypePresenceModel(nn.Module):
         Returns:
             presence_logit: [B, 1] Logit for presence prediction
             valid_mask: [B, M] Mask of valid markers
+            l2_penalty: L2 regularization term
         """
         B, M = marker_values.shape
         
@@ -127,30 +150,26 @@ class SingleCellTypePresenceModel(nn.Module):
         
         # If no valid target markers for any sample, return zeros
         if not target_markers_valid.any():
-            return torch.zeros(B, 1, device=marker_values.device), valid_mask
+            return torch.zeros(B, 1, device=marker_values.device), valid_mask, 0.0
         
         # Create a safe version of marker_values where NaNs are replaced with zeros
         # (these will be ignored in the aggregation step)
         safe_markers = torch.where(valid_mask, marker_values, torch.zeros_like(marker_values))
         
-        # Process only the target markers that are valid
-        # We'll expand the mask to find valid samples
-        samples_with_valid_targets = target_markers_valid.any(dim=1)
+        # Extract features from each marker
+        # Reshape for BatchNorm1d which expects [N, C] or [N, C, L]
+        marker_values_flat = safe_markers.reshape(-1, 1)  # [B*M, 1]
         
-        # If no sample has valid target markers, return zeros
-        if not samples_with_valid_targets.any():
-            return torch.zeros(B, 1, device=marker_values.device), valid_mask
-        
-        # Extract features for all markers in one operation
-        marker_values_2d = safe_markers.unsqueeze(2)  # [B, M, 1]
-        all_features = self.marker_feature_extractor(marker_values_2d)  # [B, M, feature_dim]
+        # Extract features - note we need to handle BatchNorm properly
+        features_flat = self.marker_feature_extractor(marker_values_flat)  # [B*M, feature_dim]
+        features = features_flat.reshape(B, M, self.feature_dim)  # [B, M, feature_dim]
         
         # Use the target marker mask to zero out non-target markers
         target_mask_expanded = self.target_markers_mask.view(1, M, 1).expand(B, -1, self.feature_dim)
         valid_mask_expanded = valid_mask.unsqueeze(2).expand(-1, -1, self.feature_dim)
         
         # Zero out features for non-target or invalid markers
-        masked_features = all_features * target_mask_expanded * valid_mask_expanded
+        masked_features = features * target_mask_expanded * valid_mask_expanded
         
         # Weight the features by coverage
         coverage_expanded = coverage.unsqueeze(2).expand(-1, -1, self.feature_dim)
@@ -173,10 +192,17 @@ class SingleCellTypePresenceModel(nn.Module):
         # Normalize features by coverage
         normalized_features = summed_features / safe_coverage_sum.expand(-1, self.feature_dim)
         
+        # Calculate L2 regularization term
+        l2_penalty = 0.0
+        if self.training and self.l2_reg > 0:
+            for param in self.parameters():
+                l2_penalty += torch.sum(param ** 2)
+            l2_penalty *= self.l2_reg
+        
         # Predict presence
         presence_logit = self.presence_detector(normalized_features)
         
-        return presence_logit, valid_mask
+        return presence_logit, valid_mask, l2_penalty
 
 # class CellTypePresenceModel(nn.Module):
     # """

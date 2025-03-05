@@ -1,5 +1,6 @@
 import torch 
 import torch.nn.functional as F
+import torch.nn as nn
 
 def single_cell_presence_loss(
     presence_logit: torch.Tensor,
@@ -81,6 +82,58 @@ def single_cell_presence_loss(
     
     return bce_loss, details
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance problems.
+    
+    Focal loss adds a factor (1 - p_t)^gamma to the standard cross-entropy
+    criterion, which reduces the relative loss for well-classified examples
+    and puts more focus on hard, misclassified examples.
+    
+    Args:
+        alpha: Weighting factor for the rare class (typically the positive class)
+        gamma: Focusing parameter, reduces the loss contribution from easy examples
+        reduction: 'mean', 'sum' or 'none'
+    """
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        
+    def forward(self, inputs, targets, weights=None):
+        """
+        Args:
+            inputs: The prediction logits (before sigmoid)
+            targets: The ground truth labels (0 or 1)
+            weights: Optional sample weights
+        """
+        # Get the probabilities
+        p = torch.sigmoid(inputs)
+        
+        # Calculate p_t
+        p_t = p * targets + (1 - p) * (1 - targets)
+        
+        # Calculate the loss
+        loss = -((1 - p_t) ** self.gamma) * torch.log(torch.clamp(p_t, min=1e-8, max=1.0))
+        
+        # Apply alpha weighting
+        if self.alpha > 0:
+            alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+            loss = alpha_t * loss
+        
+        # Apply additional weights if provided
+        if weights is not None:
+            loss = weights * loss
+        
+        # Apply reduction
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+        
 
 # def presence_loss_fn(
     # presence_logits: torch.Tensor,
