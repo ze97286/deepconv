@@ -250,8 +250,8 @@ def train_and_eval(
             dataloaders={"train":train_dl, "val": validation_dls},
             model_path=output_path,
             num_epochs=100,
-            learning_rate=1e-3
-            target_cell_type=target_cell_type_name
+            learning_rate=1e-3,
+            target_cell_type=target_cell_type_name,
         )
 
         results_df = analyze_detection_by_concentration(trained_model, tier2_dl, output_path, target_cell_type_name)
