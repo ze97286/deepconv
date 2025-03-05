@@ -82,7 +82,7 @@ def get_validation_set(eval_pat_dir: str, atlas: pd.DataFrame,target_cell_type:i
         fraction=X_val,
         coverage=coverage_val,
         y=y_val,
-        target_ids=list(atlas.columns[8:]),
+        # target_ids=list(atlas.columns[8:]),
         target_cell_type=target_cell_type,
     )
     
@@ -185,7 +185,7 @@ def load_training(base_dir: str, atlas: pd.DataFrame, names: set, target_cell_ty
         coverage=coverage_train,
         y=y_train,
         target_cell_type=target_cell_type,
-        target_ids=list(atlas.columns[8:]),
+        # target_ids=list(atlas.columns[8:]),
     )
     
     # Also create a normalized version of y for potential usage
