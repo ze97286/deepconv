@@ -216,9 +216,8 @@ def train_and_eval(
 
     # 1) Read the atlas of markers and cell types
     atlas = pd.read_csv(atlas_path, sep="\t")
-    # cell_types = list(atlas.columns[8:])
-    cell_types = ['CD4-T-cells', 'CD8-T-cells', 'OAC']
-    for target_cell_type_name in cell_types:
+    cell_types = list(atlas.columns[8:])
+    for target_cell_type_name in ['CD4-T-cells', 'CD8-T-cells', 'OAC']:
         print("training presence model for",target_cell_type_name)
         # The 'names' set ensures we only keep relevant markers
         names = set(atlas[atlas.target==target_cell_type_name].name.unique())
