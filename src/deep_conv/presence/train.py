@@ -9,7 +9,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 
 
 def concentration_weighted_focal_loss(logits, targets, concentration, gamma=2.0, alpha=0.25,
-                                      critical_range=(0.01, 0.03), critical_weight=3.0):
+                                      critical_range=(0.01, 0.03), critical_weight=2.0):
     """
     Focal loss with additional weighting based on sample concentration.
     
@@ -145,7 +145,7 @@ def train_binary_classifier(
         if curriculum_learning:
             # In early epochs, focus on higher concentration samples (easier)
             # In later epochs, include more low-concentration samples (harder)
-            curr_progress = min(1.0, epoch / (num_epochs * 0.5))  # 0 to 1 over first half of training
+            curr_progress = min(1.0, epoch / (num_epochs * 0.75))  # 0 to 1 over first half of training
             
             # Adjust critical range for loss function based on curriculum progress
             # Start with higher concentration range, then gradually lower it

@@ -88,7 +88,7 @@ class SingleCellTypePresenceModel(nn.Module):
     3. Cross-attention between pathways to leverage information from different concentration ranges
     4. Enhanced normalization and transformations for low-concentration signals
     """
-    def __init__(self, num_markers, target_markers_mask=None, feature_dim=64, dropout_rate=0.3):
+    def __init__(self, num_markers, target_markers_mask=None, feature_dim=64, dropout_rate=0.2):
         super().__init__()
         self.num_markers = num_markers
         self.feature_dim = feature_dim
@@ -115,7 +115,7 @@ class SingleCellTypePresenceModel(nn.Module):
             nn.Linear(1, feature_dim),
             nn.LeakyReLU(0.1),  # Better for small signals than ReLU
             nn.BatchNorm1d(feature_dim),
-            nn.Dropout(dropout_rate * 0.7)  # Less dropout to preserve signal
+            nn.Dropout(dropout_rate * 0.5)  # Less dropout to preserve signal
         )
         
         # Medium-concentration pathway
