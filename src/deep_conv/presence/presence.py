@@ -328,7 +328,6 @@ def train_and_eval(
             trained_model, 
             val_dl, 
             target_cell_type=target_cell_type_name,
-            adaptive_threshold=True,
             output_path=output_path,
         )
         min_conc, bin_stats = find_minimum_detection_concentration(
@@ -336,7 +335,7 @@ def train_and_eval(
             detection_rate_threshold=0.95,
             save_path=os.path.join(output_path, f"{target_cell_type_name}_min_detection_concentration.html")
         )
-        with open(os.path.join(str(output_path), f"{target_cell_type}_min_detection_concentration.txt"), "w") as f:
+        with open(os.path.join(str(output_path), f"{target_cell_type_name}_min_detection_concentration.txt"), "w") as f:
             f.write(f"Minimum concentration with 95% detection rate: {min_conc:.8f}\n")
             f.write(f"Optimal thresholds by concentration:\n")
             for (min_c, max_c), threshold in threshold_mapping.items():
