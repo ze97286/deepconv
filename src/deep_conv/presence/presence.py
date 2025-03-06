@@ -622,17 +622,33 @@ def find_minimum_detection_concentration(results_df, output_path,target_cell_typ
     
     Args:
         results_df: DataFrame with detection results by sample
-        detection_rate_threshold: Minimum detection rate to consider reliable
-        save_path: Path to save the HTML visualization
+        output_path: Path directory to save the HTML visualization
         target_cell_type: Name of the target cell type (for file naming)
+        detection_rate_threshold: Minimum detection rate to consider reliable
         
     Returns:
         min_reliable_conc: Minimum concentration with reliable detection
         bin_stats: DataFrame with detection statistics by concentration bin
     """
+    # Looking at your error, we need to identify the actual concentration column name
+    # Let's check what columns are actually available in the DataFrame
+    print(f"Available columns in results_df: {results_df.columns.tolist()}")
+    
+    # Determine the concentration column name based on what's available
+    concentration_column = None
+    for possible_name in ['concentration', 'true_concentration', 'estimated_concentration']:
+        if possible_name in results_df.columns:
+            concentration_column = possible_name
+            break
+    
+    if concentration_column is None:
+        raise ValueError("Could not find concentration column in results DataFrame")
+    
+    print(f"Using concentration column: {concentration_column}")
+    
     # Create concentration bins (log scale)
-    min_conc = results_df['true_concentration'].min()
-    max_conc = results_df['true_concentration'].max()
+    min_conc = results_df[concentration_column].min()
+    max_conc = results_df[concentration_column].max()
     
     # Use log-spaced bins
     log_min = np.log10(max(min_conc, 1e-6))  # Avoid log of zero
@@ -646,7 +662,7 @@ def find_minimum_detection_concentration(results_df, output_path,target_cell_typ
         
         # Add bin column to results_df
         results_df['conc_bin'] = pd.cut(
-            results_df['true_concentration'], 
+            results_df[concentration_column], 
             bins=bin_edges,
             labels=bin_labels,
             include_lowest=True
@@ -659,20 +675,17 @@ def find_minimum_detection_concentration(results_df, output_path,target_cell_typ
     
     # Print debug info to verify data
     print(f"Total samples: {len(results_df)}")
-    print(f"Positive samples: {results_df['ground_truth'].sum()}")
-    print(f"Predicted positive: {results_df['prediction'].sum()}")
     
-    # For each bin, calculate:
-    # 1. True positive rate (sensitivity/recall) - correctly identified positives
-    # 2. Sample count
-    # 3. Min/max concentration
+    ground_truth_col = 'ground_truth' if 'ground_truth' in results_df.columns else 'label'
+    prediction_col = 'prediction' if 'prediction' in results_df.columns else 'predicted'
     
-    bin_stats = pd.DataFrame()
-    bin_stats['conc_bin'] = pd.Series(bin_labels)
-    bin_stats['min_concentration'] = [float(bin_name.split('-')[0]) for bin_name in bin_labels]
-    bin_stats['max_concentration'] = [float(bin_name.split('-')[1]) for bin_name in bin_labels]
+    print(f"Using ground truth column: {ground_truth_col}")
+    print(f"Using prediction column: {prediction_col}")
     
-    # Calculate actual detection metrics for each bin
+    print(f"Positive samples: {results_df[ground_truth_col].sum()}")
+    print(f"Predicted positive: {results_df[prediction_col].sum()}")
+    
+    # For each bin, calculate detection rates
     bin_results = []
     
     for bin_label in bin_labels:
@@ -690,14 +703,14 @@ def find_minimum_detection_concentration(results_df, output_path,target_cell_typ
             }
         else:
             # Focus on samples where ground truth is positive (we care about detecting presence)
-            positive_samples = bin_data[bin_data['ground_truth'] == 1]
+            positive_samples = bin_data[bin_data[ground_truth_col] == 1]
             
             if len(positive_samples) == 0:
                 detection_rate = 0  # No positive samples to detect
             else:
                 # Detection rate = true positives / total positives (recall/sensitivity)
-                true_positives = ((positive_samples['prediction'] == 1) & 
-                                 (positive_samples['ground_truth'] == 1)).sum()
+                true_positives = ((positive_samples[prediction_col] == 1) & 
+                                 (positive_samples[ground_truth_col] == 1)).sum()
                 detection_rate = true_positives / len(positive_samples)
             
             bin_result = {
@@ -705,10 +718,10 @@ def find_minimum_detection_concentration(results_df, output_path,target_cell_typ
                 'detection_rate': detection_rate,
                 'sample_count': len(bin_data),
                 'positives': len(positive_samples),
-                'true_positives': ((bin_data['prediction'] == 1) & 
-                                  (bin_data['ground_truth'] == 1)).sum(),
-                'false_negatives': ((bin_data['prediction'] == 0) & 
-                                   (bin_data['ground_truth'] == 1)).sum()
+                'true_positives': ((bin_data[prediction_col] == 1) & 
+                                  (bin_data[ground_truth_col] == 1)).sum(),
+                'false_negatives': ((bin_data[prediction_col] == 0) & 
+                                   (bin_data[ground_truth_col] == 1)).sum()
             }
         
         bin_results.append(bin_result)
@@ -716,12 +729,11 @@ def find_minimum_detection_concentration(results_df, output_path,target_cell_typ
     # Convert to DataFrame
     detection_stats = pd.DataFrame(bin_results)
     
-    # Merge detection stats with bin_stats
-    bin_stats = pd.merge(bin_stats, detection_stats, on='conc_bin', how='left')
-    bin_stats = bin_stats.fillna(0)  # Fill NaN values with 0
+    # Extract min_concentration from bin labels
+    detection_stats['min_concentration'] = [float(bin_name.split('-')[0]) for bin_name in detection_stats['conc_bin']]
     
     # Sort by min_concentration (ascending)
-    bin_stats = bin_stats.sort_values('min_concentration')
+    bin_stats = detection_stats.sort_values('min_concentration')
     
     # Print bin statistics for debugging
     print("\nBin statistics:")
