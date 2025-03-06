@@ -343,7 +343,7 @@ def train_and_eval(
                     detection_rate_above = (positives_above[prediction_col] == 1).mean()
                     print(f"Concentration >= {conc:.8f}: Detection rate = {detection_rate_above:.4f}, Samples = {len(positives_above)}")
                 
-        find_minimum_detection_concentration(results_df, output_path, target_cell_type_name)
+        find_minimum_detection_concentration_continuous(results_df, output_path, target_cell_type_name)
 
 
 def analyze_detection_by_concentration(model, dataloader, 
@@ -641,186 +641,131 @@ def analyze_detection_by_concentration(model, dataloader,
     return results_df
 
 
-def find_minimum_detection_concentration(results_df, output_path,target_cell_type, detection_rate_threshold=0.95):
+def find_minimum_detection_concentration_continuous(
+    results_df, output_path,target_cell_type, detection_rate_threshold=0.95
+):
     """
-    Find the minimum concentration that can be reliably detected with Plotly visualization.
+    Find minimum detection concentration treating concentration as a continuous variable.
     
-    Args:
-        results_df: DataFrame with detection results by sample
-        output_path: Path directory to save the HTML visualization
-        target_cell_type: Name of the target cell type (for file naming)
-        detection_rate_threshold: Minimum detection rate to consider reliable
-        
-    Returns:
-        min_reliable_conc: Minimum concentration with reliable detection
-        bin_stats: DataFrame with detection statistics by concentration bin
+    This approach directly calculates detection rates at each unique concentration
+    value without binning, then finds the exact threshold where detection rate crosses
+    the specified threshold.
     """
-    # Looking at your error, we need to identify the actual concentration column name
-    # Let's check what columns are actually available in the DataFrame
-    print(f"Available columns in results_df: {results_df.columns.tolist()}")
-    
-    # Determine the concentration column name based on what's available
-    concentration_column = None
-    for possible_name in ['concentration', 'true_concentration', 'estimated_concentration']:
-        if possible_name in results_df.columns:
-            concentration_column = possible_name
-            break
-    
-    if concentration_column is None:
-        raise ValueError("Could not find concentration column in results DataFrame")
-    
-    print(f"Using concentration column: {concentration_column}")
-    
-    # Create concentration bins (log scale)
-    min_conc = results_df[concentration_column].min()
-    max_conc = results_df[concentration_column].max()
-    
-    # Use log-spaced bins
-    log_min = np.log10(max(min_conc, 1e-6))  # Avoid log of zero
-    log_max = np.log10(max_conc)
-    num_bins = 20
-    
-    if log_min < log_max:
-        bin_edges = np.logspace(log_min, log_max, num_bins+1)
-        # Create bin labels
-        bin_labels = [f"{bin_edges[i]:.6f}-{bin_edges[i+1]:.6f}" for i in range(len(bin_edges)-1)]
-        
-        # Add bin column to results_df
-        results_df['conc_bin'] = pd.cut(
-            results_df[concentration_column], 
-            bins=bin_edges,
-            labels=bin_labels,
-            include_lowest=True
-        )
-    else:
-        # If all concentrations are the same, use a single bin
-        results_df['conc_bin'] = f"{min_conc:.6f}-{min_conc:.6f}"
-        bin_labels = [f"{min_conc:.6f}-{min_conc:.6f}"]
-        bin_edges = [min_conc, min_conc]
-    
-    # Print debug info to verify data
-    print(f"Total samples: {len(results_df)}")
-    
+    # Identify column names
+    concentration_col = 'concentration' if 'concentration' in results_df.columns else 'true_concentration'
     ground_truth_col = 'ground_truth' if 'ground_truth' in results_df.columns else 'label'
     prediction_col = 'prediction' if 'prediction' in results_df.columns else 'predicted'
     
-    print(f"Using ground truth column: {ground_truth_col}")
-    print(f"Using prediction column: {prediction_col}")
+    print(f"Using columns: concentration={concentration_col}, ground_truth={ground_truth_col}, prediction={prediction_col}")
     
-    print(f"Positive samples: {results_df[ground_truth_col].sum()}")
-    print(f"Predicted positive: {results_df[prediction_col].sum()}")
+    # Filter to positive samples only (since we care about detection rate of true positives)
+    positive_samples = results_df[results_df[ground_truth_col] == 1].copy()
+    print(f"Analyzing {len(positive_samples)} positive samples")
     
-    # For each bin, calculate detection rates
-    bin_results = []
+    # Sort by concentration for cumulative analysis
+    positive_samples = positive_samples.sort_values(by=concentration_col)
     
-    for bin_label in bin_labels:
-        bin_data = results_df[results_df['conc_bin'] == bin_label]
+    # Initialize arrays for tracking
+    concentrations = []
+    detection_rates = []
+    sample_counts = []
+    
+    # This approach calculates the detection rate for all samples at or above each concentration point
+    prev_conc = None
+    for conc in sorted(positive_samples[concentration_col].unique()):
+        # Skip duplicate concentrations
+        if conc == prev_conc:
+            continue
+        prev_conc = conc
         
-        if len(bin_data) == 0:
-            # Skip empty bins
-            bin_result = {
-                'conc_bin': bin_label,
-                'detection_rate': 0,
-                'sample_count': 0,
-                'positives': 0,
-                'true_positives': 0,
-                'false_negatives': 0
-            }
-        else:
-            # Focus on samples where ground truth is positive (we care about detecting presence)
-            positive_samples = bin_data[bin_data[ground_truth_col] == 1]
-            
-            if len(positive_samples) == 0:
-                detection_rate = 0  # No positive samples to detect
-            else:
-                # Detection rate = true positives / total positives (recall/sensitivity)
-                true_positives = ((positive_samples[prediction_col] == 1) & 
-                                 (positive_samples[ground_truth_col] == 1)).sum()
-                detection_rate = true_positives / len(positive_samples)
-            
-            bin_result = {
-                'conc_bin': bin_label,
-                'detection_rate': detection_rate,
-                'sample_count': len(bin_data),
-                'positives': len(positive_samples),
-                'true_positives': ((bin_data[prediction_col] == 1) & 
-                                  (bin_data[ground_truth_col] == 1)).sum(),
-                'false_negatives': ((bin_data[prediction_col] == 0) & 
-                                   (bin_data[ground_truth_col] == 1)).sum()
-            }
+        # Get all samples at or above this concentration
+        samples_at_or_above = positive_samples[positive_samples[concentration_col] >= conc]
         
-        bin_results.append(bin_result)
+        # Calculate detection rate (true positive rate)
+        if len(samples_at_or_above) > 0:
+            true_positives = samples_at_or_above[samples_at_or_above[prediction_col] == 1].shape[0]
+            detection_rate = true_positives / len(samples_at_or_above)
+            
+            # Store results
+            concentrations.append(conc)
+            detection_rates.append(detection_rate)
+            sample_counts.append(len(samples_at_or_above))
     
-    # Convert to DataFrame
-    detection_stats = pd.DataFrame(bin_results)
+    # Create a DataFrame with results
+    results_table = pd.DataFrame({
+        'concentration': concentrations,
+        'detection_rate': detection_rates,
+        'sample_count': sample_counts
+    })
     
-    # Extract min_concentration from bin labels
-    detection_stats['min_concentration'] = [float(bin_name.split('-')[0]) for bin_name in detection_stats['conc_bin']]
+    # Find minimum concentration with detection rate at or above threshold
+    above_threshold = results_table[results_table['detection_rate'] >= detection_rate_threshold]
     
-    # Sort by min_concentration (ascending)
-    bin_stats = detection_stats.sort_values('min_concentration')
-    
-    # Print bin statistics for debugging
-    print("\nBin statistics:")
-    print(bin_stats[['conc_bin', 'detection_rate', 'sample_count', 'positives', 
-                    'true_positives', 'false_negatives']].to_string(index=False))
-    
-    # Find minimum concentration with detection rate above threshold
-    reliable_bins = bin_stats[bin_stats['detection_rate'] >= detection_rate_threshold]
-    
-    if len(reliable_bins) > 0:
-        min_reliable_conc = reliable_bins['min_concentration'].min()
-        print(f"Minimum concentration with {detection_rate_threshold*100:.1f}% detection rate: {min_reliable_conc:.8f}")
+    if len(above_threshold) > 0:
+        min_reliable_conc = above_threshold['concentration'].min()
+        detection_at_min = above_threshold.loc[above_threshold['concentration'].idxmin(), 'detection_rate']
+        print(f"Minimum concentration with {detection_rate_threshold*100:.1f}% detection rate: {min_reliable_conc:.8f} " +
+              f"(actual rate: {detection_at_min:.4f})")
     else:
         min_reliable_conc = None
-        print(f"No concentration bin achieved {detection_rate_threshold*100:.1f}% detection rate")
+        print(f"No concentration achieved {detection_rate_threshold*100:.1f}% detection rate")
     
-    # Create Plotly figure
+    # Create a plot showing the continuous nature of the data
     fig = go.Figure()
     
-    # Add detection rate line
+    # Add detection rate curve
     fig.add_trace(
         go.Scatter(
-            x=bin_stats['min_concentration'],
-            y=bin_stats['detection_rate'],
-            mode='lines+markers',
-            name='Detection Rate',
+            x=results_table['concentration'],
+            y=results_table['detection_rate'],
+            mode='lines',
             line=dict(color='blue', width=3),
-            marker=dict(size=10),
+            name='Detection Rate',
             hovertemplate='Concentration: %{x:.8f}<br>Detection Rate: %{y:.4f}<br>Samples: %{text}',
-            text=bin_stats['positives']
+            text=results_table['sample_count']
+        )
+    )
+    
+    # Add sample points for reference
+    fig.add_trace(
+        go.Scatter(
+            x=results_table['concentration'],
+            y=results_table['detection_rate'],
+            mode='markers',
+            marker=dict(
+                color='blue',
+                size=8,
+                opacity=0.5
+            ),
+            name='Data Points',
+            showlegend=False
         )
     )
     
     # Add threshold line
     fig.add_trace(
         go.Scatter(
-            x=[bin_stats['min_concentration'].min(), bin_stats['min_concentration'].max()],
+            x=[min(results_table['concentration']), max(results_table['concentration'])],
             y=[detection_rate_threshold, detection_rate_threshold],
             mode='lines',
-            name=f'Target Rate ({detection_rate_threshold:.2f})',
-            line=dict(color='red', width=2, dash='dash')
+            line=dict(color='red', width=2, dash='dash'),
+            name=f'Target Rate ({detection_rate_threshold:.2f})'
         )
     )
     
-    # Add marker for minimum reliable concentration
+    # Add marker for minimum reliable concentration if found
     if min_reliable_conc is not None:
         fig.add_trace(
             go.Scatter(
                 x=[min_reliable_conc],
                 y=[detection_rate_threshold],
                 mode='markers',
-                name=f'Min Reliable Conc: {min_reliable_conc:.8f}',
-                marker=dict(
-                    color='green',
-                    size=15,
-                    symbol='star'
-                )
+                marker=dict(color='green', size=15, symbol='star'),
+                name=f'Min Reliable Conc: {min_reliable_conc:.8f}'
             )
         )
-    
-    # Add annotation with minimum detection concentration
-    if min_reliable_conc is not None:
+        
+        # Add annotation for the minimum concentration
         fig.add_annotation(
             x=min_reliable_conc,
             y=detection_rate_threshold + 0.05,
@@ -831,52 +776,52 @@ def find_minimum_detection_concentration(results_df, output_path,target_cell_typ
             ay=-40
         )
     
-    # Add sample count information
-    fig.add_trace(
-        go.Bar(
-            x=bin_stats['min_concentration'],
-            y=bin_stats['positives'],
-            name='Positive Samples',
-            marker_color='lightblue',
-            opacity=0.5,
-            yaxis='y2'
-        )
-    )
-    
-    # Update layout with secondary y-axis
+    # Update layout
     fig.update_layout(
         title=f'Detection Rate by Concentration for {target_cell_type}',
         xaxis=dict(
-            title='Minimum Concentration (log scale)',
+            title='Concentration (log scale)',
             type='log'
         ),
         yaxis=dict(
             title='Detection Rate',
             range=[0, 1.05]
         ),
-        yaxis2=dict(
-            title='Sample Count',
-            overlaying='y',
-            side='right',
-            rangemode='nonnegative'
-        ),
-        legend=dict(
-            yanchor="top",
-            y=0.99,
-            xanchor="right",
-            x=0.99
-        ),
-        width=900,
-        height=600
+        height=600,
+        width=900
     )
     
-    # Add grid
-    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
-    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='lightgray')
+    # Add sample count as a separate trace with secondary y-axis
+    fig.add_trace(
+        go.Scatter(
+            x=results_table['concentration'],
+            y=results_table['sample_count'],
+            mode='lines',
+            line=dict(color='lightgray', width=2),
+            name='Sample Count',
+            yaxis='y2'
+        )
+    )
     
-    # Save the visualization if path provided
+    # Configure secondary y-axis
+    fig.update_layout(
+        yaxis2=dict(
+            title='Sample Count',
+            titlefont=dict(color='gray'),
+            tickfont=dict(color='gray'),
+            overlaying='y',
+            side='right'
+        )
+    )
+    
+    # Save the plot if path provided
+    if output_path:
+        file_path = os.path.join(output_path, f"{target_cell_type}_detection_rate_continuous.html")
+        fig.write_html(file_path)
+        print(f"Saved visualization to {file_path}")
+    
     fig.write_html(f"{str(output_path)}/{target_cell_type}_minimum_detection_concentration.html")    
-    return min_reliable_conc, bin_stats
+    return min_reliable_conc, results_table
 
 
 def main():
