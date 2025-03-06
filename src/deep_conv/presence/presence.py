@@ -318,6 +318,31 @@ def train_and_eval(
             val_dl = tier4_dl
 
         results_df = analyze_detection_by_concentration(trained_model, val_dl, output_path, target_cell_type_name)
+        print("Sample of results_df:")
+        print(results_df.head())
+        print("Value counts for prediction/ground truth:")
+        prediction_col = 'prediction' if 'prediction' in results_df.columns else 'predicted'
+        ground_truth_col = 'ground_truth' if 'ground_truth' in results_df.columns else 'label'
+        print(f"Ground truth distribution: {results_df[ground_truth_col].value_counts()}")
+        print(f"Prediction distribution: {results_df[prediction_col].value_counts()}")
+
+        # Calculate raw detection rate for positive samples only
+        positive_samples = results_df[results_df[ground_truth_col] == 1]
+        if len(positive_samples) > 0:
+            true_positive_rate = (positive_samples[prediction_col] == 1).mean()
+            print(f"Overall detection rate for positive samples: {true_positive_rate:.4f}")
+
+        # Try to reproduce the original threshold calculation
+        concentration_col = 'concentration' if 'concentration' in results_df.columns else 'true_concentration'
+        concentrations = sorted(results_df[concentration_col].unique())
+        for conc in concentrations:
+            samples_above = results_df[results_df[concentration_col] >= conc]
+            if len(samples_above) > 0:
+                positives_above = samples_above[samples_above[ground_truth_col] == 1]
+                if len(positives_above) > 0:
+                    detection_rate_above = (positives_above[prediction_col] == 1).mean()
+                    print(f"Concentration >= {conc:.8f}: Detection rate = {detection_rate_above:.4f}, Samples = {len(positives_above)}")
+                
         find_minimum_detection_concentration(results_df, output_path, target_cell_type_name)
 
 
