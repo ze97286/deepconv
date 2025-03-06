@@ -7,54 +7,40 @@ import numpy as np
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score
 
-
-def focal_loss(logits, targets, alpha=0.25, gamma=2.0):
-    """
-    Simple focal loss without concentration weighting.
-    
-    Args:
-        logits: Prediction logits
-        targets: Ground truth labels
-        alpha: Class balancing parameter (higher values focus more on positive class)
-        gamma: Focusing parameter (higher values focus more on hard examples)
-        
-    Returns:
-        Focal loss value
-    """
-    p = torch.sigmoid(logits)
-    ce_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
-    
-    # Focal term
-    p_t = p * targets + (1 - p) * (1 - targets)
-    focal_term = (1 - p_t) ** gamma
-    
-    # Alpha term for class imbalance
-    alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
-    
-    # Combine
-    loss = alpha_t * focal_term * ce_loss
-    return loss.mean()
-
-
 def train_binary_classifier(
     model: nn.Module,
     dataloaders: dict,
     model_path: str,
     target_cell_type: str,
-    num_epochs: int = 100,
+    num_epochs: int = 50,
     learning_rate: float = 1e-3,
-    warmup_epochs: int = 5,
     weight_decay: float = 1e-4,
-    patience: int = 20,  
-    alpha: float = 0.25, 
-    gamma: float = 2.0,  
+    class_weight: float = None,  # Positive class weight (for imbalance)
+    patience: int = 10,
     device: torch.device = None,
-    fp16_training: bool = True,
-    gradient_accumulation: int = 1,
-    eval_metric: str = 'balanced_accuracy'
+    fp16_training: bool = True,  # Use mixed precision
+    gradient_accumulation: int = 1,  # Number of batches to accumulate
+    eval_metric: str = 'balanced_accuracy'  # 'balanced_accuracy', 'f1', 'auroc'
 ):
     """
-    Train the simplified binary cell type classifier.
+    Train a binary classifier for cell type detection.
+    
+    Args:
+        model: Binary classifier model
+        dataloaders: Dictionary containing 'train' and 'val' dataloaders
+        model_path: Path to save model checkpoints
+        num_epochs: Number of training epochs
+        learning_rate: Initial learning rate
+        weight_decay: L2 regularization weight
+        class_weight: Weight for positive class (None = auto-calculate)
+        patience: Early stopping patience
+        device: Training device (GPU/CPU)
+        fp16_training: Whether to use mixed precision training
+        gradient_accumulation: Number of batches to accumulate gradients
+        eval_metric: Metric to use for model selection
+    
+    Returns:
+        Trained model
     """
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -70,23 +56,39 @@ def train_binary_classifier(
     # Create optimizer with weight decay
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     
-    # Learning rate scheduler with warmup
-    def lr_lambda(epoch):
-        if epoch < warmup_epochs:
-            return epoch / warmup_epochs
-        return 1.0
-    
-    warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-    
-    # Main scheduler for after warmup
-    main_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    # Learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='max', factor=0.5, patience=patience//2, verbose=True
     )
     
     # Create directory for saving models
     os.makedirs(model_path, exist_ok=True)
     
-    # Initialize early stopping variables
+    # Automatically calculate class weight if not provided
+    if class_weight is None:
+        pos_count = 0
+        total_count = 0
+        
+        for batch in dataloaders['train']:
+            labels = batch['label']
+            pos_count += torch.sum(labels).item()
+            total_count += len(labels)
+        
+        pos_ratio = pos_count / total_count
+        class_weight = (1 - pos_ratio) / pos_ratio
+        print(f"Calculated positive class weight: {class_weight:.4f} (ratio: {pos_ratio:.4f})")
+    
+    # Create loss function with class weights
+    weights = torch.tensor([1.0, class_weight], device=device)
+    
+    def weighted_bce_loss(logits, targets):
+        per_sample_weights = torch.ones_like(targets)
+        per_sample_weights[targets == 1] = weights[1]
+        return F.binary_cross_entropy_with_logits(
+            logits, targets, weight=per_sample_weights, reduction='mean'
+        )
+    
+    # Tracking variables
     best_metric = 0.0
     best_epoch = 0
     patience_counter = 0
@@ -114,20 +116,12 @@ def train_binary_classifier(
             if scaler is not None:
                 with torch.cuda.amp.autocast():
                     logits, _ = model(marker_values, coverage, target_markers_mask)
-                    
-                    # Calculate loss with focal loss
-                    loss = focal_loss(logits, labels, alpha=alpha, gamma=gamma)
-                    
-                    # Scale for gradient accumulation
-                    loss = loss / gradient_accumulation
+                    loss = weighted_bce_loss(logits, labels)
+                    loss = loss / gradient_accumulation  # Scale for gradient accumulation
             else:
                 logits, _ = model(marker_values, coverage, target_markers_mask)
-                
-                # Calculate loss with focal loss
-                loss = focal_loss(logits, labels, alpha=alpha, gamma=gamma)
-                
-                # Scale for gradient accumulation
-                loss = loss / gradient_accumulation
+                loss = weighted_bce_loss(logits, labels)
+                loss = loss / gradient_accumulation  # Scale for gradient accumulation
             
             # Backward pass with mixed precision
             if scaler is not None:
@@ -135,10 +129,8 @@ def train_binary_classifier(
                 
                 # Only step optimizer after accumulating gradients
                 if (batch_idx + 1) % gradient_accumulation == 0 or batch_idx == len(dataloaders['train']) - 1:
-                    # Gradient clipping
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    
+                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad()
@@ -147,9 +139,7 @@ def train_binary_classifier(
                 
                 # Only step optimizer after accumulating gradients
                 if (batch_idx + 1) % gradient_accumulation == 0 or batch_idx == len(dataloaders['train']) - 1:
-                    # Gradient clipping
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                    
+                    nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                     optimizer.step()
                     optimizer.zero_grad()
             
@@ -157,19 +147,14 @@ def train_binary_classifier(
             with torch.no_grad():
                 train_losses.append(loss.item() * gradient_accumulation)
                 
-                # Calculate metrics
+                # Calculate confusion matrix
                 probabilities = torch.sigmoid(logits)
                 predictions = (probabilities >= 0.5).float()
                 
-                # Update confusion matrix
                 train_metrics['tp'] += torch.sum((predictions == 1) & (labels == 1)).item()
                 train_metrics['fp'] += torch.sum((predictions == 1) & (labels == 0)).item()
                 train_metrics['tn'] += torch.sum((predictions == 0) & (labels == 0)).item()
                 train_metrics['fn'] += torch.sum((predictions == 0) & (labels == 1)).item()
-        
-        # Update learning rate for warmup
-        if epoch < warmup_epochs:
-            warmup_scheduler.step()
         
         # Calculate training metrics
         train_metrics['loss'] = np.mean(train_losses)
@@ -210,9 +195,7 @@ def train_binary_classifier(
                     
                     # Forward pass
                     logits, _ = model(marker_values, coverage, target_markers_mask)
-                    
-                    # Calculate loss
-                    loss = focal_loss(logits, labels, alpha=alpha, gamma=gamma)
+                    loss = weighted_bce_loss(logits, labels)
                     
                     # Calculate metrics
                     probabilities = torch.sigmoid(logits)
@@ -284,9 +267,8 @@ def train_binary_classifier(
         else:
             raise ValueError(f"Unknown evaluation metric: {eval_metric}")
         
-        # Update learning rate scheduler (after warmup)
-        if epoch >= warmup_epochs:
-            main_scheduler.step(avg_metric)
+        # Update learning rate scheduler
+        scheduler.step(avg_metric)
         
         # Check for improvement
         if avg_metric > best_metric:
@@ -322,7 +304,6 @@ def train_binary_classifier(
     return model
 
 
-
 def evaluate_binary_classifier(
     model: nn.Module,
     dataloader: DataLoader,
@@ -341,7 +322,6 @@ def evaluate_binary_classifier(
         threshold: Classification threshold
         decision_thresholds: Dictionary mapping concentration ranges to thresholds
                             e.g., {(0.1, 1.0): 0.7, (0.01, 0.1): 0.5, (0.0, 0.01): 0.3}
-                            (Only used if 'concentration' is available in batch)
         concentration_key: Key in batch dictionary for concentration values
     
     Returns:
@@ -386,7 +366,7 @@ def evaluate_binary_classifier(
             metrics['all_labels'].append(labels.cpu().numpy())
             metrics['all_probs'].append(probabilities.cpu().numpy())
             
-            # Apply concentration-specific thresholds if provided and concentrations available
+            # Apply concentration-specific thresholds if provided
             if decision_thresholds is not None and concentrations is not None:
                 # Get threshold for each sample based on concentration
                 sample_thresholds = []
@@ -448,3 +428,5 @@ def evaluate_binary_classifier(
     print(f"Confusion Matrix - TP: {tp}, FP: {fp}, TN: {tn}, FN: {fn}")
     
     return metrics
+
+

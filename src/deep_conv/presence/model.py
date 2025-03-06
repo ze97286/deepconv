@@ -69,6 +69,15 @@ class BinaryCellTypeDataset(Dataset):
 
 
 class SingleCellTypePresenceModel(nn.Module):
+    """
+    A binary classifier for detecting the presence of a specific cell type.
+    
+    Key features:
+    1. Uses only the markers relevant to the target cell type
+    2. Processes markers with varying coverage appropriately
+    3. Uses attention mechanism to focus on the most informative markers
+    4. Employs a deep architecture with residual connections for better feature extraction
+    """
     def __init__(self, num_markers, target_markers_mask=None, feature_dim=64, dropout_rate=0.3):
         super().__init__()
         self.num_markers = num_markers
@@ -97,7 +106,7 @@ class SingleCellTypePresenceModel(nn.Module):
             nn.Dropout(dropout_rate)
         )
         
-        # Attention mechanism
+        # Marker attention mechanism
         self.attention = nn.Sequential(
             nn.Linear(feature_dim, 1),
             nn.Sigmoid()
@@ -108,13 +117,17 @@ class SingleCellTypePresenceModel(nn.Module):
             nn.Linear(feature_dim, 64),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(64, 1)
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(32, 1)
         )
         
         # Initialize weights
         self._init_weights()
     
     def _init_weights(self):
+        """Initialize model weights for better convergence"""
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
@@ -123,62 +136,112 @@ class SingleCellTypePresenceModel(nn.Module):
         
         # Set a negative bias in the final layer to counter class imbalance
         if hasattr(self.classifier[-1], 'bias'):
-            self.classifier[-1].bias.data.fill_(-0.5)
+            self.classifier[-1].bias.data.fill_(0.0)
     
     def forward(self, marker_values, coverage, target_markers_mask=None):
+        """
+        Forward pass of the binary classifier.
+        
+        Args:
+            marker_values: [B, M] Methylation values
+            coverage: [B, M] Coverage values
+            target_markers_mask: [M] Mask indicating markers for target cell type
+                                 (if not provided, uses the one stored in the model)
+                               
+        Returns:
+            logits: [B, 1] Logits for binary classification
+            attention_weights: [B, M] Attention weights for each marker
+        """
         B, M = marker_values.shape
         
-        # Get target markers mask
+        # Get target markers mask (either from input or model)
         if target_markers_mask is None:
             if hasattr(self, 'target_markers_mask'):
                 target_markers_mask = self.target_markers_mask
             else:
+                # If no mask provided, use all markers
                 target_markers_mask = torch.ones(M, dtype=torch.bool, device=marker_values.device)
         
-        # Create masks
+        # Create valid markers mask (coverage > 0 AND is target marker)
         valid_mask = (coverage > 0)
         target_valid_mask = valid_mask & target_markers_mask.expand(B, -1)
         
-        # Replace NaNs with zeros
+        # Replace NaNs with zeros (these will be masked out later)
         marker_values_safe = torch.where(valid_mask, marker_values, torch.zeros_like(marker_values))
         
-        # Normalize by coverage
-        coverage_safe = coverage.clone() + 1e-10
+        # Normalize marker values by coverage (improves stability and generalization)
+        coverage_safe = coverage.clone() + 1e-10  # Add epsilon to avoid division by zero
         normalized_markers = marker_values_safe / torch.sqrt(coverage_safe)
         
-        # Reshape for batch operations
-        marker_values_flat = normalized_markers.reshape(-1, 1)
+        # Process all markers through feature extraction
+        marker_values_flat = normalized_markers.reshape(-1, 1)  # [B*M, 1]
         
-        # Apply input normalization
+        # Apply batch normalization to inputs
         marker_values_norm = self.input_norm(marker_values_flat)
         
         # Extract features
-        features = self.feature_extractor(marker_values_norm)
+        features = self.feature_extractor(marker_values_norm)  # [B*M, feature_dim]
         
-        # Apply transformation with residual connection
-        transformed = self.feature_transform(features)
-        features = features + transformed
+        # Apply feature transformation with residual connection
+        transformed_features = self.feature_transform(features)
+        features = features + transformed_features  # [B*M, feature_dim]
         
         # Calculate attention weights
-        attention_flat = self.attention(features).reshape(B, M)
+        attention_flat = self.attention(features).reshape(B, M)  # [B, M]
         
-        # Apply target and valid mask
+        # Apply target markers mask and valid mask to attention
         masked_attention = attention_flat * target_valid_mask.float()
         
-        # Normalize attention
+        # Normalize attention weights to sum to 1 for each sample
         attention_sum = masked_attention.sum(dim=1, keepdim=True)
         attention_sum = torch.where(attention_sum > 0, attention_sum, torch.ones_like(attention_sum))
         normalized_attention = masked_attention / attention_sum
         
-        # Reshape features and apply attention
-        features_reshaped = features.reshape(B, M, -1)
-        expanded_attention = normalized_attention.unsqueeze(-1).expand_as(features_reshaped)
+        # Reshape features back to batch form
+        features_reshaped = features.reshape(B, M, self.feature_dim)  # [B, M, feature_dim]
+        
+        # Apply attention weights to features
+        expanded_attention = normalized_attention.unsqueeze(-1).expand(-1, -1, self.feature_dim)
         weighted_features = features_reshaped * expanded_attention
         
-        # Aggregate features
-        aggregated_features = weighted_features.sum(dim=1)
+        # Aggregate features across markers
+        aggregated_features = weighted_features.sum(dim=1)  # [B, feature_dim]
         
-        # Classification
+        # Final classification
         logits = self.classifier(aggregated_features)
         
         return logits, normalized_attention
+    
+    def predict(self, marker_values, coverage, target_markers_mask=None, threshold=0.5):
+        """
+        Make binary predictions.
+        
+        Args:
+            marker_values: [B, M] Methylation values
+            coverage: [B, M] Coverage values
+            target_markers_mask: [M] Mask indicating markers for target cell type
+            threshold: Classification threshold
+        
+        Returns:
+            predictions: [B] Binary predictions (0/1)
+            probabilities: [B] Prediction probabilities
+        """
+        logits, _ = self.forward(marker_values, coverage, target_markers_mask)
+        probabilities = torch.sigmoid(logits).squeeze(-1)
+        predictions = (probabilities >= threshold).float()
+        return predictions, probabilities
+    
+    def get_marker_importance(self, marker_values, coverage, target_markers_mask=None):
+        """
+        Calculate importance scores for each marker based on attention weights.
+        
+        Args:
+            marker_values: [B, M] Methylation values
+            coverage: [B, M] Coverage values
+            target_markers_mask: [M] Mask indicating markers for target cell type
+        
+        Returns:
+            importance_scores: [B, M] Importance score for each marker
+        """
+        _, attention_weights = self.forward(marker_values, coverage, target_markers_mask)
+        return attention_weights
