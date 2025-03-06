@@ -105,20 +105,16 @@ def train_binary_classifier(
         for batch_idx, batch in enumerate(tqdm(dataloaders['train'], desc=f"Epoch {epoch+1}/{num_epochs}")):
             marker_values = batch['X'].to(device)
             coverage = batch['coverage'].to(device)
-            target_markers_mask = batch.get('target_markers_mask', None)
-            if target_markers_mask is not None and target_markers_mask.dim() == 1:
-                target_markers_mask = target_markers_mask.to(device)
-            
             labels = batch['label'].to(device).view(-1, 1)
             
             # Forward pass with mixed precision if enabled
             if scaler is not None:
                 with torch.cuda.amp.autocast():
-                    logits, _ = model(marker_values, coverage, target_markers_mask)
+                    logits, _ = model(marker_values, coverage)
                     loss = weighted_bce_loss(logits, labels)
                     loss = loss / gradient_accumulation  # Scale for gradient accumulation
             else:
-                logits, _ = model(marker_values, coverage, target_markers_mask)
+                logits, _ = model(marker_values, coverage)
                 loss = weighted_bce_loss(logits, labels)
                 loss = loss / gradient_accumulation  # Scale for gradient accumulation
             
@@ -186,14 +182,10 @@ def train_binary_classifier(
                 for batch in tqdm(val_loader, desc=f"Validating {val_name}"):
                     marker_values = batch['X'].to(device)
                     coverage = batch['coverage'].to(device)
-                    target_markers_mask = batch.get('target_markers_mask', None)
-                    if target_markers_mask is not None and target_markers_mask.dim() == 1:
-                        target_markers_mask = target_markers_mask.to(device)
-                    
                     labels = batch['label'].to(device).view(-1, 1)
                     
                     # Forward pass
-                    logits, _ = model(marker_values, coverage, target_markers_mask)
+                    logits, _ = model(marker_values, coverage)
                     loss = weighted_bce_loss(logits, labels)
                     
                     # Calculate metrics
