@@ -305,11 +305,9 @@ def train_and_eval(
             target_cell_type=target_cell_type_name,
             warmup_epochs=5,
             weight_decay=1e-4,
-            patience=15,
+            patience=20,
             fp16_training=True,
             gradient_accumulation=1,
-            concentration_balance=True,
-            curriculum_learning=True,
             eval_metric='balanced_accuracy'        
         )
 
