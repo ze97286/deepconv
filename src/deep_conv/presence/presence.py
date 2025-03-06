@@ -261,6 +261,7 @@ def train_and_eval(
     eval_pat_dir: str,
     threads: int,
     output_path: str,  
+    target_cell_type_name: str
 ) -> nn.Module:
     # Fix random seeds and threads for reproducibility
     set_seed()
@@ -270,51 +271,50 @@ def train_and_eval(
     # 1) Read the atlas of markers and cell types
     atlas = pd.read_csv(atlas_path, sep="\t")
     cell_types = list(atlas.columns[8:])
-    for target_cell_type_name in ['CD4-T-cells', 'CD8-T-cells', 'OAC']:
-        print("training presence model for",target_cell_type_name)
-        # The 'names' set ensures we only keep relevant markers
-        names = set(atlas[atlas.target==target_cell_type_name].name.unique())
-        print("using", len(names), "markers for detection of presence of",target_cell_type_name)
-        target_cell_type=cell_types.index(target_cell_type_name)
-        # 2) Build the training DataLoader from parquet files in train_pat_dir
-        train_dl = load_training(train_pat_dir, names, target_cell_type=target_cell_type)
-        # 3) Build DataLoaders for each validation subset
-        tier1_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "tier1"), target_cell_type, names)
-        tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), target_cell_type, names)
-        tier3_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD4"), target_cell_type, names)
-        tier4_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD8"), target_cell_type, names)
-        validation_dls = {
-            "tier1": tier1_dl,        
-            "tier2": tier2_dl,        
-            "tier3": tier3_dl,        
-            "tier4": tier4_dl,        
-        }
-        
-        single_model = SingleCellTypePresenceModel()
+    print("training presence model for",target_cell_type_name)
+    # The 'names' set ensures we only keep relevant markers
+    names = set(atlas[atlas.target==target_cell_type_name].name.unique())
+    print("using", len(names), "markers for detection of presence of",target_cell_type_name)
+    target_cell_type=cell_types.index(target_cell_type_name)
+    # 2) Build the training DataLoader from parquet files in train_pat_dir
+    train_dl = load_training(train_pat_dir, names, target_cell_type=target_cell_type)
+    # 3) Build DataLoaders for each validation subset
+    tier1_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "tier1"), target_cell_type, names)
+    tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), target_cell_type, names)
+    tier3_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD4"), target_cell_type, names)
+    tier4_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD8"), target_cell_type, names)
+    validation_dls = {
+        "tier1": tier1_dl,        
+        "tier2": tier2_dl,        
+        "tier3": tier3_dl,        
+        "tier4": tier4_dl,        
+    }
+    
+    single_model = SingleCellTypePresenceModel()
 
-        # Train it
-        trained_model = train_binary_classifier(
-            model=single_model,
-            dataloaders={"train":train_dl, "val": validation_dls},
-            model_path=output_path,
-            num_epochs=100,
-            learning_rate=1e-3,
-            target_cell_type=target_cell_type_name,
-        )
+    # Train it
+    trained_model = train_binary_classifier(
+        model=single_model,
+        dataloaders={"train":train_dl, "val": validation_dls},
+        model_path=output_path,
+        num_epochs=100,
+        learning_rate=1e-3,
+        target_cell_type=target_cell_type_name,
+    )
 
-        val_dl = tier1_dl
-        if target_cell_type_name=="OAC":
-            check_prediction_distributions(trained_model, tier2_dl)    
-            val_dl = tier2_dl
-        if target_cell_type_name=="CD4-T-cells":
-            check_prediction_distributions(trained_model, tier3_dl)
-            val_dl = tier3_dl
-        if target_cell_type_name=="CD8-T-cells":
-            check_prediction_distributions(trained_model, tier4_dl)
-            val_dl = tier4_dl
+    val_dl = tier1_dl
+    if target_cell_type_name=="OAC":
+        check_prediction_distributions(trained_model, tier2_dl)    
+        val_dl = tier2_dl
+    if target_cell_type_name=="CD4-T-cells":
+        check_prediction_distributions(trained_model, tier3_dl)
+        val_dl = tier3_dl
+    if target_cell_type_name=="CD8-T-cells":
+        check_prediction_distributions(trained_model, tier4_dl)
+        val_dl = tier4_dl
 
-        results_df = analyse_detection_by_concentration(trained_model, val_dl, output_path, target_cell_type_name)
-        find_minimum_detection_concentration_continuous(results_df, output_path, target_cell_type_name)
+    results_df = analyse_detection_by_concentration(trained_model, val_dl, output_path, target_cell_type_name)
+    find_minimum_detection_concentration_continuous(results_df, output_path, target_cell_type_name)
 
 
 def analyse_detection_by_concentration(model, dataloader, 

@@ -3,7 +3,7 @@ from pathlib import Path
 from deep_conv.presence.presence import *
 from deep_conv.benchmark.benchmark_utils import *
 
-def train_and_evaluate(model_name, use_low_coverage:bool=False, use_high_coverage:bool=True):
+def train_and_evaluate(model_name, target_cell_type_name, use_low_coverage:bool=False, use_high_coverage:bool=True):
     atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
     train_pat_dir = "/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/train"
     eval_pat_dir = "/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval"
@@ -23,4 +23,5 @@ def train_and_evaluate(model_name, use_low_coverage:bool=False, use_high_coverag
                            train_pat_dir=train_pat_dir, 
                            eval_pat_dir=eval_pat_dir, 
                            threads=threads,
-                           output_path=output_path)
+                           output_path=output_path, 
+                           target_cell_type_name=target_cell_type_name)
