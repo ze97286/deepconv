@@ -21,7 +21,6 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 
 
-
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
     random.seed(seed)
@@ -32,10 +31,10 @@ def set_seed(seed: int = 42):
     torch.backends.cudnn.benchmark = False
 
 
-def get_validation_set(eval_pat_dir: str, atlas: pd.DataFrame,target_cell_type:int, names: set) -> Tuple[DataLoader, torch.Tensor]:
+def get_validation_set(eval_pat_dir: str, target_cell_type:int, names: set) -> Tuple[DataLoader, torch.Tensor]:
     """
     Reads marker coverage, methylation, and ground-truth label files from a validation set directory,
-    filters them down to the set of markers in 'names', and returns a DataLoader plus normalized labels.
+    filters them down to the set of markers in 'names', and returns a DataLoader plus normalised labels.
 
     Args:
         eval_pat_dir (str):
@@ -53,7 +52,7 @@ def get_validation_set(eval_pat_dir: str, atlas: pd.DataFrame,target_cell_type:i
             A DataLoader wrapping the TissueDeconvolutionDataset for the validation set, 
             with batch_size=512.
         y_val (torch.Tensor):
-            A [N, C] Tensor of ground-truth cell-type proportions, normalized so each row sums to 1.
+            A [N, C] Tensor of ground-truth cell-type proportions, normalised so each row sums to 1.
     """
     # Load marker values, coverage, and labels from parquet
     X_val = pd.read_parquet(Path(eval_pat_dir) / "marker_values.parquet")
@@ -94,14 +93,14 @@ def get_validation_set(eval_pat_dir: str, atlas: pd.DataFrame,target_cell_type:i
         shuffle=False
     )
     
-    # Convert y_val to a PyTorch tensor and normalize each row
+    # Convert y_val to a PyTorch tensor and normalise each row
     y_val = torch.tensor(y_val, dtype=torch.float32)
     y_val = y_val / y_val.sum(dim=1, keepdim=True)
     
     return val_loader, y_val
 
 
-def load_training(base_dir: str, atlas: pd.DataFrame, names: set, target_cell_type: int, num_files: int = 4) -> DataLoader:
+def load_training(base_dir: str, names: set, target_cell_type: int, num_files: int = 4) -> DataLoader:
     """
     Loads and merges multiple parquet files containing training data (marker_values, coverage, ground_truth_y),
     filters them to only include the markers in 'names', and returns a DataLoader for training.
@@ -187,7 +186,7 @@ def load_training(base_dir: str, atlas: pd.DataFrame, names: set, target_cell_ty
         target_cell_type=target_cell_type,
     )
     
-    # Also create a normalized version of y for potential usage
+    # Also create a normalised version of y for potential usage
     y_train = torch.tensor(y_train, dtype=torch.float32)
     y_train = y_train / y_train.sum(dim=1, keepdim=True)
     
@@ -202,7 +201,7 @@ def load_training(base_dir: str, atlas: pd.DataFrame, names: set, target_cell_ty
    
 
 def check_prediction_distributions(model, dataloader, device=None):
-    """Analyze the raw prediction probabilities for positive and negative samples."""
+    """Analyse the raw prediction probabilities for positive and negative samples."""
     if device is None:
         device = next(model.parameters()).device
     
@@ -278,13 +277,12 @@ def train_and_eval(
         print("using", len(names), "markers for detection of presence of",target_cell_type_name)
         target_cell_type=cell_types.index(target_cell_type_name)
         # 2) Build the training DataLoader from parquet files in train_pat_dir
-        train_dl = load_training(train_pat_dir, atlas, names, target_cell_type=target_cell_type)
+        train_dl = load_training(train_pat_dir, names, target_cell_type=target_cell_type)
         # 3) Build DataLoaders for each validation subset
-        tier1_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "tier1"), atlas, target_cell_type, names)
-        tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, target_cell_type, names)
-        tier3_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD4"), atlas, target_cell_type, names)
-        tier4_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD8"), atlas, target_cell_type, names)
-
+        tier1_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "tier1"), target_cell_type, names)
+        tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), target_cell_type, names)
+        tier3_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD4"), target_cell_type, names)
+        tier4_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD8"), target_cell_type, names)
         validation_dls = {
             "tier1": tier1_dl,        
             "tier2": tier2_dl,        
@@ -292,9 +290,7 @@ def train_and_eval(
             "tier4": tier4_dl,        
         }
         
-        single_model = SingleCellTypePresenceModel(
-            num_markers=len(atlas),       
-        )
+        single_model = SingleCellTypePresenceModel()
 
         # Train it
         trained_model = train_binary_classifier(
@@ -317,43 +313,18 @@ def train_and_eval(
             check_prediction_distributions(trained_model, tier4_dl)
             val_dl = tier4_dl
 
-        results_df = analyze_detection_by_concentration(trained_model, val_dl, output_path, target_cell_type_name)
-        print("Sample of results_df:")
-        print(results_df.head())
-        print("Value counts for prediction/ground truth:")
-        prediction_col = 'prediction' if 'prediction' in results_df.columns else 'predicted'
-        ground_truth_col = 'ground_truth' if 'ground_truth' in results_df.columns else 'label'
-        print(f"Ground truth distribution: {results_df[ground_truth_col].value_counts()}")
-        print(f"Prediction distribution: {results_df[prediction_col].value_counts()}")
-
-        # Calculate raw detection rate for positive samples only
-        positive_samples = results_df[results_df[ground_truth_col] == 1]
-        if len(positive_samples) > 0:
-            true_positive_rate = (positive_samples[prediction_col] == 1).mean()
-            print(f"Overall detection rate for positive samples: {true_positive_rate:.4f}")
-
-        # Try to reproduce the original threshold calculation
-        concentration_col = 'concentration' if 'concentration' in results_df.columns else 'true_concentration'
-        concentrations = sorted(results_df[concentration_col].unique())
-        for conc in concentrations:
-            samples_above = results_df[results_df[concentration_col] >= conc]
-            if len(samples_above) > 0:
-                positives_above = samples_above[samples_above[ground_truth_col] == 1]
-                if len(positives_above) > 0:
-                    detection_rate_above = (positives_above[prediction_col] == 1).mean()
-                    print(f"Concentration >= {conc:.8f}: Detection rate = {detection_rate_above:.4f}, Samples = {len(positives_above)}")
-                
+        results_df = analyse_detection_by_concentration(trained_model, val_dl, output_path, target_cell_type_name)
         find_minimum_detection_concentration_continuous(results_df, output_path, target_cell_type_name)
 
 
-def analyze_detection_by_concentration(model, dataloader, 
+def analyse_detection_by_concentration(model, dataloader, 
                                        output_path,
                                        target_cell_type,
                                       concentration_groups=None,
                                       threshold=0.5,
                                       device=None):
     """
-    Analyze the model's detection performance across different concentration levels using Plotly visualizations.
+    Analyse the model's detection performance across different concentration levels using Plotly visualisations.
     
     Args:
         model: Binary classifier model
@@ -417,7 +388,7 @@ def analyze_detection_by_concentration(model, dataloader,
     
     # Convert to DataFrame
     results_df = pd.DataFrame(results)
-    
+
     # Add concentration group column
     def get_concentration_group(conc):
         for group, (min_conc, max_conc) in concentration_groups.items():
@@ -426,7 +397,23 @@ def analyze_detection_by_concentration(model, dataloader,
         return 'other'
     
     results_df['concentration_group'] = results_df['concentration'].apply(get_concentration_group)
-    
+    for group in concentration_groups.keys():
+        group_data = results_df[results_df['concentration_group'] == group]
+        n_samples = len(group_data)
+        n_unique_gt = len(group_data['ground_truth'].unique())
+        n_unique_pred = len(group_data['probability'].unique())
+        
+        print(f"Group {group}: {n_samples} samples, {n_unique_gt} unique ground truth values, {n_unique_pred} unique predictions")
+        if len(group_data) > 10 and len(group_data['ground_truth'].unique()) > 1:
+            try:
+                fpr, tpr, _ = roc_curve(group_data['ground_truth'], group_data['probability'])
+                print(f"Group {group}: ROC curve calculated with {len(fpr)} points")
+                print(f"First few points: {list(zip(fpr[:5], tpr[:5]))}")
+            except Exception as e:
+                print(f"Error calculating ROC for {group}: {e}")
+                
+        
+
     # Calculate detection statistics by concentration group
     group_stats = results_df.groupby('concentration_group').agg({
         'prediction': 'mean',  # Detection rate
@@ -665,7 +652,7 @@ def find_minimum_detection_concentration_continuous(
     # Sort by concentration for cumulative analysis
     positive_samples = positive_samples.sort_values(by=concentration_col)
     
-    # Initialize arrays for tracking
+    # Initialise arrays for tracking
     concentrations = []
     detection_rates = []
     sample_counts = []
@@ -818,7 +805,7 @@ def find_minimum_detection_concentration_continuous(
     if output_path:
         file_path = os.path.join(output_path, f"{target_cell_type}_detection_rate_continuous.html")
         fig.write_html(file_path)
-        print(f"Saved visualization to {file_path}")
+        print(f"Saved visualisation to {file_path}")
     
     fig.write_html(f"{str(output_path)}/{target_cell_type}_minimum_detection_concentration.html")    
     return min_reliable_conc, results_table

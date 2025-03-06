@@ -78,14 +78,9 @@ class SingleCellTypePresenceModel(nn.Module):
     3. Uses attention mechanism to focus on the most informative markers
     4. Employs a deep architecture with residual connections for better feature extraction
     """
-    def __init__(self, num_markers, target_markers_mask=None, feature_dim=64, dropout_rate=0.3):
+    def __init__(self, feature_dim=64, dropout_rate=0.3):
         super().__init__()
-        self.num_markers = num_markers
         self.feature_dim = feature_dim
-        
-        # Register target markers mask buffer if provided
-        if target_markers_mask is not None:
-            self.register_buffer("target_markers_mask", target_markers_mask)
         
         # Input normalization
         self.input_norm = nn.BatchNorm1d(1)
@@ -138,7 +133,7 @@ class SingleCellTypePresenceModel(nn.Module):
         if hasattr(self.classifier[-1], 'bias'):
             self.classifier[-1].bias.data.fill_(0.0)
     
-    def forward(self, marker_values, coverage, target_markers_mask=None):
+    def forward(self, marker_values, coverage):
         """
         Forward pass of the binary classifier.
         
@@ -155,12 +150,7 @@ class SingleCellTypePresenceModel(nn.Module):
         B, M = marker_values.shape
         
         # Get target markers mask (either from input or model)
-        if target_markers_mask is None:
-            if hasattr(self, 'target_markers_mask'):
-                target_markers_mask = self.target_markers_mask
-            else:
-                # If no mask provided, use all markers
-                target_markers_mask = torch.ones(M, dtype=torch.bool, device=marker_values.device)
+        target_markers_mask = torch.ones(M, dtype=torch.bool, device=marker_values.device)
         
         # Create valid markers mask (coverage > 0 AND is target marker)
         valid_mask = (coverage > 0)
@@ -171,10 +161,10 @@ class SingleCellTypePresenceModel(nn.Module):
         
         # Normalize marker values by coverage (improves stability and generalization)
         coverage_safe = coverage.clone() + 1e-10  # Add epsilon to avoid division by zero
-        normalized_markers = marker_values_safe / torch.sqrt(coverage_safe)
+        normalised_markers = marker_values_safe / torch.sqrt(coverage_safe)
         
         # Process all markers through feature extraction
-        marker_values_flat = normalized_markers.reshape(-1, 1)  # [B*M, 1]
+        marker_values_flat = normalised_markers.reshape(-1, 1)  # [B*M, 1]
         
         # Apply batch normalization to inputs
         marker_values_norm = self.input_norm(marker_values_flat)
@@ -212,36 +202,22 @@ class SingleCellTypePresenceModel(nn.Module):
         
         return logits, normalized_attention
     
-    def predict(self, marker_values, coverage, target_markers_mask=None, threshold=0.5):
+    def predict(self, marker_values, coverage, threshold=0.5):
         """
         Make binary predictions.
         
         Args:
             marker_values: [B, M] Methylation values
             coverage: [B, M] Coverage values
-            target_markers_mask: [M] Mask indicating markers for target cell type
             threshold: Classification threshold
         
         Returns:
             predictions: [B] Binary predictions (0/1)
             probabilities: [B] Prediction probabilities
         """
-        logits, _ = self.forward(marker_values, coverage, target_markers_mask)
+        logits, _ = self.forward(marker_values, coverage)
         probabilities = torch.sigmoid(logits).squeeze(-1)
         predictions = (probabilities >= threshold).float()
         return predictions, probabilities
     
-    def get_marker_importance(self, marker_values, coverage, target_markers_mask=None):
-        """
-        Calculate importance scores for each marker based on attention weights.
-        
-        Args:
-            marker_values: [B, M] Methylation values
-            coverage: [B, M] Coverage values
-            target_markers_mask: [M] Mask indicating markers for target cell type
-        
-        Returns:
-            importance_scores: [B, M] Importance score for each marker
-        """
-        _, attention_weights = self.forward(marker_values, coverage, target_markers_mask)
-        return attention_weights
+    

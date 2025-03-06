@@ -1,244 +1,134 @@
 import torch
 import torch.nn as nn 
 import numpy as np
-from sklearn.metrics import (
-    confusion_matrix,
-    precision_recall_curve,
-    roc_curve,
-    auc
-)
+from torch.utils.data import DataLoader
 
-def evaluate_presence_model(
+from sklearn.metrics import roc_auc_score, average_precision_score
+
+
+def evaluate_binary_classifier(
     model: nn.Module,
-    val_loaders: dict,
-    presence_threshold: float = 0.0005,
-    decision_threshold: float = 0.5,
-    device: torch.device = None,
-    cell_type_names=None
+    dataloader: DataLoader,
+    device=None,
+    threshold=0.5,
+    decision_thresholds=None,
+    concentration_key='concentration'
 ):
     """
-    Evaluate presence detection model performance.
+    Evaluate a binary classifier on a dataset.
     
     Args:
-        model: Trained presence detection model
-        val_loaders: Dict of validation DataLoaders
-        presence_threshold: Threshold for ground truth presence
-        decision_threshold: Threshold for predicted presence
-        device: Device for computation
-        cell_type_names: List of cell type names
-        
+        model: Binary classifier model
+        dataloader: DataLoader for the dataset
+        device: Device to run evaluation on
+        threshold: Classification threshold
+        decision_thresholds: Dictionary mapping concentration ranges to thresholds
+                            e.g., {(0.1, 1.0): 0.7, (0.01, 0.1): 0.5, (0.0, 0.01): 0.3}
+        concentration_key: Key in batch dictionary for concentration values
+    
     Returns:
-        results: Dict of evaluation results
+        Dictionary of evaluation metrics
     """
     if device is None:
         device = next(model.parameters()).device
     
     model.eval()
-    results = {}
     
-    for val_name, val_loader in val_loaders.items():
-        print(f"\nEvaluating on {val_name}:")
-        
-        # Get all predictions and ground truth
-        all_preds_probs = []
-        all_true = []
-        
-        with torch.no_grad():
-            for batch in val_loader:
-                marker_values = batch['X'].to(device)
-                coverage = batch['coverage'].to(device)
-                true_props = batch['y'].to(device)
-                
-                # Forward pass
-                presence_logits, _ = model(marker_values, coverage)
-                presence_probs = torch.sigmoid(presence_logits)
-                
-                # Convert to numpy
-                presence_probs = presence_probs.cpu().numpy()
-                true_props = true_props.cpu().numpy()
-                
-                all_preds_probs.append(presence_probs)
-                all_true.append(true_props)
-        
-        # Concatenate results
-        all_preds_probs = np.vstack(all_preds_probs)
-        all_true = np.vstack(all_true)
-        
-        # Convert to binary presence
-        all_true_binary = (all_true > presence_threshold).astype(float)
-        all_preds_binary = (all_preds_probs > decision_threshold).astype(float)
-        
-        # Compute overall metrics
-        true_flat = all_true_binary.flatten()
-        pred_flat = all_preds_binary.flatten()
-        prob_flat = all_preds_probs.flatten()
-        
-        # Overall metrics
-        tn, fp, fn, tp = confusion_matrix(true_flat, pred_flat).ravel()
-        accuracy = (tp + tn) / (tp + tn + fp + fn)
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
-        
-        # ROC curve and AUC
-        fpr, tpr, _ = roc_curve(true_flat, prob_flat)
-        roc_auc = auc(fpr, tpr)
-        
-        # PR curve and AUC
-        pr_precision, pr_recall, _ = precision_recall_curve(true_flat, prob_flat)
-        pr_auc = auc(pr_recall, pr_precision)
-        
-        # Per-cell type metrics
-        per_cell_metrics = []
-        
-        for i in range(all_true_binary.shape[1]):
-            true_i = all_true_binary[:, i]
-            pred_i = all_preds_binary[:, i]
-            prob_i = all_preds_probs[:, i]
+    # Initialize metrics
+    metrics = {
+        'tp': 0, 'fp': 0, 'tn': 0, 'fn': 0,
+        'all_labels': [],
+        'all_probs': [],
+        'all_concs': []
+    }
+    
+    # Evaluate
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Evaluating"):
+            marker_values = batch['X'].to(device)
+            coverage = batch['coverage'].to(device)
+            target_markers_mask = batch.get('target_markers_mask', None)
+            if target_markers_mask is not None and target_markers_mask.dim() == 1:
+                target_markers_mask = target_markers_mask.to(device)
             
-            # Check if this cell type is ever present or ever absent in this dataset
-            cell_present = np.any(true_i > 0)
-            cell_absent = np.any(true_i == 0)
+            # Get labels
+            labels = batch['label'].to(device).view(-1, 1)
             
-            cell_name = cell_type_names[i] if cell_type_names else f"Cell type {i}"
+            # Get concentrations if available
+            concentrations = None
+            if concentration_key in batch:
+                concentrations = batch[concentration_key].cpu().numpy()
+                metrics['all_concs'].append(concentrations)
             
-            # Only calculate complete metrics if cell type is both present and absent
-            if cell_present and cell_absent:
-                tn_i, fp_i, fn_i, tp_i = confusion_matrix(true_i, pred_i).ravel()
-                precision_i = tp_i / (tp_i + fp_i) if (tp_i + fp_i) > 0 else 0
-                recall_i = tp_i / (tp_i + fn_i) if (tp_i + fn_i) > 0 else 0
-                specificity_i = tn_i / (tn_i + fp_i) if (tn_i + fp_i) > 0 else 0
-                f1_i = 2 * precision_i * recall_i / (precision_i + recall_i) if (precision_i + recall_i) > 0 else 0
+            # Forward pass
+            logits, _ = model(marker_values, coverage, target_markers_mask)
+            probabilities = torch.sigmoid(logits)
+            
+            # Store predictions and labels
+            metrics['all_labels'].append(labels.cpu().numpy())
+            metrics['all_probs'].append(probabilities.cpu().numpy())
+            
+            # Apply concentration-specific thresholds if provided
+            if decision_thresholds is not None and concentrations is not None:
+                # Get threshold for each sample based on concentration
+                sample_thresholds = []
+                for conc in concentrations:
+                    # Find matching threshold range
+                    for (min_conc, max_conc), thresh in decision_thresholds.items():
+                        if min_conc <= conc < max_conc:
+                            sample_thresholds.append(thresh)
+                            break
+                    else:
+                        # Use default if no range matches
+                        sample_thresholds.append(threshold)
                 
-                # ROC and PR curves
-                fpr_i, tpr_i, _ = roc_curve(true_i, prob_i)
-                roc_auc_i = auc(fpr_i, tpr_i)
-                
-                pr_precision_i, pr_recall_i, _ = precision_recall_curve(true_i, prob_i)
-                pr_auc_i = auc(pr_recall_i, pr_precision_i)
-                
-                status = "normal"
-            # Handle always-present case (can only measure false negatives)
-            elif cell_present and not cell_absent:
-                tp_i = np.sum((pred_i > 0) & (true_i > 0))
-                fn_i = np.sum((pred_i == 0) & (true_i > 0))
-                tn_i = fp_i = 0
-                
-                recall_i = tp_i / (tp_i + fn_i) if (tp_i + fn_i) > 0 else 0
-                precision_i = 1.0 if tp_i > 0 else 0  # No false positives possible
-                specificity_i = float('nan')  # Not applicable
-                f1_i = 2 * precision_i * recall_i / (precision_i + recall_i) if (precision_i + recall_i) > 0 else 0
-                
-                roc_auc_i = float('nan')  # Not applicable for all-positive
-                pr_auc_i = float('nan')
-                
-                status = "always_present"
-            # Handle always-absent case (can only measure false positives)
-            elif not cell_present and cell_absent:
-                tn_i = np.sum((pred_i == 0) & (true_i == 0))
-                fp_i = np.sum((pred_i > 0) & (true_i == 0))
-                tp_i = fn_i = 0
-                
-                specificity_i = tn_i / (tn_i + fp_i) if (tn_i + fp_i) > 0 else 0
-                precision_i = 0  # No true positives
-                recall_i = float('nan')  # Not applicable
-                f1_i = 0  # No true positives
-                
-                roc_auc_i = float('nan')  # Not applicable for all-negative
-                pr_auc_i = float('nan')
-                
-                status = "always_absent"
+                # Convert to tensor
+                thresh_tensor = torch.tensor(sample_thresholds, device=device).view(-1, 1)
+                predictions = (probabilities >= thresh_tensor).float()
             else:
-                # Should never happen - no samples for this cell type
-                print(f"Warning: No samples for {cell_name}")
-                continue
+                # Use single threshold
+                predictions = (probabilities >= threshold).float()
             
-            per_cell_metrics.append({
-                'name': cell_name,
-                'precision': precision_i,
-                'recall': recall_i,
-                'specificity': specificity_i,
-                'f1': f1_i,
-                'roc_auc': roc_auc_i if not np.isnan(roc_auc_i) else None,
-                'pr_auc': pr_auc_i if not np.isnan(pr_auc_i) else None,
-                'true_positives': int(tp_i),
-                'false_positives': int(fp_i),
-                'true_negatives': int(tn_i),
-                'false_negatives': int(fn_i),
-                'status': status
-            })
-        
-        # Calculate meaningful averages only for applicable cell types
-        valid_cells_metrics = [m for m in per_cell_metrics if m['status'] == "normal"]
-        present_cells_metrics = [m for m in per_cell_metrics if m['status'] in ["normal", "always_present"]]
-        absent_cells_metrics = [m for m in per_cell_metrics if m['status'] in ["normal", "always_absent"]]
-        
-        # Calculate averages
-        avg_metrics = {
-            'precision': np.mean([m['precision'] for m in valid_cells_metrics]) if valid_cells_metrics else np.nan,
-            'recall': np.mean([m['recall'] for m in present_cells_metrics]) if present_cells_metrics else np.nan,
-            'specificity': np.mean([m['specificity'] for m in absent_cells_metrics]) if absent_cells_metrics else np.nan,
-            'f1': np.mean([m['f1'] for m in valid_cells_metrics]) if valid_cells_metrics else np.nan,
-        }
-        
-        # Store results
-        results[val_name] = {
-            'overall': {
-                'accuracy': accuracy,
-                'precision': precision,
-                'recall': recall,
-                'specificity': specificity,
-                'f1': f1,
-                'roc_auc': roc_auc,
-                'pr_auc': pr_auc,
-                'true_positives': int(tp),
-                'false_positives': int(fp),
-                'true_negatives': int(tn),
-                'false_negatives': int(fn)
-            },
-            'cell_type_averages': avg_metrics,
-            'per_cell_type': per_cell_metrics
-        }
-        
-        # Print summary
-        print(f"Overall dataset metrics:")
-        print(f"  Accuracy: {accuracy:.4f}")
-        print(f"  Precision: {precision:.4f}")
-        print(f"  Recall/Sensitivity: {recall:.4f}")
-        print(f"  Specificity: {specificity:.4f}")
-        print(f"  F1 Score: {f1:.4f}")
-        print(f"  ROC AUC: {roc_auc:.4f}")
-        print(f"  PR AUC: {pr_auc:.4f}")
-        print(f"  Confusion Matrix: TP={tp}, FP={fp}, TN={tn}, FN={fn}")
-        
-        # Print cell type average metrics
-        print("\nCell type average metrics:")
-        print(f"  Precision: {avg_metrics['precision']:.4f}")
-        print(f"  Recall: {avg_metrics['recall']:.4f}")
-        print(f"  Specificity: {avg_metrics['specificity']:.4f}")
-        print(f"  F1: {avg_metrics['f1']:.4f}")
-        
-        # Print per-cell type metrics for important cell types
-        print("\nMetrics for notable cell types:")
-        for cell_metric in per_cell_metrics:
-            # Skip cell types that are always absent in specialized datasets
-            if cell_metric['status'] == "always_absent" and val_name in ['cd4', 'cd8', 'oac']:
-                continue
-                
-            print(f"  {cell_metric['name']} ({cell_metric['status']}):")
-            
-            # Print applicable metrics based on status
-            if cell_metric['status'] == "normal":
-                print(f"    Precision: {cell_metric['precision']:.4f}")
-                print(f"    Recall: {cell_metric['recall']:.4f}")
-                print(f"    Specificity: {cell_metric['specificity']:.4f}")
-                print(f"    F1: {cell_metric['f1']:.4f}")
-            elif cell_metric['status'] == "always_present":
-                print(f"    Always present - Recall: {cell_metric['recall']:.4f}")
-                print(f"    TP: {cell_metric['true_positives']}, FN: {cell_metric['false_negatives']}")
-            elif cell_metric['status'] == "always_absent":
-                print(f"    Always absent - Specificity: {cell_metric['specificity']:.4f}")
-                print(f"    TN: {cell_metric['true_negatives']}, FP: {cell_metric['false_positives']}")
+            # Update confusion matrix
+            metrics['tp'] += torch.sum((predictions == 1) & (labels == 1)).item()
+            metrics['fp'] += torch.sum((predictions == 1) & (labels == 0)).item()
+            metrics['tn'] += torch.sum((predictions == 0) & (labels == 0)).item()
+            metrics['fn'] += torch.sum((predictions == 0) & (labels == 1)).item()
     
-    return results
+    # Calculate derived metrics
+    tp, fp, tn, fn = metrics['tp'], metrics['fp'], metrics['tn'], metrics['fn']
+    
+    metrics['precision'] = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    metrics['recall'] = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    metrics['specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    metrics['f1'] = 2 * metrics['precision'] * metrics['recall'] / (metrics['precision'] + metrics['recall']) if (metrics['precision'] + metrics['recall']) > 0 else 0.0
+    metrics['balanced_accuracy'] = (metrics['recall'] + metrics['specificity']) / 2
+    
+    # Concatenate arrays
+    if metrics['all_labels']:
+        all_labels = np.concatenate(metrics['all_labels']).flatten()
+        all_probs = np.concatenate(metrics['all_probs']).flatten()
+        
+        # Calculate AUROC and AUPRC (if there are positive and negative examples)
+        if len(np.unique(all_labels)) > 1:
+            metrics['auroc'] = roc_auc_score(all_labels, all_probs)
+            metrics['auprc'] = average_precision_score(all_labels, all_probs)
+        else:
+            metrics['auroc'] = 0.0
+            metrics['auprc'] = metrics['precision']  # If only one class, AUPRC = precision
+    
+    # Aggregate concentrations if available
+    if metrics['all_concs']:
+        metrics['all_concs'] = np.concatenate(metrics['all_concs']).flatten()
+    
+    # Print results
+    print(f"Evaluation Results:")
+    print(f"Precision: {metrics['precision']:.4f}, Recall: {metrics['recall']:.4f}, Specificity: {metrics['specificity']:.4f}")
+    print(f"F1 Score: {metrics['f1']:.4f}, Balanced Accuracy: {metrics['balanced_accuracy']:.4f}")
+    if 'auroc' in metrics:
+        print(f"AUROC: {metrics['auroc']:.4f}, AUPRC: {metrics['auprc']:.4f}")
+    print(f"Confusion Matrix - TP: {tp}, FP: {fp}, TN: {tn}, FN: {fn}")
+    
+    return metrics
+
+
