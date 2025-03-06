@@ -216,8 +216,8 @@ def check_prediction_distributions(model, dataloader, device=None):
             coverage = batch['coverage'].to(device)
             labels = batch['label'].to(device)
             
-            # Forward pass
-            logits, _, _ = model(marker_values, coverage)
+            # Update: changed to match simplified model output
+            logits, _ = model(marker_values, coverage)
             probs = torch.sigmoid(logits).cpu().numpy().flatten()
             
             # Store probabilities by true label
@@ -226,7 +226,7 @@ def check_prediction_distributions(model, dataloader, device=None):
                     pos_probs.append(prob)
                 else:  # True negative
                     neg_probs.append(prob)
-        
+    
     # Print statistics
     print(f"Positive samples: {len(pos_probs)}")
     print(f"  - Mean probability: {np.mean(pos_probs):.4f}")
@@ -315,21 +315,21 @@ def train_and_eval(
 
         val_dl = tier1_dl
         if target_cell_type_name=="OAC":
-            pos_probs, neg_probs = check_prediction_distributions(trained_model, tier2_dl)    
+            check_prediction_distributions(trained_model, tier2_dl)    
             val_dl = tier2_dl
         if target_cell_type_name=="CD4-T-cells":
-            pos_probs, neg_probs = check_prediction_distributions(trained_model, tier3_dl)
+            check_prediction_distributions(trained_model, tier3_dl)
             val_dl = tier3_dl
         if target_cell_type_name=="CD8-T-cells":
-            pos_probs, neg_probs = check_prediction_distributions(trained_model, tier4_dl)
+            check_prediction_distributions(trained_model, tier4_dl)
             val_dl = tier4_dl
         
-        train_pos_probs, train_neg_probs = check_prediction_distributions(trained_model, train_dl)
+        check_prediction_distributions(trained_model, train_dl)
 
         results_df, threshold_mapping = analyze_detection_by_concentration(
             trained_model, 
             val_dl, 
-            target_cell_type=target_cell_type,
+            target_cell_type=target_cell_type_name,
             adaptive_threshold=True,
             output_path=output_path,
         )
@@ -350,23 +350,23 @@ def train_and_eval(
 def analyze_detection_by_concentration(model, dataloader, 
                                        output_path,
                                        target_cell_type,
-                                      concentration_groups=None,
-                                      adaptive_threshold=True,
-                                      device=None):
+                                       concentration_groups=None,
+                                       threshold=0.5,
+                                       device=None):
     """
     Analyze the model's detection performance across different concentration levels using Plotly visualizations.
     
     Args:
-        model: Enhanced cell type detector model
+        model: Binary classifier model
         dataloader: DataLoader containing samples with concentration information
+        output_path: Path to save output files
+        target_cell_type: Target cell type being detected
         concentration_groups: Dictionary mapping group names to concentration ranges
-        adaptive_threshold: Whether to use the model's adaptive thresholding
+        threshold: Decision threshold for binary classification
         device: Device to run on
-        save_path: Path to save the HTML visualization
         
     Returns:
         results_df: DataFrame with detection results by sample
-        group_stats: DataFrame with detection statistics by concentration group
         threshold_mapping: Dictionary mapping concentration ranges to optimal thresholds
     """
     if device is None:
@@ -402,25 +402,15 @@ def analyze_detection_by_concentration(model, dataloader,
                 # If no concentration provided, use label as binary indicator
                 concentrations = labels.cpu().numpy()
             
-            # Forward pass
-            if adaptive_threshold:
-                predictions, probabilities, est_concentration = model.predict_with_adaptive_threshold(
-                    marker_values, coverage
-                )
-                predictions = predictions.cpu().numpy()
-                probabilities = probabilities.cpu().numpy()
-                est_concentration = est_concentration.cpu().numpy()
-            else:
-                logits, est_concentration, attention_weights = model(marker_values, coverage)
-                probabilities = torch.sigmoid(logits).cpu().numpy()
-                predictions = (probabilities >= 0.5).astype(int)
-                est_concentration = est_concentration.cpu().numpy()
+            # Forward pass (simplified model output)
+            logits, _ = model(marker_values, coverage)
+            probabilities = torch.sigmoid(logits).cpu().numpy()
+            predictions = (probabilities >= threshold).astype(int)
             
             # Store results for each sample
             for i in range(len(concentrations)):
                 results.append({
                     'true_concentration': concentrations[i],
-                    'estimated_concentration': est_concentration[i][0],
                     'probability': probabilities[i][0],
                     'prediction': predictions[i][0],
                     'ground_truth': labels[i].item()
@@ -443,7 +433,6 @@ def analyze_detection_by_concentration(model, dataloader,
         'prediction': 'mean',  # Detection rate
         'probability': ['mean', 'std', 'count'],
         'true_concentration': ['mean', 'min', 'max'],
-        'estimated_concentration': 'mean',
         'ground_truth': 'mean'  # Actual rate of positives
     }).reset_index()
     
@@ -459,7 +448,6 @@ def analyze_detection_by_concentration(model, dataloader,
         'true_concentration_mean': 'mean_concentration',
         'true_concentration_min': 'min_concentration',
         'true_concentration_max': 'max_concentration',
-        'estimated_concentration_mean': 'mean_estimated_concentration',
         'ground_truth_mean': 'true_positive_rate'
     })
     
@@ -468,25 +456,18 @@ def analyze_detection_by_concentration(model, dataloader,
     
     print("Detection rates by concentration group:")
     print(group_stats[['concentration_group', 'detection_rate', 'true_positive_rate', 
-                       'mean_probability', 'sample_count', 'mean_concentration',
-                       'mean_estimated_concentration']])
+                       'mean_probability', 'sample_count', 'mean_concentration']])
     
-    # Calculate concentration estimation accuracy
-    results_df['concentration_error'] = np.abs(results_df['estimated_concentration'] - results_df['true_concentration'])
-    results_df['concentration_error_pct'] = results_df['concentration_error'] / np.clip(results_df['true_concentration'], 1e-6, None) * 100
-    
-    # Create Plotly subplots
+    # Create Plotly subplots (simplified - removed concentration estimation plots)
     fig = make_subplots(
-        rows=3, cols=2,
+        rows=2, cols=2,
         subplot_titles=(
             'Detection Rate by Concentration Group', 
             'Probability Distribution by Concentration Group',
             'Predicted Probability vs Concentration (Log Scale)', 
-            'ROC Curves by Concentration Group',
-            'Concentration Estimation Accuracy',
-            'Error in Concentration Estimation (Log Scale)'
+            'ROC Curves by Concentration Group'
         ),
-        vertical_spacing=0.12,
+        vertical_spacing=0.15,
         horizontal_spacing=0.1
     )
     
@@ -520,10 +501,10 @@ def analyze_detection_by_concentration(model, dataloader,
     fig.add_trace(
         go.Scatter(
             x=group_stats['concentration_group'],
-            y=[0.5] * len(group_stats),
+            y=[threshold] * len(group_stats),
             mode='lines',
             line=dict(color='red', width=2, dash='dash'),
-            name=f'Threshold (0.50)'
+            name=f'Threshold ({threshold:.2f})'
         ),
         row=1, col=2
     )
@@ -554,10 +535,10 @@ def analyze_detection_by_concentration(model, dataloader,
     fig.add_trace(
         go.Scatter(
             x=[results_df['true_concentration'].min(), results_df['true_concentration'].max()],
-            y=[0.5, 0.5],
+            y=[threshold, threshold],
             mode='lines',
             line=dict(color='red', width=2, dash='dash'),
-            name=f'Threshold (0.50)'
+            name=f'Threshold ({threshold:.2f})'
         ),
         row=2, col=1
     )
@@ -590,64 +571,8 @@ def analyze_detection_by_concentration(model, dataloader,
         row=2, col=2
     )
     
-    # 5. Concentration estimation accuracy
-    fig.add_trace(
-        go.Scatter(
-            x=results_df['true_concentration'],
-            y=results_df['estimated_concentration'],
-            mode='markers',
-            marker=dict(
-                color=results_df['ground_truth'],
-                colorscale='Viridis',
-                opacity=0.7,
-                size=8
-            ),
-            name='Estimated vs True'
-        ),
-        row=3, col=1
-    )
-    
-    # Add perfect prediction line
-    fig.add_trace(
-        go.Scatter(
-            x=[0, results_df['true_concentration'].max()],
-            y=[0, results_df['true_concentration'].max()],
-            mode='lines',
-            line=dict(color='red', width=2, dash='dash'),
-            name='Perfect Estimation'
-        ),
-        row=3, col=1
-    )
-    
-    # 6. Error in concentration estimation
-    fig.add_trace(
-        go.Scatter(
-            x=results_df['true_concentration'],
-            y=results_df['concentration_error'],
-            mode='markers',
-            marker=dict(
-                color=results_df['probability'],
-                colorscale='Turbo',
-                opacity=0.7,
-                size=8,
-                showscale=True,
-                colorbar=dict(
-                    title='Probability',
-                    x=1.0
-                )
-            ),
-            name='Estimation Error'
-        ),
-        row=3, col=2
-    )
-    
-    # Update axes to log scale for concentration
+    # Update axes
     fig.update_xaxes(type="log", row=2, col=1, title_text='True Concentration (log scale)')
-    fig.update_xaxes(type="log", row=3, col=1, title_text='True Concentration (log scale)')
-    fig.update_xaxes(type="log", row=3, col=2, title_text='True Concentration (log scale)')
-    fig.update_yaxes(type="log", row=3, col=2, title_text='Concentration Error (log scale)')
-    
-    # Update other axes titles
     fig.update_xaxes(title_text='Concentration Group', row=1, col=1)
     fig.update_xaxes(title_text='Concentration Group', row=1, col=2)
     fig.update_xaxes(title_text='False Positive Rate', row=2, col=2)
@@ -656,13 +581,12 @@ def analyze_detection_by_concentration(model, dataloader,
     fig.update_yaxes(title_text='Predicted Probability', row=1, col=2)
     fig.update_yaxes(title_text='Predicted Probability', row=2, col=1)
     fig.update_yaxes(title_text='True Positive Rate', row=2, col=2)
-    fig.update_yaxes(title_text='Estimated Concentration', row=3, col=1)
     
     # Update layout
     fig.update_layout(
-        height=1200,
+        height=800,
         width=1200,
-        title_text='Enhanced Cell Type Detection Performance by Concentration',
+        title_text='Cell Type Detection Performance by Concentration',
         showlegend=True,
         legend=dict(
             orientation="h",
@@ -673,7 +597,7 @@ def analyze_detection_by_concentration(model, dataloader,
         )
     )
     
-    # Save the visualization if path provided
+    # Save the visualization
     fig.write_html(output_path/f"{target_cell_type}_model_analysis.html") 
     
     # Determine optimal thresholds for each concentration group
@@ -721,6 +645,7 @@ def analyze_detection_by_concentration(model, dataloader,
         if group in opt_thresholds:
             threshold_mapping[(min_conc, max_conc)] = opt_thresholds[group]['threshold']
     
+    # Save group stats
     group_stats.to_csv(output_path/f"{target_cell_type}_group_stats.csv")
     print("threshold_mapping:",threshold_mapping)
     return results_df, threshold_mapping
@@ -885,7 +810,6 @@ def find_minimum_detection_concentration(results_df, detection_rate_threshold=0.
         fig.write_html(save_path)
     
     return min_reliable_conc, bin_stats
-
 
 def main():
     parser = argparse.ArgumentParser(description="Deep conv")
