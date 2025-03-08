@@ -2,38 +2,12 @@ import pandas as pd
 import argparse
 from pathlib import Path
 
-# the purpose of this script is to merge by cell type input pat files by aggregating the coverage per pattern. This is further used downstream. 
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_B-cells" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_B_cells.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type B-cells"
-# qsub -b y -l h_vmem=150g -pe smp 1 -V -N "merge_pats_CD34-erythroblasts" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_CD34-erythroblasts.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type CD34-erythroblasts"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_CD34-megakaryocytes" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_CD34-megakaryocytes.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type CD34-megakaryocytes"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_CD4-T-cells" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_CD4-T-cells.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type CD4-T-cells"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_CD8-T-cells" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_CD8-T-cells.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type CD8-T-cells"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_Colon" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_Colon.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type Colon"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_Eosinophils" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_Eosinophils.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type Eosinophils"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_Esophagus" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_Esophagus.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type Esophagus"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_Monocytes" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_Monocytes.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type Monocytes"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_Neutrophils" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_Neutrophils.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type Neutrophils"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_NK-cells" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_NK-cells.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type NK-cells"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_OAC" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_OAC.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type OAC"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_Pancreas" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_Pancreas.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type Pancreas"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_Stomach" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_Stomach.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type Stomach"
-# qsub -b y -l h_vmem=75g -pe smp 1 -V -N "merge_pats_Duodenum" -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/merge_pats_Duodenum.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.atlasbuilder.merge_pats_by_cell_type --cell_type Duodenum"
 
 cell_type_to_pat = {
     "B-cells": [
         "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652316_Blood-B-Z000000TX.hg38.pat.gz",
         "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652317_Blood-B-Z000000UB.hg38.pat.gz",
         "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652318_Blood-B-Z000000UR.hg38.pat.gz",        
-    ],
-    "CD34-erythroblasts": [
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/D30_CD34-erythroblasts_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/D37_CD34-erythroblasts_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/D66_CD34-erythroblasts_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/D70_CD34-erythroblasts_md.pat.gz",
-    ],
-    "CD34-megakaryocytes": [
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/D30_CD34-megakaryocytes_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/D66_CD34-megakaryocytes_md.pat.gz",
     ],
     "CD4-T-cells": [
         "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652279_Blood-T-CD4-Z000000TT.hg38.pat.gz",
@@ -45,54 +19,69 @@ cell_type_to_pat = {
         "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652283_Blood-T-CD8-Z000000U5.hg38.pat.gz",
         "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652284_Blood-T-CD8-Z000000UK.hg38.pat.gz",
     ],
-    "Colon": [
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/CD563419_Colon_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/CD563663_Colon_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/CD564159_Colon_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/CD565189_Colon_md.pat.gz",
-    ],
-    "Eosinophils": [
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/UKVAC-001-5_Eosinophils_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/UKVAC-003-6_Eosinophils_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/UKVAC-049-3_Eosinophils_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/UKVAC-140_Eosinophils_md.pat.gz",
-    ],
-    "Esophagus": [
-        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652332_Esophagus-Epithelial-Z000000PZ.hg38.pat.gz",
-        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652333_Esophagus-Epithelial-Z00000426.hg38.pat.gz",        
+    "T-cells": [
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652282_Blood-T-CD8-Z000000TR.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652283_Blood-T-CD8-Z000000U5.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652284_Blood-T-CD8-Z000000UK.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652279_Blood-T-CD4-Z000000TT.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652280_Blood-T-CD4-Z000000U7.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652281_Blood-T-CD4-Z000000UM.hg38.pat.gz",
     ],
     "Monocytes": [
         "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652302_Blood-Monocytes-Z000000TP.hg38.pat.gz",
         "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652303_Blood-Monocytes-Z000000U3.hg38.pat.gz",
         "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652304_Blood-Monocytes-Z000000UH.hg38.pat.gz",
     ],
-    "Neutrophils": [
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/UKVAC-001-5_Neutrophils_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/UKVAC-003-6_Neutrophils_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/UKVAC-049-3_Neutrophils_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/UKVAC-140_Neutrophils_md.pat.gz",
-    ],
     "NK-cells": [
         "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652299_Blood-NK-Z000000TM.hg38.pat.gz",
         "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652300_Blood-NK-Z000000U1.hg38.pat.gz",
         "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652301_Blood-NK-Z000000UF.hg38.pat.gz",
     ],
+    "Erythrocyte_progenitors": [
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652274_Bone_marrow-Erythrocyte_progenitors-Z000000RF.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652275_Bone_marrow-Erythrocyte_progenitors-Z000000RH.hg38.pat.gz"
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652276_Bone_marrow-Erythrocyte_progenitors-Z000000RK.hg38.pat.gz"
+    ],
+    "Granulocytes": [
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652313_Blood-Granulocytes-Z000000TZ.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652314_Blood-Granulocytes-Z000000UD.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652315_Blood-Granulocytes-Z000000UT.hg38.pat.gz",
+    ],
+    "CD34-erythroblasts": [
+        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/D30_CD34-erythroblasts_md.pat.gz",
+        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/D37_CD34-erythroblasts_md.pat.gz",
+        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/D66_CD34-erythroblasts_md.pat.gz",
+        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/D70_CD34-erythroblasts_md.pat.gz",
+    ],
+    "CD34-megakaryocytes": [
+        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/D30_CD34-megakaryocytes_md.pat.gz",
+        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/D66_CD34-megakaryocytes_md.pat.gz",
+    ],   
     "OAC": [
         "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/071-011_ScrBsl_tumour_md.pat.gz",
         "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/071-021_ScrBsl_tumour_md.pat.gz",
         "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/129-001_ScrBsl_tumour_md.pat.gz",
     ],
+    "Esophagus": [
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652332_Esophagus-Epithelial-Z000000PZ.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652333_Esophagus-Epithelial-Z00000426.hg38.pat.gz",        
+    ],
+    "Colon": [
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652370_Colon-Right-Epithelial-Z000000V0.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652371_Colon-Right-Epithelial-Z000000V8.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652372_Colon-Right-Endocrine-Z0000044S.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652373_Colon-Left-Epithelial-Z000000VA.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652374_Colon-Left-Endocrine-Z0000044J.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652375_Colon-Left-Endocrine-Z0000044T.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652376_Colon-Left-Epithelial-Z0000043B.hg38.pat.gz",
+        "/mnt/lustre/shared/Loyfer_etal/hg38/GSM5652377_Colon-Left-Epithelial-Z0000043C.hg38.pat.gz",
+    ],
+   
+    
+    
     "Pancreas": [
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/CD564011_Pancreas_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/CD564404_Pancreas_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/CD564844_Pancreas_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/CD565341_Pancreas_md.pat.gz",
     ],
     "Stomach": [
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/CD563162_Stomach_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/CD563430_Stomach_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/CD564596_Stomach_md.pat.gz",
-        "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/CD565042_Stomach_md.pat.gz",
     ],
     "Duodenum": [
         "/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/pat/Tissue/069-004_ScrBsl_duodenum_md.pat.gz",
