@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 import numpy as np
+import os 
+import pandas as pd
+from pathlib import Path
 
 
 class TissueDeconvolutionDataset(Dataset):
@@ -59,65 +62,47 @@ class TissueDeconvolutionDataset(Dataset):
 class CellTypeDeconvolutionModel(nn.Module):
     """
     A neural network for predicting cell-type proportions from cfDNA methylation data.
-
-    The model addresses two main sub-problems:
-      (1) Determining which cell types are present (presence vs. absence).
-      (2) Estimating the concentration (proportions) of each present cell type.
+    
+    The model uses pre-trained SingleCellTypePresenceModel instances for each cell type
+    instead of an embedded presence detector network.
 
     Key inputs at forward pass:
       - marker_values: Fractional methylation values [B, M]. May be NaN where coverage=0.
       - coverage: Read coverage [B, M], used for weighting valid markers.
-
-    Overall architecture:
-      1) Marker Feature Extraction
-         - Each valid marker value is projected into a learned feature space (via a small MLP).
-         - Weighted by coverage so that higher-coverage markers contribute more to the features.
-
-      2) Cell Type-Specific Aggregation
-         - Each marker is known to correspond to a particular target cell type (`target_ids`).
-         - We aggregate marker-level features by summing (with coverage weighting) 
-           over markers targeting the same cell type, producing one feature vector per cell type.
-
-      3) Presence Detection
-         - A sub-network predicts a probability (0..1) that each cell type is present.
-
-      4) Proportion (Concentration) Prediction (Encoder)
-         - Another MLP predicts raw (non-negative) “concentration logits” for each cell type.
-         - We apply ReLU to keep them >= 0.
-         - Then we gate these raw concentrations by the presence probabilities in a 
-           “soft gating” manner, so likely-absent cell types get suppressed.
-         - Finally, we (re)normalise so that predicted cell-type proportions sum to 1.
-
-      5) Marker Reconstruction (Decoder)
-         - For interpretability or optional loss terms, we decode the predicted proportions 
-           back into an estimate of the original marker methylation values.
-
-    Args:
-        num_markers (int): Number of markers (M).
-        num_cell_types (int): Number of cell types (C).
-        target_ids (array-like): An array of length M mapping each marker to its target cell type index.
-        feature_dim (int): Dimensionality of the per-marker feature space in the extraction network.
     """
-    def __init__(self, num_markers, num_cell_types, target_ids, feature_dim=32):
+    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=32):
+        """
+        Initialize the cell type deconvolution model with separate presence models.
+        
+        Args:
+            num_markers (int): Total number of markers (M).
+            num_cell_types (int): Number of cell types (C).
+            target_ids (array-like): Mapping of each marker to its target cell type index.
+            presence_models_dir (str): Directory containing pre-trained presence models.
+            feature_dim (int): Dimensionality of the marker feature space.
+        """
         super().__init__()
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
 
-        # Store cell-type assignment for each marker (not trainable, but placed on same device).
+        # Store cell-type assignment for each marker (not trainable, but placed on same device)
         target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
         self.register_buffer("target_ids", target_ids_t)
 
-        # ----- Presence Detector -----
-        # Input: aggregated cell-type features (C * feature_dim).
-        # Output: un-sigmoided logits for presence of each cell type (size C).
-        self.presence_detector = nn.Sequential(
-            nn.Linear(num_cell_types * feature_dim, 256),
-            nn.LeakyReLU(),
-            nn.Linear(256, 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, num_cell_types)
-        )
+        # Load separate presence models
+        self.presence_models = nn.ModuleList()
+        
+        for cell_type_idx in range(num_cell_types):
+            model_path = Path(presence_models_dir) / f"presence_model_{cell_type_idx}.pt"
+            
+            if not model_path.exists():
+                raise FileNotFoundError(f"Presence model not found at {model_path}")
+            
+            # Load the presence model
+            presence_model = torch.load(model_path)
+            presence_model.eval()  # Set to evaluation mode
+            self.presence_models.append(presence_model)
 
         # ----- Marker Feature Extractor -----
         # Transforms each (scalar) methylation value into a learned feature space of dimension `feature_dim`.
@@ -128,7 +113,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         )
 
         # ----- Encoder (Proportion Prediction) -----
-        # Input: same aggregated features (C * feature_dim).
+        # Input: aggregated features (C * feature_dim).
         # Output: raw concentration logits for each cell type, ReLU => non-negative.
         self.encoder = nn.Sequential(
             nn.Linear(num_cell_types * feature_dim, 128),
@@ -149,7 +134,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         """
         Create a smoother gating transition between presence and absence.
 
-        Instead of hard “multiplication by presence_prob”,
+        Instead of hard "multiplication by presence_prob",
         this function uses a sigmoid-like scaling around `min_threshold` -> `max_threshold`.
 
         Args:
@@ -233,6 +218,53 @@ class CellTypeDeconvolutionModel(nn.Module):
         result = result / (torch.sum(result, dim=1, keepdim=True) + 1e-8)
 
         return result
+        
+    def predict_presence_with_separate_models(self, marker_values, coverage):
+        """
+        Use the separate pre-trained presence models to predict 
+        presence probabilities for each cell type.
+        
+        Each presence model was trained on a subset of markers relevant to its target cell type.
+        We need to filter the input data to provide only the relevant markers to each model.
+        
+        Args:
+            marker_values (FloatTensor): [B, M], fractional methylation
+            coverage (FloatTensor): [B, M], read coverage
+            
+        Returns:
+            presence_probs (FloatTensor): [B, C], presence probability for each cell type
+            presence_logits (FloatTensor): [B, C], raw logits before sigmoid
+        """
+        B = marker_values.shape[0]
+        C = self.num_celltypes
+        
+        # Initialize output tensors
+        presence_probs = torch.zeros(B, C, device=marker_values.device)
+        presence_logits = torch.zeros(B, C, device=marker_values.device)
+        
+        # For each cell type, use its dedicated presence model
+        for cell_type_idx, presence_model in enumerate(self.presence_models):
+            with torch.no_grad():  # No gradients needed as these models are pre-trained
+                # Create a mask for the markers that belong to this cell type
+                cell_type_marker_mask = (self.target_ids == cell_type_idx)
+                
+                # If no markers for this cell type, skip
+                if not cell_type_marker_mask.any():
+                    continue
+                
+                # Filter marker_values and coverage to only include markers for this cell type
+                cell_type_marker_values = marker_values[:, cell_type_marker_mask]
+                cell_type_coverage = coverage[:, cell_type_marker_mask]
+                
+                # Pass only the relevant markers to the presence model
+                logits, _ = presence_model(cell_type_marker_values, cell_type_coverage)
+                probs = torch.sigmoid(logits)
+                
+                # Store results
+                presence_logits[:, cell_type_idx] = logits.squeeze(-1)
+                presence_probs[:, cell_type_idx] = probs.squeeze(-1)
+                
+        return presence_probs, presence_logits
 
     def forward(self, marker_values: torch.Tensor, coverage: torch.Tensor):
         """
@@ -242,7 +274,7 @@ class CellTypeDeconvolutionModel(nn.Module):
             1) Identify valid markers (coverage>0).
             2) Extract features for each valid marker via `marker_feature_extractor`.
             3) Aggregate marker features per cell type, weighting by coverage.
-            4) Predict presence_prob for each cell type.
+            4) Predict presence_prob for each cell type (using separate models).
             5) Predict raw proportions (encoder) => ReLU => gating by presence_prob => normalised.
             6) Reconstruct marker methylation from the final proportions (decoder).
 
@@ -322,12 +354,12 @@ class CellTypeDeconvolutionModel(nn.Module):
         coverage_sum[mask_cov] = 1.0
         aggregator = aggregator / coverage_sum.unsqueeze(-1)
 
-        # Flatten aggregator for presence & encoder
+        # Flatten aggregator for encoder
         agg_flat = aggregator.view(B, -1)  # [B, C*feature_dim]
 
         # ----- 3) Presence detection -----
-        presence_logits = self.presence_detector(agg_flat)  # [B, C]
-        presence_probs = torch.sigmoid(presence_logits)      # [B, C]
+        # Use the dedicated presence models
+        presence_probs, presence_logits = self.predict_presence_with_separate_models(marker_values, coverage)
 
         # ----- 4) Proportion Prediction -----
         logits = self.encoder(agg_flat)  # [B, C]
@@ -340,3 +372,4 @@ class CellTypeDeconvolutionModel(nn.Module):
         reconstructed = self.decoder(celltype_props)  # [B, M]
 
         return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
+    
