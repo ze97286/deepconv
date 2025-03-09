@@ -10,7 +10,7 @@ def train_binary_classifier(
     model: nn.Module,
     dataloaders: dict,
     model_path: str,
-    target_cell_type: str,
+    target_cell_type_index: int,
     num_epochs: int = 50,
     learning_rate: float = 1e-3,
     weight_decay: float = 1e-4,
@@ -275,7 +275,7 @@ def train_binary_classifier(
                 'best_metric': best_metric,
                 'metric_name': eval_metric
             }
-            torch.save(checkpoint, os.path.join(model_path, f'best_{target_cell_type}_model.pt'))
+            torch.save(checkpoint, os.path.join(model_path, f"presence_model_{target_cell_type_index}.pt"))
             
             print(f"New best model saved! {eval_metric}={best_metric:.4f}")
         else:
@@ -288,7 +288,7 @@ def train_binary_classifier(
             break
     
     # Load best model
-    checkpoint = torch.load(os.path.join(model_path, f'best_{target_cell_type}_model.pt'))
+    checkpoint = torch.load(os.path.join(model_path, f"presence_model_{target_cell_type_index}.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
     print(f"Loaded best model from epoch {checkpoint['epoch']+1} with {eval_metric}={checkpoint['best_metric']:.4f}")
     

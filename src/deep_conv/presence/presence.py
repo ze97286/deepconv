@@ -100,7 +100,7 @@ def get_validation_set(eval_pat_dir: str, target_cell_type:int, names: set) -> T
     return val_loader, y_val
 
 
-def load_training(base_dir: str, names: set, target_cell_type: int, num_files: int = 4) -> DataLoader:
+def load_training(base_dir: str, names: set, target_cell_type: int, num_files: int = 5) -> DataLoader:
     """
     Loads and merges multiple parquet files containing training data (marker_values, coverage, ground_truth_y),
     filters them to only include the markers in 'names', and returns a DataLoader for training.
@@ -261,7 +261,8 @@ def train_and_eval(
     eval_pat_dir: str,
     threads: int,
     output_path: str,  
-    target_cell_type_name: str
+    target_cell_type_name: str,
+    use_loyfer: bool, 
 ) -> nn.Module:
     # Fix random seeds and threads for reproducibility
     set_seed()
@@ -281,14 +282,25 @@ def train_and_eval(
     # 3) Build DataLoaders for each validation subset
     tier1_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "tier1"), target_cell_type, names)
     tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), target_cell_type, names)
-    tier3_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD4"), target_cell_type, names)
-    tier4_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD8"), target_cell_type, names)
-    validation_dls = {
-        "tier1": tier1_dl,        
-        "tier2": tier2_dl,        
-        "tier3": tier3_dl,        
-        "tier4": tier4_dl,        
-    }
+    if use_loyfer:
+        tier3_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "T-cells"), target_cell_type, names)
+    else:
+        tier3_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD4"), target_cell_type, names)
+        tier4_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD8"), target_cell_type, names)
+    
+    if use_loyfer:
+        validation_dls = {
+            "tier1": tier1_dl,        
+            "tier2": tier2_dl,        
+            "tier3": tier3_dl,        
+        }
+    else:
+         validation_dls = {
+            "tier1": tier1_dl,        
+            "tier2": tier2_dl,        
+            "tier3": tier3_dl,        
+            "tier4": tier4_dl,        
+        }
     
     single_model = SingleCellTypePresenceModel()
 
@@ -299,7 +311,7 @@ def train_and_eval(
         model_path=output_path,
         num_epochs=100,
         learning_rate=1e-3,
-        target_cell_type=target_cell_type_name,
+        target_cell_type_index=target_cell_type,
     )
 
     val_dl = tier1_dl
@@ -312,6 +324,9 @@ def train_and_eval(
     if target_cell_type_name=="CD8-T-cells":
         check_prediction_distributions(trained_model, tier4_dl)
         val_dl = tier4_dl
+    if target_cell_type_name=="T-cells":
+        check_prediction_distributions(trained_model, tier3_dl)
+        val_dl = tier3_dl
 
     results_df = analyse_detection_by_concentration(trained_model, val_dl, output_path, target_cell_type_name)
     find_minimum_detection_concentration_continuous(results_df, output_path, target_cell_type_name)
