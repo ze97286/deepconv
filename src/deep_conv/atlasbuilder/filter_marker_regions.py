@@ -94,18 +94,17 @@ def select_markers_for_cell_type2(df: pd.DataFrame, min_markers: int = 100, max_
     markers = df.copy()
     # Calculate separability score if not already present
     if 'separability' not in markers.columns:
-        markers['separability'] = (
-            # Higher target value means stronger signal (square it to emphasize high values)
-            markers['target_value']**2 * 
-            # Use a more aggressive scaling for SNR to better distinguish very high values
-            (np.log1p(markers['snr'])**1.5) * 
-            # Keep log of SNR vs median
-            np.log1p(markers['snr_vs_median']) * 
-            # Add a bonus for "perfect" markers (target high, background near zero)
-            (1 + 2 * (markers['target_value'] > 0.9) * (markers['mean_background'] < 0.1)) *
-            # Keep the background stability factor
-            (1 / (1 + markers['background_std']))
-        )
+        if 'separability' not in markers.columns:
+            markers['separability'] = (
+                # Higher target value means stronger signal
+                markers['target_value'] * 
+                # Log of SNR (vs max) - logarithmic scale handles extreme values better
+                np.log1p(markers['snr']) * 
+                # Log of SNR (vs median) ensures separation from most other cell types
+                np.log1p(markers['snr_vs_median']) * 
+                # Penalize high background variation which could make detection unreliable
+                (1 / (1 + markers['background_std']))
+            )
     # Create bins but with smaller size to allow more high-SNR regions
     markers['region_bin'] = markers['chr'] + '_' + (markers['start'] // 500_000).astype(str)
     # First prioritize extremely high SNR markers regardless of region
@@ -147,6 +146,120 @@ def select_markers_for_cell_type2(df: pd.DataFrame, min_markers: int = 100, max_
     # Create DataFrame from selected primary markers
     selected_df = pd.DataFrame(selected)
     # Now add redundant markers
+    redundant_markers = []
+    for _, primary in selected_df.iterrows():
+        # Find nearby or overlapping markers with good scores
+        nearby = markers[
+            (markers['chr'] == primary['chr']) &
+            (abs(markers['start'] - primary['start']) < 5000) &  # Within 5kb
+            (markers['snr'] > primary['snr'] * 0.7)  # At least 70% as good
+        ]
+        # Skip markers that are already in the primary selection
+        nearby = nearby[~nearby.index.isin(selected_df.index)]
+        # Take up to 2 redundant markers for each primary
+        if not nearby.empty:
+            top_redundant = nearby.nlargest(2, 'snr')
+            for _, redundant in top_redundant.iterrows():
+                redundant_markers.append(redundant.to_dict())
+    # Create DataFrame from redundant markers
+    redundant_df = pd.DataFrame(redundant_markers) if redundant_markers else pd.DataFrame()
+    # Combine primary and redundant markers
+    if not redundant_df.empty:
+        final_selection = pd.concat([selected_df, redundant_df], ignore_index=True)
+        # Mark which are primary and which are redundant
+        final_selection['is_primary'] = False
+        final_selection.loc[:len(selected_df)-1, 'is_primary'] = True
+    else:
+        final_selection = selected_df
+        final_selection['is_primary'] = True
+    return final_selection
+
+
+def optimized_marker_selection(df, target_cell_type, background_cell_types, min_markers=100):
+    """
+    Optimized marker selection that balances perfect markers and genomic distribution
+    """
+    markers = df.copy()
+    # Identify perfect and near-perfect markers
+    bg_max = markers[background_cell_types].max(axis=1)
+    markers['is_perfect'] = (markers[target_cell_type] > 0.9) & (bg_max < 0.1)
+    # Use improved separability score that emphasizes perfect markers
+    markers['separability'] = (
+        # Higher target value (squared to emphasize high values)
+        markers[target_cell_type]**2 * 
+        # Log of SNR with power scaling
+        np.log1p(markers['snr'])**1.5 * 
+        # Log of SNR vs median
+        np.log1p(markers['snr_vs_median']) * 
+        # Add a boost for perfect markers
+        (1 + markers['is_perfect'] * 2) * 
+        # Penalize high background variation
+        (1 / (1 + markers['background_std']))
+    )
+    # Create region bins
+    markers['region_bin'] = markers['chr'] + '_' + (markers['start'] // 500_000).astype(str)
+    # First pass: select perfect markers with region diversity
+    selected_perfect = []
+    region_counts = {}
+    perfect_markers = markers[markers['is_perfect']].sort_values('separability', ascending=False)
+    for _, marker in perfect_markers.iterrows():
+        region = marker['region_bin']
+        # Limit to 3 per region for perfect markers to ensure distribution
+        if region_counts.get(region, 0) >= 3:
+            continue
+        # Check for overlaps
+        overlaps = False
+        for selected in selected_perfect:
+            if (marker['chr'] == selected['chr'] and
+                marker['start'] <= selected['end'] and
+                marker['end'] >= selected['start']):
+                overlaps = True
+                break
+        if not overlaps:
+            selected_perfect.append(marker.to_dict())
+            region_counts[region] = region_counts.get(region, 0) + 1
+    # Second pass: fill in with other high-quality markers
+    # Prioritize regions not yet covered
+    selected = selected_perfect.copy()
+    all_markers = markers.sort_values('separability', ascending=False)
+    uncovered_regions = set(markers['region_bin'].unique()) - set(region_counts.keys())
+    # First try to get markers from uncovered regions
+    for region in uncovered_regions:
+        region_markers = all_markers[all_markers['region_bin'] == region]
+        for _, marker in region_markers.iterrows():
+            # Check for overlaps
+            overlaps = False
+            for selected_marker in selected:
+                if (marker['chr'] == selected_marker['chr'] and
+                    marker['start'] <= selected_marker['end'] and
+                    marker['end'] >= selected_marker['start']):
+                    overlaps = True
+                    break
+            if not overlaps:
+                selected.append(marker.to_dict())
+                region_counts[region] = region_counts.get(region, 0) + 1
+                break  # Just take the best marker from each uncovered region
+    # Finally, fill in with remaining best markers
+    for _, marker in all_markers.iterrows():
+        if len(selected) >= min_markers:
+            break
+        # Check if overlaps with any selected marker
+        overlaps = False
+        for selected_marker in selected:
+            if (marker['chr'] == selected_marker['chr'] and
+                marker['start'] <= selected_marker['end'] and
+                marker['end'] >= selected_marker['start']):
+                overlaps = True
+                break
+        # Check if we already have enough from this region (max 5)
+        region = marker['region_bin']
+        if region_counts.get(region, 0) >= 5:
+            continue
+        if not overlaps:
+            selected.append(marker.to_dict())
+            region_counts[region] = region_counts.get(region, 0) + 1
+    # Create DataFrame from selected primary markers
+    selected_df = pd.DataFrame(selected)
     redundant_markers = []
     for _, primary in selected_df.iterrows():
         # Find nearby or overlapping markers with good scores
@@ -635,8 +748,10 @@ def compare_marker_selection_approaches(df, cell_types, target_cell_type):
     - Comparison results and plots
     """
     # Generate marker sets using two different approaches
-    marker_set_A = select_markers_for_cell_type(df)
-    marker_set_B = select_markers_for_cell_type2(df)
+    # marker_set_A = select_markers_for_cell_type(df)
+    marker_set_A = select_markers_for_cell_type2(df)
+    marker_set_B = optimized_marker_selection(df, target_cell_type, [c for c in cell_types if c!=target_cell_type])
+
     visualize_marker_set(
         markers=marker_set_A,
         target_cell_type=target_cell_type,
