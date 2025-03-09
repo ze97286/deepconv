@@ -102,7 +102,7 @@ def select_markers_for_cell_type2(df: pd.DataFrame, min_markers: int = 100, max_
             # Keep log of SNR vs median
             np.log1p(markers['snr_vs_median']) * 
             # Add a bonus for "perfect" markers (target high, background near zero)
-            (1 + 2 * (markers['target_value'] > 0.9) * (markers['background_mean'] < 0.1)) *
+            (1 + 2 * (markers['target_value'] > 0.9) * (markers['mean_background'] < 0.1)) *
             # Keep the background stability factor
             (1 / (1 + markers['background_std']))
         )
