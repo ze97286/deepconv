@@ -709,6 +709,13 @@ def marker_set_performance_simulation(markers, target_cell_type, background_cell
     return fig
 
 
+def save_markers(filtered_markers_dir, markers_fname, atlas_fname):
+    markers = pd.read_parquet(list(filtered_markers_dir.glob("*.parquet")))
+    markers = markers.dropna()    
+    markers[['chr','start','end','startCpG','endCpG','target','name','direction','B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 'Colon', 'Esophagus', 'Gastric', 'Granulocytes', 'Monocytes', 'NK-cells', 'OAC', 'Small-intestine','T-cells', 'B-cells_coverage', 'CD34-erythroblasts_coverage', 'CD34-megakaryocytes_coverage', 'Colon_coverage', 'Esophagus_coverage', 'Gastric_coverage', 'Granulocytes_coverage',   'Monocytes_coverage', 'NK-cells_coverage','OAC_coverage', 'Small-intestine_coverage','T-cells_coverage', 'snr', 'snr_vs_median', 'snr_vs_mean', 'target_value','max_background', 'median_background', 'mean_background','background_std', 'background_range','background_quartile_ratio', 'signal_to_noise_area','relative_signal_strength','quality_score','separability','is_primary']].to_csv(markers_fname, sep="\t", index=False)
+    markers[['chr','start','end','startCpG','endCpG','target','name','direction','B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 'Colon', 'Esophagus', 'Gastric', 'Granulocytes', 'Monocytes', 'NK-cells', 'OAC', 'Small-intestine','T-cells']].to_csv(atlas_fname, sep="\t", index=False)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Filter methylation markers for each cell type')
     parser.add_argument('--input_dir', type=str, required=True, help='Directory containing marker files')
@@ -729,13 +736,7 @@ def main():
     
     threads = len(CELL_TYPES)
     run_in_parallel(threads, CELL_TYPES, input_dir, output_dir, min_cpgs)
-    markers = pd.read_parquet(list(output_dir.glob("*.parquet")))
-    markers = markers.dropna()
-    
-    output_markers = args.output_markers
-    output_atlas = args.output_atlas
-    markers[['chr','start','end','startCpG','endCpG','target','name','direction','B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 'Colon', 'Esophagus', 'Gastric', 'Granulocytes', 'Monocytes', 'NK-cells', 'OAC', 'Small-intestine','T-cells', 'B-cells_coverage', 'CD34-erythroblasts_coverage', 'CD34-megakaryocytes_coverage', 'Colon_coverage', 'Esophagus_coverage', 'Gastric_coverage', 'Granulocytes_coverage',   'Monocytes_coverage', 'NK-cells_coverage','OAC_coverage', 'Small-intestine_coverage','T-cells_coverage', 'snr', 'snr_vs_median', 'snr_vs_mean', 'target_value','max_background', 'median_background', 'mean_background','background_std', 'background_range','background_quartile_ratio', 'signal_to_noise_area','relative_signal_strength','quality_score','separability','is_primary']].to_csv(output_markers, sep="\t", index=False)
-    markers[['chr','start','end','startCpG','endCpG','target','name','direction','B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 'Colon', 'Esophagus', 'Gastric', 'Granulocytes', 'Monocytes', 'NK-cells', 'OAC', 'Small-intestine','T-cells']].to_csv(output_atlas, sep="\t", index=False)
+    save_markers(output_dir, args.output_markers, args.output_atlas)
 
     logging.info(f"\nCompleted marker filtering")
     
