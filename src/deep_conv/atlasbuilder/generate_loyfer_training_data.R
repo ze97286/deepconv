@@ -129,7 +129,7 @@ generate_stratified_concentrations <- function(n_samples,
     "NK-cells"           = 0.20,
     "Esophagus"          = 0.10,
     "Colon"              = 0.10,
-    "Small-int"          = 0.10,
+    "Small-intestine"    = 0.10,
     "Gastric"            = 0.10
   )
   
@@ -277,7 +277,7 @@ generate_stratified_concentrations <- function(n_samples,
         # Split cell types into groups
         immune_cells <- c("T-cells", "B-cells", "NK-cells")
         myeloid_cells <- c("Granulocytes", "Monocytes")
-        tissue_cells <- c("Colon", "Small-int", "Esophagus", "Gastric")
+        tissue_cells <- c("Colon", "Small-intestine", "Esophagus", "Gastric")
         special_cells <- c("CD34-erythroblasts", "CD34-megakaryocytes", "OAC")
         
         # NEW: Prioritize under-represented zeros
@@ -372,7 +372,7 @@ generate_stratified_concentrations_tier3 <- function(n_samples, cell_types,
         "NK-cells"           = 0.20,
         "Esophagus"          = 0.10,
         "Colon"              = 0.10,
-        "Small-int"          = 0.10,
+        "Small-intestine"    = 0.10,
         "Gastric"            = 0.10
     )
     
@@ -411,11 +411,11 @@ generate_stratified_concentrations_tier3 <- function(n_samples, cell_types,
                 conc["Granulocytes"] <- blood_total * runif(1, 0.6, 0.8)
                 conc["Monocytes"] <- blood_total * runif(1, 0.2, 0.4)
                 # Set tissue cells to very low values
-                tissue_types <- c("Colon", "Small-int", "Esophagus", "Gastric")
+                tissue_types <- c("Colon", "Small-intestine", "Esophagus", "Gastric")
                 conc[tissue_types] <- runif(length(tissue_types), 0.001, 0.005)
                 
             } else if (category == "tissue_dominance") {
-                tissue_types <- c("Colon", "Small-int", "Esophagus", "Gastric")
+                tissue_types <- c("Colon", "Small-intestine", "Esophagus", "Gastric")
                 dominant_tissue <- sample(tissue_types, 1)
                 conc[dominant_tissue] <- runif(1, 0.8, 0.9)
                 # Set blood cells to very low values
@@ -704,7 +704,7 @@ main <- function() {
    # Identify all cell types
    cell_types <- c("B-cells", "T-cells", "NK-cells", "Granulocytes", "Monocytes", 
                    "CD34-megakaryocytes", "CD34-erythroblasts", "Esophagus", 
-                   "Colon", "Small-int", "Gastric", "OAC")
+                   "Colon", "Small-intestine", "Gastric", "OAC")
    cat("Using cell types:", paste(cell_types, collapse=", "), "\n")
    
    # Choose concentration generation function based on tier3 flag
