@@ -146,6 +146,155 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_p
     
     return final_selection
 
+
+def select_markers_for_tcell_type(df: pd.DataFrame, min_markers: int = 100, max_per_region: int = 3):
+    """
+    T-cell specific marker selection approach
+    
+    Parameters:
+    - df: DataFrame with marker candidates
+    - tcell_column: Name of the T-cell column
+    - background_cell_types: List of background cell type columns
+    - min_markers: Minimum number of non-overlapping primary markers to select
+    - max_per_region: Maximum primary markers to select from the same genomic region
+    
+    Returns:
+    - DataFrame of selected markers with both primary and redundant markers
+    """
+    # Copy to avoid modifying original
+    markers = df.copy()
+    
+    # T-CELL SPECIFIC: Identify other immune cells that might confound T-cell detection
+    immune_cell_cols = ['B-cells', 'NK-cells', 'Monocytes', 'Granulocytes']
+    background_cell_types = ['B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 'Colon',  'Esophagus',  'Gastric',  'Granulocytes',  'Monocytes',  'NK-cells',  'OAC', 'Small-intestine']
+    
+    # Calculate background statistics
+    markers['immune_mean'] = markers[immune_cell_cols].mean(axis=1) if immune_cell_cols else 0
+    markers['other_mean'] = markers[[col for col in background_cell_types 
+                                    if col not in immune_cell_cols]].mean(axis=1)
+    markers['background_std'] = markers[background_cell_types].std(axis=1)
+    
+    # T-CELL SPECIFIC: Custom separability score for T-cells
+    markers['separability'] = (
+        # Higher T-cell value is better
+        markers['target_value'] * 
+        # Log of SNR with higher weight
+        np.log1p(markers['snr'])**1.2 * 
+        # Special penalty for high values in other immune cells
+        (1 / (1 + 2 * markers['immune_mean'])) *
+        # Standard penalty for variability
+        (1 / (1 + markers['background_std']))
+    )
+    
+    # T-CELL SPECIFIC: Focus on T-cell receptor loci
+    # Chromosome 7 (human TRG locus) and chromosome 14 (human TRA/TRD locus)
+    tcr_chromosomes = ['chr7', 'chr14']
+    markers['is_tcr_region'] = markers['chr'].isin(tcr_chromosomes)
+    
+    # Create region bins with special treatment for TCR regions
+    markers['region_bin'] = markers['chr'] + '_' + (markers['start'] // 500_000).astype(str)
+    
+    # T-CELL SPECIFIC: First prioritize extremely high T-cell specific markers
+    # Higher threshold for T-cells as they often have very distinctive markers
+    ultra_high_snr = markers[markers['snr'] > 8000].copy()
+    
+    # Special focus on TCR regions
+    tcr_markers = markers[markers['is_tcr_region']].nlargest(min_markers//5, 'separability')
+    
+    # Then get region-balanced markers
+    region_selections = []
+    for region, group in markers.groupby('region_bin'):
+        # Take top markers from each region
+        top_in_region = group.nlargest(max_per_region, 'separability')
+        region_selections.append(top_in_region)
+    
+    region_balanced = pd.concat(region_selections)
+    
+    # Combine all approaches with priority to TCR regions and ultra-high SNR
+    combined = pd.concat([tcr_markers, ultra_high_snr, region_balanced]).drop_duplicates()
+    
+    # T-CELL SPECIFIC: Custom sorting strategy
+    # Sort by combination of factors with TCR regions getting a boost
+    combined['selection_score'] = (
+        combined['separability'] * 
+        (1.5 if combined['is_tcr_region'] else 1.0)
+    )
+    sorted_markers = combined.sort_values('selection_score', ascending=False)
+    
+    # Select non-overlapping markers
+    selected = []
+    selected_regions = set()  # Track which regions we've selected from
+    
+    for _, marker in sorted_markers.iterrows():
+        # Check if overlaps with any selected marker
+        overlaps = False
+        for selected_marker in selected:
+            if (marker['chr'] == selected_marker['chr'] and
+                marker['start'] <= selected_marker['end'] and
+                marker['end'] >= selected_marker['start']):
+                overlaps = True
+                break
+                
+        # Check if we already have enough from this region
+        region = marker['region_bin']
+        region_count = sum(1 for s in selected if s.get('region_bin') == region)
+        
+        # T-CELL SPECIFIC: Allow more markers from TCR regions
+        if marker['is_tcr_region']:
+            max_from_region = 10  # Higher limit for TCR regions
+        else:
+            max_from_region = 5 if marker['separability'] > sorted_markers['separability'].quantile(0.95) else 2
+        
+        if not overlaps and region_count < max_from_region:
+            selected.append(marker.to_dict())
+            selected_regions.add(region)
+            
+        # Continue selecting until we have minimum markers AND good genomic distribution
+        if len(selected) >= min_markers and len(selected_regions) >= min(len(markers['region_bin'].unique()), min_markers // 2):
+            break
+    
+    # Create DataFrame from selected primary markers
+    selected_df = pd.DataFrame(selected)
+    
+    # Now add redundant markers
+    redundant_markers = []
+    
+    for _, primary in selected_df.iterrows():
+        # T-CELL SPECIFIC: More redundancy for TCR regions
+        max_redundant = 3 if primary.get('is_tcr_region', False) else 2
+        
+        # Find nearby or overlapping markers with good scores
+        nearby = markers[
+            (markers['chr'] == primary['chr']) &
+            (abs(markers['start'] - primary['start']) < 5000) &  # Within 5kb
+            (markers['separability'] > primary['separability'] * 0.7)  # At least 70% as good
+        ]
+        
+        # Skip markers that are already in the primary selection
+        nearby = nearby[~nearby.index.isin(selected_df.index)]
+        
+        # Take redundant markers
+        if not nearby.empty:
+            top_redundant = nearby.nlargest(max_redundant, 'separability')
+            for _, redundant in top_redundant.iterrows():
+                redundant_markers.append(redundant.to_dict())
+    
+    # Create DataFrame from redundant markers
+    redundant_df = pd.DataFrame(redundant_markers) if redundant_markers else pd.DataFrame()
+    
+    # Combine primary and redundant markers
+    if not redundant_df.empty:
+        final_selection = pd.concat([selected_df, redundant_df], ignore_index=True)
+        # Mark which are primary and which are redundant
+        final_selection['is_primary'] = False
+        final_selection.loc[:len(selected_df)-1, 'is_primary'] = True
+    else:
+        final_selection = selected_df
+        final_selection['is_primary'] = True
+    
+    return final_selection
+
+
 def process_cell_type(input_dir: Path, 
                      output_dir: Path,
                      cell_type: str):
@@ -158,7 +307,10 @@ def process_cell_type(input_dir: Path,
         return
     combined_df = pd.read_parquet(marker_files)
     logging.info(f"Loaded {len(combined_df)} total markers for {cell_type}")
-    filtered_df = select_markers_for_cell_type(combined_df)
+    if cell_type == 'T-cells':
+        filtered_df = select_markers_for_tcell_type(combined_df)
+    else:    
+        filtered_df = select_markers_for_cell_type(combined_df)
     print(f"filtering {cell_type} => {len(filtered_df)}, nonoverlapping: {len(filtered_df.groupby('startCpG').count())}")
     output_file = output_dir / f"{cell_type}_filtered_markers.parquet"
     filtered_df.to_parquet(output_file)
