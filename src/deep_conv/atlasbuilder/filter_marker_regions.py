@@ -33,7 +33,7 @@ CELL_TYPES = [
 ]
 
 
-def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_per_region: int = 20):
+def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_per_region: int = 5):
     """
     Select optimal markers with very conservative improvements
     
