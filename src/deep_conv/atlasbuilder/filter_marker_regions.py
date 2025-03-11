@@ -35,47 +35,62 @@ CELL_TYPES = [
 
 def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_per_region: int = 3):
     """
-    Select optimal markers prioritizing high-SNR regions with proper redundancy
+    Select optimal markers with improved separability scoring
+    
     Parameters:
     - df: DataFrame with marker candidates
+    - target_cell_type: Name of the target cell type column
+    - background_cell_types: List of background cell type columns
     - min_markers: Minimum number of non-overlapping primary markers to select
     - max_per_region: Maximum primary markers to select from the same genomic region
+    
     Returns:
     - DataFrame of selected markers with both primary and redundant markers
     """
     # Copy to avoid modifying original
     markers = df.copy()
-    # Calculate separability score if not already present
-    if 'separability' not in markers.columns:
-        if 'separability' not in markers.columns:
-            markers['separability'] = (
-                # Higher target value means stronger signal
-                markers['target_value'] * 
-                # Log of SNR (vs max) - logarithmic scale handles extreme values better
-                np.log1p(markers['snr']) * 
-                # Log of SNR (vs median) ensures separation from most other cell types
-                np.log1p(markers['snr_vs_median']) * 
-                # Penalize high background variation which could make detection unreliable
-                (1 / (1 + markers['background_std']))
-            )
-    # Create bins but with smaller size to allow more high-SNR regions
+    
+    markers['signal_gap'] = markers['target_value'] - markers['max_background']
+    
+    # Calculate improved separability that better handles extreme SNR values
+    markers['separability'] = (
+        # Target value (important for detection)
+        markers['target_value'] * 
+        # Log-scaled SNR with diminishing returns for extremely high values
+        np.log1p(markers['snr']) * 
+        # Log-scaled SNR vs median
+        np.log1p(markers['snr_vs_median']) * 
+        # Direct signal gap component (crucial for low concentration detection)
+        (1 + markers['signal_gap']) * 
+        # Stability component - penalize high background variation
+        (1 / (1 + markers['background_std']))
+    )
+    
+    # Create region bins
     markers['region_bin'] = markers['chr'] + '_' + (markers['start'] // 500_000).astype(str)
+    
     # First prioritize extremely high SNR markers regardless of region
     ultra_high_snr = markers[markers['snr'] > 5000].copy()
+    
     # Then get region-balanced markers
     region_selections = []
     for region, group in markers.groupby('region_bin'):
         # Take top markers from each region
-        top_in_region = group.nlargest(max_per_region, 'snr')
+        top_in_region = group.nlargest(max_per_region, 'separability')  # Use separability instead of SNR
         region_selections.append(top_in_region)
+    
     region_balanced = pd.concat(region_selections)
+    
     # Combine ultra-high SNR with region balanced, prioritizing ultra-high
     combined = pd.concat([ultra_high_snr, region_balanced]).drop_duplicates()
-    # Sort markers by SNR for final selection
-    sorted_markers = combined.sort_values('snr', ascending=False)
+    
+    # Sort markers by separability for final selection (key improvement)
+    sorted_markers = combined.sort_values('separability', ascending=False)
+    
     # Select non-overlapping markers
     selected = []
     selected_regions = set()  # Track which regions we've selected from
+    
     for _, marker in sorted_markers.iterrows():
         # Check if overlaps with any selected marker
         overlaps = False
@@ -85,37 +100,48 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_p
                 marker['end'] >= selected_marker['start']):
                 overlaps = True
                 break
+                
         # Check if we already have enough from this region
         region = marker['region_bin']
         region_count = sum(1 for s in selected if s.get('region_bin') == region)
-        # Allow more markers from high-SNR regions
-        max_from_region = 5 if marker['snr'] > 5000 else 2
+        
+        # Allow more markers from high-separability regions (instead of just high SNR)
+        max_from_region = 5 if marker['separability'] > sorted_markers['separability'].quantile(0.95) else 2
+        
         if not overlaps and region_count < max_from_region:
             selected.append(marker.to_dict())
             selected_regions.add(region)
+            
         # Continue selecting until we have minimum markers AND good genomic distribution
         if len(selected) >= min_markers and len(selected_regions) >= min(len(markers['region_bin'].unique()), min_markers // 2):
             break
+    
     # Create DataFrame from selected primary markers
     selected_df = pd.DataFrame(selected)
+    
     # Now add redundant markers
     redundant_markers = []
+    
     for _, primary in selected_df.iterrows():
         # Find nearby or overlapping markers with good scores
         nearby = markers[
             (markers['chr'] == primary['chr']) &
             (abs(markers['start'] - primary['start']) < 5000) &  # Within 5kb
-            (markers['snr'] > primary['snr'] * 0.7)  # At least 70% as good
+            (markers['separability'] > primary['separability'] * 0.7)  # At least 70% as good
         ]
+        
         # Skip markers that are already in the primary selection
         nearby = nearby[~nearby.index.isin(selected_df.index)]
+        
         # Take up to 2 redundant markers for each primary
         if not nearby.empty:
-            top_redundant = nearby.nlargest(2, 'snr')
+            top_redundant = nearby.nlargest(2, 'separability')  # Use separability instead of SNR
             for _, redundant in top_redundant.iterrows():
                 redundant_markers.append(redundant.to_dict())
+    
     # Create DataFrame from redundant markers
     redundant_df = pd.DataFrame(redundant_markers) if redundant_markers else pd.DataFrame()
+    
     # Combine primary and redundant markers
     if not redundant_df.empty:
         final_selection = pd.concat([selected_df, redundant_df], ignore_index=True)
@@ -125,8 +151,8 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_p
     else:
         final_selection = selected_df
         final_selection['is_primary'] = True
+    
     return final_selection
-
 
 def process_cell_type(input_dir: Path, 
                      output_dir: Path,
