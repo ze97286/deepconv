@@ -35,7 +35,7 @@ CELL_TYPES = [
 
 def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_per_region: int = 3):
     """
-    Select optimal markers with improved separability scoring
+    Select optimal markers with very conservative improvements
     
     Parameters:
     - df: DataFrame with marker candidates
@@ -50,20 +50,12 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_p
     # Copy to avoid modifying original
     markers = df.copy()
     
-    markers['signal_gap'] = markers['target_value'] - markers['max_background']
-    
-    # Calculate improved separability that better handles extreme SNR values
     markers['separability'] = (
-        # Target value (important for detection)
         markers['target_value'] * 
-        # Log-scaled SNR with diminishing returns for extremely high values
         np.log1p(markers['snr']) * 
-        # Log-scaled SNR vs median
         np.log1p(markers['snr_vs_median']) * 
-        # Direct signal gap component (crucial for low concentration detection)
-        (1 + markers['signal_gap']) * 
-        # Stability component - penalize high background variation
-        (1 / (1 + markers['background_std']))
+        (1 / (1 + markers['background_std'])) *
+        (1 + 0.1 * (markers['snr'] > np.percentile(markers['snr'], 95)))
     )
     
     # Create region bins
@@ -76,7 +68,7 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_p
     region_selections = []
     for region, group in markers.groupby('region_bin'):
         # Take top markers from each region
-        top_in_region = group.nlargest(max_per_region, 'separability')  # Use separability instead of SNR
+        top_in_region = group.nlargest(max_per_region, 'snr')
         region_selections.append(top_in_region)
     
     region_balanced = pd.concat(region_selections)
@@ -84,8 +76,8 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_p
     # Combine ultra-high SNR with region balanced, prioritizing ultra-high
     combined = pd.concat([ultra_high_snr, region_balanced]).drop_duplicates()
     
-    # Sort markers by separability for final selection (key improvement)
-    sorted_markers = combined.sort_values('separability', ascending=False)
+    # Sort markers by SNR for final selection
+    sorted_markers = combined.sort_values('snr', ascending=False)
     
     # Select non-overlapping markers
     selected = []
@@ -105,8 +97,8 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_p
         region = marker['region_bin']
         region_count = sum(1 for s in selected if s.get('region_bin') == region)
         
-        # Allow more markers from high-separability regions (instead of just high SNR)
-        max_from_region = 5 if marker['separability'] > sorted_markers['separability'].quantile(0.95) else 2
+        # Allow more markers from high-SNR regions
+        max_from_region = 5 if marker['snr'] > 5000 else 2
         
         if not overlaps and region_count < max_from_region:
             selected.append(marker.to_dict())
@@ -127,7 +119,7 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_p
         nearby = markers[
             (markers['chr'] == primary['chr']) &
             (abs(markers['start'] - primary['start']) < 5000) &  # Within 5kb
-            (markers['separability'] > primary['separability'] * 0.7)  # At least 70% as good
+            (markers['snr'] > primary['snr'] * 0.7)  # At least 70% as good
         ]
         
         # Skip markers that are already in the primary selection
@@ -135,7 +127,7 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_p
         
         # Take up to 2 redundant markers for each primary
         if not nearby.empty:
-            top_redundant = nearby.nlargest(2, 'separability')  # Use separability instead of SNR
+            top_redundant = nearby.nlargest(2, 'snr')
             for _, redundant in top_redundant.iterrows():
                 redundant_markers.append(redundant.to_dict())
     
