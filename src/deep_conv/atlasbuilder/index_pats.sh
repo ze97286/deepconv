@@ -54,8 +54,8 @@ for patfile in "${pat_files[@]}"; do
     echo "[$count/$total_files] Processing: $filename"
     
     # Skip if output file and index already exist
-    if [ -f "${output_file}" ] && [ -f "${output_file}.tbi" ]; then
-        echo "  Output file and index already exist, skipping"
+    if [ -f "${output_file}" ] && [ -f "${output_file}.csi" ]; then
+        echo "  Output file and CSI index already exist, skipping"
         continue
     fi
     
@@ -71,27 +71,19 @@ for patfile in "${pat_files[@]}"; do
         continue
     fi
     
-    # Create tabix index (using bed format)
-    echo "  Creating tabix index..."
-    tabix -p bed "$output_file"
-    
-    # Also create CSI index (for more complete sequence support)
-    echo "  Creating CSI index..."
-    tabix -p bed -C "$output_file"
+    # Create tabix index using explicit column specification
+    echo "  Creating tabix index with explicit column specification..."
+    # -s 1: sequence name in column 1 (chromosome)
+    # -b 2: begin position in column 2
+    # -e 2: end position in column 2 (same as begin for point data)
+    # -C: create CSI index instead of TBI (supports larger sequences)
+    tabix -s 1 -b 2 -e 2 -C "$output_file"
     
     # Check if indexing was successful
     if [ $? -eq 0 ]; then
-        echo "  Successfully created indices for $filename"
+        echo "  Successfully created CSI index for $filename"
     else
         echo "  Error: Failed to create index for $filename"
-        # Try with explicit sequence and begin columns
-        echo "  Trying with explicit column specification..."
-        tabix -s 1 -b 2 -e 2 "$output_file"
-        if [ $? -eq 0 ]; then
-            echo "  Successfully created index with explicit columns"
-        else
-            echo "  All indexing attempts failed"
-        fi
     fi
 done
 
