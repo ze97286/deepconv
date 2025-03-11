@@ -33,7 +33,7 @@ CELL_TYPES = [
 ]
 
 
-def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_per_region: int = 3):
+def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_per_region: int = 2):
     """
     Select optimal markers with very conservative improvements
     
@@ -306,11 +306,8 @@ def process_cell_type(input_dir: Path,
         logging.warning(f"No marker files found for {cell_type}")
         return
     combined_df = pd.read_parquet(marker_files)
-    logging.info(f"Loaded {len(combined_df)} total markers for {cell_type}")
-    if cell_type == 'T-cells':
-        filtered_df = select_markers_for_tcell_type(combined_df)
-    else:    
-        filtered_df = select_markers_for_cell_type(combined_df)
+    logging.info(f"Loaded {len(combined_df)} total markers for {cell_type}")    
+    filtered_df = select_markers_for_cell_type(combined_df)
     print(f"filtering {cell_type} => {len(filtered_df)}, nonoverlapping: {len(filtered_df.groupby('startCpG').count())}")
     output_file = output_dir / f"{cell_type}_filtered_markers.parquet"
     filtered_df.to_parquet(output_file)
