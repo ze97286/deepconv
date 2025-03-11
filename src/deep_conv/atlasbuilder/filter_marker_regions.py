@@ -32,15 +32,12 @@ CELL_TYPES = [
     'T-cells'
 ]
 
-
 def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_per_region: int = 5):
     """
-    Select optimal markers with very conservative improvements
+    Select optimal markers without duplicates
     
     Parameters:
     - df: DataFrame with marker candidates
-    - target_cell_type: Name of the target cell type column
-    - background_cell_types: List of background cell type columns
     - min_markers: Minimum number of non-overlapping primary markers to select
     - max_per_region: Maximum primary markers to select from the same genomic region
     
@@ -82,8 +79,14 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     # Select non-overlapping markers
     selected = []
     selected_regions = set()  # Track which regions we've selected from
+    selected_cpg_pairs = set()  # Track CpG pairs to avoid duplicates
     
     for _, marker in sorted_markers.iterrows():
+        # Check if we already selected this CpG region
+        cpg_pair = (marker['startCpG'], marker['endCpG'])
+        if cpg_pair in selected_cpg_pairs:
+            continue
+        
         # Check if overlaps with any selected marker
         overlaps = False
         for selected_marker in selected:
@@ -103,6 +106,7 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
         if not overlaps and region_count < max_from_region:
             selected.append(marker.to_dict())
             selected_regions.add(region)
+            selected_cpg_pairs.add(cpg_pair)
             
         # Continue selecting until we have minimum markers AND good genomic distribution
         if len(selected) >= min_markers and len(selected_regions) >= min(len(markers['region_bin'].unique()), min_markers // 2):
@@ -113,6 +117,7 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     
     # Now add redundant markers
     redundant_markers = []
+    selected_redundant_cpg_pairs = set()  # Track redundant CpG pairs
     
     for _, primary in selected_df.iterrows():
         # Find nearby or overlapping markers with good scores
@@ -125,11 +130,22 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
         # Skip markers that are already in the primary selection
         nearby = nearby[~nearby.index.isin(selected_df.index)]
         
-        # Take up to 2 redundant markers for each primary
+        # Take up to 1 redundant marker for each primary
         if not nearby.empty:
-            top_redundant = nearby.nlargest(1, 'snr')
-            for _, redundant in top_redundant.iterrows():
+            # Sort by SNR
+            nearby_sorted = nearby.sort_values('snr', ascending=False)
+            
+            # Find first marker that doesn't duplicate a CpG region
+            for _, redundant in nearby_sorted.iterrows():
+                cpg_pair = (redundant['startCpG'], redundant['endCpG'])
+                
+                # Skip if this CpG pair is already selected (primary or redundant)
+                if cpg_pair in selected_cpg_pairs or cpg_pair in selected_redundant_cpg_pairs:
+                    continue
+                
                 redundant_markers.append(redundant.to_dict())
+                selected_redundant_cpg_pairs.add(cpg_pair)
+                break  # Just take one redundant marker
     
     # Create DataFrame from redundant markers
     redundant_df = pd.DataFrame(redundant_markers) if redundant_markers else pd.DataFrame()
@@ -144,8 +160,10 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
         final_selection = selected_df
         final_selection['is_primary'] = True
     
+    # Final check for duplicates - this should never happen but just to be safe
+    final_selection = final_selection.drop_duplicates(['startCpG', 'endCpG'])
+    
     return final_selection
-
 
 def process_cell_type(input_dir: Path, 
                      output_dir: Path,
