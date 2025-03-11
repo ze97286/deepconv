@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # Check if required tools are installed
-if ! command -v bcftools &> /dev/null; then
-    echo "Error: bcftools is not installed or not in PATH"
+if ! command -v tabix &> /dev/null; then
+    echo "Error: tabix is not installed or not in PATH"
+    echo "It is typically part of the htslib package"
     exit 1
 fi
 
@@ -15,7 +16,7 @@ fi
 # Directory to process (default is current directory)
 TARGET_DIR="${1:-.}"
 # Output directory for the bgzf files and indices
-OUTPUT_DIR="${2:-${TARGET_DIR}/bgzf_indexed}"
+OUTPUT_DIR="${2:-${TARGET_DIR}/tabix_indexed}"
 
 # Check if directory exists
 if [ ! -d "$TARGET_DIR" ]; then
@@ -52,7 +53,7 @@ for patfile in "$TARGET_DIR"/*.pat.gz; do
         echo "[$count/$total_files] Processing: $filename"
         
         # Skip if output file and index already exist
-        if [ -f "${output_file}" ] && [ -f "${output_file}.csi" ]; then
+        if [ -f "${output_file}" ] && [ -f "${output_file}.tbi" ]; then
             echo "  Output file and index already exist, skipping"
             continue
         fi
@@ -60,7 +61,7 @@ for patfile in "$TARGET_DIR"/*.pat.gz; do
         # Create a temporary file name
         temp_file="$OUTPUT_DIR/${filename%.gz}.temp"
         
-        echo "  Converting to BGZF format..."
+        echo "  Preparing for tabix indexing..."
         
         # Uncompress to temporary file
         gzip -dc "$patfile" > "$temp_file"
@@ -72,28 +73,46 @@ for patfile in "$TARGET_DIR"/*.pat.gz; do
             continue
         fi
         
-        # Compress with bgzip (directly to output file)
-        bgzip -c "$temp_file" > "$output_file"
+        # Sort the file by chromosome and position (required for tabix)
+        echo "  Sorting file by chromosome and position..."
+        sorted_temp="${temp_file}.sorted"
+        sort -k1,1 -k2,2n "$temp_file" > "$sorted_temp"
+        
+        # Check for sort errors
+        if [ $? -ne 0 ]; then
+            echo "  Error: Failed to sort file"
+            rm -f "$temp_file" "$sorted_temp"
+            continue
+        fi
+        
+        # Remove the original temp file
+        rm -f "$temp_file"
+        
+        # Compress with bgzip
+        echo "  Compressing with bgzip..."
+        bgzip -c "$sorted_temp" > "$output_file"
         
         # Check for compression errors
         if [ $? -ne 0 ]; then
             echo "  Error: Failed to compress with bgzip"
-            rm -f "$temp_file" "$output_file"
+            rm -f "$sorted_temp" "$output_file"
             continue
         fi
         
-        # Remove temporary file
-        rm -f "$temp_file"
+        # Remove sorted temp file
+        rm -f "$sorted_temp"
         
-        echo "  Successfully converted to BGZF format"
+        # Create tabix index (using bed format)
+        echo "  Creating tabix index..."
+        tabix -p bed "$output_file"
         
-        # Create CSI index
+        # Also create CSI index (for more complete sequence support)
         echo "  Creating CSI index..."
-        bcftools index --csi "$output_file"
+        tabix -p bed -C "$output_file"
         
         # Check if indexing was successful
         if [ $? -eq 0 ]; then
-            echo "  Successfully created index: ${output_file}.csi"
+            echo "  Successfully created indices for $filename"
         else
             echo "  Error: Failed to create index for $filename"
         fi
