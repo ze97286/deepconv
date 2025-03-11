@@ -33,7 +33,7 @@ CELL_TYPES = [
 ]
 
 
-def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_per_region: int = 1):
+def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_per_region: int = 5):
     """
     Select optimal markers with very conservative improvements
     
@@ -127,7 +127,7 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_p
         
         # Take up to 2 redundant markers for each primary
         if not nearby.empty:
-            top_redundant = nearby.nlargest(2, 'snr')
+            top_redundant = nearby.nlargest(1, 'snr')
             for _, redundant in top_redundant.iterrows():
                 redundant_markers.append(redundant.to_dict())
     
