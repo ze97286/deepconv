@@ -7,7 +7,7 @@ def predict_with_consensus(
     coverage, 
     batch_size=256,
     device=None,
-    low_snr_indices=[3, 4, 9, 11],
+    low_snr_indices=[],
     concentration_thresholds={
         'very_low': {'threshold': 0.001, 'min_confidence': 0.7},
         'low': {'threshold': 0.01, 'min_confidence': 0.5},
