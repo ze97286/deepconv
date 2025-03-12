@@ -64,7 +64,7 @@ class CellTypeDeconvolutionModel(nn.Module):
     """
     A neural network for predicting cell-type proportions from cfDNA methylation data.
     
-    The model uses pre-trained SingleCellTypePresenceModel instances for each cell type
+    This version uses pre-trained SingleCellTypePresenceModel instances for each cell type
     instead of an embedded presence detector network.
 
     Key inputs at forward pass:
@@ -267,6 +267,12 @@ class CellTypeDeconvolutionModel(nn.Module):
                 presence_logits[:, cell_type_idx] = logits.squeeze(-1)
                 presence_probs[:, cell_type_idx] = probs.squeeze(-1)
                 
+        # Make logits detached but require gradients to work with the loss function
+        # This is necessary since the pre-trained presence models are frozen 
+        # but the loss function expects gradients to flow through presence_logits
+        presence_logits = presence_logits.detach().requires_grad_(True)
+        presence_probs = presence_probs.detach()
+        
         return presence_probs, presence_logits
 
     def forward(self, marker_values: torch.Tensor, coverage: torch.Tensor):

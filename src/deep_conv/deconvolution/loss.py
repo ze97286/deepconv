@@ -13,19 +13,19 @@ def loss_fn(
     alpha: float = 0.9999,
     beta: float = 0.0001,
     gamma: float = 0.0001,
-    delta: float = 0.5,
     presence_threshold: float = 0.005,
     low_snr_indices=[3, 4, 9, 11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ):
     """
-    A multi-term loss function that accounts for:
+    Loss function specifically designed for the deconvolution model with pre-trained presence models.
+    Unlike the original loss function, this one does not calculate BCE loss for presence detection
+    since the presence models are pre-trained and frozen.
+
+    This function has three main components:
       (1) Proportion error (with concentration-dependent weighting),
       (2) Coverage-weighted marker reconstruction error,
-      (3) Presence/absence classification loss,
-      (4) Sparsity regularisation.
-
-    The final loss is a weighted sum of these components, controlled by alpha, beta, gamma, delta.
+      (3) Sparsity regularisation.
 
     Args:
         pred_props (FloatTensor): [B, C]
@@ -41,20 +41,18 @@ def loss_fn(
         valid_mask (BoolTensor): [B, M]
             Indicates which (sample, marker) positions have coverage>0 (valid).
         presence_probs (FloatTensor): [B, C]
-            Sigmoid probabilities from the presence detection sub-network.
+            Sigmoid probabilities from the pre-trained presence models.
         presence_logits (FloatTensor): [B, C]
-            Logits (before sigmoid) for the presence detection sub-network.
+            Logits (before sigmoid) from the pre-trained presence models.
         alpha (float):
             Weight for the main proportion error term (often near 1.0).
         beta (float):
             Weight for the reconstruction term (marker-level error).
         gamma (float):
             Weight for the sparsity penalty (discouraging spread-out predictions).
-        delta (float):
-            Weight for the presence detection loss (binary cross-entropy).
         presence_threshold (float):
             Threshold on true_props to decide if a cell type is "present" vs "absent" 
-            in the ground truth. E.g., if true_props[i,c] > presence_threshold => present.
+            in the ground truth. Used only for monitoring.
         low_snr_indices (list[int]):
             Indices of cell types considered "low SNR" or more uncertain, which receive
             additional penalty if under-predicted.
@@ -65,18 +63,7 @@ def loss_fn(
         total_loss (Tensor):
             A scalar tensor representing the combined loss.
         details (dict):
-            A dictionary of intermediate scalars/statistics for monitoring:
-            - 'total_loss': float
-            - 'loss_props': proportion error
-            - 'recon_loss': reconstruction error
-            - 'sparsity_loss': penalty for wide distribution of predictions
-            - 'presence_loss': binary cross-entropy for presence detection
-            - 'low_snr_under': average underestimation in low-SNR cell types
-            - 'low_snr_over': average overestimation in low-SNR cell types
-            - 'alpha_stats': basic stats (mean, std, max, min) of pred_props
-            - 'concentration_errors': separate mean errors for low/med/high concentrations
-            - 'presence_stats': includes accuracy, precision, recall, f1, and confusion terms
-            - 'valid_ratio': fraction of markers that had coverage>0
+            A dictionary of intermediate scalars/statistics for monitoring.
     """
     # -----------------------------
     # (1) Proportion Error with Enhanced Concentration-Dependent Weighting
@@ -138,25 +125,7 @@ def loss_fn(
     ) / torch.sum(valid_mask * coverage)
 
     # -----------------------------
-    # (3) Presence/Absence Classification Loss
-    # -----------------------------
-    # Convert true_props to presence vs. absence based on presence_threshold
-    presence_targets = (true_props > presence_threshold).float()  # [B, C]
-    batch_positives = torch.sum(presence_targets, dim=0)          # [C]
-    batch_size = presence_targets.size(0)
-
-    # Compute pos_weight for BCE: cell types with fewer positives => higher weight
-    pos_ratio = batch_positives / batch_size
-    pos_weight = 1.0 / (pos_ratio + 0.05)  # offset=0.05 to avoid division by zero
-    pos_weight = pos_weight.to(device)
-
-    # Weighted BCE with logits
-    presence_loss = F.binary_cross_entropy_with_logits(
-        presence_logits, presence_targets, pos_weight=pos_weight
-    )
-
-    # -----------------------------
-    # (4) Sparsity Regularisation
+    # (3) Sparsity Regularisation
     # -----------------------------
     # Encourages the sum of proportions not to blow up (though they are typically normalised to 1).
     # This can help avoid the model distributing small amounts across too many cell types.
@@ -165,15 +134,17 @@ def loss_fn(
     # -----------------------------
     # Combine All Terms
     # -----------------------------
-    # Weighted sum of the four main components
-    total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + delta * presence_loss
+    # Weighted sum of the three main components (no presence loss)
+    total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty
 
     # -----------------------------
-    # (5) Detailed Monitoring / Diagnostics
+    # (4) Detailed Monitoring / Diagnostics
     # -----------------------------
     with torch.no_grad():
-        # Predict presence with a fixed 0.5 threshold on the logits
-        presence_preds = (torch.sigmoid(presence_logits) > 0.5).float()
+        # Use pre-computed presence probabilities for monitoring only
+        # Measure performance at threshold 0.5
+        presence_preds = (presence_probs > 0.5).float()
+        presence_targets = (true_props > presence_threshold).float()
 
         # Confusion counts
         true_positives = torch.sum(presence_preds * presence_targets, dim=0)
@@ -201,7 +172,6 @@ def loss_fn(
         'loss_props': loss_props.item(),
         'recon_loss': recon_loss.item(),
         'sparsity_loss': sparsity_penalty.item(),
-        'presence_loss': presence_loss.item(),
         'low_snr_under': underestimation[:, low_snr_indices].mean().item(),
         'low_snr_over': overestimation[:, low_snr_indices].mean().item(),
         'alpha_stats': {
