@@ -676,6 +676,8 @@ def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True
     suffix = "/"
     if use_low_depth:
         suffix="_low/"
+    else:
+        suffix="_high/"
     deepconv_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
     deepconv_atlas = pd.read_csv(deepconv_atlas_path,sep="\t")
     cell_types = list(deepconv_atlas.columns[8:])
