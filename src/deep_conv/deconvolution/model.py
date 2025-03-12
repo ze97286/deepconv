@@ -6,6 +6,7 @@ import numpy as np
 import os 
 import pandas as pd
 from pathlib import Path
+from deep_conv.presence.model import SingleCellTypePresenceModel
 
 
 class TissueDeconvolutionDataset(Dataset):
@@ -100,8 +101,10 @@ class CellTypeDeconvolutionModel(nn.Module):
                 raise FileNotFoundError(f"Presence model not found at {model_path}")
             
             # Load the presence model
-            presence_model = torch.load(model_path)
-            presence_model.eval()  # Set to evaluation mode
+            checkpoint = torch.load(os.path.join(model_path, f"presence_model_{model_path}.pt"))
+            presence_model = SingleCellTypePresenceModel()
+            presence_model.load_state_dict(checkpoint['model_state_dict'])
+            presence_model.eval()  
             self.presence_models.append(presence_model)
 
         # ----- Marker Feature Extractor -----
