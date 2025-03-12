@@ -101,7 +101,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                 raise FileNotFoundError(f"Presence model not found at {model_path}")
             
             # Load the presence model
-            checkpoint = torch.load(os.path.join(model_path, f"presence_model_{model_path}.pt"))
+            checkpoint = torch.load(model_path)
             presence_model = SingleCellTypePresenceModel()
             presence_model.load_state_dict(checkpoint['model_state_dict'])
             presence_model.eval()  
