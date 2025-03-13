@@ -70,7 +70,7 @@ class CellTypeDeconvolutionModel(nn.Module):
       - marker_values: Fractional methylation values [B, M]. May be NaN where coverage=0.
       - coverage: Read coverage [B, M], used for weighting valid markers.
     """
-    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir=None, feature_dim=32):
+    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=32):
         """
         Initialize the cell type deconvolution model with separate presence models.
         
@@ -85,47 +85,31 @@ class CellTypeDeconvolutionModel(nn.Module):
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
-        self.use_presence_models = presence_models_dir is not None
 
         # Store cell-type assignment for each marker (not trainable, but placed on same device)
         target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
         self.register_buffer("target_ids", target_ids_t)
 
-        # Load separate presence models if directory provided
-        if self.use_presence_models:
-            self.presence_models = nn.ModuleList()
-            self.marker_masks = []  # Store masks for each cell type
+        # Load separate presence models
+        self.presence_models = nn.ModuleList()
+        
+        for cell_type_idx in range(num_cell_types):
+            model_path = Path(presence_models_dir) / f"presence_model_{cell_type_idx}.pt"
             
-            for cell_type_idx in range(num_cell_types):
-                model_path = Path(presence_models_dir) / f"presence_model_{cell_type_idx}.pt"
-                
-                if not model_path.exists():
-                    raise FileNotFoundError(f"Presence model not found at {model_path}")
-                
-                # Load the model (handling different saving formats)
-                checkpoint = torch.load(model_path)
-                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                    from deep_conv.presence.model import SingleCellTypePresenceModel
-                    presence_model = SingleCellTypePresenceModel()
-                    presence_model.load_state_dict(checkpoint['model_state_dict'])
-                else:
-                    presence_model = checkpoint  # Direct model object
-                
-                presence_model.eval()  # Set to evaluation mode
-                self.presence_models.append(presence_model)
-                
-                # Create and store mask for this cell type's markers
-                marker_mask = (target_ids_t == cell_type_idx)
-                self.marker_masks.append(marker_mask)
-        else:
-            # For backwards compatibility or testing
-            self.presence_detector = nn.Sequential(
-                nn.Linear(num_cell_types * feature_dim, 256),
-                nn.LeakyReLU(),
-                nn.Linear(256, 128),
-                nn.LeakyReLU(),
-                nn.Linear(128, num_cell_types)
-            )
+            if not model_path.exists():
+                raise FileNotFoundError(f"Presence model not found at {model_path}")
+            
+            # Load the model (handling different saving formats)
+            checkpoint = torch.load(model_path)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                from deep_conv.presence.model import SingleCellTypePresenceModel
+                presence_model = SingleCellTypePresenceModel()
+                presence_model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                presence_model = checkpoint  # Direct model object
+            
+            presence_model.eval()  # Set to evaluation mode
+            self.presence_models.append(presence_model)
 
         # ----- Marker Feature Extractor -----
         # Transforms each (scalar) methylation value into a learned feature space of dimension `feature_dim`.
@@ -153,12 +137,12 @@ class CellTypeDeconvolutionModel(nn.Module):
             nn.Linear(128, num_markers)
         )
 
-    def smooth_gating(self, props, probs, min_threshold=0.1, max_threshold=0.8):
+    def smooth_gating(self, props, probs, min_threshold=0.3, max_threshold=0.7):
         """
         Create a smoother gating transition between presence and absence.
-
-        Instead of hard "multiplication by presence_prob",
-        this function uses a sigmoid-like scaling around `min_threshold` -> `max_threshold`.
+        
+        Using a wider transition range (0.3-0.7 instead of 0.1-0.8) and gentler sigmoid scaling
+        for more stable behavior.
 
         Args:
             props (Tensor): [B, C] raw proportions (>= 0)
@@ -172,80 +156,50 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Clip presence probabilities to [0, 1]
         normalised_probs = torch.clamp(probs, min=0.0, max=1.0)
 
-        # Sharpening factor: when (probs - min_threshold) is large, scaling ~1
+        # Sharpening factor with gentler scaling (factor of 5 instead of 10)
         scaling_factor = torch.sigmoid(
-            (normalised_probs - min_threshold) * 10 / (max_threshold - min_threshold)
+            (normalised_probs - min_threshold) * 5 / (max_threshold - min_threshold)
         )
 
-        # Apply the scaling to the original props
+        # Apply scaling directly (simpler approach)
         gated_props = props * scaling_factor
         
         return gated_props
 
-    def concentration_aware_gating(self, props, probs):
-        """
-        Apply concentration-dependent gating.
-
-        The idea: high concentrations can tolerate lower presence confidence, 
-        whereas very low concentrations require higher confidence to remain non-zero.
-
-        Args:
-            props (Tensor): [B, C] raw proportions
-            probs (Tensor): [B, C] presence probabilities
-
-        Returns:
-            gated_props (Tensor): [B, C], re-scaled by a concentration-based confidence margin.
-        """
-        # Baseline confidence needed for each concentration:
-        # if props is big, we lower the required confidence
-        base_confidence = torch.clamp(0.8 - props * 4.0, min=0.2, max=0.8)
-
-        # How much does actual presence_prob exceed the required confidence?
-        confidence_margin = torch.clamp(probs - base_confidence, min=0.0)
-
-        # Convert that margin into a scale factor from [0.1..1.0]
-        scaling = 0.1 + 0.9 * (confidence_margin / (1.0 - base_confidence + 1e-8))
-
-        # Multiply raw proportions by the scale factor
-        gated_props = props * scaling
-
-        return gated_props
-
     def enhanced_gating(self, props, probs):
         """
-        Combine both smooth gating and concentration-aware gating.
-
-        Steps:
-         (1) Apply a smooth gating to avoid abrupt cutoff at certain presence_prob.
-         (2) Apply a concentration-aware gating, so large props can survive 
-             with slightly lower presence_prob, while tiny props need high presence_prob.
-
-        Finally, we ensure a small floor to avoid exact zeros, and re-normalise so each sample sums to 1.
-
+        Apply more stable gating using presence probabilities.
+        
+        This simplified version:
+        1. Uses smooth gating with gentler parameters
+        2. Ensures a minimum floor value
+        3. Normalizes the results
+        
         Args:
-            props (Tensor): [B, C] raw (non-negative) proportions
-            probs (Tensor): [B, C] presence probabilities
+            props (Tensor): [B, C] raw proportions (>= 0)
+            probs (Tensor): [B, C] presence probabilities (0..1)
+            
         Returns:
-            result (Tensor): [B, C], final gated & normalised proportions
+            result (Tensor): [B, C] final gated and normalized proportions
         """
-        # 1) Smooth gating
-        smoothed = self.smooth_gating(props, probs)
-
-        # 2) Concentration-aware gating
-        result = self.concentration_aware_gating(smoothed, probs)
-
-        # Avoid exact zero => maintain some gradient signal for rarely present cell types
-        result = torch.max(result, torch.ones_like(result) * 1e-5)
-
-        # Re-normalise across cell types (sum to 1)
-        result = result / (torch.sum(result, dim=1, keepdim=True) + 1e-8)
-
+        # 1) Apply smooth gating with gentler parameters
+        gated_props = self.smooth_gating(props, probs)
+        
+        # 2) Ensure a minimum floor value to maintain gradients
+        min_value = 1e-5
+        gated_props = torch.max(gated_props, torch.ones_like(gated_props) * min_value)
+        
+        # 3) Normalize to ensure sum to 1
+        result = gated_props / (torch.sum(gated_props, dim=1, keepdim=True) + 1e-8)
+        
         return result
         
     def predict_presence_with_separate_models(self, marker_values, coverage):
         """
         Use the separate pre-trained presence models to predict 
         presence probabilities for each cell type.
+        
+        Each presence model receives only the markers that correspond to its cell type.
         
         Args:
             marker_values (FloatTensor): [B, M], fractional methylation
@@ -264,18 +218,18 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         # For each cell type, use its dedicated presence model
         for cell_type_idx, presence_model in enumerate(self.presence_models):
-            # Create a mask for the markers that belong to this cell type
-            marker_mask = self.marker_masks[cell_type_idx]
-            
-            # Skip if no markers for this cell type
-            if not marker_mask.any():
-                continue
-            
-            # Filter marker_values and coverage to only include markers for this cell type
-            cell_type_marker_values = marker_values[:, marker_mask]
-            cell_type_coverage = coverage[:, marker_mask]
-            
             with torch.no_grad():  # No gradients needed for frozen presence models
+                # Create a mask for the markers that belong to this cell type
+                cell_type_marker_mask = (self.target_ids == cell_type_idx)
+                
+                # Skip if no markers for this cell type
+                if not cell_type_marker_mask.any():
+                    continue
+                
+                # Filter marker_values and coverage to only include markers for this cell type
+                cell_type_marker_values = marker_values[:, cell_type_marker_mask]
+                cell_type_coverage = coverage[:, cell_type_marker_mask]
+                
                 # Pass only the relevant markers to the presence model
                 logits, _ = presence_model(cell_type_marker_values, cell_type_coverage)
                 probs = torch.sigmoid(logits)
@@ -294,7 +248,7 @@ class CellTypeDeconvolutionModel(nn.Module):
             1) Identify valid markers (coverage>0).
             2) Extract features for each valid marker via `marker_feature_extractor`.
             3) Aggregate marker features per cell type, weighting by coverage.
-            4) Predict presence_prob for each cell type (using separate models if available).
+            4) Predict presence_prob for each cell type using separate models.
             5) Predict raw proportions (encoder) => ReLU => gating by presence_prob => normalised.
             6) Reconstruct marker methylation from the final proportions (decoder).
 
@@ -377,20 +331,14 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Flatten aggregator for encoder
         agg_flat = aggregator.view(B, -1)  # [B, C*feature_dim]
 
-        # ----- 3) Presence detection -----
-        if self.use_presence_models:
-            # Use pre-trained presence models
-            presence_probs, presence_logits = self.predict_presence_with_separate_models(marker_values, coverage)
-        else:
-            # Use integrated presence detector (backward compatibility)
-            presence_logits = self.presence_detector(agg_flat)  # [B, C]
-            presence_probs = torch.sigmoid(presence_logits)  # [B, C]
+        # ----- 3) Presence detection using separate models -----
+        presence_probs, presence_logits = self.predict_presence_with_separate_models(marker_values, coverage)
 
         # ----- 4) Proportion Prediction -----
         logits = self.encoder(agg_flat)  # [B, C]
         celltype_props = F.relu(logits)  # ensure >=0
 
-        # Enhanced gating: presence-based gating + concentration-based gating
+        # Enhanced gating with more stable behavior
         celltype_props = self.enhanced_gating(celltype_props, presence_probs)
 
         # ----- 5) Marker reconstruction -----
@@ -531,54 +479,4 @@ class CellTypeDeconvolutionModel(nn.Module):
             np.vstack(presence_probs_list),
             np.vstack(reconstructed_list)
         )
-        
-    @classmethod
-    def from_pretrained(cls, model_path, presence_models_dir=None):
-        """
-        Load a pre-trained model from a checkpoint file.
-        
-        Args:
-            model_path (str): Path to the saved model checkpoint
-            presence_models_dir (str, optional): Directory containing presence models
-                                                (if different from what's in the checkpoint)
-            
-        Returns:
-            CellTypeDeconvolutionModel: Loaded model instance
-        """
-        checkpoint = torch.load(model_path)
-        
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            # Get model parameters from checkpoint
-            if 'config' in checkpoint:
-                config = checkpoint['config']
-                model = cls(
-                    num_markers=config.get('num_markers'),
-                    num_cell_types=config.get('num_cell_types'),
-                    target_ids=config.get('target_ids'),
-                    presence_models_dir=presence_models_dir or config.get('presence_models_dir'),
-                    feature_dim=config.get('feature_dim', 32)
-                )
-            else:
-                # If config not available, try to infer from model_state_dict
-                state_dict = checkpoint['model_state_dict']
-                # Extract parameters however possible from state_dict
-                # This is a simplified approach - might need customization
-                model = cls(
-                    num_markers=state_dict.get('decoder.2.weight').size(0),
-                    num_cell_types=state_dict.get('encoder.2.weight').size(0),
-                    target_ids=state_dict.get('target_ids'),
-                    presence_models_dir=presence_models_dir,
-                    feature_dim=state_dict.get('marker_feature_extractor.0.weight').size(0)
-                )
-            
-            model.load_state_dict(checkpoint['model_state_dict'])
-        else:
-            # Direct model object
-            model = checkpoint
-            if presence_models_dir:
-                # Update presence models directory if provided
-                model.presence_models_dir = presence_models_dir
-                # Would need to reload presence models here
-        
-        return model
-    
+

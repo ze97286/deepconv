@@ -185,52 +185,24 @@ def validate(
     model: nn.Module,
     val_loaders: Dict[str, DataLoader],
     device: torch.device,
-    presence_threshold: float = 0.001
-) -> Tuple[float, Dict[str, Dict[str, float]], Dict[str, float]]:
+    presence_threshold: float = 0.01  # Fixed threshold for consistent metrics
+) -> Tuple[float, Dict[str, Dict[str, float]]]:
     """
-    Evaluate `model` on one or more validation sets. Computes:
-      1) Overall loss and sub-losses for each val set.
-      2) CD4/CD8 performance in high concentration regime.
-      3) Presence detection metrics (precision, recall, F1) at the given presence_threshold.
-      4) Additional threshold-based analyses (like MSE, MAE, detection accuracy) for 
-         multiple alpha thresholds.
-
-    Steps:
-      - Put model in eval mode.
-      - For each val_name, compute the average loss (via `loss_fn`).
-      - Maintain confusion stats for presence detection across cell types.
-      - For each threshold in [0.001, 0.005, 0.01, 0.02, 0.05], re-threshold alpha predictions, 
-        re-normalise, then compute MSE/MAE and "detection accuracy" vs. the ground-truth presence.
-      - Track average error specifically for CD4/CD8 at "high" concentrations (e.g., >3%).
-      - Return:
-          * The average of `total_loss` across all val sets (avg_val_loss),
-          * A nested dict of per-valset metrics,
-          * A dict containing the "cd48 performance" for each val set.
+    Evaluate model on validation sets with consistent metrics.
 
     Args:
-        model (nn.Module):
-            A trained model to be evaluated in `eval()` mode.
-        val_loaders (Dict[str, DataLoader]):
-            A dictionary of named validation loaders, e.g. {"cd4": cd4_loader, "tier1": tier1_loader, ...}.
-        device (torch.device):
-            Device on which to perform forward passes (CPU or GPU).
-        presence_threshold (float):
-            If true_proportion > this threshold, we treat that cell type as "present" in presence detection. 
-            This threshold is also used to label positives in the confusion matrix.
-
+        model: The model to be evaluated
+        val_loaders: Dictionary of validation DataLoaders
+        device: Device to run validation on
+        presence_threshold: Fixed threshold for evaluation metrics
+        
     Returns:
-        avg_val_loss (float):
-            The mean validation loss across all named sets.
-        val_stats (Dict[str, Dict[str, float]]):
-            Maps each val_name -> a dictionary of computed stats (loss, alpha stats, presence metrics, etc.).
-        cd48_performance (Dict[str, float]):
-            Maps val_name -> the average cd4/cd8 error on high concentration samples.
+        avg_val_loss: Average validation loss
+        val_stats: Dictionary of validation statistics
     """
     model.eval()
     
     val_stats = {}
-    cd48_performance = {}
-
     thresholds = [0.001, 0.005, 0.01, 0.02, 0.05]
     threshold_results = {t: {} for t in thresholds}
 
@@ -241,12 +213,6 @@ def validate(
         for val_name, val_loader in val_loaders.items():
             loader_stats = defaultdict(float)
             num_batches = 0
-
-            # We'll track performance for CD4/CD8 at "high" concentrations
-            cd48_metrics = {
-                'high_conc_error': 0.0,
-                'samples_count': 0
-            }
 
             # For presence detection, track confusion across cell types
             num_cell_types = model.num_celltypes
@@ -293,15 +259,6 @@ def validate(
                     presence_logits=presence_logits,
                     presence_threshold=presence_threshold,
                 )
-                
-                # --- Evaluate CD4/CD8 error for "high" concentration
-                #     Suppose indexes [3,4] are CD4/CD8
-                cd48_indices = [3, 4]
-                cd48_mask = (y_true[:, cd48_indices] > 0.03)  # e.g. "high" at 3%
-                if cd48_mask.sum() > 0:
-                    cd48_error = torch.abs(alpha[:, cd48_indices][cd48_mask] - y_true[:, cd48_indices][cd48_mask]).mean()
-                    cd48_metrics['high_conc_error'] += cd48_error.item() * cd48_mask.sum().item()
-                    cd48_metrics['samples_count'] += cd48_mask.sum().item()
                 
                 # --- Presence confusion matrix
                 batch_size = y_true.size(0)
@@ -437,18 +394,10 @@ def validate(
                     loader_stats[key] /= num_batches
             
             val_stats[val_name] = dict(loader_stats)
-            
-            # Store aggregated CD4/CD8 performance
-            if cd48_metrics['samples_count'] > 0:
-                cd48_performance[val_name] = (cd48_metrics['high_conc_error'] 
-                                              / cd48_metrics['samples_count'])
-            else:
-                cd48_performance[val_name] = 0.0
     
     # Compute mean val loss across sets
     avg_val_loss = sum(stats['total_loss'] for stats in val_stats.values()) / len(val_stats)
-    return avg_val_loss, val_stats, cd48_performance
-
+    return avg_val_loss, val_stats
 
 def train_model(
     model: nn.Module,
@@ -465,84 +414,40 @@ def train_model(
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ) -> Tuple[nn.Module, float]:
     """
-    The main training loop for our cell-type deconvolution model, with features:
-      - Warmup for learning rate (first few epochs).
-      - Curriculum on presence-threshold (gradually lowering).
-      - Early stopping based on validation loss (patience).
-      - Additional checkpoint based on CD4/CD8 performance.
-      - Post-training best checkpoint restoration.
-      - W&B integration for logging/plotting if `use_wandb=True`.
-
-    Steps:
-      1) Define an Adam optimiser with two parameter groups: 
-         one for the main model, one for `presence_detector` with 5× LR.
-      2) Optionally track everything in W&B (if `use_wandb=True`).
-      3) For epoch in [1..num_epochs]:
-         - Possibly warm up the LR for the first few epochs.
-         - Decrease presence threshold each epoch in a "curriculum" style.
-         - Train one epoch with `train_epoch()`.
-         - Validate on each of the `val_loaders` with `validate()`.
-         - Evaluate various thresholds for presence detection to find the best F1.
-         - If validation loss is improved, save "best_model.pt".
-         - If cd48 error is improved, save "best_cd48_model.pt".
-         - Apply learning rate scheduling with `scheduler.step()`.
-         - Stop if patience is reached without improvement.
-      4) Load the best model from disk, optionally plot training curves.
+    The main training loop for the cell-type deconvolution model.
+    
+    Features:
+      - Warmup for learning rate (first few epochs)
+      - Early stopping based on validation loss (patience)
+      - Post-training best checkpoint restoration
+      - W&B integration for logging/plotting if `use_wandb=True`
 
     Args:
-        model (nn.Module):
-            The cell-type model to train (must have .num_markers, .num_celltypes, etc.).
-        train_loader (DataLoader):
-            Provides training batches (fraction, coverage, y).
-        val_loaders (Dict[str, DataLoader]):
-            e.g. {"cd4": cd4_loader, "tier1": tier1_loader}, each used in `validate()`.
-        model_path (str):
-            Directory to store best model checkpoints and logs.
-        num_epochs (int):
-            Max number of epochs to train.
-        patience (int):
-            # of epochs to wait for improvement in validation loss before early stopping.
-        lr (float):
-            Base learning rate for the majority of parameters.
-        weight_decay (float):
-            L2 penalty for Adam.
-        use_wandb (bool):
-            If True, logs metrics/plots to Weights & Biases.
-        wandb_project (str):
-            W&B project name.
-        wandb_entity (str):
-            W&B entity (team name or username).
-        device (torch.device):
-            Where to run the training (CPU or GPU).
+        model: The cell-type model to train
+        train_loader: Provides training batches
+        val_loaders: Dictionary of validation loaders
+        model_path: Directory to store best model checkpoints
+        num_epochs: Max number of epochs to train
+        patience: # of epochs to wait for improvement before early stopping
+        lr: Base learning rate
+        weight_decay: L2 penalty for Adam
+        use_wandb: If True, logs metrics/plots to Weights & Biases
+        wandb_project: W&B project name
+        wandb_entity: W&B entity (team name or username)
+        device: Where to run the training (CPU or GPU)
 
     Returns:
-        (model, best_threshold):
-            model: The trained model, loaded from the best validation-loss checkpoint.
-            best_threshold: The chosen presence threshold for "presence vs. absence" classification.
+        model: The trained model, loaded from the best checkpoint
+        best_threshold: The chosen presence threshold for classification
     """
     model = model.to(device)
     
-    # -------------------------
-    # 1) Setup Optimiser and Scheduler
-    # -------------------------
-    # presence_detector submodule has 5× learning rate
-    param_groups = [
-        {
-            'params': [p for n, p in model.named_parameters() 
-                       if 'presence_detector' not in n],
-            'lr': lr
-        },
-        {
-            'params': [p for n, p in model.named_parameters() 
-                       if 'presence_detector' in n],
-            'lr': lr * 5
-        }
-    ]
-    optimiser = optim.Adam(param_groups, weight_decay=weight_decay)
+    # Setup optimizer with a single parameter group
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     
     # Scheduler that reduces LR on plateau of validation loss
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimiser, 
+        optimizer, 
         mode='min', 
         factor=0.5, 
         patience=patience // 2,
@@ -552,9 +457,7 @@ def train_model(
     # Ensure model_path exists
     os.makedirs(model_path, exist_ok=True)
     
-    # -------------------------
-    # 2) Initialise W&B (Optional)
-    # -------------------------
+    # Initialize W&B (Optional)
     if use_wandb:
         config = {
             "model_type": model.__class__.__name__,
@@ -571,60 +474,46 @@ def train_model(
         run = init_wandb(config, project_name=wandb_project, entity=wandb_entity)
         wandb.watch(model, log="all", log_freq=100)
     
-    # -------------------------
-    # 3) Preparation
-    # -------------------------
+    # Preparation
     initial_lr = lr
     warmup_epochs = 5  # # of epochs for linearly ramping LR from 0 to lr
     
     history = defaultdict(list)
     best_val_loss = float('inf')
-    best_cd48_error = float('inf')
     best_epoch = 0
     patience_counter = 0
-    cd48_patience = 0
     
-    # We'll track the "best presence threshold" by evaluating multiple 
-    # thresholds after each epoch and picking the best F1 across val sets.
+    # Track the "best presence threshold" by evaluating multiple thresholds
     best_threshold = 0.01
     best_threshold_f1 = 0.0
     
-    # -------------------------
-    # 4) Main Training Loop
-    # -------------------------
+    # Fixed presence threshold for evaluation metrics
+    eval_presence_threshold = 0.01
+    
+    # Main Training Loop
     for epoch in range(num_epochs):
         print(f"\n🔹 Epoch {epoch + 1}/{num_epochs}")
         
-        # ---- LR Warmup
+        # LR Warmup
         if epoch < warmup_epochs:
             warmup_factor = (epoch + 1) / warmup_epochs
             current_lr = initial_lr * warmup_factor
-            for param_group in optimiser.param_groups:
+            for param_group in optimizer.param_groups:
                 param_group['lr'] = current_lr
             print(f"LR Warmup: {current_lr:.1e}")
         
-        # ---- Presence threshold "curriculum"
-        current_presence_threshold = max(0.005, 0.02 - (epoch * 0.001)) 
-        print(f"Current presence threshold: {current_presence_threshold:.3f}")
+        # Training for one epoch
+        train_stats = train_epoch(model, train_loader, optimizer, device)
         
-        # If no improvement for half of the patience, reset LR
-        if epoch - best_epoch > patience // 2 and patience_counter >= patience // 2:
-            print("⚠️ Resetting learning rate to encourage exploration")
-            for param_group in optimiser.param_groups:
-                param_group['lr'] = initial_lr
-        
-        # ---- 4a) Training for one epoch
-        train_stats = train_epoch(model, train_loader, optimiser, device)
-        
-        # ---- 4b) Validation
-        avg_val_loss, val_stats, cd48_performance = validate(
+        # Validation with fixed threshold for consistent metrics
+        avg_val_loss, val_stats = validate(
             model,
             val_loaders,
             device,
-            presence_threshold=current_presence_threshold
+            presence_threshold=eval_presence_threshold  # Fixed threshold for evaluation
         )
         
-        # ---- 4c) Evaluate multiple thresholds for best F1
+        # Evaluate multiple thresholds for best F1
         thresholds = [0.001, 0.005, 0.01, 0.02, 0.05]
         threshold_f1_scores = {t: 0.0 for t in thresholds}
         
@@ -643,25 +532,14 @@ def train_model(
                 best_threshold = t
                 print(f"New best threshold: {best_threshold} (F1: {best_threshold_f1:.4f})")
         
-        # ---- 4d) Summarise CD4/CD8 performance
-        if cd48_performance:
-            avg_cd48_error = sum(cd48_performance.values()) / len(cd48_performance)
-            print(f"CD4/CD8 High Conc Error: {avg_cd48_error:.6f}")
-        else:
-            avg_cd48_error = float('inf')
-        
-        # ---- 4e) Record stats into `history`
+        # Record stats into `history`
         for key, value in train_stats.items():
             history[key].append(value)
         for val_name, stats in val_stats.items():
             for k, v in stats.items():
                 history[f"{val_name}/{k}"].append(v)
-        if cd48_performance:
-            for val_name, error in cd48_performance.items():
-                history[f"{val_name}/cd48_error"].append(error)
-            history["avg_cd48_error"].append(avg_cd48_error)
         
-        # ---- 4f) Print summary
+        # Print summary
         print(f"\n🔹 Epoch {epoch + 1} Summary:")
         print(f"Train Loss: {train_stats['total_loss']:.8f} | Grad Norm: {train_stats['grad_norm']:.8f}")
         if 'alpha_stats/mean' in train_stats:
@@ -673,15 +551,14 @@ def train_model(
                 print(f"{val_name} Detection: P={stats['avg_precision']:.4f}, "
                       f"R={stats['avg_recall']:.4f}, F1={stats['avg_f1']:.4f}")
         
-        # ---- 4g) Log to W&B
+        # Log to W&B
         if use_wandb:
             wandb_logs = {
                 "epoch": epoch,
                 "train/loss": train_stats['total_loss'],
                 "train/grad_norm": train_stats['grad_norm'],
                 "val/avg_loss": avg_val_loss,
-                "lr": optimiser.param_groups[0]['lr'],
-                "presence_threshold": current_presence_threshold,
+                "lr": optimizer.param_groups[0]['lr'],
                 "best_threshold": best_threshold,
                 "best_threshold_f1": best_threshold_f1
             }
@@ -690,12 +567,6 @@ def train_model(
                 for k, v in stats.items():
                     wandb_logs[f"val/{val_name}/{k}"] = v
             
-            # Log CD4/CD8 errors
-            if cd48_performance:
-                for val_name, error in cd48_performance.items():
-                    wandb_logs[f"cd48/{val_name}_error"] = error
-                wandb_logs["cd48/avg_error"] = avg_cd48_error
-            
             # Table for threshold F1
             wandb_logs["threshold_comparison"] = wandb.Table(
                 data=[[t, threshold_f1_scores[t]] for t in thresholds],
@@ -703,10 +574,10 @@ def train_model(
             )
             wandb.log(wandb_logs)
         
-        # ---- 4h) Scheduler step
+        # Scheduler step
         scheduler.step(avg_val_loss)
         
-        # ---- 4i) Early stopping on avg_val_loss
+        # Early stopping on avg_val_loss
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
@@ -716,7 +587,7 @@ def train_model(
             checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
-                'optimiser_state_dict': optimiser.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
                 'best_threshold': best_threshold,
@@ -728,59 +599,26 @@ def train_model(
         else:
             patience_counter += 1
         
-        # ---- 4j) Also track best CD4/CD8 performance
-        if cd48_performance and avg_cd48_error < best_cd48_error:
-            best_cd48_error = avg_cd48_error
-            cd48_patience = 0
-            print(f"New best CD4/CD8 performance: {best_cd48_error:.6f}")
-            
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimiser_state_dict': optimiser.state_dict(),
-                'best_cd48_error': best_cd48_error,
-                'best_threshold': best_threshold
-            }
-            cd48_model_path = os.path.join(model_path, "best_cd48_model.pt")
-            torch.save(checkpoint, cd48_model_path)
-            if use_wandb:
-                wandb.save(cd48_model_path)
-        else:
-            cd48_patience += 1
-        
-        # ---- 4k) Check patience for early stopping
+        # Check patience for early stopping
         if patience_counter >= patience:
             print(f"\n⚠️ Early stopping triggered after {epoch + 1} epochs")
             break
     
-    # -------------------------
-    # 5) Load the Best Model
-    # -------------------------
+    # Load the Best Model
     print("Loading best model (best overall validation loss)")
     checkpoint = torch.load(os.path.join(model_path, "best_model.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    # -------------------------
-    # 6) Plot Training History
-    # -------------------------
+    # Plot Training History
     plot_training_history(dict(history), os.path.join(model_path, "model_training"))
     
-    # If we have a special CD4/CD8 checkpoint, let user know
-    if os.path.exists(os.path.join(model_path, "best_cd48_model.pt")):
-        print(f"\nNOTE: A model optimised for CD4/CD8 performance is available at:")
-        print(f"      {os.path.join(model_path, 'best_cd48_model.pt')}")
-        print(f"      (Best CD4/CD8 error: {best_cd48_error:.6f})")
-    
-    # Summarise final recommended presence threshold
+    # Summarize final recommended presence threshold
     print(f"\nRecommended threshold for inference: {best_threshold}")
     print(f"(Based on best F1 score: {best_threshold_f1:.4f})")
     
-    # -------------------------
-    # 7) Cleanup wandb
-    # -------------------------
+    # Cleanup wandb
     if use_wandb:
         wandb.run.summary["best_val_loss"] = best_val_loss
-        wandb.run.summary["best_cd48_error"] = best_cd48_error
         wandb.run.summary["best_epoch"] = best_epoch
         wandb.run.summary["total_epochs"] = epoch + 1
         wandb.run.summary["best_threshold"] = best_threshold
@@ -802,7 +640,6 @@ def train_model(
         wandb.finish()
     
     return model, best_threshold
-
 
 def plot_training_history(history: Dict[str, List[float]], save_path: str):
     """
