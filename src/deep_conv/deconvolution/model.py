@@ -169,30 +169,23 @@ class CellTypeDeconvolutionModel(nn.Module):
     # Replace the enhanced_gating method in CellTypeDeconvolutionModel
     def enhanced_gating(self, props, probs):
         """
-        Apply more stable gating using presence probabilities.
-        
-        This improved version:
-        1. Uses a smoother transition with better gradient flow
-        2. Ensures a higher minimum floor value
-        3. Normalizes the results consistently
-        
-        Args:
-            props (Tensor): [B, C] raw proportions (>= 0)
-            probs (Tensor): [B, C] presence probabilities (0..1)
-                
-        Returns:
-            result (Tensor): [B, C] final gated and normalized proportions
+        Apply balanced gating that preserves proportion integrity
         """
-        # 1) Apply smooth gating with gentler parameters (center at 0.4 instead of 0.5)
-        # This prevents abrupt transitions that can cause training/eval discrepancies
-        scaling_factor = torch.sigmoid(8 * (probs - 0.4))
+        # 1. Apply sigmoid-based scaling with a gentler transition centered at 0.4
+        scaling_factor = torch.sigmoid(5 * (probs - 0.4))
         
-        # 2) Ensure a higher minimum floor value for stable gradients
-        min_value = 1e-4  # Increased from the previous 1e-5
+        # 2. Apply scaling but with a higher minimum for detected cell types
+        # This prevents completely zeroing out low-proportion cell types
+        detected_mask = (probs > 0.5)
         gated_props = props * scaling_factor
-        gated_props = torch.max(gated_props, torch.ones_like(gated_props) * min_value)
         
-        # 3) Normalize to ensure sum to 1
+        # 3. Add minimum floor only for detected cell types to preserve their representation
+        min_floor = 0.001
+        gated_props = torch.where(detected_mask, 
+                                torch.maximum(gated_props, torch.ones_like(gated_props) * min_floor),
+                                gated_props)
+        
+        # 4. Normalize to ensure sum to 1
         result = gated_props / (torch.sum(gated_props, dim=1, keepdim=True) + 1e-8)
         
         return result
@@ -200,36 +193,37 @@ class CellTypeDeconvolutionModel(nn.Module):
     # Add a new method for consistent prediction with detailed outputs
     def predict_with_consistent_gating(self, marker_values, coverage, batch_size=256, device=None, presence_threshold=0.5):
         """
-        Enhanced prediction function with consistent presence thresholding.
-        
-        Args:
-            marker_values: Marker methylation values [N, M]
-            coverage: Coverage values [N, M]
-            batch_size: Batch size for processing
-            device: Device to run inference on (defaults to model's device)
-            presence_threshold: Threshold for presence detection
-                
-        Returns:
-            numpy.ndarray: Cell type proportions [N, C]
+        Enhanced prediction with balanced gating for evaluation
         """
-        # Get the detailed predictions
+        # Get detailed predictions
         props, presence_probs, _ = self.predict_with_details(marker_values, coverage, batch_size, device)
         
-        # Apply consistent presence threshold
-        present_mask = (presence_probs > presence_threshold)
-        props_gated = np.copy(props)
+        # Convert to tensors for processing
+        props_tensor = torch.tensor(props, dtype=torch.float32)
+        probs_tensor = torch.tensor(presence_probs, dtype=torch.float32)
         
-        # Zero out cell types below threshold
-        props_gated[~present_mask] = 0.0
+        # Use same gating logic as in training
+        detected_mask = (probs_tensor > presence_threshold)
         
-        # Re-normalize to sum to 1
-        row_sums = props_gated.sum(axis=1, keepdims=True)
+        # Apply sigmoid-based scaling
+        scaling_factor = torch.sigmoid(5 * (probs_tensor - 0.4))
+        gated_props = props_tensor * scaling_factor
+        
+        # Add minimum floor for detected cell types
+        min_floor = 0.001
+        gated_props = torch.where(detected_mask, 
+                                torch.maximum(gated_props, torch.ones_like(gated_props) * min_floor),
+                                gated_props)
+        
+        # Normalize
+        row_sums = gated_props.sum(dim=1, keepdim=True)
         valid_rows = (row_sums > 0).squeeze()
-        if np.any(valid_rows):
-            props_gated[valid_rows] /= row_sums[valid_rows]
+        if torch.any(valid_rows):
+            gated_props[valid_rows] /= row_sums[valid_rows]
         
-        return props_gated
-    
+        return gated_props.numpy()
+
+
     def predict_presence_with_separate_models(self, marker_values, coverage):
         """
         Use the separate pre-trained presence models to predict 
