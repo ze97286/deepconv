@@ -552,7 +552,7 @@ def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, min_cpgs=4, th
         y_true_df, predictions_df, y_dilutions: DataFrames with results
     """
     # Prepare data
-    X_val, coverage_val, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions, min_cpgs, threads)
+    X_val, coverage_val, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions)
     
     # First run the debug analysis to get insights
     debug_props, debug_probs = debug_model_predictions(model, X_val, coverage_val, y_true_df, threshold=0.005)

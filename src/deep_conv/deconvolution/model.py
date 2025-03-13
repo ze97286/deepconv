@@ -59,13 +59,6 @@ class TissueDeconvolutionDataset(Dataset):
             item['y'] = self.y[idx]
         return item  
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset
-import numpy as np
-from pathlib import Path
-
 class CellTypeDeconvolutionModel(nn.Module):
     """
     A neural network for predicting cell-type proportions from cfDNA methylation data.
