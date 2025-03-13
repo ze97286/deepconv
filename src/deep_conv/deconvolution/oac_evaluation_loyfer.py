@@ -449,7 +449,7 @@ def sample_to_dilution(sample):
     return int(sample.split("_")[1][3:])-1
     
 
-def prepare_deconv_input(atlas_path, eval_pat_dir, dilutions, min_cpgs=4,threads=10):
+def prepare_deconv_input(atlas_path, eval_pat_dir, dilutions):
     atlas = pd.read_csv(atlas_path, sep="\t").dropna()
     names = set(atlas.name.unique())
     # load marker values, coverage, and ground truth
