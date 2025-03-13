@@ -230,6 +230,52 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         return props_gated
     
+    def predict_presence_with_separate_models(self, marker_values, coverage):
+        """
+        Use the separate pre-trained presence models to predict 
+        presence probabilities for each cell type.
+        
+        Each presence model receives only the markers that correspond to its cell type.
+        
+        Args:
+            marker_values (FloatTensor): [B, M], fractional methylation
+            coverage (FloatTensor): [B, M], read coverage
+            
+        Returns:
+            presence_probs (FloatTensor): [B, C], presence probability for each cell type
+            presence_logits (FloatTensor): [B, C], raw logits before sigmoid
+        """
+        B = marker_values.shape[0]
+        C = self.num_celltypes
+        
+        # Initialize output tensors
+        presence_probs = torch.zeros(B, C, device=marker_values.device)
+        presence_logits = torch.zeros(B, C, device=marker_values.device)
+        
+        # For each cell type, use its dedicated presence model
+        for cell_type_idx, presence_model in enumerate(self.presence_models):
+            with torch.no_grad():  # No gradients needed for frozen presence models
+                # Create a mask for the markers that belong to this cell type
+                cell_type_marker_mask = (self.target_ids == cell_type_idx)
+                
+                # Skip if no markers for this cell type
+                if not cell_type_marker_mask.any():
+                    continue
+                
+                # Filter marker_values and coverage to only include markers for this cell type
+                cell_type_marker_values = marker_values[:, cell_type_marker_mask]
+                cell_type_coverage = coverage[:, cell_type_marker_mask]
+                
+                # Pass only the relevant markers to the presence model
+                logits, _ = presence_model(cell_type_marker_values, cell_type_coverage)
+                probs = torch.sigmoid(logits)
+                
+                # Store results
+                presence_logits[:, cell_type_idx] = logits.squeeze(-1)
+                presence_probs[:, cell_type_idx] = probs.squeeze(-1)
+                
+        return presence_probs, presence_logits
+    
     def forward(self, marker_values: torch.Tensor, coverage: torch.Tensor):
         """
         Forward pass to predict cell-type proportions from methylation + coverage.
