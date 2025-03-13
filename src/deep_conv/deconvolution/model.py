@@ -59,16 +59,19 @@ class TissueDeconvolutionDataset(Dataset):
             item['y'] = self.y[idx]
         return item  
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset
+import numpy as np
+from pathlib import Path
+
 class CellTypeDeconvolutionModel(nn.Module):
     """
     A neural network for predicting cell-type proportions from cfDNA methylation data.
     
-    This version uses pre-trained SingleCellTypePresenceModel instances for each cell type
-    instead of an embedded presence detector network.
-
-    Key inputs at forward pass:
-      - marker_values: Fractional methylation values [B, M]. May be NaN where coverage=0.
-      - coverage: Read coverage [B, M], used for weighting valid markers.
+    This version integrates pre-trained SingleCellTypePresenceModel instances as features
+    rather than using them as binary gates.
     """
     def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=32):
         """
@@ -112,7 +115,7 @@ class CellTypeDeconvolutionModel(nn.Module):
             self.presence_models.append(presence_model)
 
         # ----- Marker Feature Extractor -----
-        # Transforms each (scalar) methylation value into a learned feature space of dimension `feature_dim`.
+        # Transforms each (scalar) methylation value into a learned feature space
         self.marker_feature_extractor = nn.Sequential(
             nn.Linear(1, feature_dim),
             nn.LeakyReLU(),
@@ -120,109 +123,21 @@ class CellTypeDeconvolutionModel(nn.Module):
         )
 
         # ----- Encoder (Proportion Prediction) -----
-        # Input: aggregated features (C * feature_dim).
-        # Output: raw concentration logits for each cell type, ReLU => non-negative.
+        # Updated to take both aggregated features AND presence probabilities
         self.encoder = nn.Sequential(
-            nn.Linear(num_cell_types * feature_dim, 128),
+            nn.Linear(num_cell_types * feature_dim + num_cell_types, 128),  # +C for presence probs
+            nn.LeakyReLU(),
+            nn.Linear(128, 128),  # Additional layer for more expressive capacity
             nn.LeakyReLU(),
             nn.Linear(128, num_cell_types)
         )
 
         # ----- Decoder (Marker Reconstruction) -----
-        # Input: predicted cell-type proportions [B, C].
-        # Output: predicted marker methylation [B, M].
         self.decoder = nn.Sequential(
             nn.Linear(num_cell_types, 128),
             nn.LeakyReLU(),
             nn.Linear(128, num_markers)
         )
-
-    def smooth_gating(self, props, probs, min_threshold=0.3, max_threshold=0.7):
-        """
-        Create a smoother gating transition between presence and absence.
-        
-        Using a wider transition range (0.3-0.7 instead of 0.1-0.8) and gentler sigmoid scaling
-        for more stable behavior.
-
-        Args:
-            props (Tensor): [B, C] raw proportions (>= 0)
-            probs (Tensor): [B, C] presence probabilities (0..1)
-            min_threshold (float): Below this probability, props are heavily reduced
-            max_threshold (float): Above this probability, props are minimally reduced
-
-        Returns:
-            gated_props (Tensor): [B, C] after smooth gating
-        """
-        # Clip presence probabilities to [0, 1]
-        normalised_probs = torch.clamp(probs, min=0.0, max=1.0)
-
-        # Sharpening factor with gentler scaling (factor of 5 instead of 10)
-        scaling_factor = torch.sigmoid(
-            (normalised_probs - min_threshold) * 5 / (max_threshold - min_threshold)
-        )
-
-        # Apply scaling directly (simpler approach)
-        gated_props = props * scaling_factor
-        
-        return gated_props
-
-    # Replace the enhanced_gating method in CellTypeDeconvolutionModel
-    def enhanced_gating(self, props, probs):
-        """
-        Apply balanced gating that preserves proportion integrity
-        """
-        # 1. Apply sigmoid-based scaling with a gentler transition centered at 0.4
-        scaling_factor = torch.sigmoid(5 * (probs - 0.4))
-        
-        # 2. Apply scaling but with a higher minimum for detected cell types
-        # This prevents completely zeroing out low-proportion cell types
-        detected_mask = (probs > 0.5)
-        gated_props = props * scaling_factor
-        
-        # 3. Add minimum floor only for detected cell types to preserve their representation
-        min_floor = 0.001
-        gated_props = torch.where(detected_mask, 
-                                torch.maximum(gated_props, torch.ones_like(gated_props) * min_floor),
-                                gated_props)
-        
-        # 4. Normalize to ensure sum to 1
-        result = gated_props / (torch.sum(gated_props, dim=1, keepdim=True) + 1e-8)
-        
-        return result
-
-    # Add a new method for consistent prediction with detailed outputs
-    def predict_with_consistent_gating(self, marker_values, coverage, batch_size=256, device=None, presence_threshold=0.5):
-        """
-        Enhanced prediction with balanced gating for evaluation
-        """
-        # Get detailed predictions
-        props, presence_probs, _ = self.predict_with_details(marker_values, coverage, batch_size, device)
-        
-        # Convert to tensors for processing
-        props_tensor = torch.tensor(props, dtype=torch.float32)
-        probs_tensor = torch.tensor(presence_probs, dtype=torch.float32)
-        
-        # Use same gating logic as in training
-        detected_mask = (probs_tensor > presence_threshold)
-        
-        # Apply sigmoid-based scaling
-        scaling_factor = torch.sigmoid(5 * (probs_tensor - 0.4))
-        gated_props = props_tensor * scaling_factor
-        
-        # Add minimum floor for detected cell types
-        min_floor = 0.001
-        gated_props = torch.where(detected_mask, 
-                                torch.maximum(gated_props, torch.ones_like(gated_props) * min_floor),
-                                gated_props)
-        
-        # Normalize
-        row_sums = gated_props.sum(dim=1, keepdim=True)
-        valid_rows = (row_sums > 0).squeeze()
-        if torch.any(valid_rows):
-            gated_props[valid_rows] /= row_sums[valid_rows]
-        
-        return gated_props.numpy()
-
 
     def predict_presence_with_separate_models(self, marker_values, coverage):
         """
@@ -269,7 +184,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                 presence_probs[:, cell_type_idx] = probs.squeeze(-1)
                 
         return presence_probs, presence_logits
-    
+
     def forward(self, marker_values: torch.Tensor, coverage: torch.Tensor):
         """
         Forward pass to predict cell-type proportions from methylation + coverage.
@@ -279,8 +194,9 @@ class CellTypeDeconvolutionModel(nn.Module):
             2) Extract features for each valid marker via `marker_feature_extractor`.
             3) Aggregate marker features per cell type, weighting by coverage.
             4) Predict presence_prob for each cell type using separate models.
-            5) Predict raw proportions (encoder) => ReLU => gating by presence_prob => normalised.
-            6) Reconstruct marker methylation from the final proportions (decoder).
+            5) Combine aggregated features with presence information for proportion prediction.
+            6) Apply soft presence-informed scaling and normalize.
+            7) Reconstruct marker methylation from the final proportions.
 
         Args:
             marker_values (FloatTensor): [B, M], fractional methylation (NaN if coverage=0).
@@ -291,7 +207,7 @@ class CellTypeDeconvolutionModel(nn.Module):
             reconstructed (FloatTensor): [B, M], the model's reconstruction of marker methylation.
             valid_mask (BoolTensor): [B, M], True where coverage>0.
             presence_probs (FloatTensor): [B, C], presence probability for each cell type.
-            presence_logits (FloatTensor): [B, C], raw logits before sigmoid in presence_probs.
+            presence_logits (FloatTensor): [B, C], raw logits before sigmoid.
         """
         B, M = marker_values.shape
         C = self.num_celltypes
@@ -328,7 +244,6 @@ class CellTypeDeconvolutionModel(nn.Module):
         celltype_idx = self.target_ids[marker_idx]
 
         # ----- 1) Marker Feature Extraction -----
-        # For valid marker values, get a learned feature vector
         marker_values_valid_2d = marker_values_valid.unsqueeze(1)  # [N, 1]
         features_valid = self.marker_feature_extractor(marker_values_valid_2d)  # [N, feature_dim]
 
@@ -364,14 +279,22 @@ class CellTypeDeconvolutionModel(nn.Module):
         # ----- 3) Presence detection using separate models -----
         presence_probs, presence_logits = self.predict_presence_with_separate_models(marker_values, coverage)
 
-        # ----- 4) Proportion Prediction -----
-        logits = self.encoder(agg_flat)  # [B, C]
-        celltype_props = F.relu(logits)  # ensure >=0
+        # ----- 4) Integrate presence information with aggregated features -----
+        combined_features = torch.cat([agg_flat, presence_probs], dim=1)
 
-        # Enhanced gating with more stable behavior
-        celltype_props = self.enhanced_gating(celltype_props, presence_probs)
+        # ----- 5) Proportion Prediction with integrated presence -----
+        logits = self.encoder(combined_features)  # [B, C]
+        celltype_props_raw = F.relu(logits)  # ensure >=0
+        
+        # Apply soft gating that preserves proportion relationships
+        scaling_factor = 0.2 + 0.8 * torch.sigmoid(3 * (presence_probs - 0.5))
+        celltype_props_gated = celltype_props_raw * scaling_factor
+        
+        # Normalize to ensure sum to 1
+        sum_props = torch.sum(celltype_props_gated, dim=1, keepdim=True)
+        celltype_props = celltype_props_gated / (sum_props + 1e-8)
 
-        # ----- 5) Marker reconstruction -----
+        # ----- 6) Marker reconstruction -----
         reconstructed = self.decoder(celltype_props)  # [B, M]
 
         return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
@@ -422,7 +345,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                 batch_X = marker_values[start_idx:end_idx].to(device)
                 batch_coverage = coverage[start_idx:end_idx].to(device)
                 
-                # Forward pass through the model
+                # Forward pass through the model - use only the proportions result
                 props, *_ = self.forward(batch_X, batch_coverage)
                 
                 # Move to CPU numpy and store
@@ -509,4 +432,3 @@ class CellTypeDeconvolutionModel(nn.Module):
             np.vstack(presence_probs_list),
             np.vstack(reconstructed_list)
         )
-

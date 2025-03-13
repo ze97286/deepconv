@@ -10,18 +10,18 @@ def loss_fn(
     valid_mask: torch.Tensor,
     presence_probs: torch.Tensor,
     presence_logits: torch.Tensor,
-    alpha: float = 0.95,
-    beta: float = 0.05,
-    gamma: float = 0.0001,
+    alpha: float = 0.92,        # Slightly reduced to better balance components
+    beta: float = 0.07,         # Slightly increased for reconstruction
+    gamma: float = 0.01,        # Increased to encourage sparsity  
     presence_threshold: float = 0.005,
     low_snr_indices=[3, 4, 9, 11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ):
     """
-    Loss function for deconvolution model with pre-trained presence models.
+    Loss function for deconvolution model with integrated presence models.
     
-    This loss function focuses on proportion accuracy and marker reconstruction,
-    without trying to train the presence models (which are pre-trained and frozen).
+    This updated version focuses on proportion accuracy with presence models
+    treated as features rather than binary gates.
 
     Args:
         pred_props (FloatTensor): [B, C]
@@ -73,15 +73,15 @@ def loss_fn(
     med_conc_mask = (true_props > 0.01) & (true_props <= 0.05)
     high_conc_mask = true_props > 0.05
     
-    # Scale importance by concentration range
-    importance_weights = torch.where(low_conc_mask, 2.0, importance_weights)   # Lower weight than before
-    importance_weights = torch.where(med_conc_mask, 1.5, importance_weights)   # Lower weight than before
+    # Scale importance by concentration range - gentler scaling
+    importance_weights = torch.where(low_conc_mask, 1.8, importance_weights)   # Lower weight than before
+    importance_weights = torch.where(med_conc_mask, 1.4, importance_weights)   # Lower weight than before
     importance_weights = torch.where(high_conc_mask, 1.0, importance_weights)
     
-    # Special handling for low-SNR cell types
+    # Special handling for low-SNR cell types - less aggressive
     for idx in low_snr_indices:
         capped_fraction = torch.clamp(true_props[:, idx], max=0.10)
-        importance_weights[:, idx] *= (1.0 + 20.0 * capped_fraction)  # Reduced multiplier
+        importance_weights[:, idx] *= (1.0 + 10.0 * capped_fraction)  # Reduced multiplier
     
     # Calculate underestimation/overestimation
     underestimation = F.relu(true_props - pred_props)  # only positive if true>pred
@@ -92,10 +92,10 @@ def loss_fn(
     low_snr_mask[:, low_snr_indices] = 1.0
     
     # Apply moderate penalty for underestimation 
-    underestimation_penalty = 1.5 * underestimation  # Reduced from 2.0
+    underestimation_penalty = 1.3 * underestimation  # Reduced from 1.5
     
     # Less aggressive special penalty for low-SNR underestimation
-    low_snr_under_penalty = low_snr_mask * underestimation * 1.0  # Reduced from 1.5
+    low_snr_under_penalty = low_snr_mask * underestimation * 0.7  # Reduced further
     
     # Combine into weighted errors
     weighted_errors = importance_weights * (cell_errors + underestimation_penalty + low_snr_under_penalty)

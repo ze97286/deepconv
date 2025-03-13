@@ -533,17 +533,10 @@ def debug_model_predictions(model, X_val, coverage_val, y_true_df, threshold=0.0
         
         print(f"\nAverage F1 Score: {sum(f1_scores)/len(f1_scores):.4f}")
         
-        # Analyze gating effect
-        raw_props_sum = torch.sum(props, dim=1).mean().item()
-        print(f"\n----- GATING ANALYSIS -----")
-        print(f"Average sum of proportions after gating: {raw_props_sum:.4f}")
-        
-        if raw_props_sum < 0.9:
-            print("WARNING: The sum of proportions is low, suggesting excessive gating")
-        
         return props, presence_probs
+    
 
-def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, presence_threshold=0.5, min_cpgs=4, threads=10):
+def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, min_cpgs=4, threads=10):
     """
     Consistent evaluation function that matches training behavior.
     
@@ -552,31 +545,30 @@ def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, presence_thres
         eval_pat_dir: Directory with evaluation data
         model: The model to evaluate
         dilutions: Dilution information
-        presence_threshold: Threshold for presence detection (should match training)
         min_cpgs: Minimum CpGs required
         threads: Number of threads to use
         
     Returns:
         y_true_df, predictions_df, y_dilutions: DataFrames with results
     """
-    X_val, coverage_val, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions)
+    # Prepare data
+    X_val, coverage_val, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions, min_cpgs, threads)
     
     # First run the debug analysis to get insights
     debug_props, debug_probs = debug_model_predictions(model, X_val, coverage_val, y_true_df, threshold=0.005)
     
-    # Use the enhanced prediction method with explicit presence threshold
-    predictions = model.predict_with_consistent_gating(X_val, coverage_val, presence_threshold=presence_threshold)
+    # Use the built-in prediction method that now properly integrates presence information
+    predictions = model.predict(X_val, coverage_val)
     predictions_df = pd.DataFrame(predictions, columns=list(y_true_df.columns))
     
-    # Compare raw vs gated predictions
-    raw_predictions = model.predict(X_val, coverage_val)
-    raw_predictions_df = pd.DataFrame(raw_predictions, columns=list(y_true_df.columns))
-    
+    # Log summary statistics
     print("\n===== PREDICTION SUMMARY =====")
-    print(f"Raw predictions mean: {raw_predictions.mean():.6f}")
-    print(f"Gated predictions mean: {predictions.mean():.6f}")
+    print(f"Predictions mean: {predictions.mean():.6f}")
+    print(f"Max prediction: {predictions.max():.6f}")
+    print(f"Min prediction: {predictions.min():.6f}")
     
     return y_true_df, predictions_df, y_dilutions
+
 
 def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type, out_dir,cd_tissue_mapping, model_name=None,ichorCNA=None, clinical_benefit=None, cancer_type=None, presence_model_name=None):
     pat_dir = Path(pat_dir)
@@ -773,7 +765,7 @@ def train_and_evaluate(model_name, presence_model_name):
 
 
 # 2 
-def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True, presence_threshold=0.5):
+def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True):
     """
     Evaluate deepconv model with consistent parameters.
     
@@ -781,7 +773,6 @@ def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True
         model_name: Name of the model directory
         presence_model_name: Name of the presence model directory
         use_low_depth: Whether to use low depth data
-        presence_threshold: Threshold for presence detection
     """
     suffix = "/"
     if use_low_depth:
@@ -810,33 +801,31 @@ def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True
     # Print the 'best_threshold' if it exists in the checkpoint
     if 'best_threshold' in checkpoint:
         print(f"Model's best threshold from training: {checkpoint['best_threshold']}")
-        # Use this threshold if available
-        presence_threshold = checkpoint.get('best_threshold', presence_threshold)
-    print(f"Using presence threshold: {presence_threshold}")
     
     # Evaluation paths
     deepconv_eval_pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
     deepconv_eval_pat_dir_oac = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
     
-    # Run evaluations with consistent threshold
+    # Run evaluations
     print("\n===== EVALUATING T-CELLS =====")
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(
-        deepconv_atlas_path, deepconv_eval_pat_dir_tcells, model, tcell_dilutions, presence_threshold
+        deepconv_atlas_path, deepconv_eval_pat_dir_tcells, model, tcell_dilutions
     )
     plot_deconvolution_evaluation(
         y_true_df, predictions_df, y_dilutions['dilution'], 
-        deepconv_eval_pat_dir_tcells+f"{model_name}_{presence_threshold}/"
+        deepconv_eval_pat_dir_tcells+f"{model_name}/"
     )
     
     print("\n===== EVALUATING OAC =====")
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(
-        deepconv_atlas_path, deepconv_eval_pat_dir_oac, model, oac_dilutions, presence_threshold
+        deepconv_atlas_path, deepconv_eval_pat_dir_oac, model, oac_dilutions
     )
     plot_deconvolution_evaluation(
         y_true_df, predictions_df, y_dilutions['dilution'], 
-        deepconv_eval_pat_dir_oac+f"{model_name}_{presence_threshold}/"
+        deepconv_eval_pat_dir_oac+f"{model_name}/"
     )
 
+    
 # 3
 def run_oac_analysis(model_name, presence_model_name):
     out_base_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis"
