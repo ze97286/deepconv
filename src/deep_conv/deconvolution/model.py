@@ -166,80 +166,70 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         return gated_props
 
+    # Replace the enhanced_gating method in CellTypeDeconvolutionModel
     def enhanced_gating(self, props, probs):
         """
         Apply more stable gating using presence probabilities.
         
-        This simplified version:
-        1. Uses smooth gating with gentler parameters
-        2. Ensures a minimum floor value
-        3. Normalizes the results
+        This improved version:
+        1. Uses a smoother transition with better gradient flow
+        2. Ensures a higher minimum floor value
+        3. Normalizes the results consistently
         
         Args:
             props (Tensor): [B, C] raw proportions (>= 0)
             probs (Tensor): [B, C] presence probabilities (0..1)
-            
+                
         Returns:
             result (Tensor): [B, C] final gated and normalized proportions
         """
-        # 1) Apply smooth gating with gentler parameters
-        gated_props = self.smooth_gating(props, probs)
+        # 1) Apply smooth gating with gentler parameters (center at 0.4 instead of 0.5)
+        # This prevents abrupt transitions that can cause training/eval discrepancies
+        scaling_factor = torch.sigmoid(8 * (probs - 0.4))
         
-        # 2) Ensure a minimum floor value to maintain gradients
-        min_value = 1e-5
+        # 2) Ensure a higher minimum floor value for stable gradients
+        min_value = 1e-4  # Increased from the previous 1e-5
+        gated_props = props * scaling_factor
         gated_props = torch.max(gated_props, torch.ones_like(gated_props) * min_value)
         
         # 3) Normalize to ensure sum to 1
         result = gated_props / (torch.sum(gated_props, dim=1, keepdim=True) + 1e-8)
         
         return result
-        
-    def predict_presence_with_separate_models(self, marker_values, coverage):
+
+    # Add a new method for consistent prediction with detailed outputs
+    def predict_with_consistent_gating(self, marker_values, coverage, batch_size=256, device=None, presence_threshold=0.5):
         """
-        Use the separate pre-trained presence models to predict 
-        presence probabilities for each cell type.
-        
-        Each presence model receives only the markers that correspond to its cell type.
+        Enhanced prediction function with consistent presence thresholding.
         
         Args:
-            marker_values (FloatTensor): [B, M], fractional methylation
-            coverage (FloatTensor): [B, M], read coverage
-            
+            marker_values: Marker methylation values [N, M]
+            coverage: Coverage values [N, M]
+            batch_size: Batch size for processing
+            device: Device to run inference on (defaults to model's device)
+            presence_threshold: Threshold for presence detection
+                
         Returns:
-            presence_probs (FloatTensor): [B, C], presence probability for each cell type
-            presence_logits (FloatTensor): [B, C], raw logits before sigmoid
+            numpy.ndarray: Cell type proportions [N, C]
         """
-        B = marker_values.shape[0]
-        C = self.num_celltypes
+        # Get the detailed predictions
+        props, presence_probs, _ = self.predict_with_details(marker_values, coverage, batch_size, device)
         
-        # Initialize output tensors
-        presence_probs = torch.zeros(B, C, device=marker_values.device)
-        presence_logits = torch.zeros(B, C, device=marker_values.device)
+        # Apply consistent presence threshold
+        present_mask = (presence_probs > presence_threshold)
+        props_gated = np.copy(props)
         
-        # For each cell type, use its dedicated presence model
-        for cell_type_idx, presence_model in enumerate(self.presence_models):
-            with torch.no_grad():  # No gradients needed for frozen presence models
-                # Create a mask for the markers that belong to this cell type
-                cell_type_marker_mask = (self.target_ids == cell_type_idx)
-                
-                # Skip if no markers for this cell type
-                if not cell_type_marker_mask.any():
-                    continue
-                
-                # Filter marker_values and coverage to only include markers for this cell type
-                cell_type_marker_values = marker_values[:, cell_type_marker_mask]
-                cell_type_coverage = coverage[:, cell_type_marker_mask]
-                
-                # Pass only the relevant markers to the presence model
-                logits, _ = presence_model(cell_type_marker_values, cell_type_coverage)
-                probs = torch.sigmoid(logits)
-                
-                # Store results
-                presence_logits[:, cell_type_idx] = logits.squeeze(-1)
-                presence_probs[:, cell_type_idx] = probs.squeeze(-1)
-                
-        return presence_probs, presence_logits
-
+        # Zero out cell types below threshold
+        props_gated[~present_mask] = 0.0
+        
+        # Re-normalize to sum to 1
+        row_sums = props_gated.sum(axis=1, keepdims=True)
+        valid_rows = (row_sums > 0).squeeze()
+        if np.any(valid_rows):
+            props_gated[valid_rows] /= row_sums[valid_rows]
+        
+        return props_gated
+    
     def forward(self, marker_values: torch.Tensor, coverage: torch.Tensor):
         """
         Forward pass to predict cell-type proportions from methylation + coverage.
