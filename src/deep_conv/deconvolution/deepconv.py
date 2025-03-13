@@ -254,7 +254,7 @@ def train_and_eval(
     # 3) Build DataLoaders for each validation subset
     tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir) / "tier1"), atlas, names)
     if use_loyfer:
-        tcells_dl, cd4_yval = get_validation_set(str(Path(eval_pat_dir) / "T-cells"), atlas, names)
+        tcells_dl, tcells_yval = get_validation_set(str(Path(eval_pat_dir) / "T-cells"), atlas, names)
         oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, names)
 
         validation_dls = {
@@ -265,7 +265,7 @@ def train_and_eval(
 
         y_vals = {
             "tier1": t1_yval,
-            "t-cells": tcells_dl,
+            "t-cells": tcells_yval,
             "oac": oac_yval
         }
     else:

@@ -59,7 +59,6 @@ class TissueDeconvolutionDataset(Dataset):
             item['y'] = self.y[idx]
         return item  
 
-
 class CellTypeDeconvolutionModel(nn.Module):
     """
     A neural network for predicting cell-type proportions from cfDNA methylation data.
@@ -71,7 +70,7 @@ class CellTypeDeconvolutionModel(nn.Module):
       - marker_values: Fractional methylation values [B, M]. May be NaN where coverage=0.
       - coverage: Read coverage [B, M], used for weighting valid markers.
     """
-    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=32):
+    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir=None, feature_dim=32):
         """
         Initialize the cell type deconvolution model with separate presence models.
         
@@ -86,26 +85,47 @@ class CellTypeDeconvolutionModel(nn.Module):
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
+        self.use_presence_models = presence_models_dir is not None
 
         # Store cell-type assignment for each marker (not trainable, but placed on same device)
         target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
         self.register_buffer("target_ids", target_ids_t)
 
-        # Load separate presence models
-        self.presence_models = nn.ModuleList()
-        
-        for cell_type_idx in range(num_cell_types):
-            model_path = Path(presence_models_dir) / f"presence_model_{cell_type_idx}.pt"
+        # Load separate presence models if directory provided
+        if self.use_presence_models:
+            self.presence_models = nn.ModuleList()
+            self.marker_masks = []  # Store masks for each cell type
             
-            if not model_path.exists():
-                raise FileNotFoundError(f"Presence model not found at {model_path}")
-            
-            # Load the presence model
-            checkpoint = torch.load(model_path)
-            presence_model = SingleCellTypePresenceModel()
-            presence_model.load_state_dict(checkpoint['model_state_dict'])
-            presence_model.eval()  
-            self.presence_models.append(presence_model)
+            for cell_type_idx in range(num_cell_types):
+                model_path = Path(presence_models_dir) / f"presence_model_{cell_type_idx}.pt"
+                
+                if not model_path.exists():
+                    raise FileNotFoundError(f"Presence model not found at {model_path}")
+                
+                # Load the model (handling different saving formats)
+                checkpoint = torch.load(model_path)
+                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                    from deep_conv.presence.model import SingleCellTypePresenceModel
+                    presence_model = SingleCellTypePresenceModel()
+                    presence_model.load_state_dict(checkpoint['model_state_dict'])
+                else:
+                    presence_model = checkpoint  # Direct model object
+                
+                presence_model.eval()  # Set to evaluation mode
+                self.presence_models.append(presence_model)
+                
+                # Create and store mask for this cell type's markers
+                marker_mask = (target_ids_t == cell_type_idx)
+                self.marker_masks.append(marker_mask)
+        else:
+            # For backwards compatibility or testing
+            self.presence_detector = nn.Sequential(
+                nn.Linear(num_cell_types * feature_dim, 256),
+                nn.LeakyReLU(),
+                nn.Linear(256, 128),
+                nn.LeakyReLU(),
+                nn.Linear(128, num_cell_types)
+            )
 
         # ----- Marker Feature Extractor -----
         # Transforms each (scalar) methylation value into a learned feature space of dimension `feature_dim`.
@@ -227,9 +247,6 @@ class CellTypeDeconvolutionModel(nn.Module):
         Use the separate pre-trained presence models to predict 
         presence probabilities for each cell type.
         
-        Each presence model was trained on a subset of markers relevant to its target cell type.
-        We need to filter the input data to provide only the relevant markers to each model.
-        
         Args:
             marker_values (FloatTensor): [B, M], fractional methylation
             coverage (FloatTensor): [B, M], read coverage
@@ -247,18 +264,18 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         # For each cell type, use its dedicated presence model
         for cell_type_idx, presence_model in enumerate(self.presence_models):
-            with torch.no_grad():  # No gradients needed as these models are pre-trained
-                # Create a mask for the markers that belong to this cell type
-                cell_type_marker_mask = (self.target_ids == cell_type_idx)
-                
-                # If no markers for this cell type, skip
-                if not cell_type_marker_mask.any():
-                    continue
-                
-                # Filter marker_values and coverage to only include markers for this cell type
-                cell_type_marker_values = marker_values[:, cell_type_marker_mask]
-                cell_type_coverage = coverage[:, cell_type_marker_mask]
-                
+            # Create a mask for the markers that belong to this cell type
+            marker_mask = self.marker_masks[cell_type_idx]
+            
+            # Skip if no markers for this cell type
+            if not marker_mask.any():
+                continue
+            
+            # Filter marker_values and coverage to only include markers for this cell type
+            cell_type_marker_values = marker_values[:, marker_mask]
+            cell_type_coverage = coverage[:, marker_mask]
+            
+            with torch.no_grad():  # No gradients needed for frozen presence models
                 # Pass only the relevant markers to the presence model
                 logits, _ = presence_model(cell_type_marker_values, cell_type_coverage)
                 probs = torch.sigmoid(logits)
@@ -267,12 +284,6 @@ class CellTypeDeconvolutionModel(nn.Module):
                 presence_logits[:, cell_type_idx] = logits.squeeze(-1)
                 presence_probs[:, cell_type_idx] = probs.squeeze(-1)
                 
-        # Make logits detached but require gradients to work with the loss function
-        # This is necessary since the pre-trained presence models are frozen 
-        # but the loss function expects gradients to flow through presence_logits
-        presence_logits = presence_logits.detach().requires_grad_(True)
-        presence_probs = presence_probs.detach()
-        
         return presence_probs, presence_logits
 
     def forward(self, marker_values: torch.Tensor, coverage: torch.Tensor):
@@ -283,7 +294,7 @@ class CellTypeDeconvolutionModel(nn.Module):
             1) Identify valid markers (coverage>0).
             2) Extract features for each valid marker via `marker_feature_extractor`.
             3) Aggregate marker features per cell type, weighting by coverage.
-            4) Predict presence_prob for each cell type (using separate models).
+            4) Predict presence_prob for each cell type (using separate models if available).
             5) Predict raw proportions (encoder) => ReLU => gating by presence_prob => normalised.
             6) Reconstruct marker methylation from the final proportions (decoder).
 
@@ -367,8 +378,13 @@ class CellTypeDeconvolutionModel(nn.Module):
         agg_flat = aggregator.view(B, -1)  # [B, C*feature_dim]
 
         # ----- 3) Presence detection -----
-        # Use the dedicated presence models
-        presence_probs, presence_logits = self.predict_presence_with_separate_models(marker_values, coverage)
+        if self.use_presence_models:
+            # Use pre-trained presence models
+            presence_probs, presence_logits = self.predict_presence_with_separate_models(marker_values, coverage)
+        else:
+            # Use integrated presence detector (backward compatibility)
+            presence_logits = self.presence_detector(agg_flat)  # [B, C]
+            presence_probs = torch.sigmoid(presence_logits)  # [B, C]
 
         # ----- 4) Proportion Prediction -----
         logits = self.encoder(agg_flat)  # [B, C]
@@ -381,4 +397,188 @@ class CellTypeDeconvolutionModel(nn.Module):
         reconstructed = self.decoder(celltype_props)  # [B, M]
 
         return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
+        
+    def predict(self, marker_values, coverage, batch_size=256, device=None):
+        """
+        Makes predictions using the model in evaluation mode.
+        
+        Args:
+            marker_values: Marker methylation values [N, M]
+            coverage: Coverage values [N, M]
+            batch_size: Batch size for processing
+            device: Device to run inference on (defaults to model's device)
+            
+        Returns:
+            numpy.ndarray: Cell type proportions [N, C]
+        """
+        import numpy as np
+        
+        # Decide which device to use (CPU/GPU)
+        if device is None:
+            device = next(self.parameters()).device
+        
+        # Convert inputs (X, coverage) to Torch tensors if needed
+        if not isinstance(marker_values, torch.Tensor):
+            marker_values = torch.tensor(marker_values, dtype=torch.float32)
+        if not isinstance(coverage, torch.Tensor):
+            coverage = torch.tensor(coverage, dtype=torch.float32)
+        
+        # Ensure both inputs have a batch dimension
+        if len(marker_values.shape) == 1:
+            marker_values = marker_values.unsqueeze(0)
+        if len(coverage.shape) == 1:
+            coverage = coverage.unsqueeze(0)
+        
+        self.eval()
+        predictions_list = []
+        
+        # Process the data in batches
+        num_samples = marker_values.shape[0]
+        num_batches = (num_samples + batch_size - 1) // batch_size  # Ceiling division
+        
+        with torch.no_grad():
+            for i in range(num_batches):
+                start_idx = i * batch_size
+                end_idx = min((i + 1) * batch_size, num_samples)
+                
+                batch_X = marker_values[start_idx:end_idx].to(device)
+                batch_coverage = coverage[start_idx:end_idx].to(device)
+                
+                # Forward pass through the model
+                props, *_ = self.forward(batch_X, batch_coverage)
+                
+                # Move to CPU numpy and store
+                predictions_list.append(props.cpu().numpy())
+                
+                # Optional GPU memory cleanup
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+        
+        # Combine all batch results
+        if len(predictions_list) == 0:
+            # Edge case: empty input
+            return np.zeros((num_samples, self.num_celltypes))
+        
+        # Return a single array of shape [N, C]
+        return np.vstack(predictions_list)
+    
+    def predict_with_details(self, marker_values, coverage, batch_size=256, device=None):
+        """
+        Extended prediction function that returns additional details.
+        
+        Args:
+            marker_values: Marker methylation values [N, M]
+            coverage: Coverage values [N, M]
+            batch_size: Batch size for processing
+            device: Device to run inference on (defaults to model's device)
+            
+        Returns:
+            tuple: (cell_props, presence_probs, reconstructed_markers)
+        """
+        import numpy as np
+        
+        # Decide which device to use (CPU/GPU)
+        if device is None:
+            device = next(self.parameters()).device
+        
+        # Convert inputs to Torch tensors if needed
+        if not isinstance(marker_values, torch.Tensor):
+            marker_values = torch.tensor(marker_values, dtype=torch.float32)
+        if not isinstance(coverage, torch.Tensor):
+            coverage = torch.tensor(coverage, dtype=torch.float32)
+        
+        # Ensure both inputs have a batch dimension
+        if len(marker_values.shape) == 1:
+            marker_values = marker_values.unsqueeze(0)
+        if len(coverage.shape) == 1:
+            coverage = coverage.unsqueeze(0)
+        
+        self.eval()
+        predictions_list = []
+        presence_probs_list = []
+        reconstructed_list = []
+        
+        # Process the data in batches
+        num_samples = marker_values.shape[0]
+        num_batches = (num_samples + batch_size - 1) // batch_size
+        
+        with torch.no_grad():
+            for i in range(num_batches):
+                start_idx = i * batch_size
+                end_idx = min((i + 1) * batch_size, num_samples)
+                
+                batch_X = marker_values[start_idx:end_idx].to(device)
+                batch_coverage = coverage[start_idx:end_idx].to(device)
+                
+                # Forward pass through the model
+                props, reconstructed, _, presence_probs, _ = self.forward(batch_X, batch_coverage)
+                
+                # Move to CPU numpy and store
+                predictions_list.append(props.cpu().numpy())
+                presence_probs_list.append(presence_probs.cpu().numpy())
+                reconstructed_list.append(reconstructed.cpu().numpy())
+        
+        # Combine all batch results
+        if len(predictions_list) == 0:
+            # Edge case: empty input
+            return (np.zeros((num_samples, self.num_celltypes)), 
+                    np.zeros((num_samples, self.num_celltypes)),
+                    np.zeros((num_samples, self.num_markers)))
+        
+        # Return the combined results
+        return (
+            np.vstack(predictions_list),
+            np.vstack(presence_probs_list),
+            np.vstack(reconstructed_list)
+        )
+        
+    @classmethod
+    def from_pretrained(cls, model_path, presence_models_dir=None):
+        """
+        Load a pre-trained model from a checkpoint file.
+        
+        Args:
+            model_path (str): Path to the saved model checkpoint
+            presence_models_dir (str, optional): Directory containing presence models
+                                                (if different from what's in the checkpoint)
+            
+        Returns:
+            CellTypeDeconvolutionModel: Loaded model instance
+        """
+        checkpoint = torch.load(model_path)
+        
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            # Get model parameters from checkpoint
+            if 'config' in checkpoint:
+                config = checkpoint['config']
+                model = cls(
+                    num_markers=config.get('num_markers'),
+                    num_cell_types=config.get('num_cell_types'),
+                    target_ids=config.get('target_ids'),
+                    presence_models_dir=presence_models_dir or config.get('presence_models_dir'),
+                    feature_dim=config.get('feature_dim', 32)
+                )
+            else:
+                # If config not available, try to infer from model_state_dict
+                state_dict = checkpoint['model_state_dict']
+                # Extract parameters however possible from state_dict
+                # This is a simplified approach - might need customization
+                model = cls(
+                    num_markers=state_dict.get('decoder.2.weight').size(0),
+                    num_cell_types=state_dict.get('encoder.2.weight').size(0),
+                    target_ids=state_dict.get('target_ids'),
+                    presence_models_dir=presence_models_dir,
+                    feature_dim=state_dict.get('marker_feature_extractor.0.weight').size(0)
+                )
+            
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            # Direct model object
+            model = checkpoint
+            if presence_models_dir:
+                # Update presence models directory if provided
+                model.presence_models_dir = presence_models_dir
+                # Would need to reload presence models here
+        
+        return model
     
