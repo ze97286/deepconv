@@ -1,7 +1,7 @@
 import torch 
 import torch.nn.functional as F
 
-def loss_fn_with_pretrained_presence(
+def loss_fn(
     pred_props: torch.Tensor,
     true_props: torch.Tensor,
     reconstructed: torch.Tensor,
