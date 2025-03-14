@@ -570,7 +570,7 @@ def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, min_cpgs=4, th
     return y_true_df, predictions_df, y_dilutions
 
 
-def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type, out_dir,cd_tissue_mapping, model_name=None,ichorCNA=None, clinical_benefit=None, cancer_type=None, presence_model_name=None):
+def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type, out_dir,cd_tissue_mapping, model_name=None,ichorCNA=None, clinical_benefit=None, cancer_type=None, presence_model_name=None, tcell_col="T-cells"):
     pat_dir = Path(pat_dir)
     atlas = pd.read_csv(atlas_path,sep="\t")
     X_val = pd.read_parquet(Path(pat_dir)/"marker_values.parquet")
@@ -646,8 +646,8 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
             create_correlation_plot(merged_df_with_tf, cols, "tf", out_dir/f"{prefix}_cell_type_vs_oac_correlation.html")
 
     # plot T-cells concentrations
-    filtered_cols_tcells = remove_clinical_benefit_cancer_type_cols(['sample','T-cells','clinical_benefit','cancer_type'])
-    fig = plot_analysis(df[filtered_cols_tcells], ['T-cells'], title, clinical_benefit_col, cancer_type_col)
+    filtered_cols_tcells = remove_clinical_benefit_cancer_type_cols(['sample',tcell_col,'clinical_benefit','cancer_type'])
+    fig = plot_analysis(df[filtered_cols_tcells], [tcell_col], title, clinical_benefit_col, cancer_type_col)
     fig.write_html(out_dir/f"{prefix}_tcells_deconvolution.html")
 
     # plot baseline concentrations
@@ -656,7 +656,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
     fig.write_html(out_dir/f"{prefix}_ScrBsl_deconvolution.html")
 
     # plot baseline T-cells concentrations
-    fig = plot_analysis(baseline[filtered_cols_tcells], ['T-cells'], "Baseline T-Cells: "+title, clinical_benefit_col, cancer_type_col)
+    fig = plot_analysis(baseline[filtered_cols_tcells], [tcell_col], "Baseline T-Cells: "+title, clinical_benefit_col, cancer_type_col)
     fig.write_html(out_dir/f"{prefix}_ScrBsl_tcells_deconvolution.html")
 
     if ichorCNA is not None:
@@ -670,7 +670,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
     fig.write_html(out_dir/f"{prefix}_immonly_deconvolution.html")
 
     # plot immonly T-cells concentrations
-    fig = plot_analysis(immonly[filtered_cols_tcells], ['T-cells'], "Immonly T-Cells: "+title, clinical_benefit_col, cancer_type_col)
+    fig = plot_analysis(immonly[filtered_cols_tcells], [tcell_col], "Immonly T-Cells: "+title, clinical_benefit_col, cancer_type_col)
     fig.write_html(out_dir/f"{prefix}_immonly_tcells_deconvolution.html")
 
     if ichorCNA is not None:
@@ -684,7 +684,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         fig = plot_analysis(surg[filtered_cols_all], cols, "Surgery: "+title, clinical_benefit_col, cancer_type_col)
         fig.write_html(out_dir/f"{prefix}_surg_deconvolution.html")
         # plot C1 T-cells concentrations
-        fig = plot_analysis(surg[filtered_cols_tcells], ['T-cells'], "Surgery T-Cells: "+title, clinical_benefit_col, cancer_type_col)
+        fig = plot_analysis(surg[filtered_cols_tcells], [tcell_col], "Surgery T-Cells: "+title, clinical_benefit_col, cancer_type_col)
         fig.write_html(out_dir/f"{prefix}_surg_tcells_deconvolution.html")
         if ichorCNA is not None:
             merged_df_with_tf = surg.merge(ichorCNA,on="sample", how="outer").dropna() 
@@ -697,7 +697,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         fig = plot_analysis(c1[filtered_cols_all], cols, "C1: "+title, clinical_benefit_col, cancer_type_col)
         fig.write_html(out_dir/f"{prefix}_c1_deconvolution.html")
         # plot C1 T-cells concentrations
-        fig = plot_analysis(c1[filtered_cols_tcells], ['T-cells'], "C1 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
+        fig = plot_analysis(c1[filtered_cols_tcells], [tcell_col], "C1 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
         fig.write_html(out_dir/f"{prefix}_c1_tcells_deconvolution.html")
         if ichorCNA is not None:
             merged_df_with_tf = c1.merge(ichorCNA,on="sample", how="outer").dropna() 
@@ -711,7 +711,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         fig.write_html(out_dir/f"{prefix}_c6_deconvolution.html")
 
         # plot C6 T-cells concentrations
-        fig = plot_analysis(c6[filtered_cols_tcells], ['T-cells'], "C6 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
+        fig = plot_analysis(c6[filtered_cols_tcells], [tcell_col], "C6 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
         fig.write_html(out_dir/f"{prefix}_c6_tcells_deconvolution.html")
 
         if ichorCNA is not None:
@@ -726,7 +726,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         fig.write_html(out_dir/f"{prefix}_pt_deconvolution.html")
 
         # plot pt T-cells concentrations
-        fig = plot_analysis(pt[filtered_cols_tcells], ['T-cells'], "PT T-Cells: "+title, clinical_benefit_col, cancer_type_col)
+        fig = plot_analysis(pt[filtered_cols_tcells], [tcell_col], "PT T-Cells: "+title, clinical_benefit_col, cancer_type_col)
         fig.write_html(out_dir/f"{prefix}_pt_tcells_deconvolution.html")
 
         if ichorCNA is not None:
@@ -742,7 +742,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         fig.write_html(out_dir/f"{prefix}_control_deconvolution.html")
 
         # plot controls T-cells concentrations
-        fig = plot_analysis(controls[['sample','T-cells']], ['T-cells'], "Control T-Cells: "+title)
+        fig = plot_analysis(controls[['sample',tcell_col]], [tcell_col], "Control T-Cells: "+title)
         fig.write_html(out_dir/f"{prefix}_control_tcells_deconvolution.html")
 
 
@@ -917,7 +917,7 @@ def run_oac_analysis(model_name, presence_model_name):
     ben_pat_dir_ab_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/AB/cfDNA/"
     ben_title_ab_cf = f"NNLS deconvolution using atlas {ben_atlas_path} on AB cfDNA"
     out_dir = str(Path(out_base_dir)/"AB"/"cfDNA"/"nnls")
-    eval_OAC(ben_atlas_path, ben_pat_dir_ab_cf, ben_title_ab_cf, ben_prefix_ab_cf, ben_atlas_name, ben_batch, ben_model, ben_type, out_dir, none_tissue_mapping, ben_model_name, ichorcna_cf_ab, ab_sample_to_cb, ab_sample_to_ct)
+    eval_OAC(ben_atlas_path, ben_pat_dir_ab_cf, ben_title_ab_cf, ben_prefix_ab_cf, ben_atlas_name, ben_batch, ben_model, ben_type, out_dir, none_tissue_mapping, ben_model_name, ichorcna_cf_ab, ab_sample_to_cb, ab_sample_to_ct, tcell_col="CD4-T-cells")
 
     ben_batch="CD"
     ben_type = "tissue"
@@ -934,7 +934,7 @@ def run_oac_analysis(model_name, presence_model_name):
     ben_title_cd_cf = f"NNLS deconvolution using atlas {ben_atlas_path} on CD cfDNA"
     out_dir = str(Path(out_base_dir)/"CD"/"cfDNA"/"nnls")
 
-    eval_OAC(ben_atlas_path, ben_pat_dir_cd_cf, ben_title_cd_cf, ben_prefix_cd_cf, ben_atlas_name, ben_batch, ben_model, ben_type, out_dir, none_tissue_mapping, ben_model_name, ichorcna_cf_cd, None, cd_sample_to_ct)
+    eval_OAC(ben_atlas_path, ben_pat_dir_cd_cf, ben_title_cd_cf, ben_prefix_cd_cf, ben_atlas_name, ben_batch, ben_model, ben_type, out_dir, none_tissue_mapping, ben_model_name, ichorcna_cf_cd, None, cd_sample_to_ct, tcell_col="CD4-T-cells")
 
     # plot AB cohort cfDNA Ben's Atlas with NNLS vs Deepcon with Zohar's atlas OAC concentration vs ichorCNA
     ben_cf_ab = pd.read_csv(out_base_dir+"/AB/cfDNA/nnls/nnls_ab_cfDNA_deconvolution.csv",sep="\t")
