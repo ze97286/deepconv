@@ -60,29 +60,13 @@ class TissueDeconvolutionDataset(Dataset):
         return item  
 
 class CellTypeDeconvolutionModel(nn.Module):
-    """
-    A neural network for predicting cell-type proportions from cfDNA methylation data.
-    
-    This version integrates pre-trained SingleCellTypePresenceModel instances as features
-    rather than using them as binary gates.
-    """
     def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=32):
-        """
-        Initialize the cell type deconvolution model with separate presence models.
-        
-        Args:
-            num_markers (int): Total number of markers (M).
-            num_cell_types (int): Number of cell types (C).
-            target_ids (array-like): Mapping of each marker to its target cell type index.
-            presence_models_dir (str): Directory containing pre-trained presence models.
-            feature_dim (int): Dimensionality of the marker feature space.
-        """
         super().__init__()
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
 
-        # Store cell-type assignment for each marker (not trainable, but placed on same device)
+        # Store cell-type assignment for each marker
         target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
         self.register_buffer("target_ids", target_ids_t)
 
@@ -95,42 +79,53 @@ class CellTypeDeconvolutionModel(nn.Module):
             if not model_path.exists():
                 raise FileNotFoundError(f"Presence model not found at {model_path}")
             
-            # Load the model (handling different saving formats)
+            # Load the model
             checkpoint = torch.load(model_path)
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 from deep_conv.presence.model import SingleCellTypePresenceModel
                 presence_model = SingleCellTypePresenceModel()
                 presence_model.load_state_dict(checkpoint['model_state_dict'])
             else:
-                presence_model = checkpoint  # Direct model object
+                presence_model = checkpoint
             
-            presence_model.eval()  # Set to evaluation mode
+            presence_model.eval()
             self.presence_models.append(presence_model)
 
-        # ----- Marker Feature Extractor -----
-        # Transforms each (scalar) methylation value into a learned feature space
+        # Marker Feature Extractor
         self.marker_feature_extractor = nn.Sequential(
             nn.Linear(1, feature_dim),
             nn.LeakyReLU(),
             nn.Linear(feature_dim, feature_dim)
         )
 
-        # ----- Encoder (Proportion Prediction) -----
-        # Updated to take both aggregated features AND presence probabilities
+        # Encoder with presence input
         self.encoder = nn.Sequential(
-            nn.Linear(num_cell_types * feature_dim + num_cell_types, 128),  # +C for presence probs
+            nn.Linear(num_cell_types * feature_dim + num_cell_types, 128),
             nn.LeakyReLU(),
-            nn.Linear(128, 128),  # Additional layer for more expressive capacity
+            nn.Linear(128, 128),
             nn.LeakyReLU(),
             nn.Linear(128, num_cell_types)
         )
 
-        # ----- Decoder (Marker Reconstruction) -----
+        # Decoder
         self.decoder = nn.Sequential(
             nn.Linear(num_cell_types, 128),
             nn.LeakyReLU(),
             nn.Linear(128, num_markers)
         )
+        
+        # Initialize presence gating parameters
+        thresholds = torch.ones(num_cell_types) * 0.5
+        slopes = torch.ones(num_cell_types) * 10
+        
+        # Special handling for OAC
+        oac_index = 9  # Adjust to your actual OAC index
+        thresholds[oac_index] = 0.3
+        slopes[oac_index] = 15
+        
+        self.register_buffer("presence_thresholds", thresholds)
+        self.register_buffer("presence_slopes", slopes)
+        
 
     def apply_presence_gating(self, props, probs):
         """
