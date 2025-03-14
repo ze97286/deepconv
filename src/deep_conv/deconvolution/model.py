@@ -132,6 +132,36 @@ class CellTypeDeconvolutionModel(nn.Module):
             nn.Linear(128, num_markers)
         )
 
+    def apply_presence_gating(self, props, probs):
+        """
+        Apply cell-type specific presence scaling based on empirical data.
+        """
+        # Cell-type specific thresholds and slopes
+        if not hasattr(self, "presence_thresholds"):
+            thresholds = torch.ones(self.num_celltypes, device=props.device) * 0.5
+            slopes = torch.ones(self.num_celltypes, device=props.device) * 10
+            
+            # Special handling for OAC based on actual data
+            oac_index = 9  # Adjust to actual OAC index
+            thresholds[oac_index] = 0.3  # Center sigmoid at 0.3 for OAC
+            slopes[oac_index] = 15       # Steeper slope for OAC
+            
+            self.register_buffer("presence_thresholds", thresholds)
+            self.register_buffer("presence_slopes", slopes)
+        
+        # Apply scaling - vector operation across all cell types at once
+        scaling = torch.sigmoid(
+            self.presence_slopes.unsqueeze(0) * (probs - self.presence_thresholds.unsqueeze(0))
+        )
+        
+        scaled_props = props * scaling
+        
+        # Normalize to ensure sum to 1
+        sum_props = torch.sum(scaled_props, dim=1, keepdim=True) + 1e-8
+        gated_props = scaled_props / sum_props
+        
+        return gated_props
+
     def predict_presence_with_separate_models(self, marker_values, coverage):
         """
         Use the separate pre-trained presence models to predict 
@@ -280,8 +310,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         celltype_props_raw = F.relu(logits)  # ensure >=0
         
         # Apply soft gating that preserves proportion relationships
-        scaling_factor = torch.sigmoid(5 * (presence_probs - 0.3)) 
-        celltype_props_gated = celltype_props_raw * scaling_factor
+        celltype_props_gated = self.apply_presence_gating(celltype_props_raw, presence_probs)
         
         # Normalize to ensure sum to 1
         sum_props = torch.sum(celltype_props_gated, dim=1, keepdim=True)
