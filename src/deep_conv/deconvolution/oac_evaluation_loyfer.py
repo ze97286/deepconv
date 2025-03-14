@@ -447,7 +447,7 @@ tcell_dilutions = [0.10,0.05,0.01,0.005,0.001,0.0001,0.00001]
 
 def sample_to_dilution(sample):
     return int(sample.split("_")[1][3:])-1
-    
+
 
 def prepare_deconv_input(atlas_path, eval_pat_dir, dilutions):
     atlas = pd.read_csv(atlas_path, sep="\t").dropna()
@@ -534,7 +534,7 @@ def debug_model_predictions(model, X_val, coverage_val, y_true_df, threshold=0.0
         print(f"\nAverage F1 Score: {sum(f1_scores)/len(f1_scores):.4f}")
         
         return props, presence_probs
-    
+
 
 def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, min_cpgs=4, threads=10):
     """
@@ -593,7 +593,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
             presence_models_dir=f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{presence_model_name}",
         )
         checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/best_model.pt")
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
         estimation = predict_with_consensus(model, X_val,coverage_val)
     else:
         estimation = run_weighted_nnls(X_val, coverage_val, atlas[atlas.columns[8:]].T.values)
@@ -608,7 +608,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         index = sample.split("-")[-1]
         name=cd_tissue_mapping[index]
         return name
-    
+
     df['sample'] = df['sample'].apply(extract_sample)
     if cd_tissue_mapping is not None:
         df['sample'] = df['sample'].apply(map_sample_index_to_name)
@@ -635,7 +635,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         if not 'cancer_type' in df.columns: 
             filtered_cols.remove("cancer_type")
         return filtered_cols
-    
+
     filtered_cols_all = remove_clinical_benefit_cancer_type_cols(cols+['sample','clinical_benefit','cancer_type'])
     fig = plot_analysis(df[filtered_cols_all], cols, title, clinical_benefit_col, cancer_type_col)
     fig.write_html(out_dir/f"{prefix}_deconvolution.html")
@@ -734,7 +734,6 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
             if len(merged_df_with_tf)>0:
                 create_correlation_plot(merged_df_with_tf, cols, "tf", out_dir/f"{prefix}_pt_cell_type_vs_oac_correlation.html")
 
-
     # plot control concentrations
     controls = df[(df['sample'].str.contains("X")) | df['sample'].str.contains("TP") | df['sample'].str.contains("GI") | df['sample'].str.contains("SCAN")]
     if len(controls)>0:
@@ -764,7 +763,7 @@ def train_and_evaluate(model_name, presence_model_name):
                            presence_models_dir=presence_path)
 
 
-# 2 
+# 2
 def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True):
     """
     Evaluate deepconv model with consistent parameters.
@@ -796,7 +795,7 @@ def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True
     # Load checkpoint
     best_model = "best_model.pt"
     checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/{best_model}")
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     
     # Print the 'best_threshold' if it exists in the checkpoint
     if 'best_threshold' in checkpoint:
@@ -825,7 +824,7 @@ def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True
         deepconv_eval_pat_dir_oac+f"{model_name}/"
     )
 
-    
+
 # 3
 def run_oac_analysis(model_name, presence_model_name):
     out_base_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis"
