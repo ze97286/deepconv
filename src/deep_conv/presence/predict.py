@@ -45,7 +45,7 @@ def predict_presence(
     
     num_samples = X.shape[0]
     num_batches = (num_samples + batch_size - 1) // batch_size
-    num_cell_types = model.num_celltypes
+    num_cell_types = 12
     
     # Prepare outputs
     all_probs = torch.zeros(num_samples, num_cell_types)

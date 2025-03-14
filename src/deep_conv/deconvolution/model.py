@@ -280,7 +280,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         celltype_props_raw = F.relu(logits)  # ensure >=0
         
         # Apply soft gating that preserves proportion relationships
-        scaling_factor = 0.2 + 0.8 * torch.sigmoid(3 * (presence_probs - 0.5))
+        scaling_factor = torch.sigmoid(5 * (presence_probs - 0.3)) 
         celltype_props_gated = celltype_props_raw * scaling_factor
         
         # Normalize to ensure sum to 1
