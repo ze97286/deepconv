@@ -763,6 +763,33 @@ def train_and_evaluate(model_name, presence_model_name):
                            presence_models_dir=presence_path)
 
 
+def nnls_estimate(atlas_path, eval_pat_dir, dilutions, min_cpgs=4,threads=10, min_coverage=0):
+    atlas = pd.read_csv(atlas_path,sep="\t").dropna()
+    marker_read_proportions, counts, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions, min_cpgs, threads)
+    print("median coverage", np.median(counts, axis=1), np.median(np.median(counts, axis=1)), np.median(counts, axis=1).mean())
+    marker_read_proportions, counts = marker_read_proportions, counts
+    predictions = run_weighted_nnls(marker_read_proportions, counts, atlas[atlas.columns[8:]].T.values)
+    predictions_df = pd.DataFrame(predictions, columns=list(y_true_df.columns))
+    return y_true_df, predictions_df, y_dilutions
+
+
+def eval_admixtures_nnls(atlas_path, pat_dir):
+    pat_dir_tcells = pat_dir+"T-cells/"
+    pat_dir_oac = pat_dir+"OAC/"
+    y_true_df, predictions_df, y_dilutions= nnls_estimate(atlas_path, pat_dir_tcells, tcell_dilutions)
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_tcells+"nnls/")
+    y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir_oac, oac_dilutions)
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_oac+"nnls/")
+
+
+def eval_admixtures(model_name,presence_model_name, use_low_coverage=True):
+    # evaluate Zohar's atlas with deepconv
+    eval_admixtures_deepconv(model_name, presence_model_name, use_low_coverage)  
+    # evaluate Zohar's atlas (primary markers only) with nnls
+    eval_admixtures_nnls("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_primary_oac.blood+gi+tum.l4.bed")
+   
+
+
 # 2
 def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True):
     """
