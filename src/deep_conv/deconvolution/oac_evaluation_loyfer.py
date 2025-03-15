@@ -793,7 +793,7 @@ def eval_admixtures(model_name,presence_model_name, use_low_coverage=True):
     # evaluate Zohar's atlas with deepconv
     eval_admixtures_deepconv(model_name, presence_model_name, use_low_coverage)  
     # evaluate Zohar's atlas (primary markers only) with nnls
-    eval_admixtures_nnls("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_primary_oac.blood+gi+tum.l4.bed")
+    eval_admixtures_nnls("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed")
    
 
 
