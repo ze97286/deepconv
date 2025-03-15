@@ -763,9 +763,9 @@ def train_and_evaluate(model_name, presence_model_name):
                            presence_models_dir=presence_path)
 
 
-def nnls_estimate(atlas_path, eval_pat_dir, dilutions, min_cpgs=4,threads=10, min_coverage=0):
+def nnls_estimate(atlas_path, eval_pat_dir, dilutions):
     atlas = pd.read_csv(atlas_path,sep="\t").dropna()
-    marker_read_proportions, counts, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions, min_cpgs, threads)
+    marker_read_proportions, counts, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions)
     print("median coverage", np.median(counts, axis=1), np.median(np.median(counts, axis=1)), np.median(counts, axis=1).mean())
     marker_read_proportions, counts = marker_read_proportions, counts
     predictions = run_weighted_nnls(marker_read_proportions, counts, atlas[atlas.columns[8:]].T.values)
