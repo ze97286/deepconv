@@ -773,9 +773,16 @@ def nnls_estimate(atlas_path, eval_pat_dir, dilutions, min_cpgs=4,threads=10, mi
     return y_true_df, predictions_df, y_dilutions
 
 
-def eval_admixtures_nnls(atlas_path, pat_dir):
-    pat_dir_tcells = pat_dir+"T-cells/"
-    pat_dir_oac = pat_dir+"OAC/"
+def eval_admixtures_nnls(atlas_path, use_low_depth=True):
+    suffix = "/"
+    if use_low_depth:
+        suffix = "_low/"
+    else:
+        suffix = "_high/"
+    
+    pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
+    pat_dir_oac = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
+
     y_true_df, predictions_df, y_dilutions= nnls_estimate(atlas_path, pat_dir_tcells, tcell_dilutions)
     plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_tcells+"nnls/")
     y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir_oac, oac_dilutions)
