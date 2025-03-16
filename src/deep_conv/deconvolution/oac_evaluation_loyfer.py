@@ -773,12 +773,8 @@ def nnls_estimate(atlas_path, eval_pat_dir, dilutions):
     return y_true_df, predictions_df, y_dilutions
 
 
-def eval_admixtures_nnls(atlas_path, use_low_depth=True):
-    suffix = "/"
-    if use_low_depth:
-        suffix = "_low/"
-    else:
-        suffix = "_high/"
+def eval_admixtures_nnls(atlas_path, size="low"):
+    suffix = f"_{size}/"
     
     pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
     pat_dir_oac = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
@@ -789,16 +785,15 @@ def eval_admixtures_nnls(atlas_path, use_low_depth=True):
     plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_oac+"nnls/")
 
 
-def eval_admixtures(model_name,presence_model_name, use_low_coverage=True):
+def eval_admixtures(model_name,presence_model_name, size="low"):
     # evaluate Zohar's atlas with deepconv
-    eval_admixtures_deepconv(model_name, presence_model_name, use_low_coverage)  
+    eval_admixtures_deepconv(model_name, presence_model_name, size)  
     # evaluate Zohar's atlas (primary markers only) with nnls
-    eval_admixtures_nnls("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed")
-   
+    eval_admixtures_nnls("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed", size)
 
 
 # 2
-def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True):
+def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     """
     Evaluate deepconv model with consistent parameters.
     
@@ -807,11 +802,7 @@ def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True
         presence_model_name: Name of the presence model directory
         use_low_depth: Whether to use low depth data
     """
-    suffix = "/"
-    if use_low_depth:
-        suffix = "_low/"
-    else:
-        suffix = "_high/"
+    suffix = f"_{size}/"
         
     deepconv_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
     deepconv_atlas = pd.read_csv(deepconv_atlas_path, sep="\t")
