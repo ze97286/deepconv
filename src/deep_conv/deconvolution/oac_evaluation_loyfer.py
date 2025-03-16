@@ -594,7 +594,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         )
         checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/best_model.pt")
         model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        estimation = predict_with_consensus(model, X_val,coverage_val)
+        estimation = model.predict(X_val,coverage_val)
     else:
         estimation = run_weighted_nnls(X_val, coverage_val, atlas[atlas.columns[8:]].T.values)
     df = pd.DataFrame(estimation, columns=list(atlas.columns[8:]))
@@ -955,7 +955,7 @@ def run_oac_analysis(model_name, presence_model_name):
     ben_batch="CD"
     ben_type = "tissue"
     ben_prefix_cd_tissue = "nnls_cd_tissue"
-    ben_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/CD/tissue/"
+    ben_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/CD/tissue/"
     ben_title_cd_tissue = f"NNLS deconvolution using atlas {ben_atlas_path} on CD tissue"
     out_dir = str(Path(out_base_dir)/"CD"/"tissue"/"nnls")
 
@@ -963,7 +963,7 @@ def run_oac_analysis(model_name, presence_model_name):
 
     ben_type = "cfDNA"
     ben_prefix_cd_cf= "nnls_cd_cfDNA"
-    ben_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/atlas/loyfer_atlas/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/CD/cfDNA"
+    ben_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/CD/cfDNA"
     ben_title_cd_cf = f"NNLS deconvolution using atlas {ben_atlas_path} on CD cfDNA"
     out_dir = str(Path(out_base_dir)/"CD"/"cfDNA"/"nnls")
 
