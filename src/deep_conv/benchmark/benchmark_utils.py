@@ -906,9 +906,9 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         fig.add_trace(
             go.Scatter(
                 x=metrics_df['dilution'],
-                y=metrics_df['within_20pct'],
+                y=metrics_df['within_10pct'],
                 mode='lines+markers',
-                name='% Within ±20%',
+                name='% Within ±10%',
                 line=dict(color='blue')
             ),
             row=3, col=1
@@ -1081,13 +1081,13 @@ def calculate_performance_metrics(y_true, y_pred):
     rel_errors = (y_pred - y_true) / np.maximum(y_true, 1e-10)
     
     # Percentage within ±20% of true value
-    within_20pct = np.mean(np.abs(rel_errors) <= 0.2)
+    within_10pct = np.mean(np.abs(rel_errors) <= 0.1)
     
     return {
         'r2': r2,
         'rmse': rmse,
         'mae': mae,
-        'within_20pct': within_20pct,
+        'within_10pct': within_10pct,
         'median_rel_error': np.median(rel_errors),
         'mean_rel_error': np.mean(rel_errors)
     }
@@ -1105,11 +1105,11 @@ def calculate_metrics_by_dilution(y_true, y_pred, intended_dilutions):
         rel_errors = 2 * (y_pred_dil - y_true_dil) / (y_pred_dil + y_true_dil + 1e-6)
         
         # Calculate percentage within 20% of true value
-        within_20pct = np.mean(np.abs(rel_errors) <= 0.2) * 100
+        within_10pct = np.mean(np.abs(rel_errors) <= 0.1) * 100
         
         metrics.append({
             'dilution': dilution,
-            'within_20pct': within_20pct,
+            'within_10pct': within_10pct,
             'median_rel_error': np.median(rel_errors) * 100,  # Convert to percentage
             'q25_rel_error': np.percentile(rel_errors, 25) * 100,
             'q75_rel_error': np.percentile(rel_errors, 75) * 100,

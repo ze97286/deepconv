@@ -447,9 +447,9 @@ tcell_dilutions = [0.10,0.05,0.01,0.005,0.001,0.0001,0.00001]
 
 def sample_to_dilution(sample):
     return int(sample.split("_")[1][3:])-1
-    
 
-def prepare_deconv_input(atlas_path, eval_pat_dir, dilutions, min_cpgs=4,threads=10):
+
+def prepare_deconv_input(atlas_path, eval_pat_dir, dilutions):
     atlas = pd.read_csv(atlas_path, sep="\t").dropna()
     names = set(atlas.name.unique())
     # load marker values, coverage, and ground truth
@@ -468,80 +468,109 @@ def prepare_deconv_input(atlas_path, eval_pat_dir, dilutions, min_cpgs=4,threads
     return X_val, coverage_val, y_val_df, y_dilutions
 
 
-def deepconv_estimate(atlas_path, eval_pat_dir,model, dilutions, min_cpgs=4,threads=10):
-    X_val, coverage_val, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions, min_cpgs, threads)
-    print("median coverage", np.median(coverage_val, axis=1), np.median(np.median(coverage_val, axis=1)), np.median(coverage_val, axis=1).mean())
-    predictions = predict_with_consensus(model, X_val,coverage_val)
+def debug_model_predictions(model, X_val, coverage_val, y_true_df, threshold=0.005):
+    """
+    Debug function to analyze presence predictions and model outputs
+    
+    Args:
+        model: The cell type deconvolution model
+        X_val: Input methylation values
+        coverage_val: Coverage values
+        y_true_df: DataFrame with ground truth
+        threshold: Presence threshold for analysis
+    """
+    # Convert to tensors if needed
+    if not isinstance(X_val, torch.Tensor):
+        X_val = torch.tensor(X_val, dtype=torch.float32)
+    if not isinstance(coverage_val, torch.Tensor):
+        coverage_val = torch.tensor(coverage_val, dtype=torch.float32)
+    
+    y_true = torch.tensor(y_true_df.values, dtype=torch.float32)
+    
+    device = next(model.parameters()).device
+    X_val = X_val.to(device)
+    coverage_val = coverage_val.to(device)
+    y_true = y_true.to(device)
+    
+    model.eval()
+    with torch.no_grad():
+        # Forward pass through model to get all outputs
+        props, reconstructed, valid_mask, presence_probs, presence_logits = model(X_val, coverage_val)
+        
+        # Check true presence (using same threshold as loss_fn)
+        true_presence = (y_true > threshold).float()
+        pred_presence = (presence_probs > 0.5).float()
+        
+        print("\n===== MODEL OUTPUT ANALYSIS =====")
+        print(f"Using presence threshold: {threshold}")
+        
+        # Aggregated stats
+        print("\n----- OVERALL STATISTICS -----")
+        print(f"Proportions: min={props.min().item():.6f}, max={props.max().item():.6f}, mean={props.mean().item():.6f}")
+        print(f"Presence probs: min={presence_probs.min().item():.6f}, max={presence_probs.max().item():.6f}, mean={presence_probs.mean().item():.6f}")
+        
+        # Calculate metrics per cell type
+        print("\n----- CELL TYPE PRESENCE DETECTION -----")
+        cell_types = y_true_df.columns
+        f1_scores = []
+        
+        for i, cell_type in enumerate(cell_types):
+            tp = torch.sum((pred_presence[:, i] == 1) & (true_presence[:, i] == 1)).item()
+            fp = torch.sum((pred_presence[:, i] == 1) & (true_presence[:, i] == 0)).item()
+            tn = torch.sum((pred_presence[:, i] == 0) & (true_presence[:, i] == 0)).item()
+            fn = torch.sum((pred_presence[:, i] == 0) & (true_presence[:, i] == 1)).item()
+            
+            precision = tp / (tp + fp + 1e-8)
+            recall = tp / (tp + fn + 1e-8)
+            f1 = 2 * precision * recall / (precision + recall + 1e-8)
+            f1_scores.append(f1)
+            
+            true_mean = y_true[:, i].mean().item()
+            pred_mean = props[:, i].mean().item()
+            
+            print(f"{cell_type}: P={precision:.4f}, R={recall:.4f}, F1={f1:.4f}, TP={tp}, FP={fp}, FN={fn}")
+            print(f"  Mean: True={true_mean:.6f}, Pred={pred_mean:.6f}, Ratio={pred_mean/max(true_mean, 1e-8):.2f}")
+        
+        print(f"\nAverage F1 Score: {sum(f1_scores)/len(f1_scores):.4f}")
+        
+        return props, presence_probs
+
+
+def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, min_cpgs=4, threads=10):
+    """
+    Consistent evaluation function that matches training behavior.
+    
+    Args:
+        atlas_path: Path to the atlas file
+        eval_pat_dir: Directory with evaluation data
+        model: The model to evaluate
+        dilutions: Dilution information
+        min_cpgs: Minimum CpGs required
+        threads: Number of threads to use
+        
+    Returns:
+        y_true_df, predictions_df, y_dilutions: DataFrames with results
+    """
+    # Prepare data
+    X_val, coverage_val, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions)
+    
+    # First run the debug analysis to get insights
+    debug_props, debug_probs = debug_model_predictions(model, X_val, coverage_val, y_true_df, threshold=0.005)
+    
+    # Use the built-in prediction method that now properly integrates presence information
+    predictions = model.predict(X_val, coverage_val)
     predictions_df = pd.DataFrame(predictions, columns=list(y_true_df.columns))
-    return y_true_df,predictions_df, y_dilutions 
-
-
-def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True):
-    suffix = "/"
-    if use_low_depth:
-        suffix="_low/"
-    deepconv_atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
-    deepconv_atlas = pd.read_csv(deepconv_atlas_path,sep="\t")
-    # model = CellTypeDeconvolutionModel(num_markers=len(deepconv_atlas),num_cell_types=len(deepconv_atlas.columns[8:]))
-    cell_types = list(deepconv_atlas.columns[8:])
-    target_ids = deepconv_atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
-    best_model = "best_model.pt"
-    presence_mode_dir = f"/users/zetzioni/sharedscratch/atlas/saved_models/{presence_model_name}/"
-    model = CellTypeDeconvolutionModel(
-        num_markers=len(deepconv_atlas),
-        num_cell_types=len(cell_types), 
-        target_ids=target_ids, 
-        presence_mode_dir=presence_mode_dir
-    )
-    checkpoint = torch.load(f"/users/zetzioni/sharedscratch/atlas/saved_models/{model_name}/{best_model}")
-    model.load_state_dict(checkpoint['model_state_dict'])
-    deepconv_eval_pat_dir4 = f"/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval{suffix}CD4/"
-    deepconv_eval_pat_dir8 = f"/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval{suffix}CD8/"
-    deepconv_eval_pat_dir_oac = f"/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
-    deepconv_eval_pat_dir4_8 = f"/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval{suffix}CD4_CD8/"
-    y_true_df, predictions_df, y_dilutions = deepconv_estimate(deepconv_atlas_path, deepconv_eval_pat_dir4,model, tcell_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir4+f"{model_name}/")
-    y_true_df, predictions_df, y_dilutions = deepconv_estimate(deepconv_atlas_path, deepconv_eval_pat_dir8,model,tcell_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir8+f"{model_name}/")
-    y_true_df, predictions_df, y_dilutions = deepconv_estimate(deepconv_atlas_path, deepconv_eval_pat_dir_oac,model, oac_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir_oac+f"{model_name}/")
-    y_true_df, predictions_df, y_dilutions = deepconv_estimate(deepconv_atlas_path, deepconv_eval_pat_dir4_8,model, tcell_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], deepconv_eval_pat_dir4_8+f"{model_name}/")
-
-
-def filter_by_coverage(fractions: np.ndarray, coverage: np.ndarray, min_cov: int):
-    mask = coverage < min_cov
-    coverage[mask] = 0
-    fractions[mask] = np.nan
-    return fractions, coverage
-
-
-def nnls_estimate(atlas_path, eval_pat_dir, dilutions, min_cpgs=4,threads=10, min_coverage=0):
-    atlas = pd.read_csv(atlas_path,sep="\t").dropna()
-    marker_read_proportions, counts, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions, min_cpgs, threads)
-    print("median coverage", np.median(counts, axis=1), np.median(np.median(counts, axis=1)), np.median(counts, axis=1).mean())
-    marker_read_proportions, counts = filter_by_coverage(marker_read_proportions, counts, min_coverage)
-    predictions = run_weighted_nnls(marker_read_proportions, counts, atlas[atlas.columns[8:]].T.values)
-    predictions_df = pd.DataFrame(predictions, columns=list(y_true_df.columns))
+    
+    # Log summary statistics
+    print("\n===== PREDICTION SUMMARY =====")
+    print(f"Predictions mean: {predictions.mean():.6f}")
+    print(f"Max prediction: {predictions.max():.6f}")
+    print(f"Min prediction: {predictions.min():.6f}")
+    
     return y_true_df, predictions_df, y_dilutions
 
 
-def eval_admixtures_nnls(atlas_path, pat_dir):
-    pat_dir4 = pat_dir+"CD4/"
-    pat_dir8 = pat_dir+"CD8/"
-    pat_dir_oac = pat_dir+"OAC/"
-    pat_dir4_8 = pat_dir+"CD4_CD8/"
-    y_true_df, predictions_df, y_dilutions= nnls_estimate(atlas_path, pat_dir4, tcell_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir4+"nnls/")
-    y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir8, tcell_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir8+"nnls/")
-    y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir_oac, oac_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_oac+"nnls/")
-    y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir4_8, tcell_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir4_8+"nnls/")
-
-
-def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type, out_dir,cd_tissue_mapping, model_name=None,ichorCNA=None, clinical_benefit=None, cancer_type=None, presence_model_name=None):
+def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type, out_dir,cd_tissue_mapping, model_name=None,ichorCNA=None, clinical_benefit=None, cancer_type=None, presence_model_name=None, tcell_col="T-cells"):
     pat_dir = Path(pat_dir)
     atlas = pd.read_csv(atlas_path,sep="\t")
     X_val = pd.read_parquet(Path(pat_dir)/"marker_values.parquet")
@@ -557,20 +586,18 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
     if model_name is not None:
         cell_types = list(atlas.columns[8:])
         target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
-        presence_mode_dir = f"/users/zetzioni/sharedscratch/atlas/saved_models/{presence_model_name}/"
         model = CellTypeDeconvolutionModel(
             num_markers=len(atlas),
             num_cell_types=len(cell_types), 
             target_ids=target_ids, 
-            presence_mode_dir=presence_mode_dir
+            presence_models_dir=f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{presence_model_name}",
         )
-        checkpoint = torch.load(f"/users/zetzioni/sharedscratch/atlas/saved_models/{model_name}/best_model.pt")
-        model.load_state_dict(checkpoint['model_state_dict'])
+        checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/best_model.pt")
+        model.load_state_dict(checkpoint["model_state_dict"], strict=False)
         estimation = predict_with_consensus(model, X_val,coverage_val)
     else:
         estimation = run_weighted_nnls(X_val, coverage_val, atlas[atlas.columns[8:]].T.values)
     df = pd.DataFrame(estimation, columns=list(atlas.columns[8:]))
-    df.rename(columns={"duodenum":"Duodenum"}, inplace=True)
     cols = sorted(list(df.columns))
     df['sample'] = samples    
     def extract_sample(sample):
@@ -581,7 +608,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         index = sample.split("-")[-1]
         name=cd_tissue_mapping[index]
         return name
-    
+
     df['sample'] = df['sample'].apply(extract_sample)
     if cd_tissue_mapping is not None:
         df['sample'] = df['sample'].apply(map_sample_index_to_name)
@@ -608,7 +635,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         if not 'cancer_type' in df.columns: 
             filtered_cols.remove("cancer_type")
         return filtered_cols
-    
+
     filtered_cols_all = remove_clinical_benefit_cancer_type_cols(cols+['sample','clinical_benefit','cancer_type'])
     fig = plot_analysis(df[filtered_cols_all], cols, title, clinical_benefit_col, cancer_type_col)
     fig.write_html(out_dir/f"{prefix}_deconvolution.html")
@@ -618,28 +645,19 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         if len(merged_df_with_tf)>0:
             create_correlation_plot(merged_df_with_tf, cols, "tf", out_dir/f"{prefix}_cell_type_vs_oac_correlation.html")
 
-    # plot CD4 concentrations
-    filtered_cols_cd4 = remove_clinical_benefit_cancer_type_cols(['sample','CD4-T-cells','clinical_benefit','cancer_type'])
-    fig = plot_analysis(df[filtered_cols_cd4], ['CD4-T-cells'], title, clinical_benefit_col, cancer_type_col)
-    fig.write_html(out_dir/f"{prefix}_cd4_deconvolution.html")
-
-    # plot CD8 concentrations
-    filtered_cols_cd8 = remove_clinical_benefit_cancer_type_cols(['sample','CD8-T-cells','clinical_benefit','cancer_type'])
-    fig = plot_analysis(df[filtered_cols_cd8], ['CD8-T-cells'], title, clinical_benefit_col, cancer_type_col)
-    fig.write_html(out_dir/f"{prefix}_cd8_deconvolution.html")
+    # plot T-cells concentrations
+    filtered_cols_tcells = remove_clinical_benefit_cancer_type_cols(['sample',tcell_col,'clinical_benefit','cancer_type'])
+    fig = plot_analysis(df[filtered_cols_tcells], [tcell_col], title, clinical_benefit_col, cancer_type_col)
+    fig.write_html(out_dir/f"{prefix}_tcells_deconvolution.html")
 
     # plot baseline concentrations
     baseline = df[df['sample'].str.contains("ScrBsl")]
     fig = plot_analysis(baseline[filtered_cols_all], cols, "Baseline: "+title, clinical_benefit_col, cancer_type_col)
     fig.write_html(out_dir/f"{prefix}_ScrBsl_deconvolution.html")
 
-    # plot baseline CD4 concentrations
-    fig = plot_analysis(baseline[filtered_cols_cd4], ['CD4-T-cells'], "Baseline CD4 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
-    fig.write_html(out_dir/f"{prefix}_ScrBsl_cd4_deconvolution.html")
-
-    # plot baseline CD8 concentrations
-    fig = plot_analysis(baseline[filtered_cols_cd8], ['CD8-T-cells'], "Baseline CD8 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
-    fig.write_html(out_dir/f"{prefix}_ScrBsl_cd8_deconvolution.html")
+    # plot baseline T-cells concentrations
+    fig = plot_analysis(baseline[filtered_cols_tcells], [tcell_col], "Baseline T-Cells: "+title, clinical_benefit_col, cancer_type_col)
+    fig.write_html(out_dir/f"{prefix}_ScrBsl_tcells_deconvolution.html")
 
     if ichorCNA is not None:
         merged_df_with_tf = baseline.merge(ichorCNA,on="sample", how="outer").dropna() 
@@ -651,13 +669,9 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
     fig = plot_analysis(immonly[filtered_cols_all], cols, "ImmOnly: "+title, clinical_benefit_col, cancer_type_col)
     fig.write_html(out_dir/f"{prefix}_immonly_deconvolution.html")
 
-    # plot immonly CD4 concentrations
-    fig = plot_analysis(immonly[filtered_cols_cd4], ['CD4-T-cells'], "Immonly CD4 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
-    fig.write_html(out_dir/f"{prefix}_immonly_cd4_deconvolution.html")
-
-    # plot immonly CD8 concentrations
-    fig = plot_analysis(immonly[filtered_cols_cd8], ['CD8-T-cells'], "Baseline CD8 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
-    fig.write_html(out_dir/f"{prefix}_immonly_cd8_deconvolution.html")
+    # plot immonly T-cells concentrations
+    fig = plot_analysis(immonly[filtered_cols_tcells], [tcell_col], "Immonly T-Cells: "+title, clinical_benefit_col, cancer_type_col)
+    fig.write_html(out_dir/f"{prefix}_immonly_tcells_deconvolution.html")
 
     if ichorCNA is not None:
         merged_df_with_tf = immonly.merge(ichorCNA,on="sample", how="outer").dropna() 
@@ -669,12 +683,9 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
     if len(surg)>0:
         fig = plot_analysis(surg[filtered_cols_all], cols, "Surgery: "+title, clinical_benefit_col, cancer_type_col)
         fig.write_html(out_dir/f"{prefix}_surg_deconvolution.html")
-        # plot C1 CD4 concentrations
-        fig = plot_analysis(surg[filtered_cols_cd4], ['CD4-T-cells'], "Surgery CD4 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
-        fig.write_html(out_dir/f"{prefix}_surg_cd4_deconvolution.html")
-        # plot c1 CD8 concentrations
-        fig = plot_analysis(surg[filtered_cols_cd8], ['CD8-T-cells'], "Surgery CD8 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
-        fig.write_html(out_dir/f"{prefix}_surg_cd8_deconvolution.html")
+        # plot C1 T-cells concentrations
+        fig = plot_analysis(surg[filtered_cols_tcells], [tcell_col], "Surgery T-Cells: "+title, clinical_benefit_col, cancer_type_col)
+        fig.write_html(out_dir/f"{prefix}_surg_tcells_deconvolution.html")
         if ichorCNA is not None:
             merged_df_with_tf = surg.merge(ichorCNA,on="sample", how="outer").dropna() 
             if len(merged_df_with_tf)>0:
@@ -685,12 +696,9 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
     if len(c1)>0:
         fig = plot_analysis(c1[filtered_cols_all], cols, "C1: "+title, clinical_benefit_col, cancer_type_col)
         fig.write_html(out_dir/f"{prefix}_c1_deconvolution.html")
-        # plot C1 CD4 concentrations
-        fig = plot_analysis(c1[filtered_cols_cd4], ['CD4-T-cells'], "C1 CD4 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
-        fig.write_html(out_dir/f"{prefix}_c1_cd4_deconvolution.html")
-        # plot c1 CD8 concentrations
-        fig = plot_analysis(c1[filtered_cols_cd8], ['CD8-T-cells'], "C1 CD8 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
-        fig.write_html(out_dir/f"{prefix}_c1_cd8_deconvolution.html")
+        # plot C1 T-cells concentrations
+        fig = plot_analysis(c1[filtered_cols_tcells], [tcell_col], "C1 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
+        fig.write_html(out_dir/f"{prefix}_c1_tcells_deconvolution.html")
         if ichorCNA is not None:
             merged_df_with_tf = c1.merge(ichorCNA,on="sample", how="outer").dropna() 
             if len(merged_df_with_tf)>0:
@@ -702,13 +710,9 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         fig = plot_analysis(c6[filtered_cols_all], cols, "C6: "+title, clinical_benefit_col, cancer_type_col)
         fig.write_html(out_dir/f"{prefix}_c6_deconvolution.html")
 
-        # plot C6 CD4 concentrations
-        fig = plot_analysis(c6[filtered_cols_cd4], ['CD4-T-cells'], "C6 CD4 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
-        fig.write_html(out_dir/f"{prefix}_c6_cd4_deconvolution.html")
-
-        # plot C6 CD8 concentrations
-        fig = plot_analysis(c6[filtered_cols_cd8], ['CD8-T-cells'], "C6 CD8 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
-        fig.write_html(out_dir/f"{prefix}_c6_cd8_deconvolution.html")
+        # plot C6 T-cells concentrations
+        fig = plot_analysis(c6[filtered_cols_tcells], [tcell_col], "C6 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
+        fig.write_html(out_dir/f"{prefix}_c6_tcells_deconvolution.html")
 
         if ichorCNA is not None:
             merged_df_with_tf = c6.merge(ichorCNA,on="sample", how="outer").dropna() 
@@ -721,19 +725,14 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         fig = plot_analysis(pt[filtered_cols_all], cols, "PT: "+title, clinical_benefit_col, cancer_type_col)
         fig.write_html(out_dir/f"{prefix}_pt_deconvolution.html")
 
-        # plot pt CD4 concentrations
-        fig = plot_analysis(pt[filtered_cols_cd4], ['CD4-T-cells'], "PT CD4 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
-        fig.write_html(out_dir/f"{prefix}_pt_cd4_deconvolution.html")
-
-        # plot pt CD8 concentrations
-        fig = plot_analysis(pt[filtered_cols_cd8], ['CD8-T-cells'], "PT CD8 T-Cells: "+title, clinical_benefit_col, cancer_type_col)
-        fig.write_html(out_dir/f"{prefix}_pt_cd8_deconvolution.html")
+        # plot pt T-cells concentrations
+        fig = plot_analysis(pt[filtered_cols_tcells], [tcell_col], "PT T-Cells: "+title, clinical_benefit_col, cancer_type_col)
+        fig.write_html(out_dir/f"{prefix}_pt_tcells_deconvolution.html")
 
         if ichorCNA is not None:
             merged_df_with_tf = pt.merge(ichorCNA,on="sample", how="outer").dropna() 
             if len(merged_df_with_tf)>0:
                 create_correlation_plot(merged_df_with_tf, cols, "tf", out_dir/f"{prefix}_pt_cell_type_vs_oac_correlation.html")
-
 
     # plot control concentrations
     controls = df[(df['sample'].str.contains("X")) | df['sample'].str.contains("TP") | df['sample'].str.contains("GI") | df['sample'].str.contains("SCAN")]
@@ -741,66 +740,134 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         fig = plot_analysis(controls[cols+['sample']], cols, "Controls: "+title)
         fig.write_html(out_dir/f"{prefix}_control_deconvolution.html")
 
-        # plot controls CD4 concentrations
-        fig = plot_analysis(controls[['sample','CD4-T-cells']], ['CD4-T-cells'], "Control CD4 T-Cells: "+title)
-        fig.write_html(out_dir/f"{prefix}_control_cd4_deconvolution.html")
-
-        # plot controls CD8 concentrations
-        fig = plot_analysis(controls[['sample','CD8-T-cells']], ['CD8-T-cells'], "Control CD8 T-Cells: "+title)
-        fig.write_html(out_dir/f"{prefix}_control_cd8_deconvolution.html")
+        # plot controls T-cells concentrations
+        fig = plot_analysis(controls[['sample',tcell_col]], [tcell_col], "Control T-Cells: "+title)
+        fig.write_html(out_dir/f"{prefix}_control_tcells_deconvolution.html")
 
 
 # 1
-def train_and_evaluate(model_name, presence_model_name, use_low_coverage:bool=False, use_high_coverage:bool=True):
-    atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
-    train_pat_dir = "/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/train"
-    eval_pat_dir = "/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval"
-    if use_low_coverage:
-        train_pat_dir+="_low/"
-        eval_pat_dir+="_low/"
-    elif use_high_coverage:
-        train_pat_dir+="_high/"
-        eval_pat_dir+="_high/"
-    else:
-        train_pat_dir+="/"
-        eval_pat_dir+="/"
+def train_and_evaluate(model_name, presence_model_name):
+    atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
+    train_pat_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_high/"
+    eval_pat_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_high/"
 
     threads = 32
-    output_path = Path("/users/zetzioni/sharedscratch/atlas/saved_models/"+model_name+"/")
-    presence_model_dir = f"/users/zetzioni/sharedscratch/atlas/saved_models/{presence_model_name}/"
+    output_path = Path("/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/"+model_name+"/")
+    presence_path = "/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/"+presence_model_name+"/"
     train_and_eval(atlas_path=atlas_path, 
                            train_pat_dir=train_pat_dir, 
                            eval_pat_dir=eval_pat_dir, 
                            threads=threads,
-                           output_path=output_path,
-                           presence_models_dir=presence_model_dir)
+                           output_path=output_path, 
+                           use_loyfer=True,
+                           presence_models_dir=presence_path)
 
 
-# 2 
+def nnls_estimate(atlas_path, eval_pat_dir, dilutions):
+    atlas = pd.read_csv(atlas_path,sep="\t").dropna()
+    marker_read_proportions, counts, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions)
+    print("median coverage", np.median(counts, axis=1), np.median(np.median(counts, axis=1)), np.median(counts, axis=1).mean())
+    marker_read_proportions, counts = marker_read_proportions, counts
+    predictions = run_weighted_nnls(marker_read_proportions, counts, atlas[atlas.columns[8:]].T.values)
+    predictions_df = pd.DataFrame(predictions, columns=list(y_true_df.columns))
+    return y_true_df, predictions_df, y_dilutions
+
+
+def eval_admixtures_nnls(atlas_path, use_low_depth=True):
+    suffix = "/"
+    if use_low_depth:
+        suffix = "_low/"
+    else:
+        suffix = "_high/"
+    
+    pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
+    pat_dir_oac = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
+
+    y_true_df, predictions_df, y_dilutions= nnls_estimate(atlas_path, pat_dir_tcells, tcell_dilutions)
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_tcells+"nnls/")
+    y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir_oac, oac_dilutions)
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_oac+"nnls/")
+
+
 def eval_admixtures(model_name,presence_model_name, use_low_coverage=True):
     # evaluate Zohar's atlas with deepconv
     eval_admixtures_deepconv(model_name, presence_model_name, use_low_coverage)  
-    # evaluate Ben's atlas with nnls
-    eval_admixtures_nnls("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Data/TAPS_Atlas/Atlas_dmr_by_read.blood+gi+tum.U100.l4.bed","/users/zetzioni/sharedscratch/atlas/training/dmr_by_read.blood+gi+tum.U100.l4/")
-    # evaluate Ben's fixed atlas with nnls
-    eval_admixtures_nnls("/users/zetzioni/sharedscratch/atlas/atlas/atlas_dmr_by_read.blood+gi+tum.U100.l4.bed", "/users/zetzioni/sharedscratch/atlas/training/fixed_dmr_by_read.blood+gi+tum.U100.l4/")
-    # evaluate Zohar's atlas with nnls
-    if use_low_coverage:
-        eval_admixtures_nnls("/users/zetzioni/sharedscratch/atlas/atlas/atlas_oac.blood+gi+tum.l4.bed","/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval_low/")
-    else:
-        eval_admixtures_nnls("/users/zetzioni/sharedscratch/atlas/atlas/atlas_oac.blood+gi+tum.l4.bed","/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/eval/")
+    # evaluate Zohar's atlas (primary markers only) with nnls
+    eval_admixtures_nnls("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed")
+   
 
+
+# 2
+def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True):
+    """
+    Evaluate deepconv model with consistent parameters.
+    
+    Args:
+        model_name: Name of the model directory
+        presence_model_name: Name of the presence model directory
+        use_low_depth: Whether to use low depth data
+    """
+    suffix = "/"
+    if use_low_depth:
+        suffix = "_low/"
+    else:
+        suffix = "_high/"
+        
+    deepconv_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
+    deepconv_atlas = pd.read_csv(deepconv_atlas_path, sep="\t")
+    cell_types = list(deepconv_atlas.columns[8:])
+    target_ids = deepconv_atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
+    
+    # Create model
+    model = CellTypeDeconvolutionModel(
+        num_markers=len(deepconv_atlas),
+        num_cell_types=len(cell_types),
+        target_ids=target_ids,
+        presence_models_dir=f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{presence_model_name}",
+    )
+    
+    # Load checkpoint
+    best_model = "best_model.pt"
+    checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/{best_model}")
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    
+    # Print the 'best_threshold' if it exists in the checkpoint
+    if 'best_threshold' in checkpoint:
+        print(f"Model's best threshold from training: {checkpoint['best_threshold']}")
+    
+    # Evaluation paths
+    deepconv_eval_pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
+    deepconv_eval_pat_dir_oac = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
+    
+    # Run evaluations
+    print("\n===== EVALUATING T-CELLS =====")
+    y_true_df, predictions_df, y_dilutions = deepconv_estimate(
+        deepconv_atlas_path, deepconv_eval_pat_dir_tcells, model, tcell_dilutions
+    )
+    plot_deconvolution_evaluation(
+        y_true_df, predictions_df, y_dilutions['dilution'], 
+        deepconv_eval_pat_dir_tcells+f"{model_name}/"
+    )
+    
+    print("\n===== EVALUATING OAC =====")
+    y_true_df, predictions_df, y_dilutions = deepconv_estimate(
+        deepconv_atlas_path, deepconv_eval_pat_dir_oac, model, oac_dilutions
+    )
+    plot_deconvolution_evaluation(
+        y_true_df, predictions_df, y_dilutions['dilution'], 
+        deepconv_eval_pat_dir_oac+f"{model_name}/"
+    )
 
 
 # 3
 def run_oac_analysis(model_name, presence_model_name):
-    out_base_dir = "/users/zetzioni/sharedscratch/atlas/OAC/analysis"
+    out_base_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis"
     ichorcna_cf_ab = pd.read_csv(out_base_dir+"/AB/cfDNA/ab_ichorcna_cfdna.csv", sep="\t")
     ichorcna_cf_ab.columns=['sample', 'tf','ploidy']
     ichorcna_cf_cd = pd.read_csv(out_base_dir+"/CD/cfDNA/cd_ichorcna_cfdna.csv", sep="\t")
     ichorcna_cf_cd.columns=['sample', 'tf','ploidy']
   
-    ab_metadata = pd.read_csv("/users/zetzioni/sharedscratch/atlas/OAC/analysis/AB/cfDNA/AB_patient_summary_HannahFuchs2023.csv")
+    ab_metadata = pd.read_csv("/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/AB_patient_summary_HannahFuchs2023.csv")
     def subject_to_sample(subject):
         split = subject.split("-")
         return split[0]+"-"+split[1]
@@ -816,7 +883,7 @@ def run_oac_analysis(model_name, presence_model_name):
         zip(ab_metadata['sample'], ab_metadata['cancer_type'])
     )
     
-    cd_metadata = pd.read_csv("/users/zetzioni/sharedscratch/atlas/OAC/analysis/CD/cfDNA/CD_patient_summary_HannahFuchs2023.csv")    
+    cd_metadata = pd.read_csv("/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/CD/cfDNA/CD_patient_summary_HannahFuchs2023.csv")    
     cd_metadata['sample']=cd_metadata['subject'].apply(subject_to_sample)
     cd_metadata['cancer_type']=cd_metadata['subject_recode'].map(lambda x:x.split('-')[0])
     cd_sample_to_ct =  defaultdict(
@@ -831,38 +898,38 @@ def run_oac_analysis(model_name, presence_model_name):
 
     zohar_model = model_name
     zohar_model_name = model_name
-    zohar_atlas_path = "/users/zetzioni/sharedscratch/atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
+    zohar_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
 
     # tissue deep conv AB
     zohar_atlas_name = "atlas_oac.blood+gi+tum.l4"
     zohar_batch="AB"
     zohar_type = "tissue"
     zohar_prefix_ab_tissue = "deep_conv_ab_tissue"
-    zohar_pat_dir_ab_tissue = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/tissue"
+    zohar_pat_dir_ab_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/tissue"
     zohar_title_ab_tissue=f"DeepConv deconvolution using atlas {zohar_atlas_path} on AB tissue"
     out_dir = str(Path(out_base_dir)/"AB"/"tissue"/model_name)
     # eval_OAC(zohar_atlas_path, zohar_pat_dir_ab_tissue, zohar_title_ab_tissue, zohar_prefix_ab_tissue, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name)
 
     zohar_type = "cfDNA"
     zohar_prefix_ab_cf = "deep_conv_ab_cfDNA"
-    zohar_pat_dir_ab_cf = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA"
+    zohar_pat_dir_ab_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA"
     zohar_title_ab_cf=f"DeepConv deconvolution using atlas {zohar_atlas_path} on AB cfDNA"
     out_dir = str(Path(out_base_dir)/"AB"/"cfDNA"/model_name)
-    eval_OAC(zohar_atlas_path, zohar_pat_dir_ab_cf, zohar_title_ab_cf, zohar_prefix_ab_cf, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name, ichorcna_cf_ab, ab_sample_to_cb, ab_sample_to_ct)
+    eval_OAC(zohar_atlas_path, zohar_pat_dir_ab_cf, zohar_title_ab_cf, zohar_prefix_ab_cf, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name, ichorcna_cf_ab, ab_sample_to_cb, ab_sample_to_ct, presence_model_name=presence_model_name)
 
     zohar_batch="CD"
     zohar_prefix_cd_tissue = "deep_conv_cd_tissue"
-    zohar_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/tissue"
+    zohar_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/tissue"
     zohar_title_cd_tissue=f"DeepConv deconvolution using atlas {zohar_atlas_path} on CD tissue"
     out_dir = str(Path(out_base_dir)/"CD"/"tissue"/model_name)
     # eval_OAC(zohar_atlas_path, zohar_pat_dir_cd_tissue, zohar_title_cd_tissue, zohar_prefix_cd_tissue, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, cd_tissue_mapping, zohar_model_name, ichorcna_cf_cd)
 
     zohar_type = "cfDNA"
     zohar_prefix_cd_cf = "deep_conv_cd_cfDNA"
-    zohar_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/cfDNA"
+    zohar_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/cfDNA"
     zohar_title_cd_cf=f"DeepConv deconvolution using atlas {zohar_atlas_path} on CD cfDNA"
     out_dir = str(Path(out_base_dir)/"CD"/"cfDNA"/model_name)
-    eval_OAC(zohar_atlas_path, zohar_pat_dir_cd_cf, zohar_title_cd_cf, zohar_prefix_cd_cf, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name)
+    eval_OAC(zohar_atlas_path, zohar_pat_dir_cd_cf, zohar_title_cd_cf, zohar_prefix_cd_cf, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name, presence_model_name=presence_model_name)
 
     ben_model_name = None
     ben_atlas_name = "atlas_dmr_by_read.blood+gi+tum.U100.l4"
@@ -872,7 +939,7 @@ def run_oac_analysis(model_name, presence_model_name):
     ben_batch="AB"
     ben_type = "tissue"
     ben_prefix_ab_tissue = "nnls_ab_tissue"
-    ben_pat_dir_ab_tissue = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/AB/tissue"                            
+    ben_pat_dir_ab_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/AB/tissue"                            
     ben_title_ab_tissue = f"NNLS deconvolution using atlas {ben_atlas_path} on AB tissue"
     out_dir = str(Path(out_base_dir)/"AB"/"tissue"/"nnls")
 
@@ -880,15 +947,15 @@ def run_oac_analysis(model_name, presence_model_name):
 
     ben_type = "cfDNA"
     ben_prefix_ab_cf = "nnls_ab_cfDNA"
-    ben_pat_dir_ab_cf = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/AB/cfDNA/"
+    ben_pat_dir_ab_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/AB/cfDNA/"
     ben_title_ab_cf = f"NNLS deconvolution using atlas {ben_atlas_path} on AB cfDNA"
     out_dir = str(Path(out_base_dir)/"AB"/"cfDNA"/"nnls")
-    eval_OAC(ben_atlas_path, ben_pat_dir_ab_cf, ben_title_ab_cf, ben_prefix_ab_cf, ben_atlas_name, ben_batch, ben_model, ben_type, out_dir, none_tissue_mapping, ben_model_name, ichorcna_cf_ab, ab_sample_to_cb, ab_sample_to_ct)
+    eval_OAC(ben_atlas_path, ben_pat_dir_ab_cf, ben_title_ab_cf, ben_prefix_ab_cf, ben_atlas_name, ben_batch, ben_model, ben_type, out_dir, none_tissue_mapping, ben_model_name, ichorcna_cf_ab, ab_sample_to_cb, ab_sample_to_ct, tcell_col="CD4-T-cells")
 
     ben_batch="CD"
     ben_type = "tissue"
     ben_prefix_cd_tissue = "nnls_cd_tissue"
-    ben_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/atlas/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/CD/tissue/"
+    ben_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/CD/tissue/"
     ben_title_cd_tissue = f"NNLS deconvolution using atlas {ben_atlas_path} on CD tissue"
     out_dir = str(Path(out_base_dir)/"CD"/"tissue"/"nnls")
 
@@ -896,11 +963,11 @@ def run_oac_analysis(model_name, presence_model_name):
 
     ben_type = "cfDNA"
     ben_prefix_cd_cf= "nnls_cd_cfDNA"
-    ben_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/atlas/OAC/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/CD/cfDNA"
+    ben_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/atlas/loyfer_atlas/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/CD/cfDNA"
     ben_title_cd_cf = f"NNLS deconvolution using atlas {ben_atlas_path} on CD cfDNA"
     out_dir = str(Path(out_base_dir)/"CD"/"cfDNA"/"nnls")
 
-    eval_OAC(ben_atlas_path, ben_pat_dir_cd_cf, ben_title_cd_cf, ben_prefix_cd_cf, ben_atlas_name, ben_batch, ben_model, ben_type, out_dir, none_tissue_mapping, ben_model_name, ichorcna_cf_cd, None, cd_sample_to_ct)
+    eval_OAC(ben_atlas_path, ben_pat_dir_cd_cf, ben_title_cd_cf, ben_prefix_cd_cf, ben_atlas_name, ben_batch, ben_model, ben_type, out_dir, none_tissue_mapping, ben_model_name, ichorcna_cf_cd, None, cd_sample_to_ct, tcell_col="CD4-T-cells")
 
     # plot AB cohort cfDNA Ben's Atlas with NNLS vs Deepcon with Zohar's atlas OAC concentration vs ichorCNA
     ben_cf_ab = pd.read_csv(out_base_dir+"/AB/cfDNA/nnls/nnls_ab_cfDNA_deconvolution.csv",sep="\t")

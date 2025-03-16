@@ -93,7 +93,7 @@ def get_validation_set(eval_pat_dir: str, atlas: pd.DataFrame, names: set) -> Tu
     return val_loader, y_val
 
 
-def load_training(base_dir: str, atlas: pd.DataFrame, names: set, num_files: int = 4) -> DataLoader:
+def load_training(base_dir: str, atlas: pd.DataFrame, names: set, num_files: int = 5) -> DataLoader:
     """
     Loads and merges multiple parquet files containing training data (marker_values, coverage, ground_truth_y),
     filters them to only include the markers in 'names', and returns a DataLoader for training.
@@ -198,7 +198,9 @@ def train_and_eval(
     train_pat_dir: str,
     eval_pat_dir: str,
     threads: int,
-    output_path: str
+    output_path: str,
+    use_loyfer: bool,
+    presence_models_dir: str,
 ) -> nn.Module:
     """
     Loads data, trains a CellTypeDeconvolutionModel, and evaluates it on multiple validation sets.
@@ -251,23 +253,40 @@ def train_and_eval(
 
     # 3) Build DataLoaders for each validation subset
     tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir) / "tier1"), atlas, names)
-    cd4_dl, cd4_yval = get_validation_set(str(Path(eval_pat_dir) / "CD4"), atlas, names)
-    cd8_dl, cd8_yval = get_validation_set(str(Path(eval_pat_dir) / "CD8"), atlas, names)
-    oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, names)
+    if use_loyfer:
+        tcells_dl, tcells_yval = get_validation_set(str(Path(eval_pat_dir) / "T-cells"), atlas, names)
+        oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, names)
 
-    validation_dls = {
-        "tier1": tier1_dl,
-        "cd4": cd4_dl,
-        "cd8": cd8_dl,
-        "oac": oac_dl
-    }
+        validation_dls = {
+            "tier1": tier1_dl,
+            "t-cells": tcells_dl,
+            "oac": oac_dl
+        }
 
-    y_vals = {
-        "tier1": t1_yval,
-        "cd4": cd4_yval,
-        "cd8": cd8_yval,
-        "oac": oac_yval
-    }
+        y_vals = {
+            "tier1": t1_yval,
+            "t-cells": tcells_yval,
+            "oac": oac_yval
+        }
+    else:
+        cd4_dl, cd4_yval = get_validation_set(str(Path(eval_pat_dir) / "CD4"), atlas, names)
+        cd8_dl, cd8_yval = get_validation_set(str(Path(eval_pat_dir) / "CD8"), atlas, names)
+        oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, names)
+
+        validation_dls = {
+            "tier1": tier1_dl,
+            "cd4": cd4_dl,
+            "cd8": cd8_dl,
+            "oac": oac_dl
+        }
+
+        y_vals = {
+            "tier1": t1_yval,
+            "cd4": cd4_yval,
+            "cd8": cd8_yval,
+            "oac": oac_yval
+        }
+
 
     # 4) Identify all cell type columns (atlas.columns[8:])
     cell_types = list(atlas.columns[8:])
@@ -279,7 +298,8 @@ def train_and_eval(
     model = CellTypeDeconvolutionModel(
         num_markers=len(atlas),
         num_cell_types=len(cell_types),
-        target_ids=target_ids
+        target_ids=target_ids,
+        presence_models_dir=presence_models_dir,
     )
 
     # 6) Train the model, saving best checkpoint to `output_path`
