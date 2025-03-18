@@ -19,15 +19,18 @@ def train_binary_classifier(
     device: torch.device = None,
     fp16_training: bool = True,  # Use mixed precision
     gradient_accumulation: int = 1,  # Number of batches to accumulate
-    eval_metric: str = 'balanced_accuracy'  # 'balanced_accuracy', 'f1', 'auroc'
+    eval_metric: str = 'balanced_accuracy',  # 'balanced_accuracy', 'f1', 'auroc'
+    coverage_low_threshold: float = 10.0,  # Threshold for low coverage
+    coverage_med_threshold: float = 30.0   # Threshold for medium coverage
 ):
     """
-    Train a binary classifier for cell type detection.
+    Train a binary classifier for cell type detection with coverage-aware loss.
     
     Args:
         model: Binary classifier model
         dataloaders: Dictionary containing 'train' and 'val' dataloaders
         model_path: Path to save model checkpoints
+        target_cell_type_index: Index of the target cell type
         num_epochs: Number of training epochs
         learning_rate: Initial learning rate
         weight_decay: L2 regularization weight
@@ -37,6 +40,8 @@ def train_binary_classifier(
         fp16_training: Whether to use mixed precision training
         gradient_accumulation: Number of batches to accumulate gradients
         eval_metric: Metric to use for model selection
+        coverage_low_threshold: Threshold for defining low coverage
+        coverage_med_threshold: Threshold for defining medium coverage
     
     Returns:
         Trained model
@@ -77,14 +82,27 @@ def train_binary_classifier(
         class_weight = (1 - pos_ratio) / pos_ratio
         print(f"Calculated positive class weight: {class_weight:.4f} (ratio: {pos_ratio:.4f})")
     
-    # Create loss function with class weights
+    # Create loss function with class weights and coverage awareness
     weights = torch.tensor([1.0, class_weight], device=device)
     
-    def weighted_bce_loss(logits, targets):
+    def weighted_bce_loss(logits, targets, coverage):
+        # Calculate mean coverage for each sample
+        sample_coverage = coverage.mean(dim=1, keepdim=True)
+        
+        # Calculate coverage weights (higher weight for higher coverage)
+        # For coverage=5, weight=0.7; for coverage=20, weight=1.3; for coverage=50, weight=1.8
+        coverage_weights = torch.clamp(sample_coverage / 15.0, 0.5, 2.0)
+        
+        # Class weights based on positive/negative imbalance
         per_sample_weights = torch.ones_like(targets)
         per_sample_weights[targets == 1] = weights[1]
+        
+        # Combine class weights with coverage weights
+        combined_weights = per_sample_weights * coverage_weights
+        
+        # Calculate weighted loss
         return F.binary_cross_entropy_with_logits(
-            logits, targets, weight=per_sample_weights, reduction='mean'
+            logits, targets, weight=combined_weights, reduction='mean'
         )
     
     # Tracking variables
@@ -96,10 +114,11 @@ def train_binary_classifier(
     for epoch in range(num_epochs):
         model.train()
         train_losses = []
-        train_metrics = {
-            'tp': 0, 'fp': 0, 'tn': 0, 'fn': 0,
-            'loss': 0.0
-        }
+        
+        # Tracking metrics by coverage level
+        coverage_categories = ['all', 'low', 'medium', 'high']
+        train_metrics = {cat: {'tp': 0, 'fp': 0, 'tn': 0, 'fn': 0, 'count': 0, 'loss': 0.0} 
+                        for cat in coverage_categories}
         
         # Training
         for batch_idx, batch in enumerate(tqdm(dataloaders['train'], desc=f"Epoch {epoch+1}/{num_epochs}")):
@@ -107,15 +126,21 @@ def train_binary_classifier(
             coverage = batch['coverage'].to(device)
             labels = batch['label'].to(device).view(-1, 1)
             
+            # Calculate mean coverage for each sample for stratification
+            mean_coverage = coverage.mean(dim=1)
+            low_cov_mask = (mean_coverage < coverage_low_threshold)
+            med_cov_mask = (mean_coverage >= coverage_low_threshold) & (mean_coverage < coverage_med_threshold)
+            high_cov_mask = (mean_coverage >= coverage_med_threshold)
+            
             # Forward pass with mixed precision if enabled
             if scaler is not None:
                 with torch.cuda.amp.autocast():
                     logits, _ = model(marker_values, coverage)
-                    loss = weighted_bce_loss(logits, labels)
+                    loss = weighted_bce_loss(logits, labels, coverage)
                     loss = loss / gradient_accumulation  # Scale for gradient accumulation
             else:
                 logits, _ = model(marker_values, coverage)
-                loss = weighted_bce_loss(logits, labels)
+                loss = weighted_bce_loss(logits, labels, coverage)
                 loss = loss / gradient_accumulation  # Scale for gradient accumulation
             
             # Backward pass with mixed precision
@@ -140,43 +165,88 @@ def train_binary_classifier(
             
             # Track metrics
             with torch.no_grad():
-                train_losses.append(loss.item() * gradient_accumulation)
+                # Record loss
+                batch_loss = loss.item() * gradient_accumulation
+                train_losses.append(batch_loss)
                 
-                # Calculate confusion matrix
+                # Calculate predictions
                 probabilities = torch.sigmoid(logits)
                 predictions = (probabilities >= 0.5).float()
                 
-                train_metrics['tp'] += torch.sum((predictions == 1) & (labels == 1)).item()
-                train_metrics['fp'] += torch.sum((predictions == 1) & (labels == 0)).item()
-                train_metrics['tn'] += torch.sum((predictions == 0) & (labels == 0)).item()
-                train_metrics['fn'] += torch.sum((predictions == 0) & (labels == 1)).item()
+                # Update metrics for all samples
+                train_metrics['all']['tp'] += torch.sum((predictions == 1) & (labels == 1)).item()
+                train_metrics['all']['fp'] += torch.sum((predictions == 1) & (labels == 0)).item()
+                train_metrics['all']['tn'] += torch.sum((predictions == 0) & (labels == 0)).item()
+                train_metrics['all']['fn'] += torch.sum((predictions == 0) & (labels == 1)).item()
+                train_metrics['all']['count'] += len(labels)
+                train_metrics['all']['loss'] += batch_loss * len(labels)
+                
+                # Update metrics for low coverage samples if present
+                if low_cov_mask.any():
+                    low_predictions = predictions[low_cov_mask]
+                    low_labels = labels[low_cov_mask]
+                    train_metrics['low']['tp'] += torch.sum((low_predictions == 1) & (low_labels == 1)).item()
+                    train_metrics['low']['fp'] += torch.sum((low_predictions == 1) & (low_labels == 0)).item()
+                    train_metrics['low']['tn'] += torch.sum((low_predictions == 0) & (low_labels == 0)).item()
+                    train_metrics['low']['fn'] += torch.sum((low_predictions == 0) & (low_labels == 1)).item()
+                    train_metrics['low']['count'] += len(low_labels)
+                    train_metrics['low']['loss'] += batch_loss * len(low_labels)
+                
+                # Update metrics for medium coverage samples if present
+                if med_cov_mask.any():
+                    med_predictions = predictions[med_cov_mask]
+                    med_labels = labels[med_cov_mask]
+                    train_metrics['medium']['tp'] += torch.sum((med_predictions == 1) & (med_labels == 1)).item()
+                    train_metrics['medium']['fp'] += torch.sum((med_predictions == 1) & (med_labels == 0)).item()
+                    train_metrics['medium']['tn'] += torch.sum((med_predictions == 0) & (med_labels == 0)).item()
+                    train_metrics['medium']['fn'] += torch.sum((med_predictions == 0) & (med_labels == 1)).item()
+                    train_metrics['medium']['count'] += len(med_labels)
+                    train_metrics['medium']['loss'] += batch_loss * len(med_labels)
+                
+                # Update metrics for high coverage samples if present
+                if high_cov_mask.any():
+                    high_predictions = predictions[high_cov_mask]
+                    high_labels = labels[high_cov_mask]
+                    train_metrics['high']['tp'] += torch.sum((high_predictions == 1) & (high_labels == 1)).item()
+                    train_metrics['high']['fp'] += torch.sum((high_predictions == 1) & (high_labels == 0)).item()
+                    train_metrics['high']['tn'] += torch.sum((high_predictions == 0) & (high_labels == 0)).item()
+                    train_metrics['high']['fn'] += torch.sum((high_predictions == 0) & (high_labels == 1)).item()
+                    train_metrics['high']['count'] += len(high_labels)
+                    train_metrics['high']['loss'] += batch_loss * len(high_labels)
         
-        # Calculate training metrics
-        train_metrics['loss'] = np.mean(train_losses)
-        tp, fp, tn, fn = train_metrics['tp'], train_metrics['fp'], train_metrics['tn'], train_metrics['fn']
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-        balanced_accuracy = (recall + specificity) / 2
-        
-        print(f"Epoch {epoch+1}/{num_epochs} - Train: loss={train_metrics['loss']:.4f}, " +
-              f"precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}, " +
-              f"f1={f1:.4f}, balanced_acc={balanced_accuracy:.4f}")
+        # Calculate final training metrics for each coverage level
+        for cat in coverage_categories:
+            metrics = train_metrics[cat]
+            if metrics['count'] > 0:
+                metrics['loss'] = metrics['loss'] / metrics['count']
+                
+                tp, fp, tn, fn = metrics['tp'], metrics['fp'], metrics['tn'], metrics['fn']
+                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+                f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+                balanced_accuracy = (recall + specificity) / 2
+                
+                metrics['precision'] = precision
+                metrics['recall'] = recall
+                metrics['specificity'] = specificity
+                metrics['f1'] = f1
+                metrics['balanced_accuracy'] = balanced_accuracy
+                
+                print(f"Epoch {epoch+1}/{num_epochs} - Train ({cat} coverage): loss={metrics['loss']:.4f}, " +
+                    f"precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}, " +
+                    f"f1={f1:.4f}, balanced_acc={balanced_accuracy:.4f}, count={metrics['count']}")
         
         # Validation
         model.eval()
         val_metrics = {}
         
         for val_name, val_loader in dataloaders['val'].items():
-            val_set_metrics = {
-                'tp': 0, 'fp': 0, 'tn': 0, 'fn': 0,
-                'loss': 0.0,
-                'all_labels': [],
-                'all_probs': []
-            }
-            
-            val_losses = []
+            # Setup metrics for each coverage category
+            val_set_metrics = {cat: {
+                'tp': 0, 'fp': 0, 'tn': 0, 'fn': 0, 'count': 0, 'loss': 0.0,
+                'all_labels': [], 'all_probs': []
+            } for cat in coverage_categories}
             
             with torch.no_grad():
                 for batch in tqdm(val_loader, desc=f"Validating {val_name}"):
@@ -184,79 +254,151 @@ def train_binary_classifier(
                     coverage = batch['coverage'].to(device)
                     labels = batch['label'].to(device).view(-1, 1)
                     
+                    # Calculate mean coverage for each sample for stratification
+                    mean_coverage = coverage.mean(dim=1)
+                    low_cov_mask = (mean_coverage < coverage_low_threshold)
+                    med_cov_mask = (mean_coverage >= coverage_low_threshold) & (mean_coverage < coverage_med_threshold)
+                    high_cov_mask = (mean_coverage >= coverage_med_threshold)
+                    
                     # Forward pass
                     logits, _ = model(marker_values, coverage)
-                    loss = weighted_bce_loss(logits, labels)
+                    loss = weighted_bce_loss(logits, labels, coverage)
                     
                     # Calculate metrics
                     probabilities = torch.sigmoid(logits)
                     predictions = (probabilities >= 0.5).float()
                     
-                    val_losses.append(loss.item())
+                    # Store predictions and labels for all samples
+                    val_set_metrics['all']['all_labels'].append(labels.cpu().numpy())
+                    val_set_metrics['all']['all_probs'].append(probabilities.cpu().numpy())
+                    val_set_metrics['all']['count'] += len(labels)
+                    val_set_metrics['all']['loss'] += loss.item() * len(labels)
                     
-                    # Store predictions and labels for ROC and PR curves
-                    val_set_metrics['all_labels'].append(labels.cpu().numpy())
-                    val_set_metrics['all_probs'].append(probabilities.cpu().numpy())
+                    # Update confusion matrix for all samples
+                    val_set_metrics['all']['tp'] += torch.sum((predictions == 1) & (labels == 1)).item()
+                    val_set_metrics['all']['fp'] += torch.sum((predictions == 1) & (labels == 0)).item()
+                    val_set_metrics['all']['tn'] += torch.sum((predictions == 0) & (labels == 0)).item()
+                    val_set_metrics['all']['fn'] += torch.sum((predictions == 0) & (labels == 1)).item()
                     
-                    # Update confusion matrix
-                    val_set_metrics['tp'] += torch.sum((predictions == 1) & (labels == 1)).item()
-                    val_set_metrics['fp'] += torch.sum((predictions == 1) & (labels == 0)).item()
-                    val_set_metrics['tn'] += torch.sum((predictions == 0) & (labels == 0)).item()
-                    val_set_metrics['fn'] += torch.sum((predictions == 0) & (labels == 1)).item()
+                    # Update metrics for low coverage samples if present
+                    if low_cov_mask.any():
+                        low_predictions = predictions[low_cov_mask]
+                        low_labels = labels[low_cov_mask]
+                        low_probs = probabilities[low_cov_mask]
+                        
+                        val_set_metrics['low']['all_labels'].append(low_labels.cpu().numpy())
+                        val_set_metrics['low']['all_probs'].append(low_probs.cpu().numpy())
+                        val_set_metrics['low']['count'] += len(low_labels)
+                        val_set_metrics['low']['loss'] += loss.item() * len(low_labels)
+                        
+                        val_set_metrics['low']['tp'] += torch.sum((low_predictions == 1) & (low_labels == 1)).item()
+                        val_set_metrics['low']['fp'] += torch.sum((low_predictions == 1) & (low_labels == 0)).item()
+                        val_set_metrics['low']['tn'] += torch.sum((low_predictions == 0) & (low_labels == 0)).item()
+                        val_set_metrics['low']['fn'] += torch.sum((low_predictions == 0) & (low_labels == 1)).item()
+                    
+                    # Update metrics for medium coverage samples if present
+                    if med_cov_mask.any():
+                        med_predictions = predictions[med_cov_mask]
+                        med_labels = labels[med_cov_mask]
+                        med_probs = probabilities[med_cov_mask]
+                        
+                        val_set_metrics['medium']['all_labels'].append(med_labels.cpu().numpy())
+                        val_set_metrics['medium']['all_probs'].append(med_probs.cpu().numpy())
+                        val_set_metrics['medium']['count'] += len(med_labels)
+                        val_set_metrics['medium']['loss'] += loss.item() * len(med_labels)
+                        
+                        val_set_metrics['medium']['tp'] += torch.sum((med_predictions == 1) & (med_labels == 1)).item()
+                        val_set_metrics['medium']['fp'] += torch.sum((med_predictions == 1) & (med_labels == 0)).item()
+                        val_set_metrics['medium']['tn'] += torch.sum((med_predictions == 0) & (med_labels == 0)).item()
+                        val_set_metrics['medium']['fn'] += torch.sum((med_predictions == 0) & (med_labels == 1)).item()
+                    
+                    # Update metrics for high coverage samples if present
+                    if high_cov_mask.any():
+                        high_predictions = predictions[high_cov_mask]
+                        high_labels = labels[high_cov_mask]
+                        high_probs = probabilities[high_cov_mask]
+                        
+                        val_set_metrics['high']['all_labels'].append(high_labels.cpu().numpy())
+                        val_set_metrics['high']['all_probs'].append(high_probs.cpu().numpy())
+                        val_set_metrics['high']['count'] += len(high_labels)
+                        val_set_metrics['high']['loss'] += loss.item() * len(high_labels)
+                        
+                        val_set_metrics['high']['tp'] += torch.sum((high_predictions == 1) & (high_labels == 1)).item()
+                        val_set_metrics['high']['fp'] += torch.sum((high_predictions == 1) & (high_labels == 0)).item()
+                        val_set_metrics['high']['tn'] += torch.sum((high_predictions == 0) & (high_labels == 0)).item()
+                        val_set_metrics['high']['fn'] += torch.sum((high_predictions == 0) & (high_labels == 1)).item()
             
-            # Calculate validation metrics
-            val_set_metrics['loss'] = np.mean(val_losses)
-            tp, fp, tn, fn = val_set_metrics['tp'], val_set_metrics['fp'], val_set_metrics['tn'], val_set_metrics['fn']
-            
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
-            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-            balanced_accuracy = (recall + specificity) / 2
-            
-            # Concat all labels and probabilities
-            all_labels = np.concatenate(val_set_metrics['all_labels']).flatten()
-            all_probs = np.concatenate(val_set_metrics['all_probs']).flatten()
-            
-            # Calculate AUROC and AUPRC (if there are positive and negative examples)
-            if len(np.unique(all_labels)) > 1:
-                auroc = roc_auc_score(all_labels, all_probs)
-                auprc = average_precision_score(all_labels, all_probs)
-            else:
-                auroc = 0.0
-                auprc = precision  # If only one class, AUPRC = precision
-            
-            # Store metrics
-            val_set_metrics.update({
-                'precision': precision,
-                'recall': recall,
-                'specificity': specificity,
-                'f1': f1,
-                'balanced_accuracy': balanced_accuracy,
-                'auroc': auroc,
-                'auprc': auprc
-            })
+            # Calculate validation metrics for each coverage level
+            for cat in coverage_categories:
+                metrics = val_set_metrics[cat]
+                
+                if metrics['count'] > 0:
+                    metrics['loss'] = metrics['loss'] / metrics['count']
+                    
+                    tp, fp, tn, fn = metrics['tp'], metrics['fp'], metrics['tn'], metrics['fn']
+                    
+                    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+                    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+                    balanced_accuracy = (recall + specificity) / 2
+                    
+                    # Concat all labels and probabilities if available
+                    if len(metrics['all_labels']) > 0 and len(metrics['all_probs']) > 0:
+                        try:
+                            all_labels = np.concatenate(metrics['all_labels']).flatten()
+                            all_probs = np.concatenate(metrics['all_probs']).flatten()
+                            
+                            # Calculate AUROC and AUPRC (if there are positive and negative examples)
+                            if len(np.unique(all_labels)) > 1:
+                                auroc = roc_auc_score(all_labels, all_probs)
+                                auprc = average_precision_score(all_labels, all_probs)
+                            else:
+                                auroc = 0.0
+                                auprc = precision  # If only one class, AUPRC = precision
+                                
+                            metrics['auroc'] = auroc
+                            metrics['auprc'] = auprc
+                        except:
+                            # Handle edge cases where concatenation fails
+                            metrics['auroc'] = 0.0
+                            metrics['auprc'] = 0.0
+                    else:
+                        metrics['auroc'] = 0.0
+                        metrics['auprc'] = 0.0
+                    
+                    # Store metrics
+                    metrics.update({
+                        'precision': precision,
+                        'recall': recall,
+                        'specificity': specificity,
+                        'f1': f1,
+                        'balanced_accuracy': balanced_accuracy
+                    })
+                    
+                    # Print validation metrics
+                    print(f"Validation ({val_name}, {cat} coverage): loss={metrics['loss']:.4f}, " +
+                        f"precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}, " +
+                        f"f1={f1:.4f}, balanced_acc={balanced_accuracy:.4f}, " +
+                        f"AUROC={metrics.get('auroc', 0.0):.4f}, AUPRC={metrics.get('auprc', 0.0):.4f}, count={metrics['count']}")
+                    
+                    # Print confusion matrix
+                    print(f"Confusion Matrix: TP={tp}, FP={fp}, TN={tn}, FN={fn}")
             
             val_metrics[val_name] = val_set_metrics
-            
-            # Print validation metrics
-            print(f"Validation ({val_name}): loss={val_set_metrics['loss']:.4f}, " +
-                  f"precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}, " +
-                  f"f1={f1:.4f}, balanced_acc={balanced_accuracy:.4f}, " +
-                  f"AUROC={auroc:.4f}, AUPRC={auprc:.4f}")
-            
-            # Print confusion matrix
-            print(f"Confusion Matrix: TP={tp}, FP={fp}, TN={tn}, FN={fn}")
         
-        # Calculate average metric for validation sets
-        if eval_metric == 'balanced_accuracy':
-            avg_metric = np.mean([m['balanced_accuracy'] for m in val_metrics.values()])
-        elif eval_metric == 'f1':
-            avg_metric = np.mean([m['f1'] for m in val_metrics.values()])
-        elif eval_metric == 'auroc':
-            avg_metric = np.mean([m['auroc'] for m in val_metrics.values()])
+        # Calculate average metric for validation sets, with emphasis on low coverage performance
+        avg_metric_all = np.mean([m['all']['balanced_accuracy'] for m in val_metrics.values() if m['all']['count'] > 0])
+        avg_metric_low = np.mean([m['low']['balanced_accuracy'] for m in val_metrics.values() if m['low']['count'] > 0])
+        
+        # Weight the overall metric to emphasize low coverage performance
+        # 60% weight on low coverage, 40% weight on overall
+        if np.isnan(avg_metric_low):
+            avg_metric = avg_metric_all
         else:
-            raise ValueError(f"Unknown evaluation metric: {eval_metric}")
+            avg_metric = 0.4 * avg_metric_all + 0.6 * avg_metric_low
+        
+        print(f"Combined validation metric: {avg_metric:.4f} (All: {avg_metric_all:.4f}, Low: {avg_metric_low:.4f})")
         
         # Update learning rate scheduler
         scheduler.step(avg_metric)
@@ -273,11 +415,13 @@ def train_binary_classifier(
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'best_metric': best_metric,
-                'metric_name': eval_metric
+                'metric_name': eval_metric,
+                'low_coverage_metric': avg_metric_low,
+                'all_coverage_metric': avg_metric_all
             }
             torch.save(checkpoint, os.path.join(model_path, f"presence_model_{target_cell_type_index}.pt"))
             
-            print(f"New best model saved! {eval_metric}={best_metric:.4f}")
+            print(f"New best model saved! Combined metric={best_metric:.4f}")
         else:
             patience_counter += 1
             print(f"No improvement. Patience: {patience_counter}/{patience}")
@@ -290,8 +434,7 @@ def train_binary_classifier(
     # Load best model
     checkpoint = torch.load(os.path.join(model_path, f"presence_model_{target_cell_type_index}.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
-    print(f"Loaded best model from epoch {checkpoint['epoch']+1} with {eval_metric}={checkpoint['best_metric']:.4f}")
+    print(f"Loaded best model from epoch {checkpoint['epoch']+1} with metric={checkpoint['best_metric']:.4f}")
+    print(f"Low coverage: {checkpoint.get('low_coverage_metric', 'N/A')}, All coverage: {checkpoint.get('all_coverage_metric', 'N/A')}")
     
     return model
-
-
