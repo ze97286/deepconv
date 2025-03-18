@@ -131,10 +131,12 @@ def load_training(base_dir: str, names: set, target_cell_type: int, num_files: i
     suffixes = [f"_batch{i}" for i in range(1, num_files + 1)]
     
     # Read multiple parquet files and accumulate marker values, coverage, and ground-truth
-    for i in range(1, num_files + 1):
-        markers.append(pd.read_parquet(base_dir + str(i) + "_marker_values.parquet"))
-        coverage.append(pd.read_parquet(base_dir + str(i) + "_coverage.parquet"))
-        y.append(pd.read_parquet(base_dir + str(i) + "_ground_truth_y.parquet"))
+    for cov in ['high', 'med', 'low']:
+        for i in range(1, num_files + 1):
+            markers.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_marker_values.parquet"))
+            coverage.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_coverage.parquet"))
+            y.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_ground_truth_y.parquet"))
+    
     
     # Merge all marker tables on ['name','direction']
     merged_markers = markers[0]
@@ -280,22 +282,28 @@ def train_and_eval(
     # 2) Build the training DataLoader from parquet files in train_pat_dir
     train_dl = load_training(train_pat_dir, names, target_cell_type=target_cell_type)
     # 3) Build DataLoaders for each validation subset
-    tier1_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "tier1"), target_cell_type, names)
-    tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), target_cell_type, names)
+
     if use_loyfer:
-        tier3_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "T-cells"), target_cell_type, names)
+        validation_dls = {}
+        y_vals = {}
+        for cov in ['high','med','low']:
+            tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "tier1"), atlas, names)
+            tcells_dl, tcells_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "T-cells"), atlas, names)
+            oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "OAC"), atlas, names)
+
+            validation_dls[f"tier1_{cov}"] = tier1_dl
+            validation_dls[f"t-cells_{cov}"] = tcells_dl
+            validation_dls[f"oac_{cov}"] = oac_dl
+            
+            y_vals[f"tier1_{cov}"] = t1_yval
+            y_vals[f"t-cells_{cov}"] = tcells_yval
+            y_vals[f"oac_{cov}"] = oac_yval        
     else:
+        tier1_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "tier1"), target_cell_type, names)
+        tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), target_cell_type, names)
         tier3_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD4"), target_cell_type, names)
         tier4_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD8"), target_cell_type, names)
-    
-    if use_loyfer:
         validation_dls = {
-            "tier1": tier1_dl,        
-            "tier2": tier2_dl,        
-            "tier3": tier3_dl,        
-        }
-    else:
-         validation_dls = {
             "tier1": tier1_dl,        
             "tier2": tier2_dl,        
             "tier3": tier3_dl,        
