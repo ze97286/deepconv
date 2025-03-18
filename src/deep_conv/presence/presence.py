@@ -287,9 +287,9 @@ def train_and_eval(
         validation_dls = {}
         y_vals = {}
         for cov in ['high','med','low']:
-            tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "tier1"), atlas, names)
-            tcells_dl, tcells_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "T-cells"), atlas, names)
-            oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "OAC"), atlas, names)
+            tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "tier1"), target_cell_type, names)
+            tcells_dl, tcells_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "T-cells"), target_cell_type, names)
+            oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "OAC"), target_cell_type, names)
 
             validation_dls[f"tier1_{cov}"] = tier1_dl
             validation_dls[f"t-cells_{cov}"] = tcells_dl
