@@ -594,7 +594,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         )
         checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/best_model.pt")
         model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        estimation = predict_with_consensus(model, X_val,coverage_val)
+        estimation = model.predict(X_val,coverage_val)
     else:
         estimation = run_weighted_nnls(X_val, coverage_val, atlas[atlas.columns[8:]].T.values)
     df = pd.DataFrame(estimation, columns=list(atlas.columns[8:]))
@@ -773,12 +773,8 @@ def nnls_estimate(atlas_path, eval_pat_dir, dilutions):
     return y_true_df, predictions_df, y_dilutions
 
 
-def eval_admixtures_nnls(atlas_path, use_low_depth=True):
-    suffix = "/"
-    if use_low_depth:
-        suffix = "_low/"
-    else:
-        suffix = "_high/"
+def eval_admixtures_nnls(atlas_path, size="low"):
+    suffix = f"_{size}/"
     
     pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
     pat_dir_oac = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
@@ -789,16 +785,15 @@ def eval_admixtures_nnls(atlas_path, use_low_depth=True):
     plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_oac+"nnls/")
 
 
-def eval_admixtures(model_name,presence_model_name, use_low_coverage=True):
+def eval_admixtures(model_name,presence_model_name, size="low"):
     # evaluate Zohar's atlas with deepconv
-    eval_admixtures_deepconv(model_name, presence_model_name, use_low_coverage)  
+    eval_admixtures_deepconv(model_name, presence_model_name, size)  
     # evaluate Zohar's atlas (primary markers only) with nnls
-    eval_admixtures_nnls("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed")
-   
+    eval_admixtures_nnls("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed", size)
 
 
 # 2
-def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True):
+def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     """
     Evaluate deepconv model with consistent parameters.
     
@@ -807,11 +802,7 @@ def eval_admixtures_deepconv(model_name, presence_model_name, use_low_depth=True
         presence_model_name: Name of the presence model directory
         use_low_depth: Whether to use low depth data
     """
-    suffix = "/"
-    if use_low_depth:
-        suffix = "_low/"
-    else:
-        suffix = "_high/"
+    suffix = f"_{size}/"
         
     deepconv_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
     deepconv_atlas = pd.read_csv(deepconv_atlas_path, sep="\t")
@@ -955,7 +946,7 @@ def run_oac_analysis(model_name, presence_model_name):
     ben_batch="CD"
     ben_type = "tissue"
     ben_prefix_cd_tissue = "nnls_cd_tissue"
-    ben_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/CD/tissue/"
+    ben_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/CD/tissue/"
     ben_title_cd_tissue = f"NNLS deconvolution using atlas {ben_atlas_path} on CD tissue"
     out_dir = str(Path(out_base_dir)/"CD"/"tissue"/"nnls")
 
@@ -963,7 +954,7 @@ def run_oac_analysis(model_name, presence_model_name):
 
     ben_type = "cfDNA"
     ben_prefix_cd_cf= "nnls_cd_cfDNA"
-    ben_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/atlas/loyfer_atlas/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/CD/cfDNA"
+    ben_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_fixed_dmr_by_read.blood+gi+tum.U100.l4/CD/cfDNA"
     ben_title_cd_cf = f"NNLS deconvolution using atlas {ben_atlas_path} on CD cfDNA"
     out_dir = str(Path(out_base_dir)/"CD"/"cfDNA"/"nnls")
 
