@@ -121,7 +121,7 @@ def load_training(base_dir: str, atlas: pd.DataFrame, names: set, num_files: int
     y = []
     
     print("loading training from", base_dir)
-    suffixes = [f"_batch{i}" for i in range(1, num_files + 1)]
+    suffixes = [f"_batch{i}" for i in range(1, (num_files + 1)*3)]
     
     # Read multiple parquet files and accumulate marker values, coverage, and ground-truth
     for cov in ['high', 'med', 'low']:
@@ -265,7 +265,7 @@ def train_and_eval(
             validation_dls[f"tier1_{cov}"] = tier1_dl
             validation_dls[f"t-cells_{cov}"] = tcells_dl
             validation_dls[f"oac_{cov}"] = oac_dl
-            
+
             y_vals[f"tier1_{cov}"] = t1_yval
             y_vals[f"t-cells_{cov}"] = tcells_yval
             y_vals[f"oac_{cov}"] = oac_yval

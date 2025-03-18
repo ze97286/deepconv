@@ -128,7 +128,7 @@ def load_training(base_dir: str, names: set, target_cell_type: int, num_files: i
     y = []
     
     print("loading training from", base_dir)
-    suffixes = [f"_batch{i}" for i in range(1, num_files + 1)]
+    suffixes = [f"_batch{i}" for i in range(1, (num_files + 1)*3)]
     
     # Read multiple parquet files and accumulate marker values, coverage, and ground-truth
     for cov in ['high', 'med', 'low']:
