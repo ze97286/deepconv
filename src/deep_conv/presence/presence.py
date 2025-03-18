@@ -201,7 +201,7 @@ def load_training(base_dir: str, names: set, target_cell_type: int, num_files: i
         num_workers=4,
         persistent_workers=True
     )
-   
+
 
 def check_prediction_distributions(model, dataloader, device=None):
     """Analyse the raw prediction probabilities for positive and negative samples."""
@@ -295,7 +295,7 @@ def train_and_eval(
             validation_dls[f"tier1_{cov}"] = tier1_dl
             validation_dls[f"t-cells_{cov}"] = tcells_dl
             validation_dls[f"oac_{cov}"] = oac_dl
-            
+
             y_vals[f"tier1_{cov}"] = t1_yval
             y_vals[f"t-cells_{cov}"] = tcells_yval
             y_vals[f"oac_{cov}"] = oac_yval        
@@ -310,7 +310,7 @@ def train_and_eval(
             "tier3": tier3_dl,        
             "tier4": tier4_dl,        
         }
-    
+
     single_model = SingleCellTypePresenceModel()
 
     # Train it
@@ -323,10 +323,10 @@ def train_and_eval(
         target_cell_type_index=target_cell_type,
     )
 
-    val_dl = tier1_dl
+    val_dl = validation_dls[f"tier1_low"]
     if target_cell_type_name=="OAC":
-        check_prediction_distributions(trained_model, tier2_dl)    
-        val_dl = tier2_dl
+        check_prediction_distributions(trained_model, validation_dls[f"oac_low"])    
+        val_dl = validation_dls[f"oac_low"]
     if target_cell_type_name=="CD4-T-cells":
         check_prediction_distributions(trained_model, tier3_dl)
         val_dl = tier3_dl
@@ -334,8 +334,8 @@ def train_and_eval(
         check_prediction_distributions(trained_model, tier4_dl)
         val_dl = tier4_dl
     if target_cell_type_name=="T-cells":
-        check_prediction_distributions(trained_model, tier3_dl)
-        val_dl = tier3_dl
+        check_prediction_distributions(trained_model, validation_dls[f"t-cells_low"])
+        val_dl = validation_dls[f"t-cells_low"]
 
     results_df = analyse_detection_by_concentration(trained_model, val_dl, output_path, target_cell_type_name)
     find_minimum_detection_concentration_continuous(results_df, output_path, target_cell_type_name)
@@ -846,7 +846,7 @@ def main():
     args = parser.parse_args()
     
     train_and_eval(args.atlas_path, args.train_path+"/train",args.eval_path+"/eval", args.num_threads, args.output_path)
-    
+
 
 if __name__ == "__main__":    
     main()

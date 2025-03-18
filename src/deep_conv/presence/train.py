@@ -12,10 +12,10 @@ def train_binary_classifier(
     model_path: str,
     target_cell_type_index: int,
     num_epochs: int = 50,
-    learning_rate: float = 1e-3,
-    weight_decay: float = 1e-4,
+    learning_rate: float = 5e-4,
+    weight_decay: float = 1e-5,
     class_weight: float = None,  # Positive class weight (for imbalance)
-    patience: int = 10,
+    patience: int = 20,
     device: torch.device = None,
     fp16_training: bool = True,  # Use mixed precision
     gradient_accumulation: int = 1,  # Number of batches to accumulate

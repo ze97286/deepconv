@@ -161,7 +161,8 @@ class SingleCellTypePresenceModel(nn.Module):
         
         # Create a confidence factor that scales with coverage
         # For coverage=1, factor=0.2; for coverage=5, factor=0.5; for coverage=20, factor=0.8
-        confidence_factor = torch.clamp(coverage_safe / (coverage_safe + 5.0), 0.1, 1.0)
+        confidence_factor = torch.clamp(coverage_safe / (coverage_safe + 10.0), 0.3, 1.0)
+
         
         # Apply the confidence factor to marker values
         normalised_markers = marker_values_safe * confidence_factor
