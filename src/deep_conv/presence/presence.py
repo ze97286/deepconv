@@ -19,7 +19,8 @@ from tqdm import tqdm
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
@@ -88,7 +89,7 @@ def get_validation_set(eval_pat_dir: str, target_cell_type:int, names: set) -> T
     val_loader = DataLoader(
         val_dataset,
         batch_size=512,
-        num_workers=4,
+        num_workers=2,
         persistent_workers=True,
         shuffle=False
     )

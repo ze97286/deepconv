@@ -13,7 +13,8 @@ from deep_conv.benchmark.benchmark_utils import *
 from deep_conv.deconvolution.model import CellTypeDeconvolutionModel, TissueDeconvolutionDataset
 from deep_conv.deconvolution.train import train_model
 from deep_conv.deconvolution.predict import predict_with_consensus
-
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
@@ -81,7 +82,7 @@ def get_validation_set(eval_pat_dir: str, atlas: pd.DataFrame, names: set) -> Tu
     val_loader = DataLoader(
         val_dataset,
         batch_size=512,
-        num_workers=4,
+        num_workers=2,
         persistent_workers=True,
         shuffle=False
     )
