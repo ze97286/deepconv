@@ -211,4 +211,66 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         return cell_props, reconstructed, valid_mask, presence_probs, presence_logits
 
-    
+    def predict(self, marker_values, coverage, batch_size=256, device=None):
+        """
+        Makes predictions using the model in evaluation mode.
+        
+        Args:
+            marker_values: Marker methylation values [N, M]
+            coverage: Coverage values [N, M]
+            batch_size: Batch size for processing
+            device: Device to run inference on (defaults to model's device)
+            
+        Returns:
+            numpy.ndarray: Cell type proportions [N, C]
+        """
+        import numpy as np
+        
+        # Decide which device to use (CPU/GPU)
+        if device is None:
+            device = next(self.parameters()).device
+        
+        # Convert inputs (X, coverage) to Torch tensors if needed
+        if not isinstance(marker_values, torch.Tensor):
+            marker_values = torch.tensor(marker_values, dtype=torch.float32)
+        if not isinstance(coverage, torch.Tensor):
+            coverage = torch.tensor(coverage, dtype=torch.float32)
+        
+        # Ensure both inputs have a batch dimension
+        if len(marker_values.shape) == 1:
+            marker_values = marker_values.unsqueeze(0)
+        if len(coverage.shape) == 1:
+            coverage = coverage.unsqueeze(0)
+        
+        self.eval()
+        predictions_list = []
+        
+        # Process the data in batches
+        num_samples = marker_values.shape[0]
+        num_batches = (num_samples + batch_size - 1) // batch_size  # Ceiling division
+        
+        with torch.no_grad():
+            for i in range(num_batches):
+                start_idx = i * batch_size
+                end_idx = min((i + 1) * batch_size, num_samples)
+                
+                batch_X = marker_values[start_idx:end_idx].to(device)
+                batch_coverage = coverage[start_idx:end_idx].to(device)
+                
+                # Forward pass through the model - use only the proportions result
+                props, *_ = self.forward(batch_X, batch_coverage)
+                
+                # Move to CPU numpy and store
+                predictions_list.append(props.cpu().numpy())
+                
+                # Optional GPU memory cleanup
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+        
+        # Combine all batch results
+        if len(predictions_list) == 0:
+            # Edge case: empty input
+            return np.zeros((num_samples, self.num_celltypes))
+        
+        # Return a single array of shape [N, C]
+        return np.vstack(predictions_list)
