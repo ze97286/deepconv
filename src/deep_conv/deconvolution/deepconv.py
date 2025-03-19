@@ -13,7 +13,8 @@ from deep_conv.benchmark.benchmark_utils import *
 from deep_conv.deconvolution.model import CellTypeDeconvolutionModel, TissueDeconvolutionDataset
 from deep_conv.deconvolution.train import train_model
 from deep_conv.deconvolution.predict import predict_with_consensus
-
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
@@ -81,7 +82,7 @@ def get_validation_set(eval_pat_dir: str, atlas: pd.DataFrame, names: set) -> Tu
     val_loader = DataLoader(
         val_dataset,
         batch_size=512,
-        num_workers=4,
+        num_workers=2,
         persistent_workers=True,
         shuffle=False
     )
@@ -121,13 +122,14 @@ def load_training(base_dir: str, atlas: pd.DataFrame, names: set, num_files: int
     y = []
     
     print("loading training from", base_dir)
-    suffixes = [f"_batch{i}" for i in range(1, num_files + 1)]
+    suffixes = [f"_batch{i}" for i in range(1, (num_files + 1)*3)]
     
     # Read multiple parquet files and accumulate marker values, coverage, and ground-truth
-    for i in range(1, num_files + 1):
-        markers.append(pd.read_parquet(base_dir + str(i) + "_marker_values.parquet"))
-        coverage.append(pd.read_parquet(base_dir + str(i) + "_coverage.parquet"))
-        y.append(pd.read_parquet(base_dir + str(i) + "_ground_truth_y.parquet"))
+    for cov in ['high', 'med', 'low']:
+        for i in range(1, num_files + 1):
+            markers.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_marker_values.parquet"))
+            coverage.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_coverage.parquet"))
+            y.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_ground_truth_y.parquet"))
     
     # Merge all marker tables on ['name','direction']
     merged_markers = markers[0]
@@ -252,23 +254,24 @@ def train_and_eval(
     train_dl = load_training(train_pat_dir, atlas, names)
 
     # 3) Build DataLoaders for each validation subset
-    tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir) / "tier1"), atlas, names)
+    
     if use_loyfer:
-        tcells_dl, tcells_yval = get_validation_set(str(Path(eval_pat_dir) / "T-cells"), atlas, names)
-        oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, names)
+        validation_dls = {}
+        y_vals = {}
+        for cov in ['high','med','low']:
+            tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "tier1"), atlas, names)
+            tcells_dl, tcells_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "T-cells"), atlas, names)
+            oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "OAC"), atlas, names)
 
-        validation_dls = {
-            "tier1": tier1_dl,
-            "t-cells": tcells_dl,
-            "oac": oac_dl
-        }
+            validation_dls[f"tier1_{cov}"] = tier1_dl
+            validation_dls[f"t-cells_{cov}"] = tcells_dl
+            validation_dls[f"oac_{cov}"] = oac_dl
 
-        y_vals = {
-            "tier1": t1_yval,
-            "t-cells": tcells_yval,
-            "oac": oac_yval
-        }
+            y_vals[f"tier1_{cov}"] = t1_yval
+            y_vals[f"t-cells_{cov}"] = tcells_yval
+            y_vals[f"oac_{cov}"] = oac_yval
     else:
+        tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir) / "tier1"), atlas, names)
         cd4_dl, cd4_yval = get_validation_set(str(Path(eval_pat_dir) / "CD4"), atlas, names)
         cd8_dl, cd8_yval = get_validation_set(str(Path(eval_pat_dir) / "CD8"), atlas, names)
         oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, names)

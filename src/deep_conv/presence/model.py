@@ -77,17 +77,19 @@ class SingleCellTypePresenceModel(nn.Module):
     2. Processes markers with varying coverage appropriately
     3. Uses attention mechanism to focus on the most informative markers
     4. Employs a deep architecture with residual connections for better feature extraction
+    5. Incorporates coverage information directly into feature extraction
+    6. Uses coverage-aware normalization for improved handling of low-coverage data
     """
     def __init__(self, feature_dim=64, dropout_rate=0.3):
         super().__init__()
         self.feature_dim = feature_dim
         
         # Input normalization
-        self.input_norm = nn.BatchNorm1d(1)
+        self.input_norm = nn.BatchNorm1d(2)
         
-        # Feature extraction
+        # Feature extraction with marker values and coverage
         self.feature_extractor = nn.Sequential(
-            nn.Linear(1, feature_dim),
+            nn.Linear(2, feature_dim),
             nn.BatchNorm1d(feature_dim),
             nn.ReLU(),
             nn.Dropout(dropout_rate)
@@ -101,7 +103,7 @@ class SingleCellTypePresenceModel(nn.Module):
             nn.Dropout(dropout_rate)
         )
         
-        # Marker attention mechanism
+        # Coverage-aware attention mechanism
         self.attention = nn.Sequential(
             nn.Linear(feature_dim, 1),
             nn.Sigmoid()
@@ -140,8 +142,6 @@ class SingleCellTypePresenceModel(nn.Module):
         Args:
             marker_values: [B, M] Methylation values
             coverage: [B, M] Coverage values
-            target_markers_mask: [M] Mask indicating markers for target cell type
-                                 (if not provided, uses the one stored in the model)
                                
         Returns:
             logits: [B, 1] Logits for binary classification
@@ -149,28 +149,36 @@ class SingleCellTypePresenceModel(nn.Module):
         """
         B, M = marker_values.shape
         
-        # Get target markers mask (either from input or model)
-        target_markers_mask = torch.ones(M, dtype=torch.bool, device=marker_values.device)
-        
-        # Create valid markers mask (coverage > 0 AND is target marker)
+        # Create valid markers mask (coverage > 0)
         valid_mask = (coverage > 0)
-        target_valid_mask = valid_mask & target_markers_mask.expand(B, -1)
         
         # Replace NaNs with zeros (these will be masked out later)
         marker_values_safe = torch.where(valid_mask, marker_values, torch.zeros_like(marker_values))
         
-        # Normalize marker values by coverage (improves stability and generalization)
+        # Coverage-aware normalization
+        # Reduce confidence for low coverage markers
         coverage_safe = coverage.clone() + 1e-10  # Add epsilon to avoid division by zero
-        normalised_markers = marker_values_safe / torch.sqrt(coverage_safe)
+        
+        # Create a confidence factor that scales with coverage
+        # For coverage=1, factor=0.2; for coverage=5, factor=0.5; for coverage=20, factor=0.8
+        confidence_factor = torch.clamp(coverage_safe / (coverage_safe + 10.0), 0.3, 1.0)
+
+        
+        # Apply the confidence factor to marker values
+        normalised_markers = marker_values_safe * confidence_factor
         
         # Process all markers through feature extraction
         marker_values_flat = normalised_markers.reshape(-1, 1)  # [B*M, 1]
+        coverage_flat = torch.log1p(coverage_safe).reshape(-1, 1)  # Log to compress the range
+        
+        # Concatenate marker values and coverage
+        features_input = torch.cat([marker_values_flat, coverage_flat], dim=1)  # [B*M, 2]
         
         # Apply batch normalization to inputs
-        marker_values_norm = self.input_norm(marker_values_flat)
+        features_norm = self.input_norm(features_input)
         
         # Extract features
-        features = self.feature_extractor(marker_values_norm)  # [B*M, feature_dim]
+        features = self.feature_extractor(features_norm)  # [B*M, feature_dim]
         
         # Apply feature transformation with residual connection
         transformed_features = self.feature_transform(features)
@@ -179,8 +187,8 @@ class SingleCellTypePresenceModel(nn.Module):
         # Calculate attention weights
         attention_flat = self.attention(features).reshape(B, M)  # [B, M]
         
-        # Apply target markers mask and valid mask to attention
-        masked_attention = attention_flat * target_valid_mask.float()
+        # Apply valid mask to attention and weight by coverage confidence
+        masked_attention = attention_flat * valid_mask.float() * confidence_factor
         
         # Normalize attention weights to sum to 1 for each sample
         attention_sum = masked_attention.sum(dim=1, keepdim=True)
@@ -218,6 +226,5 @@ class SingleCellTypePresenceModel(nn.Module):
         logits, _ = self.forward(marker_values, coverage)
         probabilities = torch.sigmoid(logits).squeeze(-1)
         predictions = (probabilities >= threshold).float()
-        return predictions, probabilities
-    
+        return predictions, probabilities   
     

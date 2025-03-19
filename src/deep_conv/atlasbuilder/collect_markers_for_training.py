@@ -163,7 +163,7 @@ def merge(base_dir, num_files, prefix):
 
 
 def merge_all():
-    base_dir = "/users/zetzioni/sharedscratch/atlas/training/oac.blood+gi+tum.l4/"
+    base_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/"
     merge(base_dir, 5, "eval")
 
 

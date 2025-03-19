@@ -19,7 +19,8 @@ from tqdm import tqdm
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
-
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
@@ -88,7 +89,7 @@ def get_validation_set(eval_pat_dir: str, target_cell_type:int, names: set) -> T
     val_loader = DataLoader(
         val_dataset,
         batch_size=512,
-        num_workers=4,
+        num_workers=2,
         persistent_workers=True,
         shuffle=False
     )
@@ -128,13 +129,15 @@ def load_training(base_dir: str, names: set, target_cell_type: int, num_files: i
     y = []
     
     print("loading training from", base_dir)
-    suffixes = [f"_batch{i}" for i in range(1, num_files + 1)]
+    suffixes = [f"_batch{i}" for i in range(1, (num_files + 1)*3)]
     
     # Read multiple parquet files and accumulate marker values, coverage, and ground-truth
-    for i in range(1, num_files + 1):
-        markers.append(pd.read_parquet(base_dir + str(i) + "_marker_values.parquet"))
-        coverage.append(pd.read_parquet(base_dir + str(i) + "_coverage.parquet"))
-        y.append(pd.read_parquet(base_dir + str(i) + "_ground_truth_y.parquet"))
+    for cov in ['high', 'med', 'low']:
+        for i in range(1, num_files + 1):
+            markers.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_marker_values.parquet"))
+            coverage.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_coverage.parquet"))
+            y.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_ground_truth_y.parquet"))
+    
     
     # Merge all marker tables on ['name','direction']
     merged_markers = markers[0]
@@ -198,7 +201,7 @@ def load_training(base_dir: str, names: set, target_cell_type: int, num_files: i
         num_workers=4,
         persistent_workers=True
     )
-   
+
 
 def check_prediction_distributions(model, dataloader, device=None):
     """Analyse the raw prediction probabilities for positive and negative samples."""
@@ -280,28 +283,34 @@ def train_and_eval(
     # 2) Build the training DataLoader from parquet files in train_pat_dir
     train_dl = load_training(train_pat_dir, names, target_cell_type=target_cell_type)
     # 3) Build DataLoaders for each validation subset
-    tier1_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "tier1"), target_cell_type, names)
-    tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), target_cell_type, names)
+
     if use_loyfer:
-        tier3_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "T-cells"), target_cell_type, names)
+        validation_dls = {}
+        y_vals = {}
+        for cov in ['high','med','low']:
+            tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "tier1"), target_cell_type, names)
+            tcells_dl, tcells_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "T-cells"), target_cell_type, names)
+            oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "OAC"), target_cell_type, names)
+
+            validation_dls[f"tier1_{cov}"] = tier1_dl
+            validation_dls[f"t-cells_{cov}"] = tcells_dl
+            validation_dls[f"oac_{cov}"] = oac_dl
+
+            y_vals[f"tier1_{cov}"] = t1_yval
+            y_vals[f"t-cells_{cov}"] = tcells_yval
+            y_vals[f"oac_{cov}"] = oac_yval        
     else:
+        tier1_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "tier1"), target_cell_type, names)
+        tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), target_cell_type, names)
         tier3_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD4"), target_cell_type, names)
         tier4_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "CD8"), target_cell_type, names)
-    
-    if use_loyfer:
         validation_dls = {
-            "tier1": tier1_dl,        
-            "tier2": tier2_dl,        
-            "tier3": tier3_dl,        
-        }
-    else:
-         validation_dls = {
             "tier1": tier1_dl,        
             "tier2": tier2_dl,        
             "tier3": tier3_dl,        
             "tier4": tier4_dl,        
         }
-    
+
     single_model = SingleCellTypePresenceModel()
 
     # Train it
@@ -314,10 +323,10 @@ def train_and_eval(
         target_cell_type_index=target_cell_type,
     )
 
-    val_dl = tier1_dl
+    val_dl = validation_dls[f"tier1_low"]
     if target_cell_type_name=="OAC":
-        check_prediction_distributions(trained_model, tier2_dl)    
-        val_dl = tier2_dl
+        check_prediction_distributions(trained_model, validation_dls[f"oac_low"])    
+        val_dl = validation_dls[f"oac_low"]
     if target_cell_type_name=="CD4-T-cells":
         check_prediction_distributions(trained_model, tier3_dl)
         val_dl = tier3_dl
@@ -325,8 +334,8 @@ def train_and_eval(
         check_prediction_distributions(trained_model, tier4_dl)
         val_dl = tier4_dl
     if target_cell_type_name=="T-cells":
-        check_prediction_distributions(trained_model, tier3_dl)
-        val_dl = tier3_dl
+        check_prediction_distributions(trained_model, validation_dls[f"t-cells_low"])
+        val_dl = validation_dls[f"t-cells_low"]
 
     results_df = analyse_detection_by_concentration(trained_model, val_dl, output_path, target_cell_type_name)
     find_minimum_detection_concentration_continuous(results_df, output_path, target_cell_type_name)
@@ -837,7 +846,7 @@ def main():
     args = parser.parse_args()
     
     train_and_eval(args.atlas_path, args.train_path+"/train",args.eval_path+"/eval", args.num_threads, args.output_path)
-    
+
 
 if __name__ == "__main__":    
     main()

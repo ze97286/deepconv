@@ -748,8 +748,8 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
 # 1
 def train_and_evaluate(model_name, presence_model_name):
     atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
-    train_pat_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_high/"
-    eval_pat_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_high/"
+    train_pat_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train"
+    eval_pat_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval"
 
     threads = 32
     output_path = Path("/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/"+model_name+"/")
