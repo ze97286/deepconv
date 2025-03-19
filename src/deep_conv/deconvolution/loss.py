@@ -78,6 +78,12 @@ def loss_fn(
         'total_loss': total_loss.item(),
         'prop_loss': loss_props.item(),
         'recon_loss': recon_loss.item(),
+        'alpha_stats': {  # Add this for compatibility
+            'mean': pred_props.mean().item(),
+            'std': pred_props.std().item(),
+            'max': pred_props.max().item(),
+            'min': pred_props.min().item()
+        },
         'presence_metrics': {
             'precision': precision.item(),
             'recall': recall.item(),
