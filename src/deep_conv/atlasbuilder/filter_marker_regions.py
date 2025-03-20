@@ -188,16 +188,26 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     # Calculate detection limits across coverage levels
     z_score = stats.norm.ppf(confidence_level)
     
+    # Use median_background as the reference background methylation value
+    # This is more robust than using max_background for detection limit calculations
+    
     # Calculate detection limit for each marker at each coverage level
     for coverage in coverage_levels:
         # For each marker, calculate its detection limit at this coverage level
-        sampling_errors = np.sqrt((markers['background_value'] * (1 - markers['background_value'])) / coverage)
-        pattern_diffs = np.abs(markers['target_value'] - markers['background_value'])
+        sampling_errors = np.sqrt((markers['median_background'] * (1 - markers['median_background'])) / coverage)
+        
+        # Pattern difference between target and background
+        pattern_diffs = np.abs(markers['target_value'] - markers['median_background'])
+        
         # Avoid division by zero for markers with no separation
         pattern_diffs = np.maximum(pattern_diffs, 0.01)
         
+        # Also consider the background variability
+        # Higher background_std means less reliable detection
+        background_penalty = 1 + markers['background_std']
+        
         # Detection limit at this coverage
-        markers[f'min_conc_{coverage}'] = np.minimum((z_score * sampling_errors) / pattern_diffs, 1.0)
+        markers[f'min_conc_{coverage}'] = np.minimum((z_score * sampling_errors * background_penalty) / pattern_diffs, 1.0)
     
     # Calculate region size
     markers['region_size'] = markers['end'] - markers['start']
@@ -338,7 +348,6 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     final_selection = final_selection.drop_duplicates(['startCpG', 'endCpG'])
     
     return final_selection
-
 
 def process_cell_type(input_dir: Path, 
                      output_dir: Path,
