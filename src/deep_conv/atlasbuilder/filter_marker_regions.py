@@ -170,7 +170,7 @@ CELL_TYPES = [
 def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_per_region: int = 5, 
                                coverage_levels: list = [5, 10, 20, 40], confidence_level: float = 0.95):
     """
-    Select optimal markers optimized for performance across coverage levels.
+    Select optimal markers optimized for performance across coverage levels with enhanced preference for longer regions.
     
     Parameters:
     - df: DataFrame with marker candidates
@@ -188,8 +188,8 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     # Calculate detection limits across coverage levels
     z_score = stats.norm.ppf(confidence_level)
     
-    # Use median_background as the reference background methylation value
-    # This is more robust than using max_background for detection limit calculations
+    # Calculate region size
+    markers['region_size'] = markers['end'] - markers['start']
     
     # Calculate detection limit for each marker at each coverage level
     for coverage in coverage_levels:
@@ -208,9 +208,17 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
         
         # Detection limit at this coverage
         markers[f'min_conc_{coverage}'] = np.minimum((z_score * sampling_errors * background_penalty) / pattern_diffs, 1.0)
-    
-    # Calculate region size
-    markers['region_size'] = markers['end'] - markers['start']
+        
+        # Apply region size adjustment to detection limits
+        # Longer regions can accumulate more reads, effectively increasing coverage
+        # Assume effective coverage scales roughly with region length, but with diminishing returns
+        region_size_factor = np.sqrt(markers['region_size'] / 1000)  # Square root to apply diminishing returns
+        
+        # Cap the region size factor to avoid excessive preference for huge regions
+        region_size_factor = np.minimum(region_size_factor, 3.0)
+        
+        # Adjust detection limits by region size factor
+        markers[f'min_conc_{coverage}'] = markers[f'min_conc_{coverage}'] / np.maximum(region_size_factor, 1.0)
     
     # Create weighted detection score (emphasizing low coverage performance)
     coverage_weights = {cov: 4 / cov for cov in coverage_levels}  # More weight for lower coverage
@@ -222,14 +230,14 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     # Calculate weighted detection score (lower is better)
     markers['weighted_detection'] = sum(coverage_weights[cov] * markers[f'min_conc_{cov}'] for cov in coverage_levels)
     
-    # Compute the coverage-optimized separability score 
+    # Compute the coverage-optimized separability score with enhanced region size preference
     markers['coverage_optimized_score'] = (
         # Original separability components
         markers['target_value'] * 
         np.log1p(markers['snr']) * 
         (1 / (1 + markers['background_std'])) *
-        # Add region size bonus (logarithmic to avoid excessive weight on huge regions)
-        (1 + 0.2 * np.log1p(markers['region_size'] / 1000)) *
+        # Significantly increased region size bonus - more aggressive preference for longer regions
+        (1 + 0.5 * np.log1p(markers['region_size'] / 500)) *  # Increased from 0.2 to 0.5
         # Add detection limit component (inverse because lower is better)
         (1 / (1 + markers['weighted_detection']))
     )
@@ -238,7 +246,6 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     markers['region_bin'] = markers['chr'] + '_' + (markers['start'] // 500_000).astype(str)
     
     # First prioritize exceptionally good markers regardless of region
-    # Now using the coverage-optimized score for selection
     exceptional_markers = markers[
         (markers['coverage_optimized_score'] > np.percentile(markers['coverage_optimized_score'], 95))
     ].copy()
@@ -298,13 +305,13 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     # Create DataFrame from selected primary markers
     selected_df = pd.DataFrame(selected)
     
-    # Now add redundant markers
+    # Now add redundant markers with preference for longer regions
     redundant_markers = []
     selected_redundant_cpg_pairs = set()  # Track redundant CpG pairs
     
     for _, primary in selected_df.iterrows():
         # Find nearby or overlapping markers with good scores
-        # Prefer larger regions that might capture more reads
+        # Stronger preference for larger regions
         nearby = markers[
             (markers['chr'] == primary['chr']) &
             (abs(markers['start'] - primary['start']) < 5000) &  # Within 5kb
@@ -316,8 +323,9 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
         
         # Take up to 1 redundant marker for each primary
         if not nearby.empty:
-            # Sort by coverage-optimized score
-            nearby_sorted = nearby.sort_values('coverage_optimized_score', ascending=False)
+            # Sort by the product of coverage-optimized score and region size to more strongly prefer larger regions
+            nearby['composite_score'] = nearby['coverage_optimized_score'] * np.log1p(nearby['region_size'] / 500)
+            nearby_sorted = nearby.sort_values('composite_score', ascending=False)
             
             # Find first marker that doesn't duplicate a CpG region
             for _, redundant in nearby_sorted.iterrows():
@@ -346,6 +354,12 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     
     # Final check for duplicates
     final_selection = final_selection.drop_duplicates(['startCpG', 'endCpG'])
+    
+    # Add statistics about region sizes to verify selection
+    avg_region_size = final_selection['region_size'].mean()
+    print(f"Average selected region size: {avg_region_size:.1f} bp")
+    print(f"Median selected region size: {final_selection['region_size'].median():.1f} bp")
+    print(f"Region size range: {final_selection['region_size'].min():.1f} - {final_selection['region_size'].max():.1f} bp")
     
     return final_selection
 
@@ -933,7 +947,7 @@ def marker_set_performance_simulation(markers, target_cell_type, background_cell
 def save_markers(filtered_markers_dir, markers_fname, atlas_fname):
     markers = pd.read_parquet(list(filtered_markers_dir.glob("*.parquet")))
     markers = markers.dropna()    
-    markers[['chr','start','end','startCpG','endCpG','target','name','direction','B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 'Colon', 'Esophagus', 'Gastric', 'Granulocytes', 'Monocytes', 'NK-cells', 'OAC', 'Small-intestine','T-cells', 'B-cells_coverage', 'CD34-erythroblasts_coverage', 'CD34-megakaryocytes_coverage', 'Colon_coverage', 'Esophagus_coverage', 'Gastric_coverage', 'Granulocytes_coverage',   'Monocytes_coverage', 'NK-cells_coverage','OAC_coverage', 'Small-intestine_coverage','T-cells_coverage', 'snr', 'snr_vs_median', 'snr_vs_mean', 'target_value','max_background', 'median_background', 'mean_background','background_std', 'background_range','background_quartile_ratio', 'signal_to_noise_area','relative_signal_strength','separability','is_primary']].to_csv(markers_fname, sep="\t", index=False)
+    markers[['chr','start','end','startCpG','endCpG','target','name','direction','B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 'Colon', 'Esophagus', 'Gastric', 'Granulocytes', 'Monocytes', 'NK-cells', 'OAC', 'Small-intestine','T-cells', 'B-cells_coverage', 'CD34-erythroblasts_coverage', 'CD34-megakaryocytes_coverage', 'Colon_coverage', 'Esophagus_coverage', 'Gastric_coverage', 'Granulocytes_coverage',   'Monocytes_coverage', 'NK-cells_coverage','OAC_coverage', 'Small-intestine_coverage','T-cells_coverage', 'snr', 'snr_vs_median', 'snr_vs_mean', 'target_value','max_background', 'median_background', 'mean_background','background_std', 'background_range','background_quartile_ratio', 'signal_to_noise_area','relative_signal_strength','is_primary']].to_csv(markers_fname, sep="\t", index=False)
     markers[['chr','start','end','startCpG','endCpG','target','name','direction','B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 'Colon', 'Esophagus', 'Gastric', 'Granulocytes', 'Monocytes', 'NK-cells', 'OAC', 'Small-intestine','T-cells']].to_csv(atlas_fname, sep="\t", index=False)
 
 

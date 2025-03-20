@@ -226,7 +226,7 @@ def visualize_detection_limits_plotly(results_df):
 
 
 def analyse_atlas(atlas_path, out_dir):
-    df = pd.read_csv(atlas_path)
+    df = pd.read_csv(atlas_path, sep="\t")
     cell_types = df.columns[8:]
     covs = [5,10,15,20,25,30,35,40]
     results = analyze_detection_limits(df, cell_types,covs)
