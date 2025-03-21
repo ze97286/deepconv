@@ -62,38 +62,32 @@ class TissueDeconvolutionDataset(Dataset):
 
 class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir=None, 
-                 feature_dim=32, top_k_fraction=0.5, min_markers_per_celltype=5):
+                 feature_dim=32, coverage_threshold=5.0, reliability_alpha=0.7):
         """
-        Cell type deconvolution model with dynamic marker selection based on coverage.
-        Key Features of This Approach:
-
-        * Dynamic Marker Selection: For each sample, the model selects the most reliable markers for each cell type based on coverage. This ensures that low-coverage markers don't contaminate the signal.
-        * Adaptive Feature Weighting: Features are weighted by their reliability scores, giving more influence to higher-coverage markers.
-        * Flexible Selection Criteria: The top_k_fraction parameter controls how many markers to select, and min_markers_per_celltype ensures a minimum number of markers are always used.
-        * Log-Space Concentration Error: Optionally uses log-space for concentration errors, which better handles the wide range of concentrations (especially at the low end).
-        * Coverage-Stratified Monitoring: Tracks performance separately for different coverage levels to better understand where improvements are happening.
-
+        Efficient cell type deconvolution model with coverage-based marker reliability.
+        
         Args:
             num_markers: Total number of markers in the atlas
             num_cell_types: Number of cell types to predict
             target_ids: Marker to cell type mapping array
             presence_models_dir: Directory containing pre-trained presence models
             feature_dim: Feature dimension for marker encoding
-            top_k_fraction: Fraction of available markers to select for each cell type
-            min_markers_per_celltype: Minimum markers to use per cell type regardless of coverage
+            coverage_threshold: Threshold for considering a marker reliable
+            reliability_alpha: Weight parameter for reliability calculation (higher = more emphasis on coverage)
         """
         super().__init__()
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
-        self.top_k_fraction = top_k_fraction
-        self.min_markers_per_celltype = min_markers_per_celltype
+        self.coverage_threshold = coverage_threshold
+        self.reliability_alpha = reliability_alpha
 
         # Store cell-type assignment for each marker
         target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
         self.register_buffer("target_ids", target_ids_t)
         
-        # Calculate marker informativeness (can be learned or initialized heuristically)
+        # Calculate marker informativeness based on uniqueness and specificity
+        # Can be learned during training or preset based on atlas information
         marker_informativeness = torch.ones(num_markers)
         self.register_buffer("marker_informativeness", marker_informativeness)
 
@@ -107,14 +101,23 @@ class CellTypeDeconvolutionModel(nn.Module):
             nn.Linear(feature_dim, feature_dim)
         )
 
+        # Cell type encoder with coverage-awareness
+        self.celltype_encoder = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(feature_dim, feature_dim),
+                nn.LeakyReLU(),
+                nn.Linear(feature_dim, feature_dim)
+            ) for _ in range(num_cell_types)
+        ])
+
         # Cell type decoder with presence information
-        self.cell_type_decoder = nn.Sequential(
+        self.decoder = nn.Sequential(
             nn.Linear(feature_dim * num_cell_types + num_cell_types, 128),
-            nn.ReLU(),
+            nn.LeakyReLU(),
             nn.Linear(128, num_cell_types)
         )
         
-        # Reconstruction decoder
+        # Reconstruction decoder (optional)
         self.reconstructor = nn.Sequential(
             nn.Linear(num_cell_types, 64),
             nn.ReLU(),
@@ -145,72 +148,29 @@ class CellTypeDeconvolutionModel(nn.Module):
             
         return presence_models
 
-    def select_reliable_markers(self, coverage, marker_values=None):
+    def calculate_marker_reliability(self, coverage):
         """
-        Dynamically select the most reliable markers based on coverage.
+        Calculate reliability scores for markers based on coverage.
         
         Args:
-            coverage: [B, M] coverage values for each sample and marker
-            marker_values: Optional [B, M] methylation values (can be used for additional selection criteria)
+            coverage: [B, M] coverage values
             
         Returns:
-            selected_marker_masks: Dictionary mapping cell type index to boolean mask of selected markers
-            reliability_scores: [B, M] Reliability score for each marker in each sample
+            reliability: [B, M] reliability scores between 0 and 1
         """
-        B, M = coverage.shape
+        # Base reliability is a sigmoid function of coverage
+        # This creates a smooth transition around the threshold
+        reliability = torch.sigmoid((coverage - self.coverage_threshold) / 2.0)
         
-        # Base reliability score is simply the coverage
-        reliability_scores = coverage.clone()
+        # Apply marker informativeness
+        reliability = reliability * self.marker_informativeness.unsqueeze(0)
         
-        # Apply marker informativeness as a multiplier
-        # This can represent prior knowledge about which markers are most discriminative
-        reliability_scores = reliability_scores * self.marker_informativeness.unsqueeze(0)
+        # Apply coverage-dependent scaling
+        # This makes the reliability more sensitive to coverage differences at lower values
+        coverage_scale = 1.0 - torch.exp(-0.1 * coverage)
+        reliability = reliability * (self.reliability_alpha + (1.0 - self.reliability_alpha) * coverage_scale)
         
-        # Create masks for each cell type's markers
-        selected_marker_masks = {}
-        
-        for cell_type_idx in range(self.num_celltypes):
-            # Get mask for this cell type's markers
-            cell_type_mask = (self.target_ids == cell_type_idx)
-            
-            # Skip if no markers for this cell type
-            if not cell_type_mask.any():
-                selected_marker_masks[cell_type_idx] = torch.zeros(B, M, dtype=torch.bool, device=coverage.device)
-                continue
-            
-            # For each sample, select top-k markers for this cell type
-            # We do this sample by sample since coverage varies per sample
-            sample_masks = []
-            
-            for b in range(B):
-                # Get reliability scores for this cell type's markers in this sample
-                scores = reliability_scores[b, cell_type_mask]
-                
-                # Calculate how many markers to select
-                available_markers = scores.size(0)
-                k = max(int(available_markers * self.top_k_fraction), self.min_markers_per_celltype)
-                k = min(k, available_markers)  # Can't select more than available
-                
-                # Select top-k markers
-                if k > 0:
-                    _, top_indices = torch.topk(scores, k)
-                    
-                    # Create mask for selected markers
-                    marker_indices = torch.arange(M, device=coverage.device)
-                    cell_type_indices = marker_indices[cell_type_mask]
-                    selected_indices = cell_type_indices[top_indices]
-                    
-                    sample_mask = torch.zeros(M, dtype=torch.bool, device=coverage.device)
-                    sample_mask[selected_indices] = True
-                else:
-                    sample_mask = torch.zeros(M, dtype=torch.bool, device=coverage.device)
-                
-                sample_masks.append(sample_mask)
-            
-            # Combine masks for all samples
-            selected_marker_masks[cell_type_idx] = torch.stack(sample_masks)
-        
-        return selected_marker_masks, reliability_scores
+        return reliability
 
     def get_presence_probs(self, marker_values, coverage):
         """Get cell type presence probabilities using pre-trained models"""
@@ -237,7 +197,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                 ct_marker_values = marker_values[:, cell_type_mask]
                 ct_coverage = coverage[:, cell_type_mask]
                 
-                # Skip if no valid markers (all coverage=0)
+                # Skip if all coverage is zero
                 if (ct_coverage > 0).sum() == 0:
                     continue
                 
@@ -253,7 +213,7 @@ class CellTypeDeconvolutionModel(nn.Module):
 
     def forward(self, marker_values, coverage):
         """
-        Forward pass with dynamic marker selection based on coverage.
+        Forward pass with coverage-aware marker reliability.
         """
         B, M = marker_values.shape
         C = self.num_celltypes
@@ -269,68 +229,64 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Replace invalid values with zeros
         marker_values_safe = torch.where(valid_mask, marker_values, torch.zeros_like(marker_values))
         
-        # Step 1: Dynamically select the most reliable markers for each cell type
-        selected_markers, reliability_scores = self.select_reliable_markers(coverage, marker_values_safe)
+        # Calculate reliability scores for all markers based on coverage
+        reliability = self.calculate_marker_reliability(coverage)
         
-        # Step 2: Extract features from all markers
-        marker_features = self.marker_encoder(marker_values_safe.unsqueeze(-1))
+        # Extract features from all markers
+        marker_features = self.marker_encoder(marker_values_safe.unsqueeze(-1))  # [B, M, feature_dim]
         
-        # Step 3: Aggregate features by cell type using only selected markers
+        # For each cell type, extract features from its markers with reliability weighting
         cell_type_features = []
         
-        for cell_type_idx in range(C):
-            # Get mask for selected markers for this cell type
-            marker_mask = selected_markers[cell_type_idx]
+        for ct_idx in range(C):
+            # Get mask for this cell type's markers
+            ct_mask = (self.target_ids == ct_idx)
             
-            # Skip if no markers selected (shouldn't happen with min_markers_per_celltype)
-            if not marker_mask.any():
+            # Skip if no markers for this cell type
+            if not ct_mask.any():
                 cell_type_features.append(torch.zeros(B, self.feature_dim, device=marker_values.device))
                 continue
             
-            # Get features for selected markers
-            batch_features = []
+            # Get only this cell type's markers
+            ct_features = marker_features[:, ct_mask]  # [B, M_ct, feature_dim]
+            ct_reliability = reliability[:, ct_mask].unsqueeze(-1)  # [B, M_ct, 1]
+            ct_valid = valid_mask[:, ct_mask].unsqueeze(-1)  # [B, M_ct, 1]
             
-            for b in range(B):
-                # Get features and reliability scores for selected markers
-                sample_mask = marker_mask[b]
-                sample_features = marker_features[b, sample_mask]
-                sample_weights = reliability_scores[b, sample_mask].unsqueeze(-1)
-                
-                # Skip if no markers selected for this sample
-                if not sample_mask.any():
-                    batch_features.append(torch.zeros(self.feature_dim, device=marker_values.device))
-                    continue
-                
-                # Weight features by reliability and aggregate
-                weighted_features = sample_features * sample_weights
-                aggregated = weighted_features.sum(dim=0) / (sample_weights.sum() + 1e-8)
-                
-                batch_features.append(aggregated)
+            # Apply reliability weighting to features
+            weighted_features = ct_features * ct_reliability * ct_valid.float()
             
-            # Stack features for all samples
-            cell_type_features.append(torch.stack(batch_features))
+            # Calculate normalizing factor (sum of weights)
+            normalizer = torch.sum(ct_reliability * ct_valid.float(), dim=1, keepdim=True) + 1e-8
+            
+            # Aggregate features with weighted average
+            aggregated_features = torch.sum(weighted_features, dim=1) / normalizer.squeeze(-1)
+            
+            # Apply cell type specific encoding
+            encoded_features = self.celltype_encoder[ct_idx](aggregated_features)
+            
+            cell_type_features.append(encoded_features)
         
-        # Combine features for all cell types
+        # Combine features from all cell types
         combined_features = torch.cat(cell_type_features, dim=1)
         
-        # Step 4: Get presence probabilities
+        # Get presence probabilities
         presence_probs, presence_logits = self.get_presence_probs(marker_values, coverage)
         
-        # Step 5: Combine features with presence information
+        # Combine with presence information
         decoder_input = torch.cat([combined_features, presence_probs], dim=1)
         
-        # Step 6: Predict cell type proportions
-        cell_props_raw = F.relu(self.cell_type_decoder(decoder_input))
+        # Predict cell type proportions
+        cell_props_raw = F.relu(self.decoder(decoder_input))
         
-        # Step 7: Apply presence gating
+        # Apply presence gating
         cell_props_gated = cell_props_raw * presence_probs
         
-        # Step 8: Normalize to sum to 1
+        # Normalize to sum to 1
         sum_props = torch.sum(cell_props_gated, dim=1, keepdim=True) + 1e-8
         cell_props = cell_props_gated / sum_props
         
-        # Step 9: Reconstruct marker values
+        # Reconstruct marker values (optional)
         reconstructed = self.reconstructor(cell_props)
         
-        return cell_props, reconstructed, valid_mask, presence_probs, presence_logits
+        return cell_props, reconstructed, valid_mask, presence_probs, presence_logits, reliability
     
