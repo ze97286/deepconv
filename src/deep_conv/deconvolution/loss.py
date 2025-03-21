@@ -10,7 +10,7 @@ def loss_fn(
     valid_mask: torch.Tensor,
     presence_probs: torch.Tensor,
     presence_logits: torch.Tensor,
-    reliability_scores: torch.Tensor,
+    model: nn.Module,
     alpha: float = 0.7,
     beta: float = 0.3,
     log_space: bool = True,
@@ -29,7 +29,7 @@ def loss_fn(
         valid_mask: [B, M] Mask indicating valid markers (coverage > 0)
         presence_probs: [B, C] Presence probabilities from presence models
         presence_logits: [B, C] Presence logits from presence models
-        reliability_scores: [B, M] Reliability scores for markers
+        model: The model instance (to retrieve reliability scores)
         alpha: Weight for proportion error
         beta: Weight for reconstruction error
         log_space: Whether to use log-space for concentration error
@@ -40,6 +40,14 @@ def loss_fn(
         total_loss: Combined loss value
         details: Dictionary of metrics for monitoring
     """
+    # Get reliability scores from model
+    reliability_scores = getattr(model, 'last_reliability', None)
+    
+    # If reliability scores are not available, calculate them
+    if reliability_scores is None:
+        # Use coverage directly as fallback
+        reliability_scores = coverage / (coverage.mean() + 1e-8)
+    
     # Set default low SNR indices if not provided
     if low_snr_indices is None:
         low_snr_indices = []

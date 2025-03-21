@@ -288,5 +288,8 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Reconstruct marker values (optional)
         reconstructed = self.reconstructor(cell_props)
         
-        return cell_props, reconstructed, valid_mask, presence_probs, presence_logits, reliability
-    
+        # Store reliability scores for loss function to use later
+        self.last_reliability = reliability
+        
+        # Return same values as original model for compatibility
+        return cell_props, reconstructed, valid_mask, presence_probs, presence_logits

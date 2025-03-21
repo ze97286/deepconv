@@ -55,47 +55,10 @@ def train_epoch(
     accumulation_steps: int = 4
 ) -> Dict[str, float]:
     """
-    Performs one training epoch on the given data loader.
-
-    Steps:
-      1) Iterate over each batch (fraction, coverage, y).
-      2) Forward pass the batch through the model to get:
-         (proportions, reconstruction, presence info).
-      3) Compute the composite loss from `loss_fn`.
-      4) Accumulate gradients, optionally using `accumulation_steps`.
-      5) Perform an optimiser step (update model params) after `accumulation_steps` mini-batches.
-      6) Keep track of various statistics (loss, presence detection metrics, etc.) and log them.
-      7) Print progress every `log_interval` batches.
-
-    Args:
-        model (nn.Module):
-            The model to be trained (must be in `model.train()` mode outside this function).
-        loader (DataLoader):
-            A DataLoader yielding batches of training data, each containing:
-              - 'X': cfDNA marker methylation values,
-              - 'coverage': coverage array for each marker,
-              - 'y': ground-truth cell-type proportions (if supervised).
-        optimiser (torch.optim.Optimizer):
-            The optimiser (e.g., Adam) used to update model parameters.
-        device (torch.device):
-            The target device (e.g., GPU) where model and data will reside.
-        log_interval (int):
-            Frequency (in mini-batches) with which progress is printed/logged.
-        accumulation_steps (int):
-            Number of mini-batches over which to accumulate gradients before taking an optimiser step.
-
-    Returns:
-        Dict[str, float]: 
-            A dictionary of epoch-level metrics (averaged across all batches), e.g. 
-            {
-                'total_loss': <float>,
-                'grad_norm': <float>,
-                'alpha_stats/mean': ...,
-                ...
-            }
+    Performs one training epoch using the coverage-aware loss function.
     """
-    model.train()  # Ensure model is in training mode (affects dropout/BatchNorm, etc.)
-    epoch_stats = defaultdict(float)  # Will aggregate sums that we later average
+    model.train()
+    epoch_stats = defaultdict(float)
     num_batches = 0
 
     # Start fresh for gradient accumulation
@@ -115,7 +78,7 @@ def train_epoch(
         #    presence_probs/logits = presence detection
         alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
         
-        # 3) Compute loss using our composite loss function
+        # 3) Compute loss using our coverage-aware loss function
         loss, details = loss_fn(
             pred_props=alpha,
             true_props=y_true,
@@ -125,6 +88,12 @@ def train_epoch(
             valid_mask=valid_mask,
             presence_probs=presence_probs,
             presence_logits=presence_logits,
+            model=model,  # Pass the model to access reliability scores
+            alpha=0.7,    # Loss component weights
+            beta=0.3,
+            log_space=True,  # Use log-space for better handling of low concentrations
+            presence_threshold=0.005,
+            low_snr_indices=[3, 4, 9, 11]  # Your existing low SNR indices
         )
         
         # 4) Scale the loss if using gradient accumulation
@@ -167,12 +136,15 @@ def train_epoch(
             print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
             print(f"Alpha Mean: {details['alpha_stats']['mean']:.8f} | "
                   f"Std: {details['alpha_stats']['std']:.8f}")
-            # Example of optional info if your dictionary has such keys
-            if 'cd48_under' in details and 'cd48_over' in details:
-                print(f"CD4/CD8 Under: {details['cd48_under']:.8f} | Over: {details['cd48_over']:.8f}")
-            if 'weight_stats' in details:
-                print(f"Weight Mean: {details['weight_stats']['mean']:.8f} | "
-                      f"Max: {details['weight_stats']['max']:.8f}")
+            # Print reliability stats if available
+            if 'reliability_stats' in details:
+                print(f"Reliability Mean: {details['reliability_stats']['mean']:.4f} | "
+                      f"Std: {details['reliability_stats']['std']:.4f}")
+            # Print coverage errors
+            if 'coverage_errors' in details:
+                print(f"Coverage Errors - Low: {details['coverage_errors']['low_cov']:.4f}, "
+                      f"Med: {details['coverage_errors']['med_cov']:.4f}, "
+                      f"High: {details['coverage_errors']['high_cov']:.4f}")
     
     # 9) Average out stats across all batches
     for key in epoch_stats:
@@ -180,25 +152,14 @@ def train_epoch(
     
     return dict(epoch_stats)
 
-
 def validate(
     model: nn.Module,
     val_loaders: Dict[str, DataLoader],
     device: torch.device,
-    presence_threshold: float = 0.01  # Fixed threshold for consistent metrics
+    presence_threshold: float = 0.01
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
     """
-    Evaluate model on validation sets with consistent metrics.
-
-    Args:
-        model: The model to be evaluated
-        val_loaders: Dictionary of validation DataLoaders
-        device: Device to run validation on
-        presence_threshold: Fixed threshold for evaluation metrics
-        
-    Returns:
-        avg_val_loss: Average validation loss
-        val_stats: Dictionary of validation statistics
+    Evaluate model on validation sets with coverage-aware metrics.
     """
     model.eval()
     
@@ -247,7 +208,7 @@ def validate(
                 # Forward pass
                 alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
         
-                # Use our standard loss function
+                # Use our coverage-aware loss function
                 loss, details = loss_fn(
                     pred_props=alpha,
                     true_props=y_true,
@@ -257,7 +218,9 @@ def validate(
                     valid_mask=valid_mask,
                     presence_probs=presence_probs,
                     presence_logits=presence_logits,
+                    model=model,
                     presence_threshold=presence_threshold,
+                    low_snr_indices=[3, 4, 9, 11]
                 )
                 
                 # --- Presence confusion matrix
@@ -332,8 +295,7 @@ def validate(
                     batch_results['detection_accuracy'] += detection_accuracy.item() * batch_size
                     batch_results['count'] += batch_size
                 
-                # Accumulate stats for standard loss details
-                loader_stats['loss'] += loss.item()
+                # Accumulate stats from loss details
                 for key, value in details.items():
                     if isinstance(value, dict):
                         for subkey, subvalue in value.items():
@@ -344,6 +306,8 @@ def validate(
                 num_batches += 1
             
             # Post-processing for this validation set
+            for key in loader_stats:
+                loader_stats[key] /= num_batches
 
             # Compute sample-based presence metrics
             if len(sample_precision_scores) > 0:
@@ -388,16 +352,12 @@ def validate(
                         if key != 'count':
                             loader_stats[f'thresh_{t}_{key}'] = value
             
-            # Average across all batches
-            for key in loader_stats:
-                if key not in ['avg_precision', 'avg_recall', 'avg_f1']:
-                    loader_stats[key] /= num_batches
-            
             val_stats[val_name] = dict(loader_stats)
     
     # Compute mean val loss across sets
     avg_val_loss = sum(stats['total_loss'] for stats in val_stats.values()) / len(val_stats)
     return avg_val_loss, val_stats
+
 
 def train_model(
     model: nn.Module,
