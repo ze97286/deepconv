@@ -1,5 +1,7 @@
 import torch 
 import torch.nn.functional as F
+import torch.nn as nn
+
 
 def loss_fn(
     pred_props: torch.Tensor,
