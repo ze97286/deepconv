@@ -1,7 +1,7 @@
 import torch 
 import torch.nn.functional as F
 
-def efficient_coverage_aware_loss(
+def loss_fn(
     pred_props: torch.Tensor,
     true_props: torch.Tensor,
     reconstructed: torch.Tensor,
