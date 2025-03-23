@@ -33,13 +33,14 @@ CELL_TYPES = [
     'T-cells'
 ]
 
-def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_per_region: int = 5):
+def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_markers: int = 200, max_per_region: int = 5):
     """
     Select optimal markers without duplicates, with enhanced consideration for region size
     
     Parameters:
     - df: DataFrame with marker candidates
     - min_markers: Minimum number of non-overlapping primary markers to select
+    - max_markers: Maximum number of non-overlapping primary markers to select
     - max_per_region: Maximum primary markers to select from the same genomic region
     
     Returns:
@@ -136,20 +137,23 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
             if marker['region_size'] > 15:
                 large_marker_count += 1
             
+        # Stop once we have enough markers
+        if len(selected) >= max_markers:
+            break
+            
         # Continue selecting until we have minimum markers AND good genomic distribution
-        # AND we have enough large markers
         if (len(selected) >= min_markers and 
             len(selected_regions) >= min(len(markers['region_bin'].unique()), min_markers // 2) and
             large_marker_count >= large_marker_target):
             break
     
     # If we didn't get enough large markers, try to add some specifically
-    if large_marker_count < large_marker_target and len(selected) < min_markers * 1.2:
+    if large_marker_count < large_marker_target and len(selected) < max_markers:
         # Get large markers sorted by separability
         large_markers = markers[markers['region_size'] > 15].sort_values('separability', ascending=False)
         
         for _, marker in large_markers.iterrows():
-            if large_marker_count >= large_marker_target:
+            if large_marker_count >= large_marker_target or len(selected) >= max_markers:
                 break
                 
             cpg_pair = (marker['startCpG'], marker['endCpG'])
@@ -224,7 +228,8 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     
     # Print statistics about the selection
     print(f"Selected {len(final_selection)} markers")
-    print(f"Large markers (>15 cpgs): {sum(final_selection['region_size'] > 15)}")
+    print(f"Primary markers: {len(selected_df)}")
+    print(f"Large markers (>15bp): {sum(final_selection['region_size'] > 15)}")
     print(f"Mean region size: {final_selection['region_size'].mean():.2f}")
     print(f"Median region size: {final_selection['region_size'].median():.2f}")
     
