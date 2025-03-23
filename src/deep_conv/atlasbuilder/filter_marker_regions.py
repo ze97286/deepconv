@@ -52,7 +52,7 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_p
     
     # Calculate region size if not already present
     if 'region_size' not in markers.columns:
-        markers['region_size'] = markers['end'] - markers['start']
+        markers['region_size'] = markers['endCpG'] - markers['startCpG']
     
     # Calculate standard separability score (informativeness-focused)
     markers['separability'] = (
