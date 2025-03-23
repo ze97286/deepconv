@@ -33,151 +33,14 @@ CELL_TYPES = [
     'T-cells'
 ]
 
-# def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_per_region: int = 5):
-#     """
-#     Select optimal markers without duplicates
-    
-#     Parameters:
-#     - df: DataFrame with marker candidates
-#     - min_markers: Minimum number of non-overlapping primary markers to select
-#     - max_per_region: Maximum primary markers to select from the same genomic region
-    
-#     Returns:
-#     - DataFrame of selected markers with both primary and redundant markers
-#     """
-#     # Copy to avoid modifying original
-#     markers = df.copy()
-    
-#     markers['separability'] = (
-#         markers['target_value'] * 
-#         np.log1p(markers['snr']) * 
-#         np.log1p(markers['snr_vs_median']) * 
-#         (1 / (1 + markers['background_std'])) *
-#         (1 + 0.1 * (markers['snr'] > np.percentile(markers['snr'], 95)))
-#     )
-    
-#     # Create region bins
-#     markers['region_bin'] = markers['chr'] + '_' + (markers['start'] // 500_000).astype(str)
-    
-#     # First prioritize extremely high SNR markers regardless of region
-#     ultra_high_snr = markers[markers['snr'] > 5000].copy()
-    
-#     # Then get region-balanced markers
-#     region_selections = []
-#     for region, group in markers.groupby('region_bin'):
-#         # Take top markers from each region
-#         top_in_region = group.nlargest(max_per_region, 'snr')
-#         region_selections.append(top_in_region)
-    
-#     region_balanced = pd.concat(region_selections)
-    
-#     # Combine ultra-high SNR with region balanced, prioritizing ultra-high
-#     combined = pd.concat([ultra_high_snr, region_balanced]).drop_duplicates()
-    
-#     # Sort markers by SNR for final selection
-#     sorted_markers = combined.sort_values('snr', ascending=False)
-    
-#     # Select non-overlapping markers
-#     selected = []
-#     selected_regions = set()  # Track which regions we've selected from
-#     selected_cpg_pairs = set()  # Track CpG pairs to avoid duplicates
-    
-#     for _, marker in sorted_markers.iterrows():
-#         # Check if we already selected this CpG region
-#         cpg_pair = (marker['startCpG'], marker['endCpG'])
-#         if cpg_pair in selected_cpg_pairs:
-#             continue
-        
-#         # Check if overlaps with any selected marker
-#         overlaps = False
-#         for selected_marker in selected:
-#             if (marker['chr'] == selected_marker['chr'] and
-#                 marker['start'] <= selected_marker['end'] and
-#                 marker['end'] >= selected_marker['start']):
-#                 overlaps = True
-#                 break
-                
-#         # Check if we already have enough from this region
-#         region = marker['region_bin']
-#         region_count = sum(1 for s in selected if s.get('region_bin') == region)
-        
-#         # Allow more markers from high-SNR regions
-#         max_from_region = 5 if marker['snr'] > 5000 else 2
-        
-#         if not overlaps and region_count < max_from_region:
-#             selected.append(marker.to_dict())
-#             selected_regions.add(region)
-#             selected_cpg_pairs.add(cpg_pair)
-            
-#         # Continue selecting until we have minimum markers AND good genomic distribution
-#         if len(selected) >= min_markers and len(selected_regions) >= min(len(markers['region_bin'].unique()), min_markers // 2):
-#             break
-    
-#     # Create DataFrame from selected primary markers
-#     selected_df = pd.DataFrame(selected)
-    
-#     # Now add redundant markers
-#     redundant_markers = []
-#     selected_redundant_cpg_pairs = set()  # Track redundant CpG pairs
-    
-#     for _, primary in selected_df.iterrows():
-#         # Find nearby or overlapping markers with good scores
-#         nearby = markers[
-#             (markers['chr'] == primary['chr']) &
-#             (abs(markers['start'] - primary['start']) < 5000) &  # Within 5kb
-#             (markers['snr'] > primary['snr'] * 0.7)  # At least 70% as good
-#         ]
-        
-#         # Skip markers that are already in the primary selection
-#         nearby = nearby[~nearby.index.isin(selected_df.index)]
-        
-#         # Take up to 1 redundant marker for each primary
-#         if not nearby.empty:
-#             # Sort by SNR
-#             nearby_sorted = nearby.sort_values('snr', ascending=False)
-            
-#             # Find first marker that doesn't duplicate a CpG region
-#             for _, redundant in nearby_sorted.iterrows():
-#                 cpg_pair = (redundant['startCpG'], redundant['endCpG'])
-                
-#                 # Skip if this CpG pair is already selected (primary or redundant)
-#                 if cpg_pair in selected_cpg_pairs or cpg_pair in selected_redundant_cpg_pairs:
-#                     continue
-                
-#                 redundant_markers.append(redundant.to_dict())
-#                 selected_redundant_cpg_pairs.add(cpg_pair)
-#                 break  # Just take one redundant marker
-    
-#     # Create DataFrame from redundant markers
-#     redundant_df = pd.DataFrame(redundant_markers) if redundant_markers else pd.DataFrame()
-    
-#     # Combine primary and redundant markers
-#     if not redundant_df.empty:
-#         final_selection = pd.concat([selected_df, redundant_df], ignore_index=True)
-#         # Mark which are primary and which are redundant
-#         final_selection['is_primary'] = False
-#         final_selection.loc[:len(selected_df)-1, 'is_primary'] = True
-#     else:
-#         final_selection = selected_df
-#         final_selection['is_primary'] = True
-    
-#     # Final check for duplicates - this should never happen but just to be safe
-#     final_selection = final_selection.drop_duplicates(['startCpG', 'endCpG'])
-    
-#     return final_selection
-
-
-def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_per_region: int = 5, 
-                               coverage_levels: list = [5, 10, 20, 40], confidence_level: float = 0.95):
+def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_per_region: int = 5):
     """
-    Select optimal markers optimized for performance across coverage levels with enhanced preference for longer regions.
+    Select optimal markers without duplicates, with enhanced consideration for region size
     
     Parameters:
     - df: DataFrame with marker candidates
     - min_markers: Minimum number of non-overlapping primary markers to select
     - max_per_region: Maximum primary markers to select from the same genomic region
-    - coverage_levels: Coverage levels to optimize for (with emphasis on low coverage)
-    - confidence_level: Statistical confidence for detection calculations
     
     Returns:
     - DataFrame of selected markers with both primary and redundant markers
@@ -185,92 +48,64 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     # Copy to avoid modifying original
     markers = df.copy()
     
-    # Calculate detection limits across coverage levels
-    z_score = stats.norm.ppf(confidence_level)
+    # Calculate region size if not already present
+    if 'region_size' not in markers.columns:
+        markers['region_size'] = markers['endCpG'] - markers['startCpG']
     
-    # Calculate region size
-    markers['region_size'] = markers['end'] - markers['start']
+    # Calculate size factor - use log scale to prevent excessive weight to very large regions
+    # Normalize it to range roughly 0-1
+    size_min = markers['region_size'].min()
+    size_max = markers['region_size'].max()
+    markers['size_factor'] = np.log1p(markers['region_size'] - size_min + 1) / np.log1p(size_max - size_min + 1)
     
-    # Calculate detection limit for each marker at each coverage level
-    for coverage in coverage_levels:
-        # For each marker, calculate its detection limit at this coverage level
-        sampling_errors = np.sqrt((markers['median_background'] * (1 - markers['median_background'])) / coverage)
-        
-        # Pattern difference between target and background
-        pattern_diffs = np.abs(markers['target_value'] - markers['median_background'])
-        
-        # Avoid division by zero for markers with no separation
-        pattern_diffs = np.maximum(pattern_diffs, 0.01)
-        
-        # Also consider the background variability
-        # Higher background_std means less reliable detection
-        background_penalty = 1 + markers['background_std']
-        
-        # Detection limit at this coverage
-        markers[f'min_conc_{coverage}'] = np.minimum((z_score * sampling_errors * background_penalty) / pattern_diffs, 1.0)
-        
-        # Apply region size adjustment to detection limits
-        # Longer regions can accumulate more reads, effectively increasing coverage
-        # Assume effective coverage scales roughly with region length, but with diminishing returns
-        region_size_factor = np.sqrt(markers['region_size'] / 1000)  # Square root to apply diminishing returns
-        
-        # Cap the region size factor to avoid excessive preference for huge regions
-        region_size_factor = np.minimum(region_size_factor, 3.0)
-        
-        # Adjust detection limits by region size factor
-        markers[f'min_conc_{coverage}'] = markers[f'min_conc_{coverage}'] / np.maximum(region_size_factor, 1.0)
-    
-    # Create weighted detection score (emphasizing low coverage performance)
-    coverage_weights = {cov: 4 / cov for cov in coverage_levels}  # More weight for lower coverage
-    total_weight = sum(coverage_weights.values())
-    
-    # Normalize weights
-    coverage_weights = {cov: w / total_weight for cov, w in coverage_weights.items()}
-    
-    # Calculate weighted detection score (lower is better)
-    markers['weighted_detection'] = sum(coverage_weights[cov] * markers[f'min_conc_{cov}'] for cov in coverage_levels)
-    
-    # Compute the coverage-optimized separability score with enhanced region size preference
-    markers['coverage_optimized_score'] = (
-        # Original separability components
+    # Calculate enhanced separability score that incorporates region size
+    markers['separability'] = (
         markers['target_value'] * 
         np.log1p(markers['snr']) * 
+        np.log1p(markers['snr_vs_median']) * 
         (1 / (1 + markers['background_std'])) *
-        # Significantly increased region size bonus - more aggressive preference for longer regions
-        (1 + 0.5 * np.log1p(markers['region_size'] / 500)) *  # Increased from 0.2 to 0.5
-        # Add detection limit component (inverse because lower is better)
-        (1 / (1 + markers['weighted_detection']))
+        (1 + 0.1 * (markers['snr'] > np.percentile(markers['snr'], 95))) *
+        (1 + 0.3 * markers['size_factor'])
     )
     
     # Create region bins
     markers['region_bin'] = markers['chr'] + '_' + (markers['start'] // 500_000).astype(str)
     
-    # First prioritize exceptionally good markers regardless of region
-    exceptional_markers = markers[
-        (markers['coverage_optimized_score'] > np.percentile(markers['coverage_optimized_score'], 95))
-    ].copy()
+    # First prioritize extremely high SNR markers regardless of region
+    ultra_high_snr = markers[markers['snr'] > 5000].copy()
     
     # Then get region-balanced markers
     region_selections = []
     for region, group in markers.groupby('region_bin'):
-        # Take top markers from each region using our new score
-        top_in_region = group.nlargest(max_per_region, 'coverage_optimized_score')
+        # Take top markers from each region by combined score
+        top_in_region = group.nlargest(max_per_region, 'separability')
         region_selections.append(top_in_region)
     
     region_balanced = pd.concat(region_selections)
     
-    # Combine exceptional markers with region balanced, prioritizing exceptional ones
-    combined = pd.concat([exceptional_markers, region_balanced]).drop_duplicates()
+    # Combine ultra-high SNR with region balanced, prioritizing ultra-high
+    combined = pd.concat([ultra_high_snr, region_balanced]).drop_duplicates()
     
-    # Sort markers by coverage-optimized score for final selection
-    sorted_markers = combined.sort_values('coverage_optimized_score', ascending=False)
+    # Sort markers by separability score (which now includes size factor)
+    sorted_markers = combined.sort_values('separability', ascending=False)
+    
+    # Set minimum size threshold to avoid very small regions
+    min_size_threshold = 8  # This is a reasonable minimum size based on your histogram
+    
+    # Ensure at least 40% of selected markers have region_size > 15
+    large_marker_target = int(min_markers * 0.4)
     
     # Select non-overlapping markers
     selected = []
     selected_regions = set()  # Track which regions we've selected from
     selected_cpg_pairs = set()  # Track CpG pairs to avoid duplicates
+    large_marker_count = 0  # Track how many larger markers we've selected
     
     for _, marker in sorted_markers.iterrows():
+        # Skip very small regions unless we're desperate for markers
+        if marker['region_size'] < min_size_threshold and len(selected) < min_markers * 0.9:
+            continue
+            
         # Check if we already selected this CpG region
         cpg_pair = (marker['startCpG'], marker['endCpG'])
         if cpg_pair in selected_cpg_pairs:
@@ -289,33 +124,66 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
         region = marker['region_bin']
         region_count = sum(1 for s in selected if s.get('region_bin') == region)
         
-        # Allow more markers from exceptional regions
-        max_from_region = 5 if marker['coverage_optimized_score'] > np.percentile(
-            markers['coverage_optimized_score'], 95) else 2
+        # Allow more markers from high-score regions
+        max_from_region = 5 if marker['separability'] > np.percentile(markers['separability'], 95) else 2
         
         if not overlaps and region_count < max_from_region:
             selected.append(marker.to_dict())
             selected_regions.add(region)
             selected_cpg_pairs.add(cpg_pair)
             
+            # Count large markers
+            if marker['region_size'] > 15:
+                large_marker_count += 1
+            
         # Continue selecting until we have minimum markers AND good genomic distribution
-        if len(selected) >= min_markers and len(selected_regions) >= min(len(markers['region_bin'].unique()), min_markers // 2):
+        # AND we have enough large markers
+        if (len(selected) >= min_markers and 
+            len(selected_regions) >= min(len(markers['region_bin'].unique()), min_markers // 2) and
+            large_marker_count >= large_marker_target):
             break
+    
+    # If we didn't get enough large markers, try to add some specifically
+    if large_marker_count < large_marker_target and len(selected) < min_markers * 1.2:
+        # Get large markers sorted by separability
+        large_markers = markers[markers['region_size'] > 15].sort_values('separability', ascending=False)
+        
+        for _, marker in large_markers.iterrows():
+            if large_marker_count >= large_marker_target:
+                break
+                
+            cpg_pair = (marker['startCpG'], marker['endCpG'])
+            if cpg_pair in selected_cpg_pairs:
+                continue
+                
+            # Check for overlaps
+            overlaps = False
+            for selected_marker in selected:
+                if (marker['chr'] == selected_marker['chr'] and
+                    marker['start'] <= selected_marker['end'] and
+                    marker['end'] >= selected_marker['start']):
+                    overlaps = True
+                    break
+                    
+            if not overlaps:
+                selected.append(marker.to_dict())
+                selected_regions.add(marker['region_bin'])
+                selected_cpg_pairs.add(cpg_pair)
+                large_marker_count += 1
     
     # Create DataFrame from selected primary markers
     selected_df = pd.DataFrame(selected)
     
-    # Now add redundant markers with preference for longer regions
+    # Now add redundant markers with preference for larger regions
     redundant_markers = []
     selected_redundant_cpg_pairs = set()  # Track redundant CpG pairs
     
     for _, primary in selected_df.iterrows():
         # Find nearby or overlapping markers with good scores
-        # Stronger preference for larger regions
         nearby = markers[
             (markers['chr'] == primary['chr']) &
             (abs(markers['start'] - primary['start']) < 5000) &  # Within 5kb
-            (markers['coverage_optimized_score'] > primary['coverage_optimized_score'] * 0.7)  # At least 70% as good
+            (markers['separability'] > primary['separability'] * 0.7)  # At least 70% as good
         ]
         
         # Skip markers that are already in the primary selection
@@ -323,9 +191,8 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
         
         # Take up to 1 redundant marker for each primary
         if not nearby.empty:
-            # Sort by the product of coverage-optimized score and region size to more strongly prefer larger regions
-            nearby['composite_score'] = nearby['coverage_optimized_score'] * np.log1p(nearby['region_size'] / 500)
-            nearby_sorted = nearby.sort_values('composite_score', ascending=False)
+            # Sort by separability score (which includes size factor)
+            nearby_sorted = nearby.sort_values('separability', ascending=False)
             
             # Find first marker that doesn't duplicate a CpG region
             for _, redundant in nearby_sorted.iterrows():
@@ -352,16 +219,17 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
         final_selection = selected_df
         final_selection['is_primary'] = True
     
-    # Final check for duplicates
+    # Final check for duplicates - this should never happen but just to be safe
     final_selection = final_selection.drop_duplicates(['startCpG', 'endCpG'])
     
-    # Add statistics about region sizes to verify selection
-    avg_region_size = final_selection['region_size'].mean()
-    print(f"Average selected region size: {avg_region_size:.1f} bp")
-    print(f"Median selected region size: {final_selection['region_size'].median():.1f} bp")
-    print(f"Region size range: {final_selection['region_size'].min():.1f} - {final_selection['region_size'].max():.1f} bp")
+    # Print statistics about the selection
+    print(f"Selected {len(final_selection)} markers")
+    print(f"Large markers (>15 cpgs): {sum(final_selection['region_size'] > 15)}")
+    print(f"Mean region size: {final_selection['region_size'].mean():.2f}")
+    print(f"Median region size: {final_selection['region_size'].median():.2f}")
     
     return final_selection
+
 
 def process_cell_type(input_dir: Path, 
                      output_dir: Path,
