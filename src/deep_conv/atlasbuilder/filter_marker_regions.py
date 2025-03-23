@@ -33,15 +33,16 @@ CELL_TYPES = [
     'T-cells'
 ]
 
-def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_markers: int = 200, max_per_region: int = 5):
+def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_per_region: int = 5):
     """
-    Select optimal markers without duplicates, with enhanced consideration for region size
+    Select optimal markers using a two-stage approach:
+    1. First select top markers based on informativeness (SNR, separability)
+    2. Then select additional markers prioritizing larger region sizes
     
     Parameters:
     - df: DataFrame with marker candidates
-    - min_markers: Minimum number of non-overlapping primary markers to select
-    - max_markers: Maximum number of non-overlapping primary markers to select
-    - max_per_region: Maximum primary markers to select from the same genomic region
+    - min_markers: Minimum number of markers to select (half informativeness, half size)
+    - max_per_region: Maximum markers to select from the same genomic region
     
     Returns:
     - DataFrame of selected markers with both primary and redundant markers
@@ -51,26 +52,34 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_m
     
     # Calculate region size if not already present
     if 'region_size' not in markers.columns:
-        markers['region_size'] = markers['endCpG'] - markers['startCpG']
+        markers['region_size'] = markers['end'] - markers['start']
     
-    # Calculate size factor - use log scale to prevent excessive weight to very large regions
-    # Normalize it to range roughly 0-1
-    size_min = markers['region_size'].min()
-    size_max = markers['region_size'].max()
-    markers['size_factor'] = np.log1p(markers['region_size'] - size_min + 1) / np.log1p(size_max - size_min + 1)
-    
-    # Calculate enhanced separability score that incorporates region size
+    # Calculate standard separability score (informativeness-focused)
     markers['separability'] = (
         markers['target_value'] * 
         np.log1p(markers['snr']) * 
         np.log1p(markers['snr_vs_median']) * 
         (1 / (1 + markers['background_std'])) *
-        (1 + 0.1 * (markers['snr'] > np.percentile(markers['snr'], 95))) *
-        (1 + 0.3 * markers['size_factor'])
+        (1 + 0.1 * (markers['snr'] > np.percentile(markers['snr'], 95)))
+    )
+    
+    # Calculate size-focused score
+    # Normalize region size to 0-1 range using log scale
+    size_min = markers['region_size'].min()
+    size_max = markers['region_size'].max()
+    markers['size_score'] = (
+        np.log1p(markers['region_size'] - size_min + 1) / np.log1p(size_max - size_min + 1) * 
+        # Still consider some level of informativeness in the size score
+        (0.3 + 0.7 * (markers['separability'] / markers['separability'].max()))
     )
     
     # Create region bins
     markers['region_bin'] = markers['chr'] + '_' + (markers['start'] // 500_000).astype(str)
+    
+    # Stage 1: Select top markers by separability (informativeness)
+    # --------------------------------------------------------------
+    # How many markers to select in this stage
+    info_target = min(min_markers // 2, 100)  # Half of min markers or up to 100
     
     # First prioritize extremely high SNR markers regardless of region
     ultra_high_snr = markers[markers['snr'] > 5000].copy()
@@ -78,43 +87,33 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_m
     # Then get region-balanced markers
     region_selections = []
     for region, group in markers.groupby('region_bin'):
-        # Take top markers from each region by combined score
+        # Take top markers from each region by separability
         top_in_region = group.nlargest(max_per_region, 'separability')
         region_selections.append(top_in_region)
     
     region_balanced = pd.concat(region_selections)
     
-    # Combine ultra-high SNR with region balanced, prioritizing ultra-high
-    combined = pd.concat([ultra_high_snr, region_balanced]).drop_duplicates()
+    # Combine and sort by separability
+    stage1_candidates = pd.concat([ultra_high_snr, region_balanced]).drop_duplicates()
+    stage1_candidates = stage1_candidates.sort_values('separability', ascending=False)
     
-    # Sort markers by separability score (which now includes size factor)
-    sorted_markers = combined.sort_values('separability', ascending=False)
+    # Select non-overlapping stage 1 markers
+    stage1_selected = []
+    stage1_regions = set()
+    stage1_cpg_pairs = set()
     
-    # Set minimum size threshold to avoid very small regions
-    min_size_threshold = 8  # This is a reasonable minimum size based on your histogram
-    
-    # Ensure at least 40% of selected markers have region_size > 15
-    large_marker_target = int(min_markers * 0.4)
-    
-    # Select non-overlapping markers
-    selected = []
-    selected_regions = set()  # Track which regions we've selected from
-    selected_cpg_pairs = set()  # Track CpG pairs to avoid duplicates
-    large_marker_count = 0  # Track how many larger markers we've selected
-    
-    for _, marker in sorted_markers.iterrows():
-        # Skip very small regions unless we're desperate for markers
-        if marker['region_size'] < min_size_threshold and len(selected) < min_markers * 0.9:
-            continue
+    for _, marker in stage1_candidates.iterrows():
+        if len(stage1_selected) >= info_target:
+            break
             
         # Check if we already selected this CpG region
         cpg_pair = (marker['startCpG'], marker['endCpG'])
-        if cpg_pair in selected_cpg_pairs:
+        if cpg_pair in stage1_cpg_pairs:
             continue
         
         # Check if overlaps with any selected marker
         overlaps = False
-        for selected_marker in selected:
+        for selected_marker in stage1_selected:
             if (marker['chr'] == selected_marker['chr'] and
                 marker['start'] <= selected_marker['end'] and
                 marker['end'] >= selected_marker['start']):
@@ -123,91 +122,92 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_m
                 
         # Check if we already have enough from this region
         region = marker['region_bin']
-        region_count = sum(1 for s in selected if s.get('region_bin') == region)
+        region_count = sum(1 for s in stage1_selected if s.get('region_bin') == region)
         
         # Allow more markers from high-score regions
         max_from_region = 5 if marker['separability'] > np.percentile(markers['separability'], 95) else 2
         
         if not overlaps and region_count < max_from_region:
-            selected.append(marker.to_dict())
-            selected_regions.add(region)
-            selected_cpg_pairs.add(cpg_pair)
-            
-            # Count large markers
-            if marker['region_size'] > 15:
-                large_marker_count += 1
-            
-        # Stop once we have enough markers
-        if len(selected) >= max_markers:
-            break
-            
-        # Continue selecting until we have minimum markers AND good genomic distribution
-        if (len(selected) >= min_markers and 
-            len(selected_regions) >= min(len(markers['region_bin'].unique()), min_markers // 2) and
-            large_marker_count >= large_marker_target):
-            break
+            stage1_selected.append(marker.to_dict())
+            stage1_regions.add(region)
+            stage1_cpg_pairs.add(cpg_pair)
     
-    # If we didn't get enough large markers, try to add some specifically
-    if large_marker_count < large_marker_target and len(selected) < max_markers:
-        # Get large markers sorted by separability
-        large_markers = markers[markers['region_size'] > 15].sort_values('separability', ascending=False)
+    # Convert to DataFrame
+    stage1_df = pd.DataFrame(stage1_selected)
+    
+    # Stage 2: Select additional markers prioritizing size
+    # --------------------------------------------------------------
+    # Calculate how many more markers we need
+    size_target = min_markers - len(stage1_selected)
+    
+    # Sort markers by size score
+    stage2_candidates = markers.sort_values('size_score', ascending=False)
+    
+    # Remove markers that would overlap with Stage 1 selections
+    stage2_selected = []
+    stage2_cpg_pairs = set()
+    
+    for _, marker in stage2_candidates.iterrows():
+        if len(stage2_selected) >= size_target:
+            break
+            
+        # Check if we already selected this CpG region
+        cpg_pair = (marker['startCpG'], marker['endCpG'])
+        if cpg_pair in stage1_cpg_pairs or cpg_pair in stage2_cpg_pairs:
+            continue
         
-        for _, marker in large_markers.iterrows():
-            if large_marker_count >= large_marker_target or len(selected) >= max_markers:
+        # Check if overlaps with any selected marker
+        overlaps = False
+        for selected_marker in (stage1_selected + stage2_selected):
+            if (marker['chr'] == selected_marker['chr'] and
+                marker['start'] <= selected_marker['end'] and
+                marker['end'] >= selected_marker['start']):
+                overlaps = True
                 break
-                
-            cpg_pair = (marker['startCpG'], marker['endCpG'])
-            if cpg_pair in selected_cpg_pairs:
-                continue
-                
-            # Check for overlaps
-            overlaps = False
-            for selected_marker in selected:
-                if (marker['chr'] == selected_marker['chr'] and
-                    marker['start'] <= selected_marker['end'] and
-                    marker['end'] >= selected_marker['start']):
-                    overlaps = True
-                    break
-                    
-            if not overlaps:
-                selected.append(marker.to_dict())
-                selected_regions.add(marker['region_bin'])
-                selected_cpg_pairs.add(cpg_pair)
-                large_marker_count += 1
+        
+        if not overlaps:
+            stage2_selected.append(marker.to_dict())
+            stage2_cpg_pairs.add(cpg_pair)
     
-    # Create DataFrame from selected primary markers
-    selected_df = pd.DataFrame(selected)
+    # Convert to DataFrame
+    stage2_df = pd.DataFrame(stage2_selected)
+    
+    # Combine primary markers from both stages
+    primary_df = pd.concat([stage1_df, stage2_df], ignore_index=True)
+    primary_df['stage'] = ['info'] * len(stage1_df) + ['size'] * len(stage2_df)
     
     # Now add redundant markers with preference for larger regions
     redundant_markers = []
-    selected_redundant_cpg_pairs = set()  # Track redundant CpG pairs
+    redundant_cpg_pairs = set()
+    all_primary_cpg_pairs = set(stage1_cpg_pairs) | set(stage2_cpg_pairs)
     
-    for _, primary in selected_df.iterrows():
+    for _, primary in primary_df.iterrows():
         # Find nearby or overlapping markers with good scores
         nearby = markers[
             (markers['chr'] == primary['chr']) &
             (abs(markers['start'] - primary['start']) < 5000) &  # Within 5kb
+            (markers['region_size'] > primary['region_size']) &  # Prefer larger redundant markers
             (markers['separability'] > primary['separability'] * 0.7)  # At least 70% as good
         ]
         
         # Skip markers that are already in the primary selection
-        nearby = nearby[~nearby.index.isin(selected_df.index)]
+        nearby = nearby[~nearby.index.isin(primary_df.index)]
         
         # Take up to 1 redundant marker for each primary
         if not nearby.empty:
-            # Sort by separability score (which includes size factor)
-            nearby_sorted = nearby.sort_values('separability', ascending=False)
+            # Sort by size first, then separability
+            nearby_sorted = nearby.sort_values(['region_size', 'separability'], ascending=[False, False])
             
             # Find first marker that doesn't duplicate a CpG region
             for _, redundant in nearby_sorted.iterrows():
                 cpg_pair = (redundant['startCpG'], redundant['endCpG'])
                 
                 # Skip if this CpG pair is already selected (primary or redundant)
-                if cpg_pair in selected_cpg_pairs or cpg_pair in selected_redundant_cpg_pairs:
+                if cpg_pair in all_primary_cpg_pairs or cpg_pair in redundant_cpg_pairs:
                     continue
                 
                 redundant_markers.append(redundant.to_dict())
-                selected_redundant_cpg_pairs.add(cpg_pair)
+                redundant_cpg_pairs.add(cpg_pair)
                 break  # Just take one redundant marker
     
     # Create DataFrame from redundant markers
@@ -215,26 +215,25 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 100, max_m
     
     # Combine primary and redundant markers
     if not redundant_df.empty:
-        final_selection = pd.concat([selected_df, redundant_df], ignore_index=True)
+        final_selection = pd.concat([primary_df, redundant_df], ignore_index=True)
         # Mark which are primary and which are redundant
         final_selection['is_primary'] = False
-        final_selection.loc[:len(selected_df)-1, 'is_primary'] = True
+        final_selection.loc[:len(primary_df)-1, 'is_primary'] = True
     else:
-        final_selection = selected_df
+        final_selection = primary_df
         final_selection['is_primary'] = True
-    
-    # Final check for duplicates - this should never happen but just to be safe
-    final_selection = final_selection.drop_duplicates(['startCpG', 'endCpG'])
     
     # Print statistics about the selection
     print(f"Selected {len(final_selection)} markers")
-    print(f"Primary markers: {len(selected_df)}")
+    print(f"Primary markers: {len(primary_df)} (Info: {len(stage1_df)}, Size: {len(stage2_df)})")
+    print(f"Redundant markers: {len(redundant_df)}")
     print(f"Large markers (>15bp): {sum(final_selection['region_size'] > 15)}")
-    print(f"Mean region size: {final_selection['region_size'].mean():.2f}")
-    print(f"Median region size: {final_selection['region_size'].median():.2f}")
+    print(f"Info stage mean size: {stage1_df['region_size'].mean():.2f}")
+    print(f"Size stage mean size: {stage2_df['region_size'].mean():.2f}")
+    print(f"Overall mean region size: {final_selection['region_size'].mean():.2f}")
+    print(f"Overall median region size: {final_selection['region_size'].median():.2f}")
     
     return final_selection
-
 
 def process_cell_type(input_dir: Path, 
                      output_dir: Path,
