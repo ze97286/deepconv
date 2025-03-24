@@ -473,6 +473,9 @@ def select_markers_for_cell_type(df, num_markers=150, max_per_region=5,
             print("Low coverage markers summary:")
             print(low_coverage_markers[['chr', 'cpg_length', 'snr', 'expected_useful_reads', 'is_primary']].head())
     
+
+    final_selection = final_selection.drop(columns=['length_bin', 'bin_rank', 'redundant_score'] , errors='ignore')
+
     return final_selection
 
 def process_cell_type(input_dir: Path, 
