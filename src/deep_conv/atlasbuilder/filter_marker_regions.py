@@ -34,7 +34,7 @@ CELL_TYPES = [
 ]
 
 def select_markers_for_cell_type(df: pd.DataFrame, num_markers: int = 200, max_per_region: int = 5,
-                               min_snr_threshold: float = 1.5, avg_clinical_depth: float = 15,
+                               min_snr_threshold: float = 1.5, avg_clinical_depth: float = 20,
                                avg_read_length: int = 150, min_cpgs_per_read: int = 4):
     """
     Select optimal markers balancing SNR and expected clinical coverage
