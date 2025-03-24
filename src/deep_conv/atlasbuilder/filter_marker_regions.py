@@ -33,66 +33,20 @@ CELL_TYPES = [
     'T-cells'
 ]
 
-def estimate_clinical_coverage(marker_df, avg_clinical_depth, avg_read_length=150, min_cpgs_per_read=4):
+def select_markers_for_cell_type(df: pd.DataFrame, num_markers: int = 200, max_per_region: int = 5,
+                               min_snr_threshold: float = 1.5, avg_clinical_depth: float = 15,
+                               avg_read_length: int = 150, min_cpgs_per_read: int = 4):
     """
-    Estimate the probability of adequate coverage in clinical samples
-    
-    Parameters:
-    - marker_df: DataFrame with selected markers
-    - avg_clinical_depth: Average sequencing depth (X) in clinical samples
-    - avg_read_length: Average read length in bp
-    - min_cpgs_per_read: Minimum consecutive CpGs a read must cover (default 4)
-    
-    Returns:
-    - DataFrame with added clinical coverage probability estimates
-    """
-    # Create a copy to avoid modifying the original
-    markers = marker_df.copy()
-    
-    # Calculate avg distance between CpGs in each region (if not already present)
-    if 'avg_cpg_distance' not in markers.columns:
-        markers['avg_cpg_distance'] = (markers['end'] - markers['start']) / markers['cpg_length']
-    
-    # Calculate how many CpGs an average read can cover
-    markers['cpgs_per_read'] = avg_read_length / markers['avg_cpg_distance']
-    
-    # Calculate probability of a read covering at least min_cpgs_per_read
-    # For regions where avg read covers fewer than required CpGs
-    markers['p_useful_read'] = np.where(
-        markers['cpgs_per_read'] < min_cpgs_per_read,
-        0,  # Cannot cover enough CpGs with one read
-        (markers['cpgs_per_read'] - min_cpgs_per_read + 1) / markers['cpgs_per_read']
-    )
-    
-    # Expected number of useful reads given depth
-    # We scale by region length relative to genome size (simplified)
-    markers[f'expected_useful_reads_{avg_clinical_depth}'] = (
-        avg_clinical_depth * 
-        markers['p_useful_read'] * 
-        (markers['end'] - markers['start']) / 3000  # Normalized by typical region size
-    )
-    
-    # Probability of having at least 3 useful reads (Poisson model)
-    # P(X ≥ 3) = 1 - P(X < 3) = 1 - (P(X=0) + P(X=1) + P(X=2))
-    from scipy.stats import poisson
-    markers[f'clinical_detection_prob_{avg_clinical_depth}'] = 1 - poisson.cdf(
-        2,  # Less than 3 reads
-        markers[f'expected_useful_reads_{avg_clinical_depth}']
-    )
-    
-    return markers
-
-def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_per_region: int = 5,
-                               length_weight: float = 0.2, min_snr_threshold: float = 1.5):
-    """
-    Select optimal markers balancing SNR and region length (as a proxy for clinical coverage)
+    Select optimal markers balancing SNR and expected clinical coverage
     
     Parameters:
     - df: DataFrame with marker candidates
-    - min_markers: Minimum number of non-overlapping primary markers to select
+    - num_markers: Target number of primary markers to select (default 200)
     - max_per_region: Maximum primary markers to select from the same genomic region
-    - length_weight: Weight for CpG length in the combined score (0-1)
     - min_snr_threshold: Minimum SNR to consider a marker
+    - avg_clinical_depth: Average sequencing depth (X) in clinical samples
+    - avg_read_length: Average read length in bp
+    - min_cpgs_per_read: Minimum consecutive CpGs a read must cover (default 4)
     
     Returns:
     - DataFrame of selected markers with both primary and redundant markers
@@ -118,30 +72,61 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
         (markers['snr'] >= min_snr_threshold)  # Min SNR threshold
     ]
     
-    if len(markers) < min_markers:
+    # Ensure we have enough markers to select from
+    min_candidate_markers = max(500, num_markers * 3)  # Need good pool of candidates
+    if len(markers) < min_candidate_markers:
         print(f"Warning: Only {len(markers)} markers pass filters. Consider relaxing constraints.")
         # Fall back to original criteria but still enforce minimum SNR
         markers = df.copy()
         markers['cpg_length'] = markers['endCpG'] - markers['startCpG']
         markers = markers[markers['snr'] >= min_snr_threshold]
     
-    # Normalize metrics for scoring
-    markers['snr_norm'] = markers['snr'] / markers['snr'].max()
-    markers['length_norm'] = markers['cpg_length'] / markers['cpg_length'].max()
+    # Calculate average distance between CpGs in each region
+    markers['avg_cpg_distance'] = (markers['end'] - markers['start']) / markers['cpg_length']
     
-    # Calculate balanced score
-    snr_weight = 1 - length_weight
-    markers['balanced_score'] = (
-        (markers['snr_norm'] * snr_weight) + 
-        (markers['length_norm'] * length_weight)
+    # Calculate expected clinical coverage metrics
+    # How many CpGs an average read can cover
+    markers['cpgs_per_read'] = avg_read_length / markers['avg_cpg_distance']
+    
+    # Probability of a read covering at least min_cpgs_per_read
+    markers['p_useful_read'] = np.where(
+        markers['cpgs_per_read'] < min_cpgs_per_read,
+        0,  # Cannot cover enough CpGs with one read
+        np.minimum(1.0, (markers['cpgs_per_read'] - min_cpgs_per_read + 1) / markers['cpgs_per_read'])
+    )
+    
+    # Expected number of useful reads given depth
+    # We scale by region length relative to genome size (simplified)
+    region_size_factor = np.minimum(1.0, (markers['end'] - markers['start']) / 3000)
+    markers['expected_useful_reads'] = (
+        avg_clinical_depth * 
+        markers['p_useful_read'] * 
+        region_size_factor  # Normalized by typical region size
+    )
+    
+    # Probability of having at least 3 useful reads (Poisson model)
+    from scipy.stats import poisson
+    markers['clinical_detection_prob'] = 1 - poisson.cdf(
+        2,  # Less than 3 reads
+        markers['expected_useful_reads']
+    )
+    
+    # Normalize metrics for balanced scoring
+    markers['snr_norm'] = markers['snr'] / markers['snr'].max()
+    markers['clinical_norm'] = markers['clinical_detection_prob']  # Already 0-1
+    
+    # Calculate combined score that balances SNR and clinical detectability
+    markers['combined_score'] = (
+        markers['snr_norm'] * 0.7 +  # SNR is primary driver
+        markers['clinical_norm'] * 0.3  # Clinical detectability is secondary
     )
     
     # Add bonus for very high SNR markers
-    markers['balanced_score'] = markers['balanced_score'] * (
+    markers['combined_score'] = markers['combined_score'] * (
         1 + 0.3 * (markers['snr'] > np.percentile(markers['snr'], 90))
     )
     
-    # Create region bins
+    # Create region bins for genomic distribution
     markers['region_bin'] = markers['chr'] + '_' + (markers['start'] // 500_000).astype(str)
     
     # Define CpG length bins
@@ -153,39 +138,75 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
         (50, 100)     # Very long CpG regions (50-100 CpGs)
     ]
     
-    # Target distribution (prioritizing medium-length regions)
-    target_distribution = {
-        0: 0.25,  # Very short: 25% (high specificity)
-        1: 0.35,  # Short: 35% (good balance)
-        2: 0.25,  # Medium: 25% 
-        3: 0.10,  # Long: 10%
-        4: 0.05   # Very long: 5% (only exceptional cases)
-    }
+    # Target distribution weighted by clinical utility
+    # Higher weight for bins with better balance of SNR and coverage
+    clinical_by_bin = []
+    for bin_idx, (min_len, max_len) in enumerate(cpg_length_bins):
+        bin_markers = markers[
+            (markers['cpg_length'] >= min_len) & 
+            (markers['cpg_length'] < max_len)
+        ]
+        if not bin_markers.empty:
+            avg_clinical = bin_markers['clinical_detection_prob'].mean()
+            avg_snr = bin_markers['snr_norm'].mean()
+            bin_utility = (avg_clinical * 0.4) + (avg_snr * 0.6)
+            clinical_by_bin.append((bin_idx, bin_utility))
     
-    # Calculate number to select from each bin
-    target_counts = {bin_idx: max(3, int(min_markers * pct)) 
+    # Adjust distribution based on clinical utility
+    if clinical_by_bin:
+        total_utility = sum(u for _, u in clinical_by_bin)
+        target_distribution = {
+            bin_idx: max(0.05, u / total_utility)  # Ensure at least 5% from each bin
+            for bin_idx, u in clinical_by_bin
+        }
+        
+        # Normalize to sum to 1
+        total_pct = sum(target_distribution.values())
+        target_distribution = {
+            k: v / total_pct for k, v in target_distribution.items()
+        }
+    else:
+        # Fallback if calculation fails
+        target_distribution = {
+            0: 0.25,  # Very short: 25%
+            1: 0.35,  # Short: 35%
+            2: 0.25,  # Medium: 25%
+            3: 0.10,  # Long: 10%
+            4: 0.05   # Very long: 5%
+        }
+    
+    # Calculate number to select from each bin based on fixed total
+    target_counts = {bin_idx: max(3, int(num_markers * pct)) 
                      for bin_idx, pct in target_distribution.items()}
     
     # Select markers from each length bin
     length_selections = []
     for bin_idx, (min_len, max_len) in enumerate(cpg_length_bins):
+        if bin_idx not in target_distribution:
+            continue
+            
         length_group = markers[
             (markers['cpg_length'] >= min_len) & 
             (markers['cpg_length'] < max_len)
         ]
         
         if not length_group.empty:
-            # For longer regions, apply stricter SNR filtering
+            # Apply stricter quality standards for longer regions
             if bin_idx >= 3:  # Long and very long regions
+                min_clinical_prob = 0.4  # Require reasonable clinical detection probability
+                length_group = length_group[length_group['clinical_detection_prob'] >= min_clinical_prob]
+                
+                # Also require higher SNR for longer regions
                 min_snr_for_length = min_snr_threshold * (1 + 0.2 * bin_idx)
                 length_group = length_group[length_group['snr'] >= min_snr_for_length]
             
             if not length_group.empty:
                 n_from_group = target_counts[bin_idx]
-                top_in_length = length_group.nlargest(n_from_group, 'snr')
+                # Use combined score for selection
+                top_in_length = length_group.nlargest(n_from_group, 'combined_score')
                 length_selections.append(top_in_length)
         
-        if bin_idx in target_counts and (length_group.empty or len(length_group) < target_counts[bin_idx]):
+        if len(length_group) < target_counts.get(bin_idx, 0):
             print(f"Warning: Insufficient markers in CpG length bin {min_len}-{max_len}")
     
     # Combine length-based selections
@@ -194,7 +215,8 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     # Get region-balanced markers
     region_selections = []
     for region, group in markers.groupby('region_bin'):
-        top_in_region = group.nlargest(max_per_region, 'snr')
+        # Use combined score for region-based selection
+        top_in_region = group.nlargest(max_per_region, 'combined_score')
         region_selections.append(top_in_region)
     
     region_balanced = pd.concat(region_selections) if region_selections else pd.DataFrame()
@@ -203,10 +225,14 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
     combined = pd.concat([length_balanced, region_balanced]).drop_duplicates()
     
     # If we don't have enough markers, add more from the original set
-    if len(combined) < min_markers:
+    if len(combined) < num_markers:
         remaining = markers[~markers.index.isin(combined.index)]
-        additional = remaining.nlargest(min_markers - len(combined), 'snr')
+        additional = remaining.nlargest(num_markers - len(combined), 'combined_score')
         combined = pd.concat([combined, additional])
+    
+    # If we have too many candidates, trim to a reasonable number to speed up selection
+    elif len(combined) > num_markers * 3:
+        combined = combined.nlargest(num_markers * 3, 'combined_score')
     
     # Add length bin categories for stratified selection
     combined['length_bin'] = pd.cut(
@@ -215,11 +241,11 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
         labels=range(5)
     )
     
-    # Within each length bin, rank by SNR
-    combined['bin_rank'] = combined.groupby('length_bin')['snr'].rank(ascending=False)
+    # Within each length bin, rank by combined score
+    combined['bin_rank'] = combined.groupby('length_bin')['combined_score'].rank(ascending=False)
     
     # Sort for stratified selection
-    sorted_markers = combined.sort_values(['bin_rank', 'snr'], ascending=[True, False])
+    sorted_markers = combined.sort_values(['bin_rank', 'combined_score'], ascending=[True, False])
     
     # Select non-overlapping markers
     selected = []
@@ -264,8 +290,8 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
             current = length_counts.get(length_bin, 0)
             length_priority = current < target
         
-        # Allow more from high-SNR regions
-        max_from_region = 5 if marker['snr'] > np.percentile(sorted_markers['snr'], 90) else 3
+        # Allow more from high-quality regions
+        max_from_region = 5 if marker['combined_score'] > np.percentile(sorted_markers['combined_score'], 90) else 3
         
         # Select marker if it passes all criteria
         if not overlaps and (region_count < max_from_region or length_priority):
@@ -275,7 +301,7 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
             selected_cpg_pairs.add(cpg_pair)
             
         # Stop when we have enough markers with good distribution
-        if len(selected) >= min_markers:
+        if len(selected) >= num_markers:
             # Check length distribution
             enough_per_bin = True
             for bin_idx in range(len(cpg_length_bins)):
@@ -286,33 +312,54 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
                         break
             
             # Check genomic distribution
-            enough_regions = len(selected_regions) >= min(len(markers['region_bin'].unique()), min_markers // 2)
+            enough_regions = len(selected_regions) >= min(len(markers['region_bin'].unique()), num_markers // 2)
             
             if enough_regions and enough_per_bin:
+                # Limit to exactly num_markers if we have more
+                if len(selected) > num_markers:
+                    # Sort by combined score and keep top num_markers
+                    selected_scores = [(i, s.get('combined_score', 0)) for i, s in enumerate(selected)]
+                    selected_scores.sort(key=lambda x: x[1], reverse=True)
+                    keep_indices = [i for i, _ in selected_scores[:num_markers]]
+                    selected = [selected[i] for i in keep_indices]
                 break
     
     # Create DataFrame from selected primary markers
     selected_df = pd.DataFrame(selected) if selected else pd.DataFrame()
     
-    # Now add redundant markers
+    # Now add redundant markers (limited to max num_markers/2)
+    max_redundant = num_markers // 2
     redundant_markers = []
     selected_redundant_cpg_pairs = set()
     
     if not selected_df.empty:
-        for _, primary in selected_df.iterrows():
+        # Prioritize finding redundant markers for the highest scoring primary markers
+        primary_with_scores = [(i, row['combined_score']) for i, (_, row) in enumerate(selected_df.iterrows())]
+        primary_with_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        for idx, _ in primary_with_scores:
+            if len(redundant_markers) >= max_redundant:
+                break
+                
+            primary = selected_df.iloc[idx]
+            
             # Find nearby markers with good scores
             nearby = markers[
                 (markers['chr'] == primary['chr']) &
                 (abs(markers['start'] - primary['start']) < 5000) &
-                (markers['snr'] > primary['snr'] * 0.7)
+                (markers['snr'] > primary['snr'] * 0.7) &
+                (markers['clinical_detection_prob'] >= primary['clinical_detection_prob'] * 0.9)  # Similar clinical utility
             ]
             
             # Skip markers already in primary selection
             nearby = nearby[~nearby.index.isin(selected_df.index)]
             
             if not nearby.empty:
-                # Score favoring SNR with small length bonus
-                nearby['redundant_score'] = nearby['snr'] * (1 + 0.1 * nearby['cpg_length']/50)
+                # Use combined score but weight clinical probability more for redundant markers
+                nearby['redundant_score'] = (
+                    nearby['snr_norm'] * 0.4 + 
+                    nearby['clinical_norm'] * 0.6  # Higher weight on clinical detection for redundancy
+                )
                 nearby_sorted = nearby.sort_values('redundant_score', ascending=False)
                 
                 # Find first marker that doesn't duplicate a CpG region
@@ -338,10 +385,6 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
         final_selection = selected_df if not selected_df.empty else redundant_df
         if not final_selection.empty:
             final_selection['is_primary'] = True
-
-    estimate_clinical_coverage(final_selection, 10)
-    estimate_clinical_coverage(final_selection, 20)
-    estimate_clinical_coverage(final_selection, 30)
     
     # Final check for duplicates
     if not final_selection.empty:
@@ -354,25 +397,40 @@ def select_markers_for_cell_type(df: pd.DataFrame, min_markers: int = 75, max_pe
             labels=['very_short', 'short', 'medium', 'long', 'very_long']
         )).size()
         
-        print("Marker CpG length distribution:")
+        print("\n=== Marker Selection Summary ===")
+        print(f"Total markers selected: {len(final_selection)}")
+        print(f"Primary markers: {sum(final_selection['is_primary'])}")
+        print(f"Redundant markers: {len(final_selection) - sum(final_selection['is_primary'])}")
+        
+        print("\nCpG length distribution:")
         print(length_stats)
         print(f"Mean CpG length: {final_selection['cpg_length'].mean():.2f}")
         print(f"Median CpG length: {final_selection['cpg_length'].median():.2f}")
+        
+        print("\nSNR Statistics:")
         print(f"Mean SNR: {final_selection['snr'].mean():.2f}")
         print(f"Min SNR: {final_selection['snr'].min():.2f}")
         
-        # SNR by length category
-        snr_by_length = final_selection.groupby(pd.cut(
+        # Clinical detection probability statistics
+        print("\nClinical Detection Statistics:")
+        print(f"Mean clinical detection probability: {final_selection['clinical_detection_prob'].mean():.2f}")
+        print(f"Median clinical detection probability: {final_selection['clinical_detection_prob'].median():.2f}")
+        
+        # Combined metrics by length category
+        metrics_by_length = final_selection.groupby(pd.cut(
             final_selection['cpg_length'],
             bins=[4, 8, 15, 25, 50, 100],
             labels=['very_short', 'short', 'medium', 'long', 'very_long']
-        ))['snr'].agg(['mean', 'min', 'max'])
+        )).agg({
+            'snr': ['mean', 'min', 'max'],
+            'clinical_detection_prob': ['mean', 'min', 'max'],
+            'combined_score': ['mean']
+        })
         
-        print("SNR distribution by CpG length category:")
-        print(snr_by_length)
+        print("\nMetrics by length category:")
+        print(metrics_by_length)
     
     return final_selection
-
 
 def process_cell_type(input_dir: Path, 
                      output_dir: Path,
@@ -958,7 +1016,7 @@ def marker_set_performance_simulation(markers, target_cell_type, background_cell
 def save_markers(filtered_markers_dir, markers_fname, atlas_fname):
     markers = pd.read_parquet(list(filtered_markers_dir.glob("*.parquet")))
     markers = markers.dropna()    
-    markers[['chr','start','end','startCpG','endCpG','target','name','direction','B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 'Colon', 'Esophagus', 'Gastric', 'Granulocytes', 'Monocytes', 'NK-cells', 'OAC', 'Small-intestine','T-cells', 'B-cells_coverage', 'CD34-erythroblasts_coverage', 'CD34-megakaryocytes_coverage', 'Colon_coverage', 'Esophagus_coverage', 'Gastric_coverage', 'Granulocytes_coverage',   'Monocytes_coverage', 'NK-cells_coverage','OAC_coverage', 'Small-intestine_coverage','T-cells_coverage', 'snr', 'snr_vs_median', 'snr_vs_mean', 'target_value','max_background', 'median_background', 'mean_background','background_std', 'background_range','background_quartile_ratio', 'signal_to_noise_area','relative_signal_strength','is_primary', 'separability','clinical_detection_prob_10','clinical_detection_prob_20','clinical_detection_prob_30','expected_useful_reads_10','expected_useful_reads_20','expected_useful_reads_30']].to_csv(markers_fname, sep="\t", index=False)
+    markers[['chr','start','end','startCpG','endCpG','target','name','direction','B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 'Colon', 'Esophagus', 'Gastric', 'Granulocytes', 'Monocytes', 'NK-cells', 'OAC', 'Small-intestine','T-cells', 'B-cells_coverage', 'CD34-erythroblasts_coverage', 'CD34-megakaryocytes_coverage', 'Colon_coverage', 'Esophagus_coverage', 'Gastric_coverage', 'Granulocytes_coverage',   'Monocytes_coverage', 'NK-cells_coverage','OAC_coverage', 'Small-intestine_coverage','T-cells_coverage', 'snr', 'snr_vs_median', 'snr_vs_mean', 'target_value','max_background', 'median_background', 'mean_background','background_std', 'background_range','background_quartile_ratio', 'signal_to_noise_area','relative_signal_strength','is_primary', 'separability','clinical_detection_prob','expected_useful_reads']].to_csv(markers_fname, sep="\t", index=False)
     markers[['chr','start','end','startCpG','endCpG','target','name','direction','B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 'Colon', 'Esophagus', 'Gastric', 'Granulocytes', 'Monocytes', 'NK-cells', 'OAC', 'Small-intestine','T-cells']].to_csv(atlas_fname, sep="\t", index=False)
 
 
