@@ -162,10 +162,9 @@ def merge(base_dir, num_files, prefix, cov):
 
 
 def merge_all():
-    base_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/"
-    merge(base_dir, 5, "eval", "high")
-    merge(base_dir, 5, "eval", "med")
-    merge(base_dir, 5, "eval", "low")
+    merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "high")
+    merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "med")
+    merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "low")
 
 
 def sample_to_dilution(sample):

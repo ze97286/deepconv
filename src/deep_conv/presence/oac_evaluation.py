@@ -7,7 +7,7 @@ def train_and_evaluate(model_name, target_cell_type_name, use_loyfer=True):
     atlas_dir = "atlas"
     if use_loyfer:
         atlas_dir = "loyfer_atlas"
-    atlas_path = f"/users/zetzioni/sharedscratch/{atlas_dir}/atlas/atlas_oac.blood+gi+tum.l4.bed"
+    atlas_path = f"/users/zetzioni/sharedscratch/{atlas_dir}/atlas/atlas_cov_oac.blood+gi+tum.l4.bed"
     train_pat_dir = f"/users/zetzioni/sharedscratch/{atlas_dir}/training/oac.blood+gi+tum.l4/train"
     eval_pat_dir = f"/users/zetzioni/sharedscratch/{atlas_dir}/training/oac.blood+gi+tum.l4/eval"
 

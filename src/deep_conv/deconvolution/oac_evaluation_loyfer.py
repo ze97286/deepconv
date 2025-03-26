@@ -747,7 +747,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
 
 # 1
 def train_and_evaluate(model_name, presence_model_name):
-    atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
+    atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_cov_oac.blood+gi+tum.l4.bed"
     train_pat_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train"
     eval_pat_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval"
 
@@ -789,7 +789,7 @@ def eval_admixtures(model_name,presence_model_name, size="low"):
     # evaluate Zohar's atlas with deepconv
     eval_admixtures_deepconv(model_name, presence_model_name, size)  
     # evaluate Zohar's atlas (primary markers only) with nnls
-    eval_admixtures_nnls("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed", size)
+    eval_admixtures_nnls("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_cov_oac.blood+gi+tum.l4.bed", size)
 
 
 # 2
@@ -804,7 +804,7 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     """
     suffix = f"_{size}/"
         
-    deepconv_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
+    deepconv_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_cov_oac.blood+gi+tum.l4.bed"
     deepconv_atlas = pd.read_csv(deepconv_atlas_path, sep="\t")
     cell_types = list(deepconv_atlas.columns[8:])
     target_ids = deepconv_atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
@@ -889,7 +889,7 @@ def run_oac_analysis(model_name, presence_model_name):
 
     zohar_model = model_name
     zohar_model_name = model_name
-    zohar_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
+    zohar_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_cov_oac.blood+gi+tum.l4.bed"
 
     # tissue deep conv AB
     zohar_atlas_name = "atlas_oac.blood+gi+tum.l4"
