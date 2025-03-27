@@ -15,6 +15,7 @@ from deep_conv.deconvolution.train import train_model
 from deep_conv.deconvolution.predict import predict_with_post_processing
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')
+torch.autograd.set_detect_anomaly(True)
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
