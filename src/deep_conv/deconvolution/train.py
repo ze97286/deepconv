@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from typing import Dict, Tuple, List
-from deep_conv.deconvolution.loss import loss_fn
+from deep_conv.deconvolution.loss import coverage_adaptive_loss
 
 
 def init_wandb(config, project_name="cfDNA-Deconvolution", entity=None):
