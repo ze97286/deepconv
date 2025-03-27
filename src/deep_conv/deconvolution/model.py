@@ -382,6 +382,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                 
         return presence_probs, presence_logits
     
+ 
     def apply_presence_gating(self, props, probs, coverage):
         """Apply calibrated presence gating with coverage-dependent thresholds"""
         # Compute average coverage per sample
@@ -413,26 +414,43 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         # Re-normalize to sum to 1
         sum_props = torch.sum(gated_props, dim=1, keepdim=True) + 1e-8
-        normalized_props = gated_props / sum_props
+        result = gated_props / sum_props
         
         # Handle extremely low coverage as a special case
         extremely_low_cov = avg_coverage < 1.0
         if extremely_low_cov.any():
-            ext_low_indices = extremely_low_cov.squeeze().nonzero(as_tuple=True)[0]
+            # Clone result to avoid in-place operations
+            modified_result = result.clone()
             
+            ext_low_indices = extremely_low_cov.squeeze().nonzero(as_tuple=True)[0]
             for idx in ext_low_indices:
                 # Keep only top 1-2 predictions for extremely low coverage
                 _, top_indices = torch.topk(probs[idx], k=2)
-                mask = torch.ones_like(probs[idx], dtype=torch.bool)
-                mask[top_indices] = False
-                normalized_props[idx][mask] = 0.0
                 
-                # Re-normalize after zeroing out
-                if normalized_props[idx].sum() > 0:
-                    normalized_props[idx] = normalized_props[idx] / normalized_props[idx].sum()
+                # Create a mask of zeros with ones at top indices
+                mask = torch.zeros_like(probs[idx], dtype=torch.bool)
+                mask[top_indices] = True
+                
+                # Create a new row by zeroing out non-top values
+                new_row = torch.zeros_like(modified_result[idx])
+                new_row[mask] = modified_result[idx][mask]
+                
+                # Renormalize if needed
+                row_sum = new_row.sum()
+                if row_sum > 0:
+                    # Create a normalized version without in-place operation
+                    new_row = new_row / row_sum
+                
+                # Assign the new row
+                modified_result[idx] = new_row
+            
+            # Use the modified result
+            return modified_result
         
-        return normalized_props
-    
+        # No extremely low coverage samples
+        return result
+
+
     def forward(self, marker_values, coverage):
         """
         Forward pass with coverage-aware branching architecture
