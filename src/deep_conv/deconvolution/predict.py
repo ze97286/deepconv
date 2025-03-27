@@ -1,160 +1,82 @@
 import torch
 import numpy as np
 
-def predict_with_consensus(model, marker_values, coverage, batch_size=256, device=None):
-        """
-        Makes predictions using the model in evaluation mode.
-        
-        Args:
-            marker_values: Marker methylation values [N, M]
-            coverage: Coverage values [N, M]
-            batch_size: Batch size for processing
-            device: Device to run inference on (defaults to model's device)
-            
-        Returns:
-            numpy.ndarray: Cell type proportions [N, C]
-        """
-        # Decide which device to use (CPU/GPU)
-        if device is None:
-            device = next(model.parameters()).device
-        
-        # Convert inputs (X, coverage) to Torch tensors if needed
-        if not isinstance(marker_values, torch.Tensor):
-            marker_values = torch.tensor(marker_values, dtype=torch.float32)
-        if not isinstance(coverage, torch.Tensor):
-            coverage = torch.tensor(coverage, dtype=torch.float32)
-        
-        # Ensure both inputs have a batch dimension
-        if len(marker_values.shape) == 1:
-            marker_values = marker_values.unsqueeze(0)
-        if len(coverage.shape) == 1:
-            coverage = coverage.unsqueeze(0)
-        
-        model.eval()
-        predictions_list = []
-        
-        # Process the data in batches
-        num_samples = marker_values.shape[0]
-        num_batches = (num_samples + batch_size - 1) // batch_size  # Ceiling division
-        
-        with torch.no_grad():
-            for i in range(num_batches):
-                start_idx = i * batch_size
-                end_idx = min((i + 1) * batch_size, num_samples)
-                
-                batch_X = marker_values[start_idx:end_idx].to(device)
-                batch_coverage = coverage[start_idx:end_idx].to(device)
-                
-                # Forward pass through the model
-                props, *_ = model.forward(batch_X, batch_coverage)
-                
-                # Move to CPU numpy and store
-                predictions_list.append(props.cpu().numpy())
-                
-                # Optional GPU memory cleanup
-                if device.type == 'cuda':
-                    torch.cuda.empty_cache()
-        
-        # Combine all batch results
-        if len(predictions_list) == 0:
-            # Edge case: empty input
-            return np.zeros((num_samples, model.num_celltypes))
-        
-        # Return a single array of shape [N, C]
-        return np.vstack(predictions_list)
 
-
-def predict_with_details(
-    model,
-    X,
-    coverage,
+def predict_with_post_processing(
+    model, 
+    marker_values, 
+    coverage, 
+    marker_to_cell_mapping,
     batch_size=256,
-    device=None,
+    min_coverage_threshold=5.0,
+    min_signal_threshold=0.01
 ):
     """
-    Extended prediction function that returns additional details
-    beyond just the cell type proportions.
-    
-    This function returns:
-    - Cell type proportions
-    - Presence probabilities 
-    - Reconstructed marker values
+    Complete inference pipeline with post-processing.
     
     Args:
-        model: The CellTypeDeconvolutionModel
-        X: Marker methylation values [N, M]
-        coverage: Coverage values [N, M]
-        batch_size: Batch size for processing
-        device: Device to run inference on (defaults to model's device)
+        model: Trained deconvolution model
+        marker_values: Input methylation values [samples, markers]
+        coverage: Coverage values [samples, markers]
+        marker_to_cell_mapping: Mapping from markers to cell types
+        batch_size: Batch size for processing large datasets
+        min_coverage_threshold: Minimum coverage to trust predictions
+        min_signal_threshold: Minimum signal to keep prediction non-zero
         
     Returns:
-        tuple: (cell_props, presence_probs, reconstructed_markers)
+        filtered_predictions: Post-processed cell type proportions
     """
-    # 1) Remove any W&B hooks before prediction, to avoid logging or gradient issues during inference
-    wandb_hooks = []
-    if hasattr(model, '_forward_hooks'):
-        wandb_hooks = [
-            (k, v) for k, v in model._forward_hooks.items()
-            if 'wandb' in str(v)
-        ]
-        for hook_id, _ in wandb_hooks:
-            model._forward_hooks.pop(hook_id)
+    # Get raw model predictions
+    raw_predictions = model.predict(marker_values, coverage, batch_size)
     
-    # 2) Decide which device to use (CPU/GPU)
-    if device is None:
-        device = next(model.parameters()).device
+    # Calculate marker-level quality scores
+    marker_quality = np.clip(coverage / 20.0, 0, 1)  # Coverage-based quality
     
-    # 3) Convert inputs (X, coverage) to Torch tensors if needed
-    if not isinstance(X, torch.Tensor):
-        X = torch.tensor(X, dtype=torch.float32)
-    if not isinstance(coverage, torch.Tensor):
-        coverage = torch.tensor(coverage, dtype=torch.float32)
+    # Process each sample
+    filtered = raw_predictions.copy()
     
-    # Ensure both inputs have a batch dimension
-    if len(X.shape) == 1:
-        X = X.unsqueeze(0)
-    if len(coverage.shape) == 1:
-        coverage = coverage.unsqueeze(0)
-    
-    model.eval()
-    predictions_list = []
-    presence_probs_list = []
-    reconstructed_list = []
-    
-    # 4) Process the data in batches
-    num_samples = X.shape[0]
-    num_batches = (num_samples + batch_size - 1) // batch_size  # Ceiling division
-    
-    with torch.no_grad():
-        for i in range(num_batches):
-            start_idx = i * batch_size
-            end_idx = min((i + 1) * batch_size, num_samples)
+    for i in range(len(filtered)):
+        # Calculate average coverage for this sample
+        avg_cov = coverage[i].mean()
+        
+        # Calculate cell type quality based on its markers
+        cell_quality = np.zeros(model.num_celltypes)
+        for cell_idx in range(model.num_celltypes):
+            # Find markers corresponding to this cell type
+            cell_markers = marker_to_cell_mapping == cell_idx
+            if np.any(cell_markers):
+                # Cell quality is average of its marker qualities
+                cell_quality[cell_idx] = marker_quality[i, cell_markers].mean()
+        
+        # Handle zero or NaN quality
+        cell_quality = np.nan_to_num(cell_quality)
+        
+        # Apply stricter filtering for low coverage
+        if avg_cov < min_coverage_threshold:
+            # For low coverage, use a more aggressive threshold
+            threshold_factor = 1.5 - (avg_cov / min_coverage_threshold)
+            dynamic_threshold = min_signal_threshold * threshold_factor
             
-            batch_X = X[start_idx:end_idx].to(device)
-            batch_coverage = coverage[start_idx:end_idx].to(device)
+            # Filter based on quality and threshold
+            quality_mask = cell_quality > 0.3
+            filtered[i, ~quality_mask] = 0
+            filtered[i, filtered[i] < dynamic_threshold] = 0
             
-            # Forward pass through the model - unpack the five return values
-            props, reconstructed, valid_mask, presence_probs, presence_logits = model(batch_X, batch_coverage)
-            
-            # Move to CPU numpy and store
-            predictions_list.append(props.cpu().numpy())
-            presence_probs_list.append(presence_probs.cpu().numpy())
-            reconstructed_list.append(reconstructed.cpu().numpy())
-            
-            # Optional GPU memory cleanup
-            if device.type == 'cuda':
-                torch.cuda.empty_cache()
+            # If everything got zeroed, keep just the top predictions
+            if np.sum(filtered[i] > 0) <= 1:
+                top_n = max(1, int(avg_cov / 2))  # Adaptive based on coverage
+                top_idx = np.argsort(raw_predictions[i])[::-1][:top_n]
+                
+                # Zero everything except top N
+                mask = np.zeros_like(filtered[i], dtype=bool)
+                mask[top_idx] = True
+                filtered[i, ~mask] = 0
+        else:
+            # For higher coverage, apply standard thresholding
+            filtered[i, filtered[i] < min_signal_threshold] = 0
+        
+        # Re-normalize to sum to 1
+        if filtered[i].sum() > 0:
+            filtered[i] = filtered[i] / filtered[i].sum()
     
-    # 5) Combine all batch results
-    if len(predictions_list) == 0:
-        # Edge case: empty input
-        return (np.zeros((num_samples, model.num_celltypes)), 
-                np.zeros((num_samples, model.num_celltypes)),
-                np.zeros((num_samples, model.num_markers)))
-    
-    # Return the combined results
-    return (
-        np.vstack(predictions_list),           # Cell type proportions
-        np.vstack(presence_probs_list),        # Presence probabilities
-        np.vstack(reconstructed_list)          # Reconstructed marker values
-    )
+    return filtered

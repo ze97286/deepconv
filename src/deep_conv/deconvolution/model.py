@@ -9,6 +9,100 @@ from pathlib import Path
 from deep_conv.presence.model import SingleCellTypePresenceModel
 
 
+def coverage_matched_augmentation(marker_values, coverage, target_dist_params=None, augmentation_probability=0.5):
+    """
+    Augment methylation and coverage data to better match clinical coverage distributions.
+    
+    Args:
+        marker_values: Original marker values [samples, markers]
+        coverage: Original coverage values [samples, markers]
+        target_dist_params: Dict with distribution parameters for target coverage:
+            - mean: Target mean coverage
+            - std: Target standard deviation
+            - log_params: Parameters for log-normal distribution
+            - quantiles: Distribution quantiles (5%, 25%, 50%, 75%, 95%)
+        augmentation_probability: Probability of applying augmentation to a sample
+            
+    Returns:
+        augmented_values: Augmented marker values
+        augmented_coverage: Augmented coverage values
+    """
+    # Default parameters for clinical-like coverage if not provided
+    if target_dist_params is None:
+        target_dist_params = {
+            'mean': 5.0,  # Lower mean coverage for clinical samples
+            'std': 4.0,
+            'log_params': {
+                'mean': 1.2,  # ln(mean) ~ 1.2
+                'std': 0.8    # High variability
+            },
+            'quantiles': {
+                '5%': 0.5,
+                '25%': 2.0,
+                '50%': 4.0,
+                '75%': 7.0,
+                '95%': 12.0
+            }
+        }
+    
+    # Create copies to modify
+    augmented_values = marker_values.copy()
+    augmented_coverage = coverage.copy()
+    
+    # Determine which samples to augment
+    num_samples = len(marker_values)
+    samples_to_augment = np.random.random(num_samples) < augmentation_probability
+    
+    for i in range(num_samples):
+        if not samples_to_augment[i]:
+            continue  # Skip samples not selected for augmentation
+        
+        # Get sample coverage statistics
+        sample_coverage = coverage[i]
+        current_mean = np.mean(sample_coverage)
+        
+        # Skip if current coverage is already very low
+        if current_mean < 1.0:
+            continue
+        
+        # Generate a target coverage level from distribution
+        if np.random.random() < 0.7:
+            # 70% of time: Use log-normal distribution for realistic coverage profile
+            log_mean = target_dist_params['log_params']['mean']
+            log_std = target_dist_params['log_params']['std']
+            target_coverage = np.exp(np.random.normal(log_mean, log_std))
+        else:
+            # 30% of time: Use a very low coverage to simulate extreme cases
+            target_coverage = np.random.uniform(0.5, 2.0)
+        
+        # Calculate scaling factor to match target coverage
+        scaling_factor = target_coverage / (current_mean + 1e-8)
+        
+        # Apply coverage scaling
+        augmented_coverage[i] = sample_coverage * scaling_factor
+        
+        # Higher noise for low scaling factors
+        if scaling_factor < 0.5:
+            # Calculate noise level (more reduction = more noise)
+            noise_level = np.clip(0.3 * (1.0 - scaling_factor), 0.05, 0.3)
+            
+            # Add noise to marker values
+            noise = np.random.normal(0, noise_level, size=marker_values[i].shape)
+            augmented_values[i] = np.clip(marker_values[i] + noise, 0, 1)
+            
+            # Simulate missing marker data
+            missing_prob = np.clip(1.0 - 2 * scaling_factor, 0, 0.5)  # Up to 50% missing
+            missing_mask = np.random.random(marker_values[i].shape) < missing_prob
+            
+            # Zero out coverage for missing markers
+            augmented_coverage[i, missing_mask] = 0
+            
+            # Handle marker values for missing data
+            augmented_values[i, missing_mask] = 0  # Or NaN if your model handles it
+    
+    return augmented_values, augmented_coverage
+
+
 class TissueDeconvolutionDataset(Dataset):
     """
     A PyTorch Dataset for loading cfDNA methylation data and optional labels.
@@ -59,24 +153,184 @@ class TissueDeconvolutionDataset(Dataset):
             item['y'] = self.y[idx]
         return item  
 
+
+class AugmentedTissueDataset(TissueDeconvolutionDataset):
+    """
+    Enhanced dataset with coverage-matched augmentation for clinical scenarios.
+    
+    This extends the base TissueDeconvolutionDataset by adding coverage augmentation
+    to better simulate real-world clinical data distributions.
+    """
+    def __init__(self, 
+                 fraction, 
+                 coverage, 
+                 atlas, 
+                 y=None, 
+                 target_dist_params=None,
+                 augmentation_probability=0.5,
+                 enable_augmentation=True):
+        # Initialize the parent class
+        super().__init__(fraction, coverage, atlas, y)
+        
+        # Store augmentation parameters
+        self.target_dist_params = target_dist_params
+        self.augmentation_probability = augmentation_probability
+        self.enable_augmentation = enable_augmentation
+        
+        # Convert numpy arrays to tensors if needed
+        if not isinstance(self.fraction, torch.Tensor):
+            self.fraction = torch.tensor(self.fraction, dtype=torch.float32)
+        if not isinstance(self.coverage, torch.Tensor):
+            self.coverage = torch.tensor(self.coverage, dtype=torch.float32)
+    
+    def __getitem__(self, idx):
+        """
+        Get a dataset item with optional augmentation.
+        """
+        # Get the base item from parent class
+        item = super().__getitem__(idx)
+        
+        # Apply augmentation during training if enabled
+        if self.enable_augmentation and self.training and self.y is not None:
+            # Convert to numpy for augmentation
+            fraction_np = item['X'].numpy().reshape(1, -1)
+            coverage_np = item['coverage'].numpy().reshape(1, -1)
+            
+            # Apply augmentation with some probability
+            if np.random.random() < self.augmentation_probability:
+                # Augment the data
+                aug_fraction, aug_coverage = coverage_matched_augmentation(
+                    fraction_np, 
+                    coverage_np, 
+                    self.target_dist_params,
+                    augmentation_probability=1.0  # Always augment since we already decided to
+                )
+                
+                # Update item with augmented data
+                item['X'] = torch.tensor(aug_fraction[0], dtype=torch.float32)
+                item['coverage'] = torch.tensor(aug_coverage[0], dtype=torch.float32)
+        
+        return item
+    
+    def set_training(self, training=True):
+        """Enable/disable training mode for augmentation"""
+        self.training = training
+        
+
 class CellTypeDeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=32):
+    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir=None, feature_dim=32):
         super().__init__()
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
-
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
         # Store cell-type assignment for each marker
         target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
         self.register_buffer("target_ids", target_ids_t)
-
-        # Load separate presence models
+        
+        # Load presence models if directory provided
+        self.presence_models = None
+        if presence_models_dir:
+            self.load_presence_models(presence_models_dir)
+            
+        # Try to load calibration table if it exists
+        self.calibration_table = None
+        if presence_models_dir:
+            calib_path = os.path.join(presence_models_dir, "calibration.pt")
+            if os.path.exists(calib_path):
+                self.calibration_table = torch.load(calib_path)
+        
+        # Marker Feature Extractor
+        self.marker_feature_extractor = nn.Sequential(
+            nn.Linear(1, feature_dim),
+            nn.LeakyReLU(),
+            nn.Linear(feature_dim, feature_dim)
+        )
+        
+        # Coverage pathway - explicitly model coverage
+        self.coverage_encoder = nn.Sequential(
+            nn.Linear(1, feature_dim),
+            nn.LeakyReLU(),
+            nn.Linear(feature_dim, feature_dim)
+        )
+        
+        # High coverage branch
+        self.high_cov_encoder = nn.Sequential(
+            nn.Linear(num_cell_types * feature_dim + feature_dim, 128),
+            nn.LeakyReLU(),
+            nn.Dropout(0.1),  # Light dropout for high coverage
+            nn.Linear(128, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, num_cell_types)
+        )
+        
+        # Low coverage branch
+        self.low_cov_encoder = nn.Sequential(
+            nn.Linear(num_cell_types * feature_dim + feature_dim, 128),
+            nn.LeakyReLU(),
+            nn.Dropout(0.3),  # More dropout for low coverage
+            nn.Linear(128, 128),
+            nn.LeakyReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, num_cell_types)
+        )
+        
+        # Coverage gating mechanism
+        self.coverage_gate = nn.Sequential(
+            nn.Linear(1, 32),
+            nn.LeakyReLU(),
+            nn.Linear(32, 1)
+        )
+        
+        # Temperature parameter for sigmoid
+        self.temp = nn.Parameter(torch.ones(1))
+        
+        # Decoder for marker reconstruction
+        self.decoder = nn.Sequential(
+            nn.Linear(num_cell_types, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, num_markers)
+        )
+        
+        # Initialize weights properly
+        self._init_weights()
+        
+        # Store loss hyperparameters
+        self.loss_params = {
+            'alpha': 0.92,
+            'beta': 0.07,
+            'gamma': 0.01,
+            'cov_min_weight': 0.2,
+            'cov_max_weight': 1.5,
+            'cov_norm_factor': 20.0,
+            'min_frac_weight': 0.5,
+            'max_frac_weight': 1.5,
+            'cov_threshold': 10.0,
+            'sparsity_min': 1.0,
+            'sparsity_max': 3.0
+        }
+    
+    def _init_weights(self):
+        """Apply proper initialization to all modules"""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        
+        # Initialize coverage gate bias to produce values around 0.5
+        if hasattr(self.coverage_gate[-1], 'bias'):
+            self.coverage_gate[-1].bias.data.fill_(0.0)
+    
+    def load_presence_models(self, presence_models_dir):
+        """Load pre-trained presence models"""
         self.presence_models = nn.ModuleList()
         
-        for cell_type_idx in range(num_cell_types):
-            model_path = Path(presence_models_dir) / f"presence_model_{cell_type_idx}.pt"
+        for cell_type_idx in range(self.num_celltypes):
+            model_path = os.path.join(presence_models_dir, f"presence_model_{cell_type_idx}.pt")
             
-            if not model_path.exists():
+            if not os.path.exists(model_path):
                 raise FileNotFoundError(f"Presence model not found at {model_path}")
             
             # Load the model
@@ -90,88 +344,9 @@ class CellTypeDeconvolutionModel(nn.Module):
             
             presence_model.eval()
             self.presence_models.append(presence_model)
-
-        # Marker Feature Extractor
-        self.marker_feature_extractor = nn.Sequential(
-            nn.Linear(1, feature_dim),
-            nn.LeakyReLU(),
-            nn.Linear(feature_dim, feature_dim)
-        )
-
-        # Encoder with presence input
-        self.encoder = nn.Sequential(
-            nn.Linear(num_cell_types * feature_dim + num_cell_types, 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, num_cell_types)
-        )
-
-        # Decoder
-        self.decoder = nn.Sequential(
-            nn.Linear(num_cell_types, 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, num_markers)
-        )
-        
-        # Initialize presence gating parameters
-        thresholds = torch.ones(num_cell_types) * 0.5
-        slopes = torch.ones(num_cell_types) * 10
-        
-        # Special handling for OAC
-        oac_index = 9  # Adjust to your actual OAC index
-        thresholds[oac_index] = 0.3
-        slopes[oac_index] = 15
-        
-        self.register_buffer("presence_thresholds", thresholds)
-        self.register_buffer("presence_slopes", slopes)
-        
-
-    def apply_presence_gating(self, props, probs):
-        """
-        Apply cell-type specific presence scaling based on empirical data.
-        """
-        # Cell-type specific thresholds and slopes
-        if not hasattr(self, "presence_thresholds"):
-            thresholds = torch.ones(self.num_celltypes, device=props.device) * 0.5
-            slopes = torch.ones(self.num_celltypes, device=props.device) * 10
-            
-            # Special handling for OAC based on actual data
-            oac_index = 9  # Adjust to actual OAC index
-            thresholds[oac_index] = 0.3  # Center sigmoid at 0.3 for OAC
-            slopes[oac_index] = 15       # Steeper slope for OAC
-            
-            self.register_buffer("presence_thresholds", thresholds)
-            self.register_buffer("presence_slopes", slopes)
-        
-        # Apply scaling - vector operation across all cell types at once
-        scaling = torch.sigmoid(
-            self.presence_slopes.unsqueeze(0) * (probs - self.presence_thresholds.unsqueeze(0))
-        )
-        
-        scaled_props = props * scaling
-        
-        # Normalize to ensure sum to 1
-        sum_props = torch.sum(scaled_props, dim=1, keepdim=True) + 1e-8
-        gated_props = scaled_props / sum_props
-        
-        return gated_props
-
-    def predict_presence_with_separate_models(self, marker_values, coverage):
-        """
-        Use the separate pre-trained presence models to predict 
-        presence probabilities for each cell type.
-        
-        Each presence model receives only the markers that correspond to its cell type.
-        
-        Args:
-            marker_values (FloatTensor): [B, M], fractional methylation
-            coverage (FloatTensor): [B, M], read coverage
-            
-        Returns:
-            presence_probs (FloatTensor): [B, C], presence probability for each cell type
-            presence_logits (FloatTensor): [B, C], raw logits before sigmoid
-        """
+    
+    def predict_presence(self, marker_values, coverage):
+        """Use pre-trained presence models to predict cell type presence"""
         B = marker_values.shape[0]
         C = self.num_celltypes
         
@@ -179,10 +354,14 @@ class CellTypeDeconvolutionModel(nn.Module):
         presence_probs = torch.zeros(B, C, device=marker_values.device)
         presence_logits = torch.zeros(B, C, device=marker_values.device)
         
+        # Skip if no presence models loaded
+        if self.presence_models is None:
+            return presence_probs, presence_logits
+        
         # For each cell type, use its dedicated presence model
         for cell_type_idx, presence_model in enumerate(self.presence_models):
             with torch.no_grad():  # No gradients needed for frozen presence models
-                # Create a mask for the markers that belong to this cell type
+                # Create a mask for markers belonging to this cell type
                 cell_type_marker_mask = (self.target_ids == cell_type_idx)
                 
                 # Skip if no markers for this cell type
@@ -202,146 +381,223 @@ class CellTypeDeconvolutionModel(nn.Module):
                 presence_probs[:, cell_type_idx] = probs.squeeze(-1)
                 
         return presence_probs, presence_logits
-
-    def forward(self, marker_values: torch.Tensor, coverage: torch.Tensor):
+    
+    def apply_presence_gating(self, props, probs, coverage):
+        """Apply calibrated presence gating with coverage-dependent thresholds"""
+        # Compute average coverage per sample
+        avg_coverage = coverage.mean(dim=1, keepdim=True)
+        
+        # Dynamic thresholds based on coverage
+        base_threshold = 0.5  # Default threshold
+        coverage_factor = torch.clamp(10.0 / (avg_coverage + 5.0), 0.8, 1.5)
+        adjusted_thresholds = base_threshold * coverage_factor
+        
+        # Apply calibration if available
+        if self.calibration_table is not None:
+            for cell_type in range(probs.size(1)):
+                key = f"cell_{cell_type}"
+                if key in self.calibration_table:
+                    cal_factor = self.calibration_table[key]
+                    adjusted_thresholds = adjusted_thresholds * cal_factor
+        
+        # Create sigmoid scaling factors with adaptive steepness
+        slope_factor = torch.clamp(15.0 / torch.sqrt(avg_coverage + 1.0), 10.0, 30.0)
+        
+        # Apply scaled sigmoid gating
+        scaling = torch.sigmoid(
+            slope_factor * (probs - adjusted_thresholds)
+        )
+        
+        # Apply gating to raw proportions
+        gated_props = props * scaling
+        
+        # Re-normalize to sum to 1
+        sum_props = torch.sum(gated_props, dim=1, keepdim=True) + 1e-8
+        normalized_props = gated_props / sum_props
+        
+        # Handle extremely low coverage as a special case
+        extremely_low_cov = avg_coverage < 1.0
+        if extremely_low_cov.any():
+            ext_low_indices = extremely_low_cov.squeeze().nonzero(as_tuple=True)[0]
+            
+            for idx in ext_low_indices:
+                # Keep only top 1-2 predictions for extremely low coverage
+                _, top_indices = torch.topk(probs[idx], k=2)
+                mask = torch.ones_like(probs[idx], dtype=torch.bool)
+                mask[top_indices] = False
+                normalized_props[idx][mask] = 0.0
+                
+                # Re-normalize after zeroing out
+                if normalized_props[idx].sum() > 0:
+                    normalized_props[idx] = normalized_props[idx] / normalized_props[idx].sum()
+        
+        return normalized_props
+    
+    def forward(self, marker_values, coverage):
         """
-        Forward pass to predict cell-type proportions from methylation + coverage.
-
-        Steps:
-            1) Identify valid markers (coverage>0).
-            2) Extract features for each valid marker via `marker_feature_extractor`.
-            3) Aggregate marker features per cell type, weighting by coverage.
-            4) Predict presence_prob for each cell type using separate models.
-            5) Combine aggregated features with presence information for proportion prediction.
-            6) Apply soft presence-informed scaling and normalize.
-            7) Reconstruct marker methylation from the final proportions.
-
+        Forward pass with coverage-aware branching architecture
+        
         Args:
-            marker_values (FloatTensor): [B, M], fractional methylation (NaN if coverage=0).
-            coverage (FloatTensor): [B, M], read coverage.
-
+            marker_values: [B, M] methylation values
+            coverage: [B, M] coverage values
+            
         Returns:
-            celltype_props (FloatTensor): [B, C], predicted proportion for each cell type.
-            reconstructed (FloatTensor): [B, M], the model's reconstruction of marker methylation.
-            valid_mask (BoolTensor): [B, M], True where coverage>0.
-            presence_probs (FloatTensor): [B, C], presence probability for each cell type.
-            presence_logits (FloatTensor): [B, C], raw logits before sigmoid.
+            celltype_props: [B, C] cell type proportions
+            reconstructed: [B, M] reconstructed marker values
+            valid_mask: [B, M] boolean mask where coverage > 0
+            presence_probs: [B, C] presence probabilities
+            presence_logits: [B, C] presence logits
         """
         B, M = marker_values.shape
         C = self.num_celltypes
-
-        # valid_mask indicates coverage>0
+        
+        # Create valid mask (coverage > 0)
         valid_mask = (coverage > 0)
-
-        # Flatten coverage & marker_values for efficient indexing
+        
+        # Flatten for easier processing
         coverage_flat = coverage.view(-1)
         marker_values_flat = marker_values.view(-1)
-
-        # Indices of non-zero coverage
+        
+        # Valid indices (coverage > 0)
         valid_inds = torch.nonzero(coverage_flat, as_tuple=False).squeeze(1)
-
-        # Handle all-zero-coverage case
+        
+        # Handle case with no valid coverage
         if valid_inds.numel() == 0:
-            # Provide a fallback (assign 1.0 to the first cell type, 0 to others)
             celltype_props = coverage.new_zeros(B, C)
-            celltype_props[:, 0] = 1.0
+            celltype_props[:, 0] = 1.0  # Assign to first cell type as fallback
             reconstructed = coverage.new_zeros(B, M)
             presence_probs = coverage.new_zeros(B, C)
             presence_logits = coverage.new_zeros(B, C)
             return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
-
-        # Extract coverage & marker_values for valid coverage
+        
+        # Extract values with valid coverage
         coverage_valid = coverage_flat[valid_inds]
         marker_values_valid = marker_values_flat[valid_inds]
-
-        # Compute the batch index and marker index from flattened indices
+        
+        # Compute batch and marker indices
         batch_idx = valid_inds // M
         marker_idx = valid_inds % M
-
-        # Each marker is known to correspond to a specific cell type (via self.target_ids)
+        
+        # Get cell type for each marker
         celltype_idx = self.target_ids[marker_idx]
-
-        # ----- 1) Marker Feature Extraction -----
+        
+        # Extract marker features
         marker_values_valid_2d = marker_values_valid.unsqueeze(1)  # [N, 1]
         features_valid = self.marker_feature_extractor(marker_values_valid_2d)  # [N, feature_dim]
-
-        # ----- 2) Aggregate features by cell type -----
-        # aggregator shape: [B, C, feature_dim], coverage_sum shape: [B, C]
+        
+        # Aggregate features by cell type
         aggregator = coverage.new_zeros(B, C, self.feature_dim)
         coverage_sum = coverage.new_zeros(B, C)
-
-        # We'll do index_add_ on a flattened [B*C, feature_dim]
+        
+        # Flatten for scatter operations
         aggregator_2d = aggregator.view(B*C, self.feature_dim)
         coverage_sum_1d = coverage_sum.view(B*C)
-
-        # Flatten to [N], so bc_index is each valid coverage row's (batch, celltype)
+        
+        # Calculate indices for aggregation
         bc_index = batch_idx * C + celltype_idx
-        weighted_feats = coverage_valid.unsqueeze(1) * features_valid  # shape [N, feature_dim]
-
-        # Scatter-add
+        weighted_feats = coverage_valid.unsqueeze(1) * features_valid
+        
+        # Scatter-add features
         aggregator_2d.index_add_(0, bc_index, weighted_feats)
         coverage_sum_1d.index_add_(0, bc_index, coverage_valid)
-
+        
         # Reshape back
         aggregator = aggregator_2d.view(B, C, self.feature_dim)
         coverage_sum = coverage_sum_1d.view(B, C)
-
+        
         # Avoid divide-by-zero
         mask_cov = (coverage_sum == 0)
         coverage_sum[mask_cov] = 1.0
         aggregator = aggregator / coverage_sum.unsqueeze(-1)
-
-        # Flatten aggregator for encoder
+        
+        # Flatten aggregator
         agg_flat = aggregator.view(B, -1)  # [B, C*feature_dim]
-
-        # ----- 3) Presence detection using separate models -----
-        presence_probs, presence_logits = self.predict_presence_with_separate_models(marker_values, coverage)
-
-        # ----- 4) Integrate presence information with aggregated features -----
-        combined_features = torch.cat([agg_flat, presence_probs], dim=1)
-
-        # ----- 5) Proportion Prediction with integrated presence -----
-        logits = self.encoder(combined_features)  # [B, C]
-        celltype_props_raw = F.relu(logits)  # ensure >=0
         
-        # Apply soft gating that preserves proportion relationships
-        celltype_props_gated = self.apply_presence_gating(celltype_props_raw, presence_probs)
+        # Compute coverage features
+        log_coverage = torch.log1p(coverage.mean(dim=1, keepdim=True))
+        coverage_features = self.coverage_encoder(log_coverage)
         
-        # Normalize to ensure sum to 1
-        sum_props = torch.sum(celltype_props_gated, dim=1, keepdim=True)
-        celltype_props = celltype_props_gated / (sum_props + 1e-8)
-
-        # ----- 6) Marker reconstruction -----
+        # Get presence predictions
+        presence_probs, presence_logits = self.predict_presence(marker_values, coverage)
+        
+        # Combine aggregated features with coverage features
+        combined_features = torch.cat([agg_flat, coverage_features], dim=1)
+        
+        # Process through both branches
+        high_cov_output = self.high_cov_encoder(combined_features)  # [B, C]
+        low_cov_output = self.low_cov_encoder(combined_features)  # [B, C]
+        
+        # Coverage gating
+        gate_logits = self.coverage_gate(log_coverage)
+        gate_value = torch.sigmoid(gate_logits / self.temp)
+        
+        # Combine branches based on coverage
+        raw_props = gate_value * F.relu(high_cov_output) + (1 - gate_value) * F.relu(low_cov_output)
+        
+        # Apply presence gating
+        celltype_props = self.apply_presence_gating(raw_props, presence_probs, coverage)
+        
+        # Reconstruct marker values
         reconstructed = self.decoder(celltype_props)  # [B, M]
-
-        return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
         
+        return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
+    
+    def init_temperature(self, loader, target_gate_std=0.2):
+        """Initialize temperature parameter for balanced pathway usage"""
+        self.eval()
+        gate_values = []
+        
+        # Collect gate values
+        with torch.no_grad():
+            for batch in loader:
+                marker_values = batch['X'].to(self.device)
+                coverage = batch['coverage'].to(self.device)
+                
+                # Get gate logits
+                log_coverage = torch.log1p(coverage.mean(dim=1, keepdim=True))
+                gate_logits = self.coverage_gate(log_coverage)
+                
+                # Store values
+                gate_values.append(gate_logits.cpu().numpy())
+        
+        # Calculate statistics
+        gate_values = np.concatenate(gate_values, axis=0)
+        gate_std = np.std(gate_values)
+        
+        # Adjust temperature
+        if gate_std > 0:
+            new_temp = self.temp.item() * (gate_std / target_gate_std)
+            new_temp = max(0.5, min(2.0, new_temp))
+            
+            with torch.no_grad():
+                self.temp.fill_(new_temp)
+                
+        self.train()
+        return new_temp
+    
     def predict(self, marker_values, coverage, batch_size=256, device=None):
         """
         Makes predictions using the model in evaluation mode.
         
         Args:
-            marker_values: Marker methylation values [N, M]
-            coverage: Coverage values [N, M]
+            marker_values: [N, M] methylation values
+            coverage: [N, M] coverage values
             batch_size: Batch size for processing
-            device: Device to run inference on (defaults to model's device)
+            device: Device for computation
             
         Returns:
             numpy.ndarray: Cell type proportions [N, C]
         """
-        import numpy as np
-        
-        # Decide which device to use (CPU/GPU)
         if device is None:
-            device = next(self.parameters()).device
+            device = self.device
         
-        # Convert inputs (X, coverage) to Torch tensors if needed
+        # Convert inputs to torch tensors
         if not isinstance(marker_values, torch.Tensor):
             marker_values = torch.tensor(marker_values, dtype=torch.float32)
         if not isinstance(coverage, torch.Tensor):
             coverage = torch.tensor(coverage, dtype=torch.float32)
         
-        # Ensure both inputs have a batch dimension
+        # Add batch dimension if needed
         if len(marker_values.shape) == 1:
             marker_values = marker_values.unsqueeze(0)
         if len(coverage.shape) == 1:
@@ -350,73 +606,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         self.eval()
         predictions_list = []
         
-        # Process the data in batches
-        num_samples = marker_values.shape[0]
-        num_batches = (num_samples + batch_size - 1) // batch_size  # Ceiling division
-        
-        with torch.no_grad():
-            for i in range(num_batches):
-                start_idx = i * batch_size
-                end_idx = min((i + 1) * batch_size, num_samples)
-                
-                batch_X = marker_values[start_idx:end_idx].to(device)
-                batch_coverage = coverage[start_idx:end_idx].to(device)
-                
-                # Forward pass through the model - use only the proportions result
-                props, *_ = self.forward(batch_X, batch_coverage)
-                
-                # Move to CPU numpy and store
-                predictions_list.append(props.cpu().numpy())
-                
-                # Optional GPU memory cleanup
-                if device.type == 'cuda':
-                    torch.cuda.empty_cache()
-        
-        # Combine all batch results
-        if len(predictions_list) == 0:
-            # Edge case: empty input
-            return np.zeros((num_samples, self.num_celltypes))
-        
-        # Return a single array of shape [N, C]
-        return np.vstack(predictions_list)
-    
-    def predict_with_details(self, marker_values, coverage, batch_size=256, device=None):
-        """
-        Extended prediction function that returns additional details.
-        
-        Args:
-            marker_values: Marker methylation values [N, M]
-            coverage: Coverage values [N, M]
-            batch_size: Batch size for processing
-            device: Device to run inference on (defaults to model's device)
-            
-        Returns:
-            tuple: (cell_props, presence_probs, reconstructed_markers)
-        """
-        import numpy as np
-        
-        # Decide which device to use (CPU/GPU)
-        if device is None:
-            device = next(self.parameters()).device
-        
-        # Convert inputs to Torch tensors if needed
-        if not isinstance(marker_values, torch.Tensor):
-            marker_values = torch.tensor(marker_values, dtype=torch.float32)
-        if not isinstance(coverage, torch.Tensor):
-            coverage = torch.tensor(coverage, dtype=torch.float32)
-        
-        # Ensure both inputs have a batch dimension
-        if len(marker_values.shape) == 1:
-            marker_values = marker_values.unsqueeze(0)
-        if len(coverage.shape) == 1:
-            coverage = coverage.unsqueeze(0)
-        
-        self.eval()
-        predictions_list = []
-        presence_probs_list = []
-        reconstructed_list = []
-        
-        # Process the data in batches
+        # Process in batches
         num_samples = marker_values.shape[0]
         num_batches = (num_samples + batch_size - 1) // batch_size
         
@@ -428,24 +618,11 @@ class CellTypeDeconvolutionModel(nn.Module):
                 batch_X = marker_values[start_idx:end_idx].to(device)
                 batch_coverage = coverage[start_idx:end_idx].to(device)
                 
-                # Forward pass through the model
-                props, reconstructed, _, presence_probs, _ = self.forward(batch_X, batch_coverage)
+                # Forward pass
+                props, *_ = self.forward(batch_X, batch_coverage)
                 
-                # Move to CPU numpy and store
+                # Store predictions
                 predictions_list.append(props.cpu().numpy())
-                presence_probs_list.append(presence_probs.cpu().numpy())
-                reconstructed_list.append(reconstructed.cpu().numpy())
         
-        # Combine all batch results
-        if len(predictions_list) == 0:
-            # Edge case: empty input
-            return (np.zeros((num_samples, self.num_celltypes)), 
-                    np.zeros((num_samples, self.num_celltypes)),
-                    np.zeros((num_samples, self.num_markers)))
-        
-        # Return the combined results
-        return (
-            np.vstack(predictions_list),
-            np.vstack(presence_probs_list),
-            np.vstack(reconstructed_list)
-        )
+        # Combine results
+        return np.vstack(predictions_list) if predictions_list else np.zeros((num_samples, self.num_celltypes))

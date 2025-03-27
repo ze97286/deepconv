@@ -46,594 +46,405 @@ def init_wandb(config, project_name="cfDNA-Deconvolution", entity=None):
     return run
 
 
-def train_epoch(
-    model: nn.Module,
-    loader: DataLoader,
-    optimiser: optim.Optimizer,
-    device: torch.device,
-    log_interval: int = 500,
-    accumulation_steps: int = 4
-) -> Dict[str, float]:
+def train_epoch(model, train_loader, optimizer, device, log_interval=100):
     """
-    Performs one training epoch on the given data loader.
-
-    Steps:
-      1) Iterate over each batch (fraction, coverage, y).
-      2) Forward pass the batch through the model to get:
-         (proportions, reconstruction, presence info).
-      3) Compute the composite loss from `loss_fn`.
-      4) Accumulate gradients, optionally using `accumulation_steps`.
-      5) Perform an optimiser step (update model params) after `accumulation_steps` mini-batches.
-      6) Keep track of various statistics (loss, presence detection metrics, etc.) and log them.
-      7) Print progress every `log_interval` batches.
-
+    Train the model for one epoch.
+    
     Args:
-        model (nn.Module):
-            The model to be trained (must be in `model.train()` mode outside this function).
-        loader (DataLoader):
-            A DataLoader yielding batches of training data, each containing:
-              - 'X': cfDNA marker methylation values,
-              - 'coverage': coverage array for each marker,
-              - 'y': ground-truth cell-type proportions (if supervised).
-        optimiser (torch.optim.Optimizer):
-            The optimiser (e.g., Adam) used to update model parameters.
-        device (torch.device):
-            The target device (e.g., GPU) where model and data will reside.
-        log_interval (int):
-            Frequency (in mini-batches) with which progress is printed/logged.
-        accumulation_steps (int):
-            Number of mini-batches over which to accumulate gradients before taking an optimiser step.
-
+        model: Coverage-aware deconvolution model
+        train_loader: DataLoader for training data
+        optimizer: Optimizer instance
+        device: Computation device
+        log_interval: How often to log batch metrics
+        
     Returns:
-        Dict[str, float]: 
-            A dictionary of epoch-level metrics (averaged across all batches), e.g. 
-            {
-                'total_loss': <float>,
-                'grad_norm': <float>,
-                'alpha_stats/mean': ...,
-                ...
-            }
+        avg_loss: Average training loss
+        metrics: Dictionary of training metrics
     """
-    model.train()  # Ensure model is in training mode (affects dropout/BatchNorm, etc.)
-    epoch_stats = defaultdict(float)  # Will aggregate sums that we later average
+    model.train()
+    total_loss = 0
+    metrics = {
+        'loss_props': 0, 
+        'recon_loss': 0, 
+        'sparsity_penalty': 0,
+        'presence_precision': 0, 
+        'presence_recall': 0, 
+        'presence_f1': 0,
+        'gate_usage': [],
+        'avg_coverage': 0
+    }
     num_batches = 0
-
-    # Start fresh for gradient accumulation
-    optimiser.zero_grad()
-
-    # Iterate over all batches
-    for batch_idx, batch in enumerate(tqdm(loader, desc='Training')):
-        # 1) Move data to appropriate device
-        fraction = batch['X'].to(device)
+    
+    for batch_idx, batch in enumerate(train_loader):
+        marker_values = batch['X'].to(device)
         coverage = batch['coverage'].to(device)
-        y_true = batch['y'].to(device)
+        true_props = batch['y'].to(device)
         
-        # 2) Forward pass
-        #    alpha = predicted proportions
-        #    reconstructed = predicted marker data
-        #    valid_mask = coverage>0
-        #    presence_probs/logits = presence detection
-        alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
+        # Forward pass
+        pred_props, reconstructed, valid_mask, presence_probs, presence_logits = model(
+            marker_values, coverage)
         
-        # 3) Compute loss using our composite loss function
-        loss, details = loss_fn(
-            pred_props=alpha,
-            true_props=y_true,
-            reconstructed=reconstructed,
-            marker_values=fraction,
-            coverage=coverage,
-            valid_mask=valid_mask,
-            presence_probs=presence_probs,
-            presence_logits=presence_logits,
+        # Calculate loss
+        loss, details = coverage_adaptive_loss(
+            pred_props, true_props, reconstructed, marker_values,
+            coverage, valid_mask, presence_probs, presence_logits,
+            **model.loss_params
         )
         
-        # 4) Scale the loss if using gradient accumulation
-        scaled_loss = loss / accumulation_steps
+        # Backward and optimize
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
         
-        # 5) Backpropagation
-        scaled_loss.backward()
+        # Track metrics
+        total_loss += loss.item()
+        metrics['loss_props'] += details['loss_props']
+        metrics['recon_loss'] += details['recon_loss']
+        metrics['sparsity_penalty'] += details['sparsity_penalty']
+        metrics['presence_precision'] += details['presence_metrics']['precision']
+        metrics['presence_recall'] += details['presence_metrics']['recall']
+        metrics['presence_f1'] += details['presence_metrics']['f1']
+        metrics['avg_coverage'] += details['avg_coverage']
         
-        # 6) Update params after `accumulation_steps` or final batch
-        if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1 == len(loader)):
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimiser.step()
-            optimiser.zero_grad()
-            
-            # Record the gradient norm
-            epoch_stats['grad_norm'] += grad_norm.item()
-            
-            # Log intermediate stats (batch-level) if wandb is active
-            if wandb.run is not None and (batch_idx + 1) % (log_interval // 2) == 0:
-                wandb.log({
-                    "batch/loss": loss.item(),
-                    "batch/grad_norm": grad_norm.item(),
-                    "batch/lr": optimiser.param_groups[0]['lr'],
-                    "batch/step": batch_idx
-                })
+        # Track gate usage
+        with torch.no_grad():
+            log_coverage = torch.log1p(coverage.mean(dim=1, keepdim=True))
+            gate_logits = model.coverage_gate(log_coverage)
+            gate_value = torch.sigmoid(gate_logits / model.temp)
+            metrics['gate_usage'].extend(gate_value.cpu().numpy().flatten())
         
-        # 7) Aggregate stats for this batch
-        epoch_stats['total_loss'] += loss.item()
-        for key, value in details.items():
-            if isinstance(value, dict):
-                # Nested dict means we add e.g. "alpha_stats/mean"
-                for subkey, subvalue in value.items():
-                    epoch_stats[f"{key}/{subkey}"] += subvalue
-            else:
-                epoch_stats[key] += value
         num_batches += 1
         
-        # 8) Print to console every `log_interval` mini-batches
+        # Log progress
         if batch_idx % log_interval == 0:
-            print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
-            print(f"Alpha Mean: {details['alpha_stats']['mean']:.8f} | "
-                  f"Std: {details['alpha_stats']['std']:.8f}")
+            print(f"Train Batch {batch_idx}/{len(train_loader)}: Loss={loss.item():.4f}")
     
-    # 9) Average out stats across all batches
-    for key in epoch_stats:
-        epoch_stats[key] /= num_batches
+    # Calculate averages
+    avg_loss = total_loss / num_batches
+    for key in ['loss_props', 'recon_loss', 'sparsity_penalty', 
+                'presence_precision', 'presence_recall', 'presence_f1',
+                'avg_coverage']:
+        metrics[key] /= num_batches
     
-    return dict(epoch_stats)
+    # Calculate gate statistics
+    gate_usage = np.array(metrics['gate_usage'])
+    metrics['gate_mean'] = np.mean(gate_usage)
+    metrics['gate_std'] = np.std(gate_usage)
+    
+    print(f"Training - Loss: {avg_loss:.4f}, Props: {metrics['loss_props']:.4f}, "
+          f"Recon: {metrics['recon_loss']:.4f}, Gate: {metrics['gate_mean']:.2f}±{metrics['gate_std']:.2f}")
+    
+    return avg_loss, metrics
 
-
-def validate(
-    model: nn.Module,
-    val_loaders: Dict[str, DataLoader],
-    device: torch.device,
-    presence_threshold: float = 0.01  # Fixed threshold for consistent metrics
-) -> Tuple[float, Dict[str, Dict[str, float]]]:
+def validate_epoch(model, val_loaders, device):
     """
-    Evaluate model on validation sets with consistent metrics.
-
+    Validate the model across all validation sets.
+    
     Args:
-        model: The model to be evaluated
+        model: Coverage-aware deconvolution model
         val_loaders: Dictionary of validation DataLoaders
-        device: Device to run validation on
-        presence_threshold: Fixed threshold for evaluation metrics
+        device: Computation device
         
     Returns:
-        avg_val_loss: Average validation loss
-        val_stats: Dictionary of validation statistics
+        avg_val_loss: Average validation loss across all sets
+        val_metrics: Dictionary of validation metrics by set
     """
     model.eval()
+    val_metrics = {}
+    total_val_loss = 0
+    total_sets = len(val_loaders)
     
-    val_stats = {}
-    thresholds = [0.001, 0.005, 0.01, 0.02, 0.05]
-    threshold_results = {t: {} for t in thresholds}
-
-    print(f"Validating with presence threshold: {presence_threshold}")
-
     with torch.no_grad():
-        # Evaluate each named validation set
         for val_name, val_loader in val_loaders.items():
-            loader_stats = defaultdict(float)
-            num_batches = 0
-
-            # For presence detection, track confusion across cell types
-            num_cell_types = model.num_celltypes
-            confusion = {
-                'tp': torch.zeros(num_cell_types, device=device),
-                'fp': torch.zeros(num_cell_types, device=device),
-                'tn': torch.zeros(num_cell_types, device=device),
-                'fn': torch.zeros(num_cell_types, device=device)
+            val_loss = 0
+            set_metrics = {
+                'loss_props': 0, 
+                'recon_loss': 0, 
+                'sparsity_penalty': 0,
+                'presence_precision': 0, 
+                'presence_recall': 0, 
+                'presence_f1': 0,
+                'gate_usage': [],
+                'avg_coverage': 0
             }
-
-            # Sample-based confusion (aggregate)
-            tp_sum = fp_sum = fn_sum = tn_sum = 0
-            sample_f1_scores = []
-            sample_precision_scores = []
-            sample_recall_scores = []
-
-            # Prepare an entry for each threshold in this val_name
-            for t in thresholds:
-                threshold_results[t][val_name] = {
-                    'mse': 0.0,
-                    'mae': 0.0,
-                    'detection_accuracy': 0.0,
-                    'count': 0
-                }
-
-            # Go through each batch in this val set
-            for batch in tqdm(val_loader, desc=f'Validating {val_name}'):
-                fraction = batch['X'].to(device)
+            num_batches = 0
+            
+            for batch in val_loader:
+                marker_values = batch['X'].to(device)
                 coverage = batch['coverage'].to(device)
-                y_true = batch['y'].to(device)
+                true_props = batch['y'].to(device)
                 
                 # Forward pass
-                alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
-        
-                # Use our standard loss function
-                loss, details = loss_fn(
-                    pred_props=alpha,
-                    true_props=y_true,
-                    reconstructed=reconstructed,
-                    marker_values=fraction,
-                    coverage=coverage,
-                    valid_mask=valid_mask,
-                    presence_probs=presence_probs,
-                    presence_logits=presence_logits,
-                    presence_threshold=presence_threshold,
+                pred_props, reconstructed, valid_mask, presence_probs, presence_logits = model(
+                    marker_values, coverage)
+                
+                # Calculate loss
+                loss, details = coverage_adaptive_loss(
+                    pred_props, true_props, reconstructed, marker_values,
+                    coverage, valid_mask, presence_probs, presence_logits,
+                    **model.loss_params
                 )
                 
-                # --- Presence confusion matrix
-                batch_size = y_true.size(0)
-                true_present = (y_true > presence_threshold)
-                pred_present = (presence_probs > 0.5)
+                # Track metrics
+                val_loss += loss.item()
+                set_metrics['loss_props'] += details['loss_props']
+                set_metrics['recon_loss'] += details['recon_loss']
+                set_metrics['sparsity_penalty'] += details['sparsity_penalty']
+                set_metrics['presence_precision'] += details['presence_metrics']['precision']
+                set_metrics['presence_recall'] += details['presence_metrics']['recall']
+                set_metrics['presence_f1'] += details['presence_metrics']['f1']
+                set_metrics['avg_coverage'] += details['avg_coverage']
                 
-                # Sample-based confusion
-                for i in range(batch_size):
-                    sample_tp = torch.sum((pred_present[i] & true_present[i]).float()).item()
-                    sample_fp = torch.sum((pred_present[i] & ~true_present[i]).float()).item()
-                    sample_fn = torch.sum((~pred_present[i] & true_present[i]).float()).item()
-                    sample_tn = torch.sum((~pred_present[i] & ~true_present[i]).float()).item()
-                    
-                    tp_sum += sample_tp
-                    fp_sum += sample_fp
-                    fn_sum += sample_fn
-                    tn_sum += sample_tn
-                    
-                    # Per-sample precision/recall/f1
-                    if sample_tp + sample_fp > 0:
-                        sample_precision = sample_tp / (sample_tp + sample_fp)
-                    else:
-                        sample_precision = 1.0
-                    
-                    if sample_tp + sample_fn > 0:
-                        sample_recall = sample_tp / (sample_tp + sample_fn)
-                    else:
-                        sample_recall = 1.0
-                    
-                    if sample_precision + sample_recall > 0:
-                        sample_f1 = 2 * sample_precision * sample_recall / (sample_precision + sample_recall)
-                    else:
-                        sample_f1 = 0.0
-                    
-                    sample_precision_scores.append(sample_precision)
-                    sample_recall_scores.append(sample_recall)
-                    sample_f1_scores.append(sample_f1)
-                
-                # Cell-type-level confusion
-                for ct in range(num_cell_types):
-                    ct_true_present = true_present[:, ct]
-                    ct_pred_present = pred_present[:, ct]
-                    confusion['tp'][ct] += torch.sum((ct_pred_present & ct_true_present).float())
-                    confusion['fp'][ct] += torch.sum((ct_pred_present & ~ct_true_present).float())
-                    confusion['tn'][ct] += torch.sum((~ct_pred_present & ~ct_true_present).float())
-                    confusion['fn'][ct] += torch.sum((~ct_pred_present & ct_true_present).float())
-                
-                # --- Evaluate threshold-based metrics for alpha
-                for t in thresholds:
-                    batch_results = threshold_results[t][val_name]
-                    
-                    thresholded_preds = torch.where(alpha < t, torch.zeros_like(alpha), alpha)
-                    
-                    # Renormalise
-                    row_sums = thresholded_preds.sum(dim=1, keepdim=True)
-                    valid_rows = (row_sums > 0).squeeze(-1)
-                    if valid_rows.any():
-                        thresholded_preds[valid_rows] /= row_sums[valid_rows]
-                    
-                    # MSE, MAE
-                    mse = F.mse_loss(thresholded_preds, y_true)
-                    mae = torch.abs(thresholded_preds - y_true).mean()
-                    
-                    # "Detection accuracy": predicted presence vs. true presence
-                    pred_present_t = (thresholded_preds > 0)
-                    true_present_t = (y_true > presence_threshold)
-                    detection_accuracy = (pred_present_t == true_present_t).float().mean()
-                    
-                    batch_results['mse'] += mse.item() * batch_size
-                    batch_results['mae'] += mae.item() * batch_size
-                    batch_results['detection_accuracy'] += detection_accuracy.item() * batch_size
-                    batch_results['count'] += batch_size
-                
-                # Accumulate stats for standard loss details
-                loader_stats['loss'] += loss.item()
-                for key, value in details.items():
-                    if isinstance(value, dict):
-                        for subkey, subvalue in value.items():
-                            loader_stats[f"{key}/{subkey}"] += subvalue
-                    else:
-                        loader_stats[key] += value
+                # Track gate usage
+                log_coverage = torch.log1p(coverage.mean(dim=1, keepdim=True))
+                gate_logits = model.coverage_gate(log_coverage)
+                gate_value = torch.sigmoid(gate_logits / model.temp)
+                set_metrics['gate_usage'].extend(gate_value.cpu().numpy().flatten())
                 
                 num_batches += 1
             
-            # Post-processing for this validation set
-
-            # Compute sample-based presence metrics
-            if len(sample_precision_scores) > 0:
-                overall_precision = sum(sample_precision_scores) / len(sample_precision_scores)
-                overall_recall = sum(sample_recall_scores) / len(sample_recall_scores)
-                overall_f1 = sum(sample_f1_scores) / len(sample_f1_scores)
-            else:
-                overall_precision = 0.0
-                overall_recall = 0.0
-                overall_f1 = 0.0
+            # Calculate averages
+            avg_set_loss = val_loss / num_batches
+            for key in ['loss_props', 'recon_loss', 'sparsity_penalty', 
+                        'presence_precision', 'presence_recall', 'presence_f1',
+                        'avg_coverage']:
+                set_metrics[key] /= num_batches
             
-            # Cell-type-level confusion => compute class-based precision/recall/f1
-            class_precision = confusion['tp'] / (confusion['tp'] + confusion['fp'] + 1e-8)
-            class_recall = confusion['tp'] / (confusion['tp'] + confusion['fn'] + 1e-8)
-            class_f1 = 2 * class_precision * class_recall / (class_precision + class_recall + 1e-8)
+            # Calculate gate statistics
+            gate_usage = np.array(set_metrics['gate_usage'])
+            set_metrics['gate_mean'] = np.mean(gate_usage)
+            set_metrics['gate_std'] = np.std(gate_usage)
             
-            print(f"\nValidation set: {val_name}")
-            print(f"Total: TP={tp_sum}, FP={fp_sum}, FN={fn_sum}, TN={tn_sum}")
-            print(f"Sample-based metrics - Precision: {overall_precision:.4f}, "
-                  f"Recall: {overall_recall:.4f}, F1: {overall_f1:.4f}")
-            print(f"Class-based metrics - Precision: {class_precision.mean().item():.4f}, "
-                  f"Recall: {class_recall.mean().item():.4f}, F1: {class_f1.mean().item():.4f}")
+            # Store set metrics
+            val_metrics[val_name] = {
+                'loss': avg_set_loss,
+                **set_metrics
+            }
             
-            # Add sample-based presence metrics
-            loader_stats['avg_precision'] = overall_precision
-            loader_stats['avg_recall'] = overall_recall
-            loader_stats['avg_f1'] = overall_f1
+            # Add to total validation loss
+            total_val_loss += avg_set_loss
             
-            # Store per-cell-type metrics
-            for ct in range(num_cell_types):
-                loader_stats[f'precision_ct{ct}'] = class_precision[ct].item()
-                loader_stats[f'recall_ct{ct}'] = class_recall[ct].item()
-                loader_stats[f'f1_ct{ct}'] = class_f1[ct].item()
-            
-            # Finalise threshold-based results
-            for t in thresholds:
-                batch_results = threshold_results[t][val_name]
-                if batch_results['count'] > 0:
-                    for key in ['mse', 'mae', 'detection_accuracy']:
-                        batch_results[key] /= batch_results['count']
-                    for key, value in batch_results.items():
-                        if key != 'count':
-                            loader_stats[f'thresh_{t}_{key}'] = value
-            
-            # Average across all batches
-            for key in loader_stats:
-                if key not in ['avg_precision', 'avg_recall', 'avg_f1']:
-                    loader_stats[key] /= num_batches
-            
-            val_stats[val_name] = dict(loader_stats)
+            print(f"Validation ({val_name}) - Loss: {avg_set_loss:.4f}, "
+                  f"Props: {set_metrics['loss_props']:.4f}, F1: {set_metrics['presence_f1']:.4f}")
     
-    # Compute mean val loss across sets
-    avg_val_loss = sum(stats['total_loss'] for stats in val_stats.values()) / len(val_stats)
-    return avg_val_loss, val_stats
+    # Calculate average validation loss
+    avg_val_loss = total_val_loss / total_sets
+    
+    return avg_val_loss, val_metrics
+
+def analyze_gate_behavior(model, val_loader, device):
+    """
+    Analyze the gate behavior across different coverage levels.
+    
+    Args:
+        model: Coverage-aware deconvolution model
+        val_loader: Validation DataLoader
+        device: Computation device
+        
+    Returns:
+        gate_stats: Dictionary of gate statistics by coverage bin
+    """
+    model.eval()
+    coverage_bins = [0, 5, 10, 20, 50, float('inf')]
+    gate_stats = {f"{low}-{high}": [] for low, high in zip(
+        coverage_bins[:-1], coverage_bins[1:])}
+    
+    with torch.no_grad():
+        for batch in val_loader:
+            marker_values = batch['X'].to(device)
+            coverage = batch['coverage'].to(device)
+            
+            # Calculate average coverage per sample
+            avg_coverage = coverage.mean(dim=1)
+            
+            # Get gate values
+            log_coverage = torch.log1p(avg_coverage.unsqueeze(1))
+            gate_logits = model.coverage_gate(log_coverage)
+            gate_value = torch.sigmoid(gate_logits / model.temp)
+            
+            # Group by coverage bin
+            for i in range(len(avg_coverage)):
+                cov = avg_coverage[i].item()
+                gate = gate_value[i].item()
+                
+                for low, high in zip(coverage_bins[:-1], coverage_bins[1:]):
+                    if low <= cov < high:
+                        gate_stats[f"{low}-{high}"].append(gate)
+                        break
+    
+    # Calculate statistics for each bin
+    bin_statistics = {}
+    for bin_name, gates in gate_stats.items():
+        if gates:
+            bin_statistics[bin_name] = {
+                'count': len(gates),
+                'mean': np.mean(gates),
+                'std': np.std(gates),
+                'min': np.min(gates),
+                'max': np.max(gates)
+            }
+    
+    return bin_statistics
 
 def train_model(
-    model: nn.Module,
-    train_loader: DataLoader,
-    val_loaders: Dict[str, DataLoader],
-    model_path: str,
-    num_epochs: int = 1000,
-    patience: int = 10,
-    lr: float = 1e-3,
-    weight_decay: float = 1e-5,
-    use_wandb: bool = True,
-    wandb_project: str = "cfDNA-Deconvolution",
-    wandb_entity: str = None,
-    device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-) -> Tuple[nn.Module, float]:
+    model, train_loader, val_loaders, model_path, 
+    num_epochs=100, patience=10, learning_rate=1e-3, 
+    weight_decay=1e-5, use_wandb=True):
     """
-    The main training loop for the cell-type deconvolution model.
+    Training loop with coverage-aware monitoring and early stopping.
     
-    Features:
-      - Warmup for learning rate (first few epochs)
-      - Early stopping based on validation loss (patience)
-      - Post-training best checkpoint restoration
-      - W&B integration for logging/plotting if `use_wandb=True`
-
     Args:
-        model: The cell-type model to train
-        train_loader: Provides training batches
-        val_loaders: Dictionary of validation loaders
-        model_path: Directory to store best model checkpoints
-        num_epochs: Max number of epochs to train
-        patience: # of epochs to wait for improvement before early stopping
-        lr: Base learning rate
-        weight_decay: L2 penalty for Adam
-        use_wandb: If True, logs metrics/plots to Weights & Biases
-        wandb_project: W&B project name
-        wandb_entity: W&B entity (team name or username)
-        device: Where to run the training (CPU or GPU)
-
+        model: CoverageAwareDeconvolutionModel instance
+        train_loader: DataLoader for training data
+        val_loaders: Dict of validation DataLoaders
+        model_path: Path to save model checkpoints
+        num_epochs: Maximum training epochs
+        patience: Early stopping patience
+        learning_rate: Initial learning rate
+        weight_decay: L2 regularization strength
+        use_wandb: Whether to log to Weights & Biases
+    
     Returns:
-        model: The trained model, loaded from the best checkpoint
-        best_threshold: The chosen presence threshold for classification
+        model: Trained model (best checkpoint)
+        best_val_metrics: Dictionary of metrics for the best model
     """
+    # Setup
+    device = next(model.parameters()).device
     model = model.to(device)
     
-    # Setup optimizer with a single parameter group
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # Create optimizer and scheduler
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = torch.optim.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=patience//2, verbose=True)
     
-    # Scheduler that reduces LR on plateau of validation loss
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 
-        mode='min', 
-        factor=0.5, 
-        patience=patience // 2,
-        verbose=True
-    )
-    
-    # Ensure model_path exists
+    # Create directories
     os.makedirs(model_path, exist_ok=True)
     
-    # Initialize W&B (Optional)
-    if use_wandb:
-        config = {
-            "model_type": model.__class__.__name__,
-            "num_markers": getattr(model, "num_markers", "unknown"),
-            "num_cell_types": getattr(model, "num_celltypes", "unknown"),
-            "feature_dim": getattr(model, "feature_dim", "unknown"),
-            "learning_rate": lr,
-            "weight_decay": weight_decay,
-            "batch_size": train_loader.batch_size if hasattr(train_loader, "batch_size") else "unknown",
-            "num_epochs": num_epochs,
-            "patience": patience,
-            "device": str(device)
-        }
-        run = init_wandb(config, project_name=wandb_project, entity=wandb_entity)
-        wandb.watch(model, log="all", log_freq=100)
+    # Initialize gate temperature
+    init_temp = model.init_temperature(train_loader)
+    print(f"Initialized gate temperature to {init_temp:.4f}")
     
-    # Preparation
-    initial_lr = lr
-    warmup_epochs = 5  # # of epochs for linearly ramping LR from 0 to lr
-    
-    history = defaultdict(list)
+    # Setup tracking
     best_val_loss = float('inf')
     best_epoch = 0
     patience_counter = 0
+    history = {'train': [], 'val': []}
     
-    # Track the "best presence threshold" by evaluating multiple thresholds
-    best_threshold = 0.01
-    best_threshold_f1 = 0.0
+    # Initialize wandb
+    if use_wandb:
+        import wandb
+        wandb.init(project="methylation-deconv", config={
+            "model_type": model.__class__.__name__,
+            "num_cell_types": model.num_celltypes,
+            "num_markers": model.num_markers,
+            "feature_dim": model.feature_dim,
+            "learning_rate": learning_rate,
+            "weight_decay": weight_decay,
+            "loss_params": model.loss_params
+        })
+        wandb.watch(model, log_freq=100)
     
-    # Fixed presence threshold for evaluation metrics
-    eval_presence_threshold = 0.01
-    
-    # Main Training Loop
+    # Training loop
     for epoch in range(num_epochs):
-        print(f"\n🔹 Epoch {epoch + 1}/{num_epochs}")
+        print(f"\n=== Epoch {epoch+1}/{num_epochs} ===")
         
-        # LR Warmup
-        if epoch < warmup_epochs:
-            warmup_factor = (epoch + 1) / warmup_epochs
-            current_lr = initial_lr * warmup_factor
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = current_lr
-            print(f"LR Warmup: {current_lr:.1e}")
+        # Training phase
+        train_loss, train_metrics = train_epoch(model, train_loader, optimizer, device)
         
-        # Training for one epoch
-        train_stats = train_epoch(model, train_loader, optimizer, device)
+        # Validation phase
+        val_loss, val_metrics = validate_epoch(model, val_loaders, device)
         
-        # Validation with fixed threshold for consistent metrics
-        avg_val_loss, val_stats = validate(
-            model,
-            val_loaders,
-            device,
-            presence_threshold=eval_presence_threshold  # Fixed threshold for evaluation
-        )
+        # Analyze gate behavior
+        gate_stats = analyze_gate_behavior(model, next(iter(val_loaders.values())), device)
         
-        # Evaluate multiple thresholds for best F1
-        thresholds = [0.001, 0.005, 0.01, 0.02, 0.05]
-        threshold_f1_scores = {t: 0.0 for t in thresholds}
+        # Update learning rate scheduler
+        scheduler.step(val_loss)
         
-        # Sum up detection metric for each threshold across all val sets
-        for t in thresholds:
-            for val_name, stats in val_stats.items():
-                threshold_key = f'thresh_{t}_detection_accuracy'
-                if threshold_key in stats:
-                    threshold_f1_scores[t] += stats[threshold_key]
-            
-            threshold_f1_scores[t] /= len(val_stats)
-            
-            # Update best threshold if improved
-            if threshold_f1_scores[t] > best_threshold_f1:
-                best_threshold_f1 = threshold_f1_scores[t]
-                best_threshold = t
-                print(f"New best threshold: {best_threshold} (F1: {best_threshold_f1:.4f})")
+        # Save history
+        history['train'].append({
+            'epoch': epoch,
+            'loss': train_loss,
+            **train_metrics
+        })
+        history['val'].append({
+            'epoch': epoch,
+            'loss': val_loss,
+            'metrics': val_metrics,
+            'gate_stats': gate_stats
+        })
         
-        # Record stats into `history`
-        for key, value in train_stats.items():
-            history[key].append(value)
-        for val_name, stats in val_stats.items():
-            for k, v in stats.items():
-                history[f"{val_name}/{k}"].append(v)
-        
-        # Print summary
-        print(f"\n🔹 Epoch {epoch + 1} Summary:")
-        print(f"Train Loss: {train_stats['total_loss']:.8f} | Grad Norm: {train_stats['grad_norm']:.8f}")
-        if 'alpha_stats/mean' in train_stats:
-            print(f"Alpha Mean: {train_stats['alpha_stats/mean']:.8f} | Std: {train_stats['alpha_stats/std']:.8f}")
-        
-        for val_name, stats in val_stats.items():
-            print(f"{val_name} Loss: {stats['total_loss']:.8f}")
-            if 'avg_precision' in stats and 'avg_recall' in stats and 'avg_f1' in stats:
-                print(f"{val_name} Detection: P={stats['avg_precision']:.4f}, "
-                      f"R={stats['avg_recall']:.4f}, F1={stats['avg_f1']:.4f}")
-        
-        # Log to W&B
+        # Log to wandb
         if use_wandb:
-            wandb_logs = {
+            wandb_log = {
                 "epoch": epoch,
-                "train/loss": train_stats['total_loss'],
-                "train/grad_norm": train_stats['grad_norm'],
-                "val/avg_loss": avg_val_loss,
-                "lr": optimizer.param_groups[0]['lr'],
-                "best_threshold": best_threshold,
-                "best_threshold_f1": best_threshold_f1
+                "train/loss": train_loss,
+                "val/loss": val_loss,
+                "gate/temperature": model.temp.item(),
+                "gate/mean": train_metrics['gate_mean'],
+                "gate/std": train_metrics['gate_std'],
+                "lr": optimizer.param_groups[0]['lr']
             }
-            # Add validation stats
-            for val_name, stats in val_stats.items():
-                for k, v in stats.items():
-                    wandb_logs[f"val/{val_name}/{k}"] = v
             
-            # Table for threshold F1
-            wandb_logs["threshold_comparison"] = wandb.Table(
-                data=[[t, threshold_f1_scores[t]] for t in thresholds],
-                columns=["threshold", "f1_score"]
-            )
-            wandb.log(wandb_logs)
+            # Add detailed metrics
+            for key, value in train_metrics.items():
+                if key not in ['gate_usage', 'gate_mean', 'gate_std']:
+                    wandb_log[f"train/{key}"] = value
+            
+            # Add validation metrics
+            for val_name, metrics in val_metrics.items():
+                for key, value in metrics.items():
+                    if key not in ['gate_usage', 'gate_mean', 'gate_std']:
+                        wandb_log[f"val/{val_name}/{key}"] = value
+            
+            # Add gate statistics
+            for bin_name, stats in gate_stats.items():
+                for key, value in stats.items():
+                    wandb_log[f"gate_bins/{bin_name}/{key}"] = value
+            
+            wandb.log(wandb_log)
         
-        # Scheduler step
-        scheduler.step(avg_val_loss)
-        
-        # Early stopping on avg_val_loss
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            patience_counter = 0
+        # Check for improvement
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             best_epoch = epoch
-            print(f"New best model with loss: {best_val_loss:.8f}")
+            patience_counter = 0
             
+            # Save best model
             checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'best_val_loss': best_val_loss,
-                'best_threshold': best_threshold,
-                'history': dict(history)
+                'val_loss': val_loss,
+                'train_metrics': train_metrics,
+                'val_metrics': val_metrics,
+                'history': history
             }
             torch.save(checkpoint, os.path.join(model_path, "best_model.pt"))
-            if use_wandb:
-                wandb.save(os.path.join(model_path, "best_model.pt"))
+            print(f"Saved new best model with val_loss={val_loss:.4f}")
         else:
             patience_counter += 1
+            print(f"No improvement. Patience: {patience_counter}/{patience}")
         
-        # Check patience for early stopping
+        # Early stopping
         if patience_counter >= patience:
-            print(f"\n⚠️ Early stopping triggered after {epoch + 1} epochs")
+            print(f"Early stopping triggered after {epoch+1} epochs.")
             break
     
-    # Load the Best Model
-    print("Loading best model (best overall validation loss)")
+    # Load best model
+    print(f"\nLoading best model from epoch {best_epoch+1} with val_loss={best_val_loss:.4f}")
     checkpoint = torch.load(os.path.join(model_path, "best_model.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    # Plot Training History
-    plot_training_history(dict(history), os.path.join(model_path, "model_training"))
-    
-    # Summarize final recommended presence threshold
-    print(f"\nRecommended threshold for inference: {best_threshold}")
-    print(f"(Based on best F1 score: {best_threshold_f1:.4f})")
-    
-    # Cleanup wandb
+    # Finish wandb run
     if use_wandb:
         wandb.run.summary["best_val_loss"] = best_val_loss
         wandb.run.summary["best_epoch"] = best_epoch
         wandb.run.summary["total_epochs"] = epoch + 1
-        wandb.run.summary["best_threshold"] = best_threshold
-        wandb.run.summary["best_threshold_f1"] = best_threshold_f1
-        
-        def remove_wandb_hooks(model):
-            # Remove forward/backward/pre-forward hooks
-            for k in list(model._forward_hooks.keys()):
-                model._forward_hooks.pop(k)
-            for k in list(model._backward_hooks.keys()):
-                model._backward_hooks.pop(k)
-            for k in list(model._forward_pre_hooks.keys()):
-                model._forward_pre_hooks.pop(k)
-            # Recurse to child modules
-            for child in model.children():
-                remove_wandb_hooks(child)
-
-        remove_wandb_hooks(model)
         wandb.finish()
     
-    return model, best_threshold
+    return model, checkpoint['val_metrics']
+
 
 def plot_training_history(history: Dict[str, List[float]], save_path: str):
     """

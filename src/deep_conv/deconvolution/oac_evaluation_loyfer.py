@@ -1,4 +1,5 @@
 from deep_conv.deconvolution.deepconv import *
+from deep_conv.deconvolution.predict import *
 from collections import defaultdict
 
 from pathlib import Path
@@ -553,12 +554,11 @@ def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, min_cpgs=4, th
     """
     # Prepare data
     X_val, coverage_val, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions)
-    
-    # First run the debug analysis to get insights
-    debug_props, debug_probs = debug_model_predictions(model, X_val, coverage_val, y_true_df, threshold=0.005)
-    
+    atlas = pd.read_csv(atlas_path, sep="\t")
+    cell_types = list(atlas.columns[8:])
+    target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()   
     # Use the built-in prediction method that now properly integrates presence information
-    predictions = model.predict(X_val, coverage_val)
+    predictions = predict_with_post_processing(model, X_val, coverage_val, target_ids)
     predictions_df = pd.DataFrame(predictions, columns=list(y_true_df.columns))
     
     # Log summary statistics
@@ -594,7 +594,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         )
         checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/best_model.pt")
         model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        estimation = model.predict(X_val,coverage_val)
+        estimation = predict_with_post_processing(model, X_val,coverage_val, target_ids)
     else:
         estimation = run_weighted_nnls(X_val, coverage_val, atlas[atlas.columns[8:]].T.values)
     df = pd.DataFrame(estimation, columns=list(atlas.columns[8:]))
@@ -747,7 +747,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
 
 # 1
 def train_and_evaluate(model_name, presence_model_name):
-    atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_cov_oac.blood+gi+tum.l4.bed"
+    atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
     train_pat_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train"
     eval_pat_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval"
 
@@ -789,7 +789,7 @@ def eval_admixtures(model_name,presence_model_name, size="low"):
     # evaluate Zohar's atlas with deepconv
     eval_admixtures_deepconv(model_name, presence_model_name, size)  
     # evaluate Zohar's atlas (primary markers only) with nnls
-    eval_admixtures_nnls("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_cov_oac.blood+gi+tum.l4.bed", size)
+    eval_admixtures_nnls("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed", size)
 
 
 # 2
@@ -804,7 +804,7 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     """
     suffix = f"_{size}/"
         
-    deepconv_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_cov_oac.blood+gi+tum.l4.bed"
+    deepconv_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
     deepconv_atlas = pd.read_csv(deepconv_atlas_path, sep="\t")
     cell_types = list(deepconv_atlas.columns[8:])
     target_ids = deepconv_atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
@@ -889,35 +889,35 @@ def run_oac_analysis(model_name, presence_model_name):
 
     zohar_model = model_name
     zohar_model_name = model_name
-    zohar_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_cov_oac.blood+gi+tum.l4.bed"
+    zohar_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
 
     # tissue deep conv AB
     zohar_atlas_name = "atlas_oac.blood+gi+tum.l4"
     zohar_batch="AB"
     zohar_type = "tissue"
     zohar_prefix_ab_tissue = "deep_conv_ab_tissue"
-    zohar_pat_dir_ab_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_cov_oac.blood+gi+tum.l4/AB/tissue"
+    zohar_pat_dir_ab_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/tissue"
     zohar_title_ab_tissue=f"DeepConv deconvolution using atlas {zohar_atlas_path} on AB tissue"
     out_dir = str(Path(out_base_dir)/"AB"/"tissue"/model_name)
     # eval_OAC(zohar_atlas_path, zohar_pat_dir_ab_tissue, zohar_title_ab_tissue, zohar_prefix_ab_tissue, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name)
 
     zohar_type = "cfDNA"
     zohar_prefix_ab_cf = "deep_conv_ab_cfDNA"
-    zohar_pat_dir_ab_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_cov_oac.blood+gi+tum.l4/AB/cfDNA"
+    zohar_pat_dir_ab_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA"
     zohar_title_ab_cf=f"DeepConv deconvolution using atlas {zohar_atlas_path} on AB cfDNA"
     out_dir = str(Path(out_base_dir)/"AB"/"cfDNA"/model_name)
     eval_OAC(zohar_atlas_path, zohar_pat_dir_ab_cf, zohar_title_ab_cf, zohar_prefix_ab_cf, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name, ichorcna_cf_ab, ab_sample_to_cb, ab_sample_to_ct, presence_model_name=presence_model_name)
 
     zohar_batch="CD"
     zohar_prefix_cd_tissue = "deep_conv_cd_tissue"
-    zohar_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_cov_oac.blood+gi+tum.l4/CD/tissue"
+    zohar_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/tissue"
     zohar_title_cd_tissue=f"DeepConv deconvolution using atlas {zohar_atlas_path} on CD tissue"
     out_dir = str(Path(out_base_dir)/"CD"/"tissue"/model_name)
     # eval_OAC(zohar_atlas_path, zohar_pat_dir_cd_tissue, zohar_title_cd_tissue, zohar_prefix_cd_tissue, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, cd_tissue_mapping, zohar_model_name, ichorcna_cf_cd)
 
     zohar_type = "cfDNA"
     zohar_prefix_cd_cf = "deep_conv_cd_cfDNA"
-    zohar_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_cov_oac.blood+gi+tum.l4/CD/cfDNA"
+    zohar_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/cfDNA"
     zohar_title_cd_cf=f"DeepConv deconvolution using atlas {zohar_atlas_path} on CD cfDNA"
     out_dir = str(Path(out_base_dir)/"CD"/"cfDNA"/model_name)
     eval_OAC(zohar_atlas_path, zohar_pat_dir_cd_cf, zohar_title_cd_cf, zohar_prefix_cd_cf, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name, presence_model_name=presence_model_name)
