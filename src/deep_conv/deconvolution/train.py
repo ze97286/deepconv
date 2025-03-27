@@ -315,7 +315,7 @@ def train_model(
     
     # Create optimizer and scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = torch.optim.ReduceLROnPlateau(
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=patience//2, verbose=True)
     
     # Create directories
