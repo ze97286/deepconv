@@ -896,28 +896,28 @@ def run_oac_analysis(model_name, presence_model_name):
     zohar_batch="AB"
     zohar_type = "tissue"
     zohar_prefix_ab_tissue = "deep_conv_ab_tissue"
-    zohar_pat_dir_ab_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/tissue"
+    zohar_pat_dir_ab_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_cov_oac.blood+gi+tum.l4/AB/tissue"
     zohar_title_ab_tissue=f"DeepConv deconvolution using atlas {zohar_atlas_path} on AB tissue"
     out_dir = str(Path(out_base_dir)/"AB"/"tissue"/model_name)
     # eval_OAC(zohar_atlas_path, zohar_pat_dir_ab_tissue, zohar_title_ab_tissue, zohar_prefix_ab_tissue, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name)
 
     zohar_type = "cfDNA"
     zohar_prefix_ab_cf = "deep_conv_ab_cfDNA"
-    zohar_pat_dir_ab_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA"
+    zohar_pat_dir_ab_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_cov_oac.blood+gi+tum.l4/AB/cfDNA"
     zohar_title_ab_cf=f"DeepConv deconvolution using atlas {zohar_atlas_path} on AB cfDNA"
     out_dir = str(Path(out_base_dir)/"AB"/"cfDNA"/model_name)
     eval_OAC(zohar_atlas_path, zohar_pat_dir_ab_cf, zohar_title_ab_cf, zohar_prefix_ab_cf, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name, ichorcna_cf_ab, ab_sample_to_cb, ab_sample_to_ct, presence_model_name=presence_model_name)
 
     zohar_batch="CD"
     zohar_prefix_cd_tissue = "deep_conv_cd_tissue"
-    zohar_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/tissue"
+    zohar_pat_dir_cd_tissue = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_cov_oac.blood+gi+tum.l4/CD/tissue"
     zohar_title_cd_tissue=f"DeepConv deconvolution using atlas {zohar_atlas_path} on CD tissue"
     out_dir = str(Path(out_base_dir)/"CD"/"tissue"/model_name)
     # eval_OAC(zohar_atlas_path, zohar_pat_dir_cd_tissue, zohar_title_cd_tissue, zohar_prefix_cd_tissue, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, cd_tissue_mapping, zohar_model_name, ichorcna_cf_cd)
 
     zohar_type = "cfDNA"
     zohar_prefix_cd_cf = "deep_conv_cd_cfDNA"
-    zohar_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/cfDNA"
+    zohar_pat_dir_cd_cf = "/users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_cov_oac.blood+gi+tum.l4/CD/cfDNA"
     zohar_title_cd_cf=f"DeepConv deconvolution using atlas {zohar_atlas_path} on CD cfDNA"
     out_dir = str(Path(out_base_dir)/"CD"/"cfDNA"/model_name)
     eval_OAC(zohar_atlas_path, zohar_pat_dir_cd_cf, zohar_title_cd_cf, zohar_prefix_cd_cf, zohar_atlas_name, zohar_batch, zohar_model, zohar_type, out_dir, none_tissue_mapping, zohar_model_name, presence_model_name=presence_model_name)
