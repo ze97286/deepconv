@@ -647,6 +647,7 @@ def train_and_eval(
     )
 
     # save the figure
+    os.makedirs(output_path, exist_ok=True)
     plt.savefig(output_path/"augmentation_effect.png", dpi=300)
         
     # train_dl = load_training(train_pat_dir, atlas, names)
