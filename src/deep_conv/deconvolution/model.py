@@ -298,9 +298,9 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         # Store loss hyperparameters
         self.loss_params = {
-            'alpha': 0.92,
-            'beta': 0.07,
-            'gamma': 0.01,
+            'alpha': 1.0,
+            'beta': 0.05,
+            'gamma': 0.02,
             'cov_min_weight': 0.2,
             'cov_max_weight': 1.5,
             'cov_norm_factor': 20.0,
