@@ -687,7 +687,7 @@ def train_and_eval(
                 target_dist_params=clinical_dist_params
             )
 
-            print(f"validation set for {cov} tcells length={len(tcells_yval)}")
+            print(f"validation set for {cov} oac length={len(oac_yval)}")
 
             # Store both standard and clinical variants
             validation_dls[f"tier1_{cov}"] = tier1_dl
