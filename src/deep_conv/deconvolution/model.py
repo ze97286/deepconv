@@ -218,8 +218,9 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
         
 
 class CellTypeDeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir=None, feature_dim=32):
+    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir=None, feature_dim=32, disable_presence_gating_in_training=True):
         super().__init__()
+        self.disable_presence_gating_in_training = disable_presence_gating_in_training
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
@@ -298,9 +299,11 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         # Store loss hyperparameters
         self.loss_params = {
-            'alpha': 1.0,
-            'beta': 0.05,
-            'gamma': 0.02,
+            'alpha': 1.0,             
+            'beta': 0.05,             
+            'gamma': 0.02,            
+            'coverage_weight_enabled': False,  
+            'coverage_weight_scale': 0.2,      
             'cov_min_weight': 0.2,
             'cov_max_weight': 1.5,
             'cov_norm_factor': 20.0,
@@ -385,6 +388,12 @@ class CellTypeDeconvolutionModel(nn.Module):
  
     def apply_presence_gating(self, props, probs, coverage):
         """Apply calibrated presence gating with coverage-dependent thresholds"""
+        if self.training and self.disable_presence_gating_in_training:
+            # Skip gating
+            raw_relu = F.relu(props)
+            sums = raw_relu.sum(dim=1, keepdim=True) + 1e-8
+            return raw_relu / sums
+        
         # Compute average coverage per sample
         avg_coverage = coverage.mean(dim=1, keepdim=True)
         

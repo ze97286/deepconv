@@ -5,8 +5,10 @@ def coverage_adaptive_loss(
     pred_props, true_props, reconstructed, marker_values, coverage, valid_mask,
     presence_probs, presence_logits,
     # Higher-level loss component weights
-    alpha=0.92, beta=0.07, gamma=0.01,
+    alpha=1.0, beta=0.05, gamma=0.02,
     # Coverage weighting parameters
+    coverage_weight_enabled=False,
+    coverage_weight_scale=0.2,
     cov_min_weight=0.2, cov_max_weight=1.5, cov_norm_factor=20.0,
     # Proportion loss parameters
     min_frac_weight=0.5, max_frac_weight=1.5, cov_threshold=10.0,
@@ -32,24 +34,27 @@ def coverage_adaptive_loss(
         total_loss: Combined loss value
         details: Dictionary with component values for monitoring
     """
-    # Calculate proportion error
+    # Standard proportion error
     cell_errors = torch.abs(pred_props - true_props)
     
     # Calculate average coverage for each sample
     avg_coverage = coverage.mean(dim=1, keepdim=True)
     
-    # Create coverage-dependent importance weights
-    coverage_factor = torch.clamp(
-        avg_coverage / cov_threshold, 
-        min_frac_weight, 
-        max_frac_weight
-    )
-    importance_weights = torch.ones_like(true_props) * coverage_factor
+    # Apply coverage weighting if enabled
+    if coverage_weight_enabled:
+        coverage_factor = torch.clamp(
+            (avg_coverage / cov_threshold) * coverage_weight_scale,
+            min_frac_weight,
+            max_frac_weight
+        )
+    else:
+        coverage_factor = torch.ones_like(avg_coverage)    
+    # Apply importance weights
+    importance_weights = coverage_factor * torch.ones_like(true_props)
     
     # Weight different concentration ranges differently
     low_conc_mask = (true_props > 0.001) & (true_props <= 0.01)
     med_conc_mask = (true_props > 0.01) & (true_props <= 0.05)
-    high_conc_mask = true_props > 0.05
     
     # Weight low concentrations more heavily
     importance_weights = torch.where(low_conc_mask, importance_weights * 1.3, importance_weights)
@@ -59,34 +64,49 @@ def coverage_adaptive_loss(
     weighted_errors = importance_weights * cell_errors
     loss_props = weighted_errors.mean()
     
-    # Coverage-weighted reconstruction loss
-    marker_weights = torch.clamp(
-        coverage / cov_norm_factor, 
-        cov_min_weight, 
-        cov_max_weight
-    )
-    
-    # Handle missing values in marker_values
-    safe_marker_values = torch.where(valid_mask, marker_values, reconstructed)
-    
-    recon_loss = torch.sum(
-        valid_mask * marker_weights * torch.abs(safe_marker_values - reconstructed)
-    ) / (torch.sum(valid_mask * marker_weights) + 1e-8)
-    
     # Sparsity penalty - stronger for lower coverage
-    sparsity_strength = torch.clamp(
-        cov_threshold / (avg_coverage + 1e-8), 
-        sparsity_min, 
-        sparsity_max
-    )
+    if coverage_weight_enabled:
+        sparsity_strength = torch.clamp(
+            cov_threshold / (avg_coverage + 1e-8), 
+            sparsity_min, 
+            sparsity_max
+        )
+    else:
+        sparsity_strength = torch.ones_like(avg_coverage)
+    
     sparsity_penalty = torch.mean(torch.sum(pred_props, dim=1)) * sparsity_strength.mean()
     
-    # Dynamically adjust component weights based on coverage
-    coverage_ratio = torch.clamp(avg_coverage / cov_threshold, 0.5, 1.5)
-    alpha_adjusted = alpha * coverage_ratio.mean()
-    beta_adjusted = beta * (2 - coverage_ratio.mean())
+    # Coverage-weighted reconstruction loss - only if beta > 0
+    if beta > 0:
+        # Handle missing values in marker_values
+        safe_marker_values = torch.where(valid_mask, marker_values, reconstructed)
+        
+        if coverage_weight_enabled:
+            marker_weights = torch.clamp(
+                coverage / cov_norm_factor, 
+                cov_min_weight, 
+                cov_max_weight
+            )
+        else:
+            marker_weights = torch.ones_like(coverage)
+        
+        recon_loss = torch.sum(
+            valid_mask * marker_weights * torch.abs(safe_marker_values - reconstructed)
+        ) / (torch.sum(valid_mask * marker_weights) + 1e-8)
+    else:
+        # Skip reconstruction completely
+        recon_loss = torch.tensor(0.0, device=pred_props.device)
     
-    # Combined loss
+    # Dynamically adjust component weights based on coverage
+    if coverage_weight_enabled:
+        coverage_ratio = torch.clamp(avg_coverage / cov_threshold, 0.5, 1.5)
+        alpha_adjusted = alpha * coverage_ratio.mean()
+        beta_adjusted = beta * (2 - coverage_ratio.mean())
+    else:
+        alpha_adjusted = alpha
+        beta_adjusted = beta
+    
+    # Combine all terms
     total_loss = alpha_adjusted * loss_props + beta_adjusted * recon_loss + gamma * sparsity_penalty
     
     # Calculate statistics for monitoring

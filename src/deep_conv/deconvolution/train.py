@@ -12,7 +12,7 @@ from tqdm import tqdm
 import numpy as np
 from typing import Dict, Tuple, List
 from deep_conv.deconvolution.loss import coverage_adaptive_loss
-
+import time
 
 def init_wandb(config, project_name="cfDNA-Deconvolution", entity=None):
     """
@@ -46,7 +46,7 @@ def init_wandb(config, project_name="cfDNA-Deconvolution", entity=None):
     return run
 
 
-def train_epoch(model, train_loader, optimizer, device, log_interval=100):
+def train_epoch(model, train_loader, optimizer, device, log_interval=100, epoch=0):
     """
     Train the model for one epoch.
     
@@ -59,10 +59,10 @@ def train_epoch(model, train_loader, optimizer, device, log_interval=100):
         
     Returns:
         avg_loss: Average training loss
-        metrics: Dictionary of training metrics
-    """
+        metrics: Dictionary of training metrics    """
     model.train()
-    total_loss = 0
+    start_time = time.time()
+    total_loss = 0.0
     metrics = {
         'loss_props': 0, 
         'recon_loss': 0, 
@@ -75,7 +75,7 @@ def train_epoch(model, train_loader, optimizer, device, log_interval=100):
     }
     num_batches = 0
     
-    for batch_idx, batch in enumerate(train_loader):
+    for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1} training")):
         marker_values = batch['X'].to(device)
         coverage = batch['coverage'].to(device)
         true_props = batch['y'].to(device)
@@ -109,31 +109,32 @@ def train_epoch(model, train_loader, optimizer, device, log_interval=100):
         
         # Track gate usage
         with torch.no_grad():
-            log_coverage = torch.log1p(coverage.mean(dim=1, keepdim=True))
-            gate_logits = model.coverage_gate(log_coverage)
-            gate_value = torch.sigmoid(gate_logits / model.temp)
-            metrics['gate_usage'].extend(gate_value.cpu().numpy().flatten())
+            if hasattr(model, 'coverage_gate') and hasattr(model, 'temp'):
+                log_coverage = torch.log1p(coverage.mean(dim=1, keepdim=True))
+                gate_logits = model.coverage_gate(log_coverage)
+                gate_value = torch.sigmoid(gate_logits / model.temp)
+                metrics['gate_usage'].extend(gate_value.cpu().numpy().flatten())
         
         num_batches += 1
         
-        # Log progress
+        # Log intermediate progress
         if batch_idx % log_interval == 0:
-            print(f"Train Batch {batch_idx}/{len(train_loader)}: Loss={loss.item():.4f}")
+            print(f"  [Batch {batch_idx}/{len(train_loader)}] Loss={loss.item():.4f}")
     
     # Calculate averages
     avg_loss = total_loss / num_batches
-    for key in ['loss_props', 'recon_loss', 'sparsity_penalty', 
-                'presence_precision', 'presence_recall', 'presence_f1',
-                'avg_coverage']:
+    for key in ['loss_props', 'recon_loss', 'sparsity_penalty', 'avg_coverage']:
         metrics[key] /= num_batches
     
     # Calculate gate statistics
-    gate_usage = np.array(metrics['gate_usage'])
-    metrics['gate_mean'] = np.mean(gate_usage)
-    metrics['gate_std'] = np.std(gate_usage)
+    if metrics['gate_usage']:
+        gate_usage = np.array(metrics['gate_usage'])
+        metrics['gate_mean'] = np.mean(gate_usage)
+        metrics['gate_std'] = np.std(gate_usage)
     
-    print(f"Training - Loss: {avg_loss:.4f}, Props: {metrics['loss_props']:.4f}, "
-          f"Recon: {metrics['recon_loss']:.4f}, Gate: {metrics['gate_mean']:.2f}±{metrics['gate_std']:.2f}")
+    # End epoch timing
+    epoch_time = time.time() - start_time
+    print(f"Epoch {epoch+1} finished in {epoch_time:.2f}s. Avg loss={avg_loss:.4f}")
     
     return avg_loss, metrics
 

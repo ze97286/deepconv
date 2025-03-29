@@ -373,12 +373,15 @@ def load_training_with_augmentation(
     # Enable training mode for augmentation
     train_dataset.set_training(True)
     
+    print(f"training dataset has {len(y_train)} samples")
+
     # Return augmented DataLoader
     return DataLoader(
         train_dataset,
-        batch_size=256,
+        batch_size=64,  
         shuffle=True,
-        num_workers=4,
+        num_workers=24, 
+        pin_memory=True,
         persistent_workers=True
     )
 
@@ -667,18 +670,24 @@ def train_and_eval(
                 atlas, names, 
                 target_dist_params=clinical_dist_params
             )
+
+            print(f"validation set for {cov} tier1 length={len(t1_yval)}")
             
             tcells_dl, tcells_clinical_dl, tcells_yval = get_validation_set_with_augmentation(
                 str(Path(eval_pat_dir+"_"+cov) / "T-cells"), 
                 atlas, names,
                 target_dist_params=clinical_dist_params
             )
+
+            print(f"validation set for {cov} tcells length={len(tcells_yval)}")
             
             oac_dl, oac_clinical_dl, oac_yval = get_validation_set_with_augmentation(
                 str(Path(eval_pat_dir+"_"+cov) / "OAC"), 
                 atlas, names,
                 target_dist_params=clinical_dist_params
             )
+
+            print(f"validation set for {cov} tcells length={len(tcells_yval)}")
 
             # Store both standard and clinical variants
             validation_dls[f"tier1_{cov}"] = tier1_dl
