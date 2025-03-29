@@ -16,6 +16,86 @@ from deep_conv.deconvolution.predict import predict_with_post_processing
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')
 torch.autograd.set_detect_anomaly(True)
+from torch.utils.data import Sampler
+
+class RandomSubsetSampler(Sampler[int]):
+    """ 
+    Randomly sample a fixed subset_size of indices each epoch 
+    from a dataset of total length N.
+    """
+    def __init__(self, data_source, subset_size: int):
+        self.data_source = data_source
+        self.subset_size = min(subset_size, len(data_source))
+
+    def __len__(self):
+        # By definition, we'll yield subset_size each epoch
+        return self.subset_size
+
+    def __iter__(self):
+        # Generate a random permutation of all indices
+        all_indices = np.arange(len(self.data_source))
+        np.random.shuffle(all_indices)
+        # Take the first subset_size
+        chosen = all_indices[:self.subset_size]
+        return iter(chosen.tolist())
+    
+
+class FixedBlockSampler(Sampler[int]):
+    """
+    Samples a fixed number of items from each contiguous block in a dataset
+    without requiring an explicit block_to_indices dict.
+
+    Assumes dataset is physically laid out in contiguous blocks:
+      - Block 0: indices [0 .. block_size-1]
+      - Block 1: indices [block_size .. 2*block_size-1]
+      - ...
+    up to the final block which may have fewer than 'block_size' items if
+    dataset_size is not a multiple of block_size.
+    """
+
+    def __init__(self, dataset_size: int, block_size: int,
+                 samples_per_block: int, shuffle_within_block: bool = False):
+        """
+        Args:
+            dataset_size (int): Total number of samples in the dataset.
+            block_size (int): The size of each contiguous block.
+            samples_per_block (int): How many samples to take from each block.
+            shuffle_within_block (bool): If True, randomly shuffle indices
+                                         within each block before taking samples_per_block.
+        """
+        self.dataset_size = dataset_size
+        self.block_size = block_size
+        self.samples_per_block = samples_per_block
+        self.shuffle_within_block = shuffle_within_block
+
+        self.final_indices = []
+        start_idx = 0
+
+        # Partition the dataset into blocks of size 'block_size'
+        while start_idx < dataset_size:
+            end_idx = min(start_idx + block_size, dataset_size)
+            block_indices = np.arange(start_idx, end_idx)
+
+            # Optionally shuffle within the block
+            if self.shuffle_within_block:
+                np.random.shuffle(block_indices)
+
+            # Take the first 'samples_per_block' from this block
+            # (or all if the block size < samples_per_block)
+            chosen = block_indices[:samples_per_block]
+            self.final_indices.extend(chosen)
+
+            start_idx += block_size
+
+        # Sort final indices so iteration order is stable
+        self.final_indices.sort()
+
+    def __iter__(self):
+        return iter(self.final_indices)
+
+    def __len__(self):
+        return len(self.final_indices)
+    
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
@@ -94,12 +174,14 @@ def get_validation_set(eval_pat_dir: str, atlas: pd.DataFrame, names: set) -> Tu
     
     return val_loader, y_val
 
+
 def get_validation_set_with_augmentation(
     eval_pat_dir: str, 
     atlas: pd.DataFrame, 
     names: set,
+    block_size: int,
     target_dist_params=None,
-    enable_augmentation=True
+    enable_augmentation=True,
 ) -> Tuple[DataLoader, torch.Tensor]:
     """
     Enhanced validation set loader with coverage augmentation.
@@ -165,21 +247,37 @@ def get_validation_set_with_augmentation(
     )
     clinical_val_dataset.set_training(True)  # Enable augmentation
     
+    sampler = FixedBlockSampler(
+        len(y_val_np),
+        block_size,
+        int(block_size*0.2),
+        shuffle_within_block=False
+    )
+
     # Create DataLoaders
     val_loader = DataLoader(
         val_dataset,
         batch_size=512,
+        sampler=sampler,
+        shuffle=False,
         num_workers=2,
-        persistent_workers=True,
-        shuffle=False
+        persistent_workers=True
     )
     
+    clinical_sampler = FixedBlockSampler(
+        len(y_val_np),
+        block_size,
+        int(block_size*0.2),
+        shuffle_within_block=False
+    )
+
     clinical_val_loader = DataLoader(
         clinical_val_dataset,
         batch_size=512,
+        sampler=clinical_sampler,
+        shuffle=False,
         num_workers=2,
-        persistent_workers=True,
-        shuffle=False
+        persistent_workers=True
     )
     
     # Convert y_val to a PyTorch tensor and normalize each row
@@ -297,10 +395,11 @@ def load_training_with_augmentation(
     num_files: int = 5,
     enable_augmentation: bool = True,
     target_dist_params: dict = None,
-    augmentation_probability: float = 0.5
+    augmentation_probability: float = 0.5,
+    subset_size: int = 500_000
 ) -> DataLoader:
     """
-    Enhanced training data loader with coverage augmentation.
+    Enhanced training data loader with coverage augmentation and optional random subset sampling.
     
     Args:
         base_dir: Path prefix for training parquet files
@@ -310,25 +409,23 @@ def load_training_with_augmentation(
         enable_augmentation: Whether to enable coverage augmentation
         target_dist_params: Parameters for target clinical coverage distribution
         augmentation_probability: Probability of applying augmentation
+        subset_size: How many samples to randomly draw from the full dataset each epoch
         
     Returns:
-        DataLoader: Enhanced DataLoader with augmentation capability
+        DataLoader: DataLoader that yields random subsets of the training data each epoch.
     """
     # Load data using the original method
     markers, coverage, y = [], [], []
     
     print("loading training from", base_dir)
-    suffixes = [f"_batch{i}" for i in range(1, (num_files + 1)*3)]
-    
-    # Read multiple parquet files and accumulate marker values, coverage, and ground-truth
     for cov in ['high', 'med', 'low']:
         for i in range(1, num_files + 1):
             markers.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_marker_values.parquet"))
             coverage.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_coverage.parquet"))
             y.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_ground_truth_y.parquet"))
     
-    # Merge and process as in the original function
     merged_markers = markers[0]
+    suffixes = [f"_batch{i}" for i in range(1, len(markers))]
     for i, m in enumerate(markers[1:]):
         merged_markers = merged_markers.merge(
             m, on=['name', 'direction'], how='outer', suffixes=('', suffixes[i])
@@ -359,7 +456,7 @@ def load_training_with_augmentation(
     print("  5th percentile:", np.percentile(coverage_train, 5))
     print("  95th percentile:", np.percentile(coverage_train, 95))
     
-    # Create the augmented dataset
+    # Create augmented dataset
     train_dataset = AugmentedTissueDataset(
         X_train,
         coverage_train,
@@ -373,18 +470,22 @@ def load_training_with_augmentation(
     # Enable training mode for augmentation
     train_dataset.set_training(True)
     
-    print(f"training dataset has {len(y_train)} samples")
-
-    # Return augmented DataLoader
+    dataset_size = len(train_dataset)
+    print(f"Full training dataset has {dataset_size} samples.")
+    
+    # Create the random subset sampler
+    subset_sampler = RandomSubsetSampler(train_dataset, subset_size=subset_size)
+    
+    # Return DataLoader using the custom sampler
     return DataLoader(
         train_dataset,
-        batch_size=64,  
-        shuffle=True,
-        num_workers=24, 
+        batch_size=64,
+        sampler=subset_sampler,
+        num_workers=24,
         pin_memory=True,
-        persistent_workers=True
+        persistent_workers=True,
+        shuffle=False  
     )
-
 
 def analyze_coverage_distribution(data_loader):
     """
@@ -668,7 +769,8 @@ def train_and_eval(
             tier1_dl, tier1_clinical_dl, t1_yval = get_validation_set_with_augmentation(
                 str(Path(eval_pat_dir+"_"+cov) / "tier1"), 
                 atlas, names, 
-                target_dist_params=clinical_dist_params
+                target_dist_params=clinical_dist_params,
+                block_size=100_000,
             )
 
             print(f"validation set for {cov} tier1 length={len(t1_yval)}")
@@ -676,7 +778,8 @@ def train_and_eval(
             tcells_dl, tcells_clinical_dl, tcells_yval = get_validation_set_with_augmentation(
                 str(Path(eval_pat_dir+"_"+cov) / "T-cells"), 
                 atlas, names,
-                target_dist_params=clinical_dist_params
+                target_dist_params=clinical_dist_params,
+                block_size=10_000,
             )
 
             print(f"validation set for {cov} tcells length={len(tcells_yval)}")
@@ -684,7 +787,8 @@ def train_and_eval(
             oac_dl, oac_clinical_dl, oac_yval = get_validation_set_with_augmentation(
                 str(Path(eval_pat_dir+"_"+cov) / "OAC"), 
                 atlas, names,
-                target_dist_params=clinical_dist_params
+                target_dist_params=clinical_dist_params,
+                block_size=1_000,
             )
 
             print(f"validation set for {cov} oac length={len(oac_yval)}")
