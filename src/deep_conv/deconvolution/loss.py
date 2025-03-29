@@ -48,7 +48,9 @@ def coverage_adaptive_loss(
             max_frac_weight
         )
     else:
-        coverage_factor = torch.ones_like(avg_coverage)    
+        # No coverage weighting - use uniform weights
+        coverage_factor = torch.ones_like(avg_coverage)
+    
     # Apply importance weights
     importance_weights = coverage_factor * torch.ones_like(true_props)
     
@@ -103,8 +105,9 @@ def coverage_adaptive_loss(
         alpha_adjusted = alpha * coverage_ratio.mean()
         beta_adjusted = beta * (2 - coverage_ratio.mean())
     else:
-        alpha_adjusted = alpha
-        beta_adjusted = beta
+        # Create tensor versions of the constants for consistent behavior
+        alpha_adjusted = torch.tensor(alpha, device=pred_props.device)
+        beta_adjusted = torch.tensor(beta, device=pred_props.device)
     
     # Combine all terms
     total_loss = alpha_adjusted * loss_props + beta_adjusted * recon_loss + gamma * sparsity_penalty
