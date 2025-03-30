@@ -12,7 +12,6 @@ from typing import Tuple
 from deep_conv.benchmark.benchmark_utils import *
 from deep_conv.deconvolution.model import CellTypeDeconvolutionModel, TissueDeconvolutionDataset, AugmentedTissueDataset, coverage_matched_augmentation
 from deep_conv.deconvolution.train import train_model
-from deep_conv.deconvolution.predict import predict_with_post_processing
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')
 torch.autograd.set_detect_anomaly(True)
@@ -739,7 +738,7 @@ def train_and_eval(
         names,
         enable_augmentation=True,
         target_dist_params=clinical_dist_params,
-        augmentation_probability=0.5  # Adjust this as needed
+        augmentation_probability=0.7
     )
     analyze_coverage_distribution(train_dl)
     import matplotlib.pyplot as plt
@@ -842,38 +841,28 @@ def train_and_eval(
         num_markers=len(atlas),
         num_cell_types=len(cell_types),
         target_ids=target_ids,
-        presence_models_dir=presence_models_dir,
+        feature_dim=64,
     )
 
     # 6) Train the model, saving best checkpoint to `output_path`
     combined_val_loaders = {**validation_dls, **clinical_validation_dls}
-    model, best_threshold = train_model(
+    model, _ = train_model(
         model=model,
         train_loader=train_dl,
         val_loaders=combined_val_loaders,
         model_path=output_path
     )
     
-    # Print the threshold the training process found to be best
-    print("best_threshold", best_threshold)
-
     # Evaluate on both standard and clinical validation sets
+    model.post_processing_enabled = False  # Disable for standard validation
     print("\nStandard Validation Sets:")
     for tier in validation_dls.keys():
         tier_dl = validation_dls[tier]
         y_val = y_vals[tier]
         
-        # Get marker to cell type mapping
-        marker_to_cell_mapping = model.target_ids.cpu().numpy()
-        
-        # Use predict_with_post_processing instead of predict_with_consensus
-        deep_conv_estimation = predict_with_post_processing(
-            model, 
+        deep_conv_estimation = model.predict(
             tier_dl.dataset.fraction,
-            tier_dl.dataset.coverage,
-            marker_to_cell_mapping,
-            min_coverage_threshold=5.0,
-            min_signal_threshold=0.01
+            tier_dl.dataset.coverage,            
         )
         
         deep_conv_eval_metrics = evaluate_performance(
@@ -885,22 +874,18 @@ def train_and_eval(
         print(f"Standard validation metrics for tier {tier}")
         log_metrics(deep_conv_eval_metrics)
 
+
     print("\nClinical-Like Validation Sets:")
+    model.post_processing_enabled = True  
+    model.min_detection_threshold = 0.001  
+
     for tier in clinical_validation_dls.keys():
         tier_dl = clinical_validation_dls[tier]
         y_val = y_vals[tier]
         
-        # Get marker to cell type mapping
-        marker_to_cell_mapping = model.target_ids.cpu().numpy()
-        
-        # Use predict_with_post_processing with stricter thresholds for clinical data
-        deep_conv_estimation = predict_with_post_processing(
-            model, 
+        deep_conv_estimation = model.predict(
             tier_dl.dataset.fraction,
             tier_dl.dataset.coverage,
-            marker_to_cell_mapping,
-            min_coverage_threshold=3.0,  # Possibly lower threshold for clinical data
-            min_signal_threshold=0.02    # Possibly higher threshold to be more conservative
         )
         
         deep_conv_eval_metrics = evaluate_performance(

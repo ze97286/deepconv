@@ -1,5 +1,4 @@
 from deep_conv.deconvolution.deepconv import *
-from deep_conv.deconvolution.predict import *
 from collections import defaultdict
 
 from pathlib import Path
@@ -554,11 +553,7 @@ def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, min_cpgs=4, th
     """
     # Prepare data
     X_val, coverage_val, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions)
-    atlas = pd.read_csv(atlas_path, sep="\t")
-    cell_types = list(atlas.columns[8:])
-    target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()   
-    # Use the built-in prediction method that now properly integrates presence information
-    predictions = predict_with_post_processing(model, X_val, coverage_val, target_ids)
+    predictions = model.predict(X_val, coverage_val)
     predictions_df = pd.DataFrame(predictions, columns=list(y_true_df.columns))
     
     # Log summary statistics
@@ -589,12 +584,12 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         model = CellTypeDeconvolutionModel(
             num_markers=len(atlas),
             num_cell_types=len(cell_types), 
-            target_ids=target_ids, 
-            presence_models_dir=f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{presence_model_name}",
         )
+        model.post_processing_enabled = True  
+        model.min_detection_threshold = 0.001  
         checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/best_model.pt")
         model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        estimation = predict_with_post_processing(model, X_val,coverage_val, target_ids)
+        estimation = model.predict(X_val,coverage_val)
     else:
         estimation = run_weighted_nnls(X_val, coverage_val, atlas[atlas.columns[8:]].T.values)
     df = pd.DataFrame(estimation, columns=list(atlas.columns[8:]))
@@ -807,25 +802,19 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     deepconv_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
     deepconv_atlas = pd.read_csv(deepconv_atlas_path, sep="\t")
     cell_types = list(deepconv_atlas.columns[8:])
-    target_ids = deepconv_atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
     
     # Create model
     model = CellTypeDeconvolutionModel(
         num_markers=len(deepconv_atlas),
         num_cell_types=len(cell_types),
-        target_ids=target_ids,
-        presence_models_dir=f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{presence_model_name}",
     )
     
     # Load checkpoint
     best_model = "best_model.pt"
     checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/{best_model}")
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    
-    # Print the 'best_threshold' if it exists in the checkpoint
-    if 'best_threshold' in checkpoint:
-        print(f"Model's best threshold from training: {checkpoint['best_threshold']}")
-    
+    model.post_processing_enabled = False  
+      
     # Evaluation paths
     deepconv_eval_pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
     deepconv_eval_pat_dir_oac = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
