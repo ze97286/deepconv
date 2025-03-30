@@ -849,7 +849,8 @@ def train_and_eval(
         model=model,
         train_loader=train_dl,
         val_loaders=combined_val_loaders,
-        model_path=output_path
+        model_path=output_path,
+        num_epochs=1000,
     )
     
     # Evaluate on both standard and clinical validation sets

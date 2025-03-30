@@ -290,7 +290,7 @@ def analyze_coverage_behavior(model, val_loader, device):
 
 def train_model(
     model, train_loader, val_loaders, model_path, 
-    num_epochs=100, patience=10, learning_rate=1e-3, 
+    num_epochs=1000, patience=10, learning_rate=1e-3, 
     weight_decay=1e-5, use_wandb=True):
     """
     Training loop with coverage-aware monitoring and early stopping.
