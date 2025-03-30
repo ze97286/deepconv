@@ -502,54 +502,89 @@ def enhance_with_negatives(train_dl, problematic_cell_types, cell_types, sample_
     # Get problematic cell type indices
     problematic_indices = [cell_types.index(ct) for ct in problematic_cell_types]
     
-    enhanced_X = []
-    enhanced_coverage = []
-    enhanced_y = []
+    # First collect all the original data
+    all_X = []
+    all_coverage = []
+    all_y = []
     
-    # Process in batches to avoid memory issues
-    for batch in train_dl:
+    print("Collecting original data...")
+    for batch in tqdm(train_dl):
         X = batch['X'].numpy()
         coverage = batch['coverage'].numpy()
         y = batch['y'].numpy()
         
-        # Add original data
-        enhanced_X.append(X)
-        enhanced_coverage.append(coverage)
-        enhanced_y.append(y)
-        
-        # Create explicit negative samples for problematic cell types
-        for cell_idx in problematic_indices:
-            # Find samples where the cell type is absent or very low concentration
-            negative_mask = y[:, cell_idx] < 0.001
-            
-            if np.sum(negative_mask) > 0:
-                # Extract samples where this cell type is already absent
-                negative_X = X[negative_mask].copy()
-                negative_coverage = coverage[negative_mask].copy()
-                negative_y = y[negative_mask].copy()
-                
-                # Select only a fraction of these samples for efficiency
-                num_samples = len(negative_X)
-                num_to_keep = max(1, int(num_samples * sample_fraction))
-                
-                # Randomly select samples to keep
-                indices = np.random.choice(num_samples, num_to_keep, replace=False)
-                negative_X = negative_X[indices]
-                negative_coverage = negative_coverage[indices]
-                negative_y = negative_y[indices]
-                
-                # Ensure this cell type is exactly zero
-                negative_y[:, cell_idx] = 0.0
-                
-                # Add these explicit negative examples
-                enhanced_X.append(negative_X)
-                enhanced_coverage.append(negative_coverage)
-                enhanced_y.append(negative_y)
+        all_X.append(X)
+        all_coverage.append(coverage)
+        all_y.append(y)
     
-    # Combine all batches
-    combined_X = np.vstack(enhanced_X)
-    combined_coverage = np.vstack(enhanced_coverage)
-    combined_y = np.vstack(enhanced_y)
+    # Combine original data
+    X = np.vstack(all_X)
+    coverage = np.vstack(all_coverage)
+    y = np.vstack(all_y)
+    
+    original_count = len(X)
+    print(f"Original dataset size: {original_count} samples")
+    
+    added_examples = 0
+    negative_samples_X = []
+    negative_samples_coverage = []
+    negative_samples_y = []
+    
+    print("Creating negative examples for problematic cell types...")
+    # For each problematic cell type
+    for i, cell_idx in enumerate(problematic_indices):
+        cell_type = problematic_cell_types[i]
+        print(f"Processing {cell_type} (index {cell_idx})...")
+        
+        # Find samples where this cell type is absent
+        negative_mask = y[:, cell_idx] < 0.001
+        print(f"  Found {np.sum(negative_mask)} samples with {cell_type} absent")
+        
+        if np.sum(negative_mask) > 0:
+            # Select a subset for efficiency
+            negative_indices = np.where(negative_mask)[0]
+            num_to_select = max(1, int(len(negative_indices) * sample_fraction))
+            selected_indices = np.random.choice(negative_indices, num_to_select, replace=False)
+            
+            print(f"  Selected {num_to_select} samples to use as negative examples")
+            
+            # Extract the selected samples
+            selected_X = X[selected_indices].copy()
+            selected_coverage = coverage[selected_indices].copy()
+            selected_y = y[selected_indices].copy()
+            
+            # Ensure this cell type is exactly zero
+            selected_y[:, cell_idx] = 0.0
+            
+            # Add to our negative examples
+            negative_samples_X.append(selected_X)
+            negative_samples_coverage.append(selected_coverage)
+            negative_samples_y.append(selected_y)
+            
+            added_examples += len(selected_X)
+    
+    # Combine original data with negative examples
+    if added_examples > 0:
+        print(f"Adding {added_examples} negative examples to the dataset")
+        
+        # If we have negative examples to add
+        if negative_samples_X:
+            negative_X = np.vstack(negative_samples_X)
+            negative_coverage = np.vstack(negative_samples_coverage)
+            negative_y = np.vstack(negative_samples_y)
+            
+            combined_X = np.vstack([X, negative_X])
+            combined_coverage = np.vstack([coverage, negative_coverage])
+            combined_y = np.vstack([y, negative_y])
+        else:
+            combined_X = X
+            combined_coverage = coverage
+            combined_y = y
+    else:
+        print("No negative examples were added")
+        combined_X = X
+        combined_coverage = coverage
+        combined_y = y
     
     # Create new dataset
     enhanced_dataset = TissueDeconvolutionDataset(
@@ -568,8 +603,9 @@ def enhance_with_negatives(train_dl, problematic_cell_types, cell_types, sample_
         persistent_workers=getattr(train_dl, 'persistent_workers', False)
     )
     
-    print(f"Enhanced dataset created: {len(train_dl.dataset)} → {len(enhanced_dataset)} samples")
-    print(f"Added {len(enhanced_dataset) - len(train_dl.dataset)} explicit negative examples")
+    final_count = len(enhanced_dataset)
+    print(f"Enhanced dataset created: {original_count} → {final_count} samples")
+    print(f"Added {final_count - original_count} explicit negative examples")
     
     return enhanced_loader
 
