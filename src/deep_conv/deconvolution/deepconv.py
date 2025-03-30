@@ -541,7 +541,7 @@ def enhance_with_negatives(train_dl, problematic_cell_types, cell_types):
                     aug_X, aug_coverage = coverage_matched_augmentation(
                         negative_X, 
                         negative_coverage,
-                        augmentation_probability=1.0  # Apply to all
+                        augmentation_prob=1.0  # Apply to all
                     )
                     
                     enhanced_X.append(aug_X)
