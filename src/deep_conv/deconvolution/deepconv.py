@@ -486,14 +486,15 @@ def load_training_with_augmentation(
         shuffle=False  
     )
 
-def enhance_with_negatives(train_dl, problematic_cell_types, cell_types):
+def enhance_with_negatives(train_dl, problematic_cell_types, cell_types, sample_fraction=0.2):
     """
-    Add negative examples focusing on problematic cell types
+    Add negative examples focusing on problematic cell types, but more efficiently
     
     Args:
         train_dl: Training DataLoader
         problematic_cell_types: List of cell type names that have high false positive rates
         cell_types: List of all cell type names
+        sample_fraction: Fraction of negative examples to keep (0-1)
         
     Returns:
         Enhanced dataset with additional negative examples
@@ -518,7 +519,6 @@ def enhance_with_negatives(train_dl, problematic_cell_types, cell_types):
         
         # Create explicit negative samples for problematic cell types
         for cell_idx in problematic_indices:
-            # Create samples where these problematic cell types are explicitly zero
             # Find samples where the cell type is absent or very low concentration
             negative_mask = y[:, cell_idx] < 0.001
             
@@ -528,25 +528,23 @@ def enhance_with_negatives(train_dl, problematic_cell_types, cell_types):
                 negative_coverage = coverage[negative_mask].copy()
                 negative_y = y[negative_mask].copy()
                 
-                # Ensure this cell type is exactly zero (may already be, but just to be sure)
+                # Select only a fraction of these samples for efficiency
+                num_samples = len(negative_X)
+                num_to_keep = max(1, int(num_samples * sample_fraction))
+                
+                # Randomly select samples to keep
+                indices = np.random.choice(num_samples, num_to_keep, replace=False)
+                negative_X = negative_X[indices]
+                negative_coverage = negative_coverage[indices]
+                negative_y = negative_y[indices]
+                
+                # Ensure this cell type is exactly zero
                 negative_y[:, cell_idx] = 0.0
                 
                 # Add these explicit negative examples
                 enhanced_X.append(negative_X)
                 enhanced_coverage.append(negative_coverage)
                 enhanced_y.append(negative_y)
-                
-                # Also create another copy with augmented coverage to simulate clinical
-                if negative_X.shape[0] > 0:
-                    aug_X, aug_coverage = coverage_matched_augmentation(
-                        negative_X, 
-                        negative_coverage,
-                        augmentation_prob=1.0  # Apply to all
-                    )
-                    
-                    enhanced_X.append(aug_X)
-                    enhanced_coverage.append(aug_coverage)
-                    enhanced_y.append(negative_y)  # Same labels
     
     # Combine all batches
     combined_X = np.vstack(enhanced_X)
@@ -561,13 +559,13 @@ def enhance_with_negatives(train_dl, problematic_cell_types, cell_types):
         combined_y
     )
     
-    # Create new dataloader
+    # Create new dataloader with same batch size
     enhanced_loader = DataLoader(
         enhanced_dataset,
         batch_size=train_dl.batch_size,
         shuffle=True,
-        num_workers=train_dl.num_workers if hasattr(train_dl, 'num_workers') else 4,
-        persistent_workers=True if hasattr(train_dl, 'persistent_workers') else False
+        num_workers=getattr(train_dl, 'num_workers', 4),
+        persistent_workers=getattr(train_dl, 'persistent_workers', False)
     )
     
     print(f"Enhanced dataset created: {len(train_dl.dataset)} → {len(enhanced_dataset)} samples")
@@ -926,7 +924,12 @@ def train_and_eval(
     target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
 
     problematic_cell_types = ['Colon', 'Gastric', 'Small-intestine', 'Esophagus']
-    enhanced_train_dl = enhance_with_negatives(train_dl, problematic_cell_types, cell_types)
+    enhanced_train_dl = enhance_with_negatives(
+        train_dl, 
+        problematic_cell_types, 
+        cell_types,
+        sample_fraction=0.2 
+    )
 
     # 5) Create the model
     model = CellTypeDeconvolutionModel(
