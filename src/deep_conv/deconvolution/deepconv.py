@@ -4,6 +4,7 @@ import random
 import pandas as pd
 import numpy as np
 import torch
+from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from pathlib import Path
