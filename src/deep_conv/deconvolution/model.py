@@ -167,8 +167,7 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
                 aug_fraction, aug_coverage = coverage_matched_augmentation(
                     fraction_np, 
                     coverage_np, 
-                    self.target_dist_params,
-                    augmentation_probability=1.0  # Always augment since we already decided to
+                    augmentation_prob=1.0  # Always augment since we already decided to
                 )
                 
                 # Update item with augmented data
