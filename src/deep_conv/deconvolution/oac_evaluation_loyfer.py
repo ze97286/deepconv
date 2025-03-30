@@ -584,6 +584,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         model = CellTypeDeconvolutionModel(
             num_markers=len(atlas),
             num_cell_types=len(cell_types), 
+            target_ids = target_ids,
         )
         model.post_processing_enabled = True  
         model.min_detection_threshold = 0.001  
@@ -803,10 +804,12 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     deepconv_atlas = pd.read_csv(deepconv_atlas_path, sep="\t")
     cell_types = list(deepconv_atlas.columns[8:])
     
+    target_ids = deepconv_atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()   
     # Create model
     model = CellTypeDeconvolutionModel(
         num_markers=len(deepconv_atlas),
         num_cell_types=len(cell_types),
+        target_ids=target_ids,
     )
     
     # Load checkpoint
