@@ -587,7 +587,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
             target_ids = target_ids,
         )
         model.post_processing_enabled = True  
-        model.min_detection_threshold = 0.001  
+        model.min_detection_threshold = 0.005  
         checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/best_model.pt")
         model.load_state_dict(checkpoint["model_state_dict"], strict=False)
         estimation = model.predict(X_val,coverage_val)
@@ -816,7 +816,8 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     best_model = "best_model.pt"
     checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/{best_model}")
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    model.post_processing_enabled = False  
+    model.post_processing_enabled = True  
+    model.min_detection_threshold = 0.005  
       
     # Evaluation paths
     deepconv_eval_pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
