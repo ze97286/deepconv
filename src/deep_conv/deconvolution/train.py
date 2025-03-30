@@ -136,10 +136,10 @@ def validate_epoch(model, val_loaders, device):
                 true_props = batch['y'].to(device)
                 
                 # Forward pass
-                pred_props, reconstructed, valid_mask, feature_quality = model(marker_values, coverage)
+                pred_props, reconstructed, valid_mask, feature_quality, _ = model(marker_values, coverage)
                 
                 # Calculate loss
-                loss, details = coverage_adaptive_loss(
+                loss, details = zero_focused_adaptive_loss(
                     pred_props, true_props, reconstructed, marker_values,
                     coverage, valid_mask, feature_quality
                 )
@@ -219,8 +219,8 @@ def analyze_coverage_behavior(model, val_loader, device):
             coverage_weight = model.coverage_classifier(log_coverage)
             
             # Forward pass to get quality scores
-            pred_props, _, _, feature_quality = model(marker_values, coverage)
-            
+            pred_props, _, _, feature_quality, _ = model(marker_values, coverage)
+
             # Group statistics by coverage bin
             for i in range(len(avg_coverage)):
                 cov = avg_coverage[i].item()
