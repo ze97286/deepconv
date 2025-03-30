@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
 from typing import Dict, Tuple, List
-from deep_conv.deconvolution.loss import coverage_adaptive_loss
+from deep_conv.deconvolution.loss import zero_focused_adaptive_loss
 
 import time
 
