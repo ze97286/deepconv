@@ -486,6 +486,95 @@ def load_training_with_augmentation(
         shuffle=False  
     )
 
+def enhance_with_negatives(train_dl, problematic_cell_types, cell_types):
+    """
+    Add negative examples focusing on problematic cell types
+    
+    Args:
+        train_dl: Training DataLoader
+        problematic_cell_types: List of cell type names that have high false positive rates
+        cell_types: List of all cell type names
+        
+    Returns:
+        Enhanced dataset with additional negative examples
+    """
+    # Get problematic cell type indices
+    problematic_indices = [cell_types.index(ct) for ct in problematic_cell_types]
+    
+    enhanced_X = []
+    enhanced_coverage = []
+    enhanced_y = []
+    
+    # Process in batches to avoid memory issues
+    for batch in train_dl:
+        X = batch['X'].numpy()
+        coverage = batch['coverage'].numpy()
+        y = batch['y'].numpy()
+        
+        # Add original data
+        enhanced_X.append(X)
+        enhanced_coverage.append(coverage)
+        enhanced_y.append(y)
+        
+        # Create explicit negative samples for problematic cell types
+        for cell_idx in problematic_indices:
+            # Create samples where these problematic cell types are explicitly zero
+            # Find samples where the cell type is absent or very low concentration
+            negative_mask = y[:, cell_idx] < 0.001
+            
+            if np.sum(negative_mask) > 0:
+                # Extract samples where this cell type is already absent
+                negative_X = X[negative_mask].copy()
+                negative_coverage = coverage[negative_mask].copy()
+                negative_y = y[negative_mask].copy()
+                
+                # Ensure this cell type is exactly zero (may already be, but just to be sure)
+                negative_y[:, cell_idx] = 0.0
+                
+                # Add these explicit negative examples
+                enhanced_X.append(negative_X)
+                enhanced_coverage.append(negative_coverage)
+                enhanced_y.append(negative_y)
+                
+                # Also create another copy with augmented coverage to simulate clinical
+                if negative_X.shape[0] > 0:
+                    aug_X, aug_coverage = coverage_matched_augmentation(
+                        negative_X, 
+                        negative_coverage,
+                        augmentation_probability=1.0  # Apply to all
+                    )
+                    
+                    enhanced_X.append(aug_X)
+                    enhanced_coverage.append(aug_coverage)
+                    enhanced_y.append(negative_y)  # Same labels
+    
+    # Combine all batches
+    combined_X = np.vstack(enhanced_X)
+    combined_coverage = np.vstack(enhanced_coverage)
+    combined_y = np.vstack(enhanced_y)
+    
+    # Create new dataset
+    enhanced_dataset = TissueDeconvolutionDataset(
+        combined_X,
+        combined_coverage,
+        train_dl.dataset.atlas,
+        combined_y
+    )
+    
+    # Create new dataloader
+    enhanced_loader = DataLoader(
+        enhanced_dataset,
+        batch_size=train_dl.batch_size,
+        shuffle=True,
+        num_workers=train_dl.num_workers if hasattr(train_dl, 'num_workers') else 4,
+        persistent_workers=True if hasattr(train_dl, 'persistent_workers') else False
+    )
+    
+    print(f"Enhanced dataset created: {len(train_dl.dataset)} → {len(enhanced_dataset)} samples")
+    print(f"Added {len(enhanced_dataset) - len(train_dl.dataset)} explicit negative examples")
+    
+    return enhanced_loader
+
 def analyze_coverage_distribution(data_loader):
     """
     Analyze the coverage distribution in a dataset for calibration.
@@ -739,6 +828,7 @@ def train_and_eval(
         target_dist_params=clinical_dist_params,
         augmentation_probability=0.7
     )
+    
     analyze_coverage_distribution(train_dl)
     import matplotlib.pyplot as plt
     # Call the test function
@@ -835,11 +925,15 @@ def train_and_eval(
     # Build an array mapping each marker to its cell type index
     target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
 
+    problematic_cell_types = ['Colon', 'Gastric', 'Small-intestine', 'Esophagus']
+    enhanced_train_dl = enhance_with_negatives(train_dl, problematic_cell_types, cell_types)
+
     # 5) Create the model
     model = CellTypeDeconvolutionModel(
         num_markers=len(atlas),
         num_cell_types=len(cell_types),
         target_ids=target_ids,
+        cell_types=cell_types,
         feature_dim=64,
     )
 
@@ -847,7 +941,7 @@ def train_and_eval(
     combined_val_loaders = {**validation_dls, **clinical_validation_dls}
     model, _ = train_model(
         model=model,
-        train_loader=train_dl,
+        train_loader=enhanced_train_dl,
         val_loaders=combined_val_loaders,
         model_path=output_path,
         num_epochs=1000,

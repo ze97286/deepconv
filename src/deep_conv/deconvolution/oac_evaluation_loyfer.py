@@ -584,6 +584,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         model = CellTypeDeconvolutionModel(
             num_markers=len(atlas),
             num_cell_types=len(cell_types), 
+            cell_types=cell_types,
             target_ids = target_ids,
         )
         model.post_processing_enabled = True  
@@ -809,6 +810,7 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     model = CellTypeDeconvolutionModel(
         num_markers=len(deepconv_atlas),
         num_cell_types=len(cell_types),
+        cell_types=cell_types,
         target_ids=target_ids,
     )
     

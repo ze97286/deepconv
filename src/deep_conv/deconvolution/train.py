@@ -36,23 +36,8 @@ def init_wandb(config, project_name="cfDNA-Deconvolution", entity=None):
     )
     return run
 
-
 def train_epoch(model, train_loader, optimizer, device, log_interval=100, epoch=0):
-    """
-    Train the model for one epoch.
-    
-    Args:
-        model: Clinical deconvolution model
-        train_loader: DataLoader for training data
-        optimizer: Optimizer instance
-        device: Computation device
-        log_interval: How often to log batch metrics
-        epoch: Current epoch number
-        
-    Returns:
-        avg_loss: Average training loss
-        metrics: Dictionary of training metrics
-    """
+    """Train the model for one epoch with zero-focused loss"""
     model.train()
     start_time = time.time()
     total_loss = 0.0
@@ -61,8 +46,8 @@ def train_epoch(model, train_loader, optimizer, device, log_interval=100, epoch=
         'quality_loss': 0,
         'recon_loss': 0, 
         'sparsity': 0,
-        'avg_coverage': 0,
-        'coverage_weight': []
+        'presence_loss': 0,
+        'avg_coverage': 0
     }
     num_batches = 0
     
@@ -71,13 +56,14 @@ def train_epoch(model, train_loader, optimizer, device, log_interval=100, epoch=
         coverage = batch['coverage'].to(device)
         true_props = batch['y'].to(device)
         
-        # Forward pass
-        pred_props, reconstructed, valid_mask, feature_quality = model(marker_values, coverage)
+        # Forward pass with our enhanced model
+        pred_props, reconstructed, valid_mask, feature_quality, presence_probs = model(marker_values, coverage)
         
-        # Calculate loss
-        loss, details = coverage_adaptive_loss(
+        # Calculate loss with our zero-focused loss
+        loss, details = zero_focused_adaptive_loss(
             pred_props, true_props, reconstructed, marker_values,
-            coverage, valid_mask, feature_quality
+            coverage, valid_mask, feature_quality, presence_probs,
+            alpha=1.0, beta=0.05, gamma=0.03, delta=0.2, zero_weight=5.0
         )
         
         # Backward and optimize
@@ -92,14 +78,8 @@ def train_epoch(model, train_loader, optimizer, device, log_interval=100, epoch=
         metrics['quality_loss'] += details.get('quality_loss', 0)
         metrics['recon_loss'] += details['recon_loss']
         metrics['sparsity'] += details['sparsity']
+        metrics['presence_loss'] += details.get('presence_loss', 0)
         metrics['avg_coverage'] += details['avg_coverage']
-        
-        # Track coverage classifier values
-        with torch.no_grad():
-            if hasattr(model, 'coverage_classifier'):
-                log_coverage = torch.log1p(coverage.mean(dim=1, keepdim=True))
-                coverage_weight = model.coverage_classifier(log_coverage)
-                metrics['coverage_weight'].extend(coverage_weight.cpu().numpy().flatten())
         
         num_batches += 1
         
@@ -109,14 +89,8 @@ def train_epoch(model, train_loader, optimizer, device, log_interval=100, epoch=
     
     # Calculate averages
     avg_loss = total_loss / num_batches
-    for key in ['prop_loss', 'quality_loss', 'recon_loss', 'sparsity', 'avg_coverage']:
+    for key in ['prop_loss', 'quality_loss', 'recon_loss', 'sparsity', 'presence_loss', 'avg_coverage']:
         metrics[key] /= num_batches
-    
-    # Calculate coverage weight statistics
-    if metrics['coverage_weight']:
-        cov_weights = np.array(metrics['coverage_weight'])
-        metrics['coverage_weight_mean'] = np.mean(cov_weights)
-        metrics['coverage_weight_std'] = np.std(cov_weights)
     
     # End epoch timing
     epoch_time = time.time() - start_time

@@ -182,11 +182,12 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
         
 
 class CellTypeDeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types, target_ids, feature_dim=64):
+    def __init__(self, num_markers, num_cell_types, target_ids, cell_types, feature_dim=64):
         super().__init__()
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
+        self.cell_types = cell_types
         
         # Store marker-to-cell-type mapping
         target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
@@ -194,7 +195,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         # Marker feature extraction with coverage context
         self.marker_extractor = nn.Sequential(
-            nn.Linear(2, feature_dim),  # [fraction, log_coverage] -> feature_dim
+            nn.Linear(2, feature_dim),
             nn.LeakyReLU(),
             nn.Linear(feature_dim, feature_dim),
             nn.LeakyReLU()
@@ -211,6 +212,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Shared base for both decoders
         self.shared_decoder_base = nn.Sequential(
             nn.Linear(num_cell_types * feature_dim + feature_dim, 128),
+            nn.BatchNorm1d(128),
             nn.LeakyReLU()
         )
         
@@ -231,11 +233,20 @@ class CellTypeDeconvolutionModel(nn.Module):
             nn.Linear(64, num_cell_types)
         )
         
-        # Coverage regime classifier
+        # Coverage regime classifier - kept this from original model
         self.coverage_classifier = nn.Sequential(
             nn.Linear(1, 32),
             nn.LeakyReLU(),
             nn.Linear(32, 1),
+            nn.Sigmoid()
+        )
+        
+        # Binary presence classifier - explicitly learns which cell types are present/absent
+        self.presence_classifier = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.LeakyReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, num_cell_types),
             nn.Sigmoid()
         )
         
@@ -245,6 +256,13 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Hyperparameters for inference
         self.min_detection_threshold = 0.001
         self.post_processing_enabled = True
+        
+        # Cell type specific thresholds for post-processing
+        self.problematic_types = ['Colon', 'Gastric', 'Small-intestine', 'Esophagus']
+        self.cell_type_thresholds = {
+            ct: 0.05 if ct in self.problematic_types else 0.001 
+            for ct in cell_types
+        }
 
     def _init_weights(self):
         """Initialize weights with Kaiming initialization"""
@@ -253,11 +271,17 @@ class CellTypeDeconvolutionModel(nn.Module):
                 nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='leaky_relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+        
+        # Initialize the final layer of presence classifier with negative bias
+        # This makes it tend toward predicting absence (0) by default
+        if hasattr(self.presence_classifier[-2], 'bias'):  # Note: -2 since -1 is sigmoid
+            self.presence_classifier[-2].bias.data.fill_(-2.0)
                     
     def aggregate_cell_type_features(self, marker_features, marker_values, coverage, valid_mask):
-        """
-        Aggregate features by cell type with quality assessment
-        """
+        """Aggregate features by cell type with quality assessment"""
         B, M, F = marker_features.shape  # Batch, Markers, Features
         C = self.num_celltypes
         
@@ -313,9 +337,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         return aggregated, feature_quality
                 
     def forward(self, marker_values, coverage):
-        """
-        Forward pass with coverage-aware dual pathway
-        """
+        """Forward pass with dual pathway and explicit presence detection"""
         B, M = marker_values.shape
         C = self.num_celltypes
         
@@ -356,6 +378,9 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Shared processing
         shared_features = self.shared_decoder_base(combined_features)
         
+        # NEW: Presence prediction
+        presence_probs = self.presence_classifier(shared_features)
+        
         # Branch-specific processing
         high_cov_output = F.relu(self.high_cov_specific(shared_features))
         low_cov_output = F.relu(self.low_cov_specific(shared_features))
@@ -363,9 +388,13 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Blend based on coverage regime
         raw_props = coverage_weight * high_cov_output + (1 - coverage_weight) * low_cov_output
         
-        # Apply quality-aware scaling
-        quality_scaling = torch.pow(feature_quality, 2)  # Square to emphasize quality differences
-        scaled_props = raw_props * quality_scaling
+        # Apply presence-based gating
+        # Multiply by presence probabilities to enforce zero where cell type is absent
+        gated_props = raw_props * presence_probs
+        
+        # Apply quality-aware scaling with stronger quality impact
+        quality_scaling = torch.pow(feature_quality, 3)  # Stronger quality impact
+        scaled_props = gated_props * quality_scaling
         
         # Normalize to sum to 1
         sum_props = scaled_props.sum(dim=1, keepdim=True) + 1e-8
@@ -375,12 +404,10 @@ class CellTypeDeconvolutionModel(nn.Module):
         reconstruction = torch.zeros_like(marker_values)
         
         # Return results
-        return cell_props, reconstruction, valid_mask, feature_quality
-    
+        return cell_props, reconstruction, valid_mask, feature_quality, presence_probs
+
     def predict(self, marker_values, coverage, batch_size=128, device=None):
-        """
-        Make predictions with optional post-processing
-        """
+        """Make predictions with optional post-processing"""
         if device is None:
             device = next(self.parameters()).device
         
@@ -400,6 +427,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         self.eval()
         all_preds = []
         all_qualities = []
+        all_presence = []
         
         with torch.no_grad():
             # Process in batches
@@ -411,37 +439,48 @@ class CellTypeDeconvolutionModel(nn.Module):
                 batch_coverage = coverage[i:end].to(device)
                 
                 # Forward pass
-                props, _, _, quality = self.forward(batch_markers, batch_coverage)
+                props, _, _, quality, presence = self.forward(batch_markers, batch_coverage)
                 
                 # Store results
                 all_preds.append(props.cpu().numpy())
                 all_qualities.append(quality.cpu().numpy())
+                all_presence.append(presence.cpu().numpy())
         
         # Combine results
         predictions = np.vstack(all_preds)
         qualities = np.vstack(all_qualities)
+        presence_probs = np.vstack(all_presence)
         
         # Post-processing for clinical samples
         if self.post_processing_enabled:
-            predictions = self._clinical_post_processing(predictions, qualities)
+            predictions = self._clinical_post_processing(predictions, qualities, presence_probs)
         
         return predictions
         
-    def _clinical_post_processing(self, raw_preds, qualities=None):
-        """
-        Post-process predictions for clinical samples
-        """
+    def _clinical_post_processing(self, raw_preds, qualities=None, presence_probs=None):
+        """Enhanced post-processing with cell-type specific thresholds"""
         processed = raw_preds.copy()
         
-        # Apply minimum threshold
-        processed[processed < self.min_detection_threshold] = 0
-        
-        # Apply quality-based thresholding if available
-        if qualities is not None:
-            # Higher threshold for low-quality features
-            quality_threshold = self.min_detection_threshold * (2.0 - qualities)
-            mask = processed < quality_threshold
-            processed[mask] = 0
+        # Apply cell-type specific thresholds
+        for i, cell_type in enumerate(self.cell_types):
+            # Get appropriate threshold for this cell type
+            threshold = self.cell_type_thresholds.get(cell_type, self.min_detection_threshold)
+            
+            # If we have presence probabilities, use them to make better decisions
+            if presence_probs is not None:
+                # For problematic cell types, require stronger evidence
+                is_problematic = cell_type in self.problematic_types
+                presence_threshold = 0.7 if is_problematic else 0.5
+                
+                # Zero out low presence probability cells
+                processed[:, i] = np.where(
+                    presence_probs[:, i] < presence_threshold,
+                    0.0,
+                    processed[:, i]
+                )
+            
+            # Apply concentration threshold
+            processed[:, i] = np.where(processed[:, i] < threshold, 0, processed[:, i])
             
         # Ensure at least one non-zero prediction per sample
         zero_samples = (processed.sum(axis=1) == 0)
