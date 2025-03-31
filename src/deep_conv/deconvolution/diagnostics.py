@@ -176,6 +176,7 @@ model = CellTypeDeconvolutionModel(
     num_markers=len(atlas),
     num_cell_types=len(cell_types),
     target_ids=target_ids,
+    cell_types=cell_types,
 )
 checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/deepconv/best_model.pt")
 model.load_state_dict(checkpoint["model_state_dict"], strict=False)
