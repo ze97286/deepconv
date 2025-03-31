@@ -19,7 +19,7 @@ def analyse_model_performance(model, val_loaders, cell_types, device):
                 coverage = batch['coverage'].to(device)
                 y_true = batch['y'].to(device)
                 # Get predictions and quality scores
-                props, _, _, quality = model(X, coverage)
+                props, _, _, quality,_ = model(X, coverage)
                 # Store everything
                 all_preds.append(props.cpu().numpy())
                 all_true.append(y_true.cpu().numpy())
