@@ -490,166 +490,140 @@ def load_training_with_augmentation(
 
 def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.15):
     """
-    Add negative examples for all cell types with realistic stochastic sampling
+    Create additional negative examples (for each cell type) by applying 
+    stochastic coverage reduction and hypergeometric sampling in a vectorized manner.
     
     Args:
-        train_dl: Training DataLoader
-        cell_types: List of all cell type names
-        sample_fraction: Fraction of samples to use for each negative example type
+        train_dl: Training DataLoader yielding dictionaries with keys 'X', 'coverage', and 'y'
+        cell_types: List of cell type names (order must match columns in y)
+        sample_fraction: Fraction of eligible negative examples to select for each cell type.
         
     Returns:
-        Enhanced dataset with additional negative examples
+        Enhanced DataLoader (same batch size as train_dl) over a new dataset that includes 
+        both the original examples and the additional negative examples.
     """
     from tqdm import tqdm
     
-    # First collect all the original data
-    all_X = []
-    all_coverage = []
-    all_y = []
-    
+    # 1. Collect original data from the DataLoader
+    all_X, all_coverage, all_y = [], [], []
     print("Collecting original data...")
     for batch in tqdm(train_dl):
-        X = batch['X'].numpy()
-        coverage = batch['coverage'].numpy()
-        y = batch['y'].numpy()
-        
-        all_X.append(X)
-        all_coverage.append(coverage)
-        all_y.append(y)
+        all_X.append(batch['X'].numpy())
+        all_coverage.append(batch['coverage'].numpy())
+        all_y.append(batch['y'].numpy())
     
-    # Combine original data
-    X = np.vstack(all_X)
-    coverage = np.vstack(all_coverage)
-    y = np.vstack(all_y)
-    
+    X = np.vstack(all_X)          # shape [N, M]
+    coverage = np.vstack(all_coverage)  # shape [N, M]
+    y = np.vstack(all_y)          # shape [N, C]
     original_count = len(X)
     print(f"Original dataset size: {original_count} samples")
     
-    negative_samples_X = []
-    negative_samples_coverage = []
-    negative_samples_y = []
+    # Lists to store negative variants
+    neg_X_list = []
+    neg_coverage_list = []
+    neg_y_list = []
+    
     total_added = 0
     
-    print("Creating negative examples for all cell types...")
-    # For each cell type, find samples where it's absent and create variants
+    print("Creating negative examples for each cell type...")
     for cell_idx, cell_type in enumerate(cell_types):
         print(f"Processing {cell_type} (index {cell_idx})...")
-        
-        # Find samples where this cell type is absent
-        negative_mask = y[:, cell_idx] < 0.001
-        samples_count = np.sum(negative_mask)
+        # Find indices where cell type is absent (using a small threshold)
+        neg_mask = y[:, cell_idx] < 0.001
+        negative_indices = np.where(neg_mask)[0]
+        samples_count = len(negative_indices)
         print(f"  Found {samples_count} samples with {cell_type} absent")
+        if samples_count == 0:
+            continue
         
-        if samples_count > 0:
-            # Select a subset for efficiency
-            negative_indices = np.where(negative_mask)[0]
-            num_to_select = max(1, int(len(negative_indices) * sample_fraction))
-            selected_indices = np.random.choice(negative_indices, num_to_select, replace=False)
-            
-            print(f"  Selected {num_to_select} samples to use as negative examples")
-            
-            # Extract the selected samples
-            selected_X = X[selected_indices].copy()
-            selected_coverage = coverage[selected_indices].copy()
-            selected_y = y[selected_indices].copy()
-            
-            # Ensure this cell type is exactly zero
-            selected_y[:, cell_idx] = 0.0
-            
-            # Create different coverage variants for these samples
-            for i in range(len(selected_X)):
-                # Original sample
-                negative_samples_X.append(selected_X[i])
-                negative_samples_coverage.append(selected_coverage[i])
-                negative_samples_y.append(selected_y[i])
-                
-                # Low coverage variant with proper stochastic sampling
-                low_X = np.zeros_like(selected_X[i])
-                low_coverage = selected_coverage[i] * 0.5  # 50% reduction
-                
-                # Apply realistic stochastic sampling for each marker
-                for j in range(len(selected_X[i])):
-                    if selected_coverage[i, j] > 0:
-                        # Original read count (approximately)
-                        orig_reads = max(1, int(round(selected_coverage[i, j])))
-                        
-                        # Target read count for low coverage
-                        target_reads = max(1, int(round(low_coverage[j])))
-                        
-                        if target_reads < orig_reads:
-                            # Simulate taking a random subset of reads
-                            # Calculate how many of the original reads were "methylated"
-                            orig_methylated = int(round(selected_X[i, j] * orig_reads))
-                            
-                            # Randomly sample target_reads from the original reads
-                            # This models drawing reads without replacement
-                            methylated_in_sample = np.random.hypergeometric(
-                                orig_methylated,      # Number of success states in the population
-                                orig_reads - orig_methylated,  # Number of failure states in the population
-                                target_reads          # Number of draws
-                            )
-                            
-                            # Calculate new marker value based on sampled reads
-                            low_X[j] = methylated_in_sample / target_reads
-                        else:
-                            # No reduction needed
-                            low_X[j] = selected_X[i, j]
-                
-                negative_samples_X.append(low_X)
-                negative_samples_coverage.append(low_coverage)
-                negative_samples_y.append(selected_y[i])
-                
-                # Very low coverage variant
-                very_low_X = np.zeros_like(selected_X[i])
-                very_low_coverage = selected_coverage[i] * 0.2  # 80% reduction
-                
-                # Apply stochastic sampling for each marker
-                for j in range(len(selected_X[i])):
-                    if selected_coverage[i, j] > 0:
-                        # Original read count
-                        orig_reads = max(1, int(round(selected_coverage[i, j])))
-                        
-                        # Target read count for very low coverage
-                        target_reads = max(0, int(round(very_low_coverage[j])))
-                        
-                        if target_reads > 0:
-                            # If we have any reads, sample them
-                            orig_methylated = int(round(selected_X[i, j] * orig_reads))
-                            
-                            # Randomly sample target_reads from the original reads
-                            methylated_in_sample = np.random.hypergeometric(
-                                orig_methylated,
-                                orig_reads - orig_methylated,
-                                target_reads
-                            )
-                            
-                            # Calculate new marker value based on sampled reads
-                            very_low_X[j] = methylated_in_sample / target_reads
-                        else:
-                            # No reads = no value (coverage will be 0)
-                            very_low_X[j] = 0.0
-                            very_low_coverage[j] = 0.0
-                            
-                negative_samples_X.append(very_low_X)
-                negative_samples_coverage.append(very_low_coverage)
-                negative_samples_y.append(selected_y[i])
-                
-                total_added += 3  # Original + low + very low
+        num_to_select = max(1, int(samples_count * sample_fraction))
+        selected_indices = np.random.choice(negative_indices, num_to_select, replace=False)
+        print(f"  Selected {num_to_select} samples to use as negative examples")
+        
+        # Extract selected samples
+        sel_X = X[selected_indices]             # [N_sel, M]
+        sel_cov = coverage[selected_indices]      # [N_sel, M]
+        sel_y = y[selected_indices].copy()        # [N_sel, C]
+        # Set the target cell type proportion to zero
+        sel_y[:, cell_idx] = 0.0
+        
+        N_sel, M = sel_X.shape
+        
+        # Prepare vectorized operations:
+        # For each sample, compute:
+        #   orig_reads: round(coverage) but at least 1, shape [N_sel, M]
+        orig_reads = np.maximum(1, np.rint(sel_cov)).astype(np.int32)
+        
+        # --- Low Coverage Variant (50% reduction) ---
+        # Compute target reads (round(coverage*0.5)) but at least 1
+        low_cov = sel_cov * 0.5
+        target_reads_low = np.maximum(1, np.rint(low_cov)).astype(np.int32)
+        
+        # For hypergeometric sampling, compute original methylated counts:
+        orig_methylated = np.rint(sel_X * orig_reads).astype(np.int32)
+        
+        # Create a mask where we can sample: where coverage > 0 and target_reads_low < orig_reads
+        mask_low = (sel_cov > 0) & (target_reads_low < orig_reads)
+        # Initialize low_X as a copy of sel_X (default: if target_reads not lower, keep original)
+        low_X = sel_X.copy()
+        if np.any(mask_low):
+            # For indices where mask_low is True, call hypergeometric in vectorized form.
+            # np.random.hypergeometric supports vectorized parameters if shapes broadcast.
+            sampled_low = np.random.hypergeometric(
+                orig_methylated[mask_low],
+                (orig_reads - orig_methylated)[mask_low],
+                target_reads_low[mask_low]
+            )
+            # Compute new fraction
+            low_X[mask_low] = sampled_low / target_reads_low[mask_low].astype(np.float32)
+        
+        # --- Very Low Coverage Variant (80% reduction) ---
+        very_low_cov = sel_cov * 0.2
+        target_reads_very = np.rint(very_low_cov).astype(np.int32)  # here we allow zeros
+        # Initialize very_low_X with zeros
+        very_low_X = np.zeros_like(sel_X)
+        # Mask: where original coverage > 0 and target_reads_very > 0
+        mask_very = (sel_cov > 0) & (target_reads_very > 0)
+        if np.any(mask_very):
+            sampled_very = np.random.hypergeometric(
+                orig_methylated[mask_very],
+                (orig_reads - orig_methylated)[mask_very],
+                target_reads_very[mask_very]
+            )
+            very_low_X[mask_very] = sampled_very / target_reads_very[mask_very].astype(np.float32)
+        # For markers where target_reads_very==0, leave very_low_X as 0 (and target coverage remains 0)
+        
+        # Append three variants per sample:
+        # (a) Original negative examples (selected as-is)
+        neg_X_list.append(sel_X)
+        neg_coverage_list.append(sel_cov)
+        neg_y_list.append(sel_y)
+        # (b) Low coverage variants
+        neg_X_list.append(low_X)
+        neg_coverage_list.append(low_cov)
+        neg_y_list.append(sel_y)
+        # (c) Very low coverage variants
+        neg_X_list.append(very_low_X)
+        neg_coverage_list.append(very_low_cov)
+        neg_y_list.append(sel_y)
+        
+        total_added += 3 * N_sel
     
-    # Combine original data with negative examples
     if total_added > 0:
         print(f"Adding {total_added} negative examples to the dataset")
-        
-        combined_X = np.vstack([X] + negative_samples_X)
-        combined_coverage = np.vstack([coverage] + negative_samples_coverage)
-        combined_y = np.vstack([y] + negative_samples_y)
+        combined_X = np.vstack([X] + neg_X_list)
+        combined_coverage = np.vstack([coverage] + neg_coverage_list)
+        combined_y = np.vstack([y] + neg_y_list)
     else:
         print("No negative examples were added")
         combined_X = X
         combined_coverage = coverage
         combined_y = y
+
+    print(f"Enhanced dataset created: {len(X)} → {len(combined_X)} samples")
+    print(f"Added {len(combined_X) - len(X)} explicit negative examples")
     
-    # Create new dataset
+    # Create new dataset and dataloader (using the same batch size as train_dl)
     enhanced_dataset = TissueDeconvolutionDataset(
         combined_X,
         combined_coverage,
@@ -657,7 +631,6 @@ def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.15):
         combined_y
     )
     
-    # Create new dataloader with same batch size
     enhanced_loader = DataLoader(
         enhanced_dataset,
         batch_size=train_dl.batch_size,
@@ -666,12 +639,7 @@ def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.15):
         persistent_workers=getattr(train_dl, 'persistent_workers', False)
     )
     
-    final_count = len(enhanced_dataset)
-    print(f"Enhanced dataset created: {original_count} → {final_count} samples")
-    print(f"Added {final_count - original_count} explicit negative examples")
-    
     return enhanced_loader
-
 def analyze_coverage_distribution(data_loader):
     """
     Analyze the coverage distribution in a dataset for calibration.
@@ -1021,7 +989,7 @@ def train_and_eval(
     enhanced_train_dl = enhanced_negative_examples(
         train_dl=train_dl, 
         cell_types=cell_types,
-        sample_fraction=0.2 
+        sample_fraction=0.05, 
     )
     print("finished enhancing negative examples")
 
