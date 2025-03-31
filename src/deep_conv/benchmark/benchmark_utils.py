@@ -1050,7 +1050,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             row=2, col=1
         )
         
-        # Perfect prediction line
+        # Perfect prediction line - adjust for log scale display
         min_val = max(y_true_vals.min() * 100, 0.001)  # Convert to percentage
         max_val = y_true_vals.max() * 100  # Convert to percentage
         fig.add_trace(
@@ -1063,6 +1063,22 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 legendgroup="main"
             ),
             row=2, col=1
+        )
+        
+        # Update axis settings to use log scale
+        fig.update_xaxes(
+            title="True Value (%)", 
+            type="log",  # Ensure log scale is used
+            row=2, col=1,
+            ticktext=[f"{x:.3g}%" for x in [0.001, 0.01, 0.1, 1, 10]],
+            tickvals=[0.001, 0.01, 0.1, 1, 10]
+        )
+        fig.update_yaxes(
+            title="Predicted Value (%)", 
+            type="log",  # Ensure log scale is used
+            row=2, col=1,
+            ticktext=[f"{x:.3g}%" for x in [0.001, 0.01, 0.1, 1, 10]],
+            tickvals=[0.001, 0.01, 0.1, 1, 10]
         )
         
         # ----------------- Row 2, Col 2: Concentration-Stratified MAE ---------------- #
@@ -1479,7 +1495,6 @@ def calculate_metrics_by_dilution(y_true, y_pred, intended_dilutions):
         })
     
     return pd.DataFrame(metrics)
-
 
 def calculate_metrics_per_dilution(y_true, y_pred, intended_dilution):
     """
