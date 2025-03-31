@@ -9,10 +9,11 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
+import numpy as np
 from typing import Dict, Tuple, List
 from deep_conv.deconvolution.loss import loss_fn
 
+import time
 
 def init_wandb(config, project_name="cfDNA-Deconvolution", entity=None):
     """
