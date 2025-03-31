@@ -66,6 +66,58 @@ def coverage_matched_augmentation(marker_values, coverage, augmentation_prob=0.5
     
     return augmented_values, augmented_coverage
 
+
+class TissueDeconvolutionDataset(Dataset):
+    """
+    A PyTorch Dataset for loading cfDNA methylation data and optional labels.
+    
+    Each sample in this dataset includes:
+      - `fraction`: Methylation fractions across markers, in [0..1] (may contain NaNs if coverage=0).
+      - `coverage`: Read coverage array of the same shape as `fraction`.
+      - `atlas`: (Optional) if using some reference atlas or additional data, 
+                 you could store it here. (Currently not directly used in the model.)
+      - `y`: Ground-truth cell-type proportions for training/validation, if available.
+      
+    Args:
+        fraction (ndarray or Tensor): Shape [num_samples, num_markers].
+            Fractional methylation values. Some entries may be invalid if coverage=0.
+        coverage (ndarray or Tensor): Shape [num_samples, num_markers].
+            Coverage (read depth) for each sample-marker pair.
+        atlas (ndarray or Tensor): Arbitrary shape, often referencing 
+            a reference atlas. Not necessarily used in the model code, 
+            but stored for convenience.
+        y (ndarray or Tensor, optional): Shape [num_samples, num_cell_types].
+            Ground-truth proportions for each cell type (if supervised).
+            If None, dataset is for inference only.
+    """
+    def __init__(self, fraction, coverage, atlas, y=None):
+        self.fraction = torch.tensor(fraction, dtype=torch.float32)
+        self.coverage = torch.tensor(coverage, dtype=torch.float32)
+        self.atlas = torch.tensor(atlas, dtype=torch.float32)        
+        if y is not None:
+            self.y = torch.tensor(y, dtype=torch.float32)
+        else:
+            self.y = None
+
+    def __len__(self):
+        return self.fraction.size(0)
+
+    def __getitem__(self, idx):
+        """
+        Return a dictionary containing:
+            'X': The methylation fraction row for this sample
+            'coverage': The coverage row for this sample
+            'y': The ground-truth proportions, if available
+        """
+        item = {
+            'X': self.fraction[idx],
+            'coverage': self.coverage[idx],
+        }
+        if self.y is not None:
+            item['y'] = self.y[idx]
+        return item  
+
+
 class AugmentedTissueDataset(TissueDeconvolutionDataset):
     """
     Enhanced dataset with coverage-matched augmentation for clinical scenarios.
