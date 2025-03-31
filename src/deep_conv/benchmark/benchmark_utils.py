@@ -966,7 +966,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             row=1, col=1
         )
         
-        # --------------------- Row 1, Col 2: Detection Performance --------------------- #
+        # -------- Row 1, Col 2: Detection Performance --------- #
         # Bar chart of sensitivity/specificity/precision for different thresholds
         threshold_values = []
         sensitivity_values = []
@@ -993,7 +993,9 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                     x=threshold_values,
                     y=values,
                     name=name,
-                    marker_color=color
+                    marker_color=color,
+                    legendgroup="detection_metrics",
+                    legendgrouptitle_text="Detection Metrics"
                 ),
                 row=1, col=2
             )
@@ -1008,10 +1010,17 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                     color=np.log10(intended_dilutions),
                     colorscale='Viridis',
                     showscale=True,
-                    colorbar=dict(title='log10(Intended Dilution)', len=0.2, y=0.65), 
+                    colorbar=dict(
+                        title='log10(Intended Dilution)', 
+                        len=0.2, 
+                        y=0.65,
+                        yanchor="top"
+                    ), 
                     size=3,
                     opacity=0.6
                 ),
+                name="Predicted vs True",
+                legendgroup="main",
                 showlegend=False
             ),
             row=2, col=1
@@ -1024,7 +1033,8 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 y=[max(y_true_vals.min(), 1e-5), y_true_vals.max()],
                 mode='lines',
                 line=dict(color='red', dash='dash'),
-                name='Perfect Prediction'
+                name='Perfect Prediction',
+                legendgroup="main"
             ),
             row=2, col=1
         )
@@ -1043,9 +1053,10 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             go.Bar(
                 x=strata_names,
                 y=mae_values,
-                name='MAE',
+                name='MAE by Concentration',
                 text=count_texts,
-                textposition='auto'
+                textposition='auto',
+                legendgroup="main"
             ),
             row=2, col=2
         )
@@ -1060,7 +1071,9 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 y=metrics_df['within_10pct'],
                 mode='lines+markers',
                 name='% Within ±10%',
-                line=dict(color='blue')
+                line=dict(color='blue'),
+                legendgroup="error_metrics",
+                legendgrouptitle_text="Error Metrics"
             ),
             row=3, col=1
         )
@@ -1077,7 +1090,8 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 ),
                 mode='lines+markers',
                 name='Relative Error',
-                line=dict(color='red')
+                line=dict(color='red'),
+                legendgroup="error_metrics"
             ),
             row=3, col=1
         )
@@ -1094,7 +1108,9 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 y=tpr,
                 mode='lines',
                 name=f'ROC curve (AUC = {roc_auc:.3f})',
-                line=dict(color='darkorange')
+                line=dict(color='darkorange'),
+                legendgroup="roc_pr",
+                legendgrouptitle_text="ROC/PR Curves"
             ),
             row=3, col=2
         )
@@ -1125,7 +1141,9 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 fig.add_trace(
                     go.Box(
                         y=2 * (y_pred_vals[mask] - y_true_vals[mask]) / (y_pred_vals[mask] + y_true_vals[mask] + 1e-6) * 100,
-                        name=conc_type
+                        name=conc_type,
+                        legendgroup="concentration",
+                        legendgrouptitle_text="Concentration"
                     ),
                     row=4, col=1
                 )
@@ -1137,7 +1155,8 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 y=precision,
                 mode='lines',
                 name=f'PR curve (AP = {avg_precision:.3f})',
-                line=dict(color='green')
+                line=dict(color='green'),
+                legendgroup="roc_pr"
             ),
             row=4, col=2
         )
@@ -1233,7 +1252,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             f"<b>Clinical Relevance Score: {crs:.1f}/100</b>"
         ]
         
-        # Add summary text annotation
+        # Add summary text annotation in the dedicated summary metrics section
         fig.add_annotation(
             xref="x domain",
             yref="y domain",
@@ -1248,7 +1267,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             borderpad=10,
             bgcolor="white",
             opacity=0.8,
-            row=6, col=1
+            row=6, col=1  # Position in the dedicated summary row
         )
         
         # --------------------- Axis Updates ---------------------- #
@@ -1296,9 +1315,38 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         
         # --------------------- Layout -------------------- #
         fig.update_layout(
-            height=2400,
+            height=2600,  # Increased height for dedicated summary section
             width=1600,
-            title=f"Cell Type Analysis: {cell_type} (R²={r2:.3f}, Pearson r={pearson_r:.3f})"
+            title=f"Cell Type Analysis: {cell_type} (R²={r2:.3f}, Pearson r={pearson_r:.3f})",
+            # Separate legends for different plot sections
+            legend=dict(
+                y=0.99, x=1.15,  # Main legend position
+                title="Main Legend",
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="Gray",
+                borderwidth=1
+            ),
+            legend2=dict(
+                y=0.72, x=1.15,  # Detection metrics legend position
+                title="Detection Metrics",
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="Gray",
+                borderwidth=1
+            ),
+            legend3=dict(
+                y=0.48, x=1.15,  # Error metrics legend position
+                title="Error Metrics",
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="Gray",
+                borderwidth=1
+            ),
+            legend4=dict(
+                y=0.24, x=1.15,  # ROC/PR curves legend position
+                title="AUROC/PR Metrics",
+                bgcolor="rgba(255,255,255,0.8)", 
+                bordercolor="Gray",
+                borderwidth=1
+            )
         )
         
         # Save results and return
@@ -1399,6 +1447,7 @@ def calculate_metrics_by_dilution(y_true, y_pred, intended_dilutions):
         })
     
     return pd.DataFrame(metrics)
+
 
 def calculate_metrics_per_dilution(y_true, y_pred, intended_dilution):
     """
