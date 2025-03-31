@@ -968,6 +968,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         
         # -------- Row 1, Col 2: Detection Performance --------- #
         # Bar chart of sensitivity/specificity/precision for different thresholds
+        detection_thresholds = [0.001, 0.005, 0.01, 0.05, 0.10]  # Added 5% and 10% thresholds
         threshold_values = []
         sensitivity_values = []
         specificity_values = []
@@ -975,6 +976,29 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         f1_values = []
         
         for threshold in detection_thresholds:
+            # Calculate metrics for this threshold if not already in detection_metrics
+            if f'threshold_{threshold:.3f}' not in detection_metrics:
+                true_positive = np.sum((y_true_vals >= threshold) & (y_pred_vals >= threshold))
+                false_positive = np.sum((y_true_vals < threshold) & (y_pred_vals >= threshold))
+                true_negative = np.sum((y_true_vals < threshold) & (y_pred_vals < threshold))
+                false_negative = np.sum((y_true_vals >= threshold) & (y_pred_vals < threshold))
+                
+                sensitivity = true_positive / (true_positive + false_negative) if (true_positive + false_negative) > 0 else 0
+                specificity = true_negative / (true_negative + false_positive) if (true_negative + false_positive) > 0 else 0
+                ppv = true_positive / (true_positive + false_positive) if (true_positive + false_positive) > 0 else 0
+                f1 = 2 * sensitivity * ppv / (sensitivity + ppv) if (sensitivity + ppv) > 0 else 0
+                
+                detection_metrics[f'threshold_{threshold:.3f}'] = {
+                    'sensitivity': sensitivity,
+                    'specificity': specificity,
+                    'precision': ppv,
+                    'f1_score': f1,
+                    'tp': true_positive,
+                    'fp': false_positive,
+                    'tn': true_negative,
+                    'fn': false_negative
+                }
+            
             metrics = detection_metrics[f'threshold_{threshold:.3f}']
             threshold_values.append(f"{threshold*100:.1f}%")
             sensitivity_values.append(metrics['sensitivity'])
@@ -1003,8 +1027,8 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         # ----------------- Row 2, Col 1: Predicted vs. True ---------------- #
         fig.add_trace(
             go.Scatter(
-                x=y_true_vals,
-                y=y_pred_vals,
+                x=y_true_vals * 100,  # Convert to percentage
+                y=y_pred_vals * 100,  # Convert to percentage
                 mode='markers',
                 marker=dict(
                     color=np.log10(intended_dilutions),
@@ -1027,10 +1051,12 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         )
         
         # Perfect prediction line
+        min_val = max(y_true_vals.min() * 100, 0.001)  # Convert to percentage
+        max_val = y_true_vals.max() * 100  # Convert to percentage
         fig.add_trace(
             go.Scatter(
-                x=[max(y_true_vals.min(), 1e-5), y_true_vals.max()],
-                y=[max(y_true_vals.min(), 1e-5), y_true_vals.max()],
+                x=[min_val, max_val],
+                y=[min_val, max_val],
                 mode='lines',
                 line=dict(color='red', dash='dash'),
                 name='Perfect Prediction',
@@ -1185,7 +1211,13 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 x=['Bias', 'MAE', 'Variance'],
                 y=[f"{conc_bins[i]:.4f}-{conc_bins[i+1]:.4f}" for i in range(len(conc_bins)-1)],
                 colorscale='RdBu_r',
-                colorbar=dict(title='Z-score'),
+                colorbar=dict(
+                    title='Z-score', 
+                    len=0.2, 
+                    y=0.35,  # Positioned lower to avoid overlap
+                    yanchor="middle",
+                    title_side="right"
+                ),
                 zmin=-2,
                 zmax=2
             ),
@@ -1240,7 +1272,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         # Calculate final CRS (normalized to 0-100)
         crs = 100 * sum(crs_components) / sum(weights.values())
         
-        # Create text summary
+        # Create summary text with added 5% and 10% thresholds
         summary_text = [
             f"<b>Summary Metrics for {cell_type}</b>",
             f"R²: {r2:.3f} | Pearson r: {pearson_r:.3f} | Spearman r: {spearman_r:.3f}",
@@ -1249,13 +1281,13 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             f"Detection at 0.1%: {detection_metrics['threshold_0.001']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.001']['specificity']:.3f} spec",
             f"Detection at 0.5%: {detection_metrics['threshold_0.005']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.005']['specificity']:.3f} spec",
             f"Detection at 1.0%: {detection_metrics['threshold_0.010']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.010']['specificity']:.3f} spec",
+            f"Detection at 5.0%: {detection_metrics['threshold_0.050']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.050']['specificity']:.3f} spec",
+            f"Detection at 10.0%: {detection_metrics['threshold_0.100']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.100']['specificity']:.3f} spec",
             f"<b>Clinical Relevance Score: {crs:.1f}/100</b>"
         ]
         
-        # Add summary text annotation in the dedicated summary metrics section
+        # Add summary text annotation in a dedicated subplot cell
         fig.add_annotation(
-            xref="x domain",
-            yref="y domain",
             x=0.5,
             y=0.5,
             text="<br>".join(summary_text),
@@ -1267,7 +1299,8 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             borderpad=10,
             bgcolor="white",
             opacity=0.8,
-            row=6, col=1  # Position in the dedicated summary row
+            xref="x6",
+            yref="y6"
         )
         
         # --------------------- Axis Updates ---------------------- #
@@ -1278,14 +1311,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         fig.update_yaxes(title="Score (0-1)", range=[0, 1], row=1, col=2)
         
         # Row 2: Predicted vs. True & Concentration-Stratified MAE
-        fig.update_xaxes(
-            title="True Value (%)", 
-            type="log", 
-            row=2, col=1,
-            ticktext=[f"{x*100:.3g}%" for x in [0.00001, 0.0001, 0.001, 0.01, 0.1]],
-            tickvals=[0.00001, 0.0001, 0.001, 0.01, 0.1]
-        )
-        fig.update_yaxes(title="Predicted Value (%)", type="log", row=2, col=1)
+        # (Axis formatting now handled separately above)
         fig.update_xaxes(title="Concentration Range", row=2, col=2)
         fig.update_yaxes(title="Mean Absolute Error", row=2, col=2)
         
@@ -1294,8 +1320,8 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             title="Intended Dilution (%)", 
             type="log", 
             row=3, col=1,
-            ticktext=[f"{x*100:.3g}%" for x in [0.00001, 0.0001, 0.001, 0.01, 0.1]],
-            tickvals=[0.00001, 0.0001, 0.001, 0.01, 0.1]
+            ticktext=[f"{x:.3g}%" for x in [0.001, 0.01, 0.1, 1, 10]],
+            tickvals=[0.001, 0.01, 0.1, 1, 10]
         )
         fig.update_yaxes(title="Percentage / Error", row=3, col=1)
         fig.update_xaxes(title="False Positive Rate", range=[0, 1], row=3, col=2)
@@ -1312,6 +1338,12 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         fig.update_yaxes(title="Concentration Range", row=5, col=1)
         fig.update_xaxes(title="Prediction Error", row=5, col=2)
         fig.update_yaxes(title="Count", row=5, col=2)
+        
+        # Row 6: Summary Metrics
+        fig.update_xaxes(title="", showticklabels=False, row=6, col=1)
+        fig.update_yaxes(title="", showticklabels=False, row=6, col=1)
+        fig.update_xaxes(title="", showticklabels=False, row=6, col=2)
+        fig.update_yaxes(title="", showticklabels=False, row=6, col=2)
         
         # --------------------- Layout -------------------- #
         fig.update_layout(
