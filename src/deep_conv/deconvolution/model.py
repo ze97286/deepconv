@@ -8,20 +8,8 @@ import pandas as pd
 from pathlib import Path
 from deep_conv.presence.model import SingleCellTypePresenceModel
 
-def coverage_matched_augmentation(marker_values, coverage, augmentation_prob=0.5):
-    """
-    Augment training data to better match clinical coverage patterns
-    
-    Args:
-        marker_values: [N, M] Methylation values
-        coverage: [N, M] Coverage values
-        augmentation_prob: Probability of applying augmentation
-        
-    Returns:
-        augmented_values: Augmented methylation values
-        augmented_coverage: Augmented coverage values
-    """
-    # Create copies
+def coverage_matched_augmentation(marker_values, coverage, augmentation_prob=0.7):
+    """Enhanced augmentation focused on extreme low coverage simulation"""
     augmented_values = marker_values.copy()
     augmented_coverage = coverage.copy()
     
@@ -34,38 +22,45 @@ def coverage_matched_augmentation(marker_values, coverage, augmentation_prob=0.5
         
         # Get current coverage
         current_cov = coverage[i].mean()
-        
         # Skip if already very low
-        if current_cov < 2.0:
+        if current_cov < 1.0:
             continue
-        
-        # Generate target coverage (biased toward clinical patterns)
-        if np.random.random() < 0.7:
-            # Clinical-like coverage (log-normal distribution)
-            target_cov = np.exp(np.random.normal(1.2, 0.8))
+            
+        # More aggressive scaling distribution
+        # Bias strongly toward very low coverage (0.5-3)
+        if np.random.random() < 0.8:  # 80% chance of extreme reduction
+            target_cov = np.random.exponential(1.5)  # Heavy tail toward 0.5-3
+            target_cov = min(max(target_cov, 0.5), 5.0)  # Bound to reasonable range
         else:
-            # Extremely low coverage
-            target_cov = np.random.uniform(0.5, 2.0)
+            # Sometimes use log-normal for more moderate reduction
+            target_cov = np.exp(np.random.normal(1.0, 0.7))
         
-        # Calculate scaling factor
+        # Calculate scaling and apply more aggressively
         scale = target_cov / current_cov
-        
-        # Apply scaling
         augmented_coverage[i] = coverage[i] * scale
         
-        # Add noise to marker values for low coverage
-        if scale < 0.3:
-            noise_level = np.clip((1.0 - scale) * 0.3, 0.05, 0.3)
+        # More aggressive noise for marker values
+        if scale < 0.2:  # Very low coverage gets more noise
+            noise_level = 0.3  # Stronger fixed noise level
             noise = np.random.normal(0, noise_level, size=marker_values[i].shape)
             augmented_values[i] = np.clip(marker_values[i] + noise, 0, 1)
             
-            # Simulate missing markers
-            missing_prob = np.clip(0.5 * (1.0 - scale), 0, 0.5)
+            # More aggressive marker zeroing
+            missing_prob = 0.4  # Fixed higher probability of marker loss
             missing_mask = np.random.random(marker_values[i].shape) < missing_prob
             augmented_coverage[i, missing_mask] = 0
+            
+            # Quantize marker values to simulate low read counts
+            # E.g., with 3 reads, values can only be 0, 1/3, 2/3, 1.0
+            for j in range(len(augmented_coverage[i])):
+                if augmented_coverage[i, j] > 0:
+                    read_count = max(1, int(augmented_coverage[i, j]))
+                    if read_count < 5:  # Only quantize for very low coverage
+                        # Simulate binomial sampling
+                        successes = np.random.binomial(read_count, marker_values[i, j])
+                        augmented_values[i, j] = successes / read_count
     
     return augmented_values, augmented_coverage
-
 
 class TissueDeconvolutionDataset(Dataset):
     """

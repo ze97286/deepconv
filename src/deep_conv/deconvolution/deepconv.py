@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Tuple 
 
 from deep_conv.benchmark.benchmark_utils import *
-from deep_conv.deconvolution.model import CellTypeDeconvolutionModel, TissueDeconvolutionDataset
+from deep_conv.deconvolution.model import *
 from deep_conv.deconvolution.train import train_model
-from deep_conv.deconvolution.predict import predict_with_consensus
+from deep_conv.deconvolution.predict import *
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -488,126 +488,80 @@ def load_training_with_augmentation(
         shuffle=False  
     )
 
-def enhance_with_negatives(train_dl, problematic_cell_types, cell_types, sample_fraction=0.2):
-    """
-    Add negative examples focusing on problematic cell types, but more efficiently
-    
-    Args:
-        train_dl: Training DataLoader
-        problematic_cell_types: List of cell type names that have high false positive rates
-        cell_types: List of all cell type names
-        sample_fraction: Fraction of negative examples to keep (0-1)
-        
-    Returns:
-        Enhanced dataset with additional negative examples
-    """
-    # Get problematic cell type indices
+def enhanced_negative_examples(train_dl, problematic_cell_types, cell_types):
+    """Create more realistic negative examples with correct marker patterns"""
+    from tqdm import tqdm
     problematic_indices = [cell_types.index(ct) for ct in problematic_cell_types]
     
-    # First collect all the original data
-    all_X = []
-    all_coverage = []
-    all_y = []
-    
-    print("Collecting original data...")
+    # Collect original data
+    all_X, all_coverage, all_y = [], [], []
     for batch in tqdm(train_dl):
-        X = batch['X'].numpy()
-        coverage = batch['coverage'].numpy()
-        y = batch['y'].numpy()
-        
-        all_X.append(X)
-        all_coverage.append(coverage)
-        all_y.append(y)
+        all_X.append(batch['X'].numpy())
+        all_coverage.append(batch['coverage'].numpy())
+        all_y.append(batch['y'].numpy())
     
-    # Combine original data
     X = np.vstack(all_X)
     coverage = np.vstack(all_coverage)
     y = np.vstack(all_y)
     
-    original_count = len(X)
-    print(f"Original dataset size: {original_count} samples")
+    # Create prototypical examples where ONLY problematic cell types are absent
+    # Find samples with good blood cell type representation but no GI tract cells
+    blood_mask = np.zeros_like(y, dtype=bool)
+    for i, ct in enumerate(cell_types):
+        if ct not in problematic_cell_types and "CD" in ct:
+            blood_mask[:, i] = True
     
-    added_examples = 0
-    negative_samples_X = []
-    negative_samples_coverage = []
-    negative_samples_y = []
+    good_blood_samples = (y[:, blood_mask.any(axis=1)].sum(axis=1) > 0.5)
+    no_problem_samples = np.all(y[:, problematic_indices] < 0.001, axis=1)
     
-    print("Creating negative examples for problematic cell types...")
-    # For each problematic cell type
-    for i, cell_idx in enumerate(problematic_indices):
-        cell_type = problematic_cell_types[i]
-        print(f"Processing {cell_type} (index {cell_idx})...")
+    prototype_indices = np.where(good_blood_samples & no_problem_samples)[0]
+    prototype_X = X[prototype_indices]
+    prototype_coverage = coverage[prototype_indices]
+    prototype_y = y[prototype_indices]
+    
+    # Create synthetic variants with different coverage profiles
+    synthetic_X, synthetic_coverage, synthetic_y = [], [], []
+    
+    # Generate 3x more variants than original samples
+    for i in range(len(prototype_X)):
+        # Original prototype
+        synthetic_X.append(prototype_X[i])
+        synthetic_coverage.append(prototype_coverage[i])
+        synthetic_y.append(prototype_y[i])
         
-        # Find samples where this cell type is absent
-        negative_mask = y[:, cell_idx] < 0.001
-        print(f"  Found {np.sum(negative_mask)} samples with {cell_type} absent")
+        # Low coverage variant
+        aug_X, aug_cov = coverage_matched_augmentation(
+            prototype_X[i:i+1], 
+            prototype_coverage[i:i+1],
+            augmentation_prob=1.0
+        )
+        synthetic_X.append(aug_X[0])
+        synthetic_coverage.append(aug_cov[0])
+        synthetic_y.append(prototype_y[i])
         
-        if np.sum(negative_mask) > 0:
-            # Select a subset for efficiency
-            negative_indices = np.where(negative_mask)[0]
-            num_to_select = max(1, int(len(negative_indices) * sample_fraction))
-            selected_indices = np.random.choice(negative_indices, num_to_select, replace=False)
-            
-            print(f"  Selected {num_to_select} samples to use as negative examples")
-            
-            # Extract the selected samples
-            selected_X = X[selected_indices].copy()
-            selected_coverage = coverage[selected_indices].copy()
-            selected_y = y[selected_indices].copy()
-            
-            # Ensure this cell type is exactly zero
-            selected_y[:, cell_idx] = 0.0
-            
-            # Add to our negative examples
-            negative_samples_X.append(selected_X)
-            negative_samples_coverage.append(selected_coverage)
-            negative_samples_y.append(selected_y)
-            
-            added_examples += len(selected_X)
+        # Very low coverage variant
+        very_low_cov = prototype_coverage[i] * 0.1  # 90% reduction
+        synthetic_X.append(prototype_X[i])  # Keep original markers
+        synthetic_coverage.append(very_low_cov)
+        synthetic_y.append(prototype_y[i])
     
-    # Combine original data with negative examples
-    if added_examples > 0:
-        print(f"Adding {added_examples} negative examples to the dataset")
-        
-        # If we have negative examples to add
-        if negative_samples_X:
-            negative_X = np.vstack(negative_samples_X)
-            negative_coverage = np.vstack(negative_samples_coverage)
-            negative_y = np.vstack(negative_samples_y)
-            
-            combined_X = np.vstack([X, negative_X])
-            combined_coverage = np.vstack([coverage, negative_coverage])
-            combined_y = np.vstack([y, negative_y])
-        else:
-            combined_X = X
-            combined_coverage = coverage
-            combined_y = y
-    else:
-        print("No negative examples were added")
-        combined_X = X
-        combined_coverage = coverage
-        combined_y = y
+    # Combine with original data
+    combined_X = np.vstack([X, synthetic_X])
+    combined_coverage = np.vstack([coverage, synthetic_coverage])
+    combined_y = np.vstack([y, synthetic_y])
     
-    # Create new dataset
+    # Create dataset and loader
     enhanced_dataset = TissueDeconvolutionDataset(
-        combined_X,
-        combined_coverage,
-        train_dl.dataset.atlas,
-        combined_y
+        combined_X, combined_coverage, train_dl.dataset.atlas, combined_y
     )
     
-    # Create new dataloader with same batch size
     enhanced_loader = DataLoader(
         enhanced_dataset,
         batch_size=train_dl.batch_size,
         shuffle=True,
-        num_workers=getattr(train_dl, 'num_workers', 4),
-        persistent_workers=getattr(train_dl, 'persistent_workers', False)
+        num_workers=train_dl.num_workers,
+        persistent_workers=True
     )
-    
-    final_count = len(enhanced_dataset)
-    print(f"Enhanced dataset created: {original_count} → {final_count} samples")
-    print(f"Added {final_count - original_count} explicit negative examples")
     
     return enhanced_loader
 
