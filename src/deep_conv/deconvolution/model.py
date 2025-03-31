@@ -8,7 +8,126 @@ import pandas as pd
 from pathlib import Path
 from deep_conv.presence.model import SingleCellTypePresenceModel
 
+def coverage_matched_augmentation(marker_values, coverage, augmentation_prob=0.5):
+    """
+    Augment training data to better match clinical coverage patterns
+    
+    Args:
+        marker_values: [N, M] Methylation values
+        coverage: [N, M] Coverage values
+        augmentation_prob: Probability of applying augmentation
+        
+    Returns:
+        augmented_values: Augmented methylation values
+        augmented_coverage: Augmented coverage values
+    """
+    # Create copies
+    augmented_values = marker_values.copy()
+    augmented_coverage = coverage.copy()
+    
+    num_samples = len(marker_values)
+    augment_mask = np.random.random(num_samples) < augmentation_prob
+    
+    for i in range(num_samples):
+        if not augment_mask[i]:
+            continue
+        
+        # Get current coverage
+        current_cov = coverage[i].mean()
+        
+        # Skip if already very low
+        if current_cov < 2.0:
+            continue
+        
+        # Generate target coverage (biased toward clinical patterns)
+        if np.random.random() < 0.7:
+            # Clinical-like coverage (log-normal distribution)
+            target_cov = np.exp(np.random.normal(1.2, 0.8))
+        else:
+            # Extremely low coverage
+            target_cov = np.random.uniform(0.5, 2.0)
+        
+        # Calculate scaling factor
+        scale = target_cov / current_cov
+        
+        # Apply scaling
+        augmented_coverage[i] = coverage[i] * scale
+        
+        # Add noise to marker values for low coverage
+        if scale < 0.3:
+            noise_level = np.clip((1.0 - scale) * 0.3, 0.05, 0.3)
+            noise = np.random.normal(0, noise_level, size=marker_values[i].shape)
+            augmented_values[i] = np.clip(marker_values[i] + noise, 0, 1)
+            
+            # Simulate missing markers
+            missing_prob = np.clip(0.5 * (1.0 - scale), 0, 0.5)
+            missing_mask = np.random.random(marker_values[i].shape) < missing_prob
+            augmented_coverage[i, missing_mask] = 0
+    
+    return augmented_values, augmented_coverage
 
+class AugmentedTissueDataset(TissueDeconvolutionDataset):
+    """
+    Enhanced dataset with coverage-matched augmentation for clinical scenarios.
+    
+    This extends the base TissueDeconvolutionDataset by adding coverage augmentation
+    to better simulate real-world clinical data distributions.
+    """
+    def __init__(self, 
+                 fraction, 
+                 coverage, 
+                 atlas, 
+                 y=None, 
+                 target_dist_params=None,
+                 augmentation_probability=0.5,
+                 enable_augmentation=True):
+        # Initialize the parent class
+        super().__init__(fraction, coverage, atlas, y)
+        
+        # Store augmentation parameters
+        self.target_dist_params = target_dist_params
+        self.augmentation_probability = augmentation_probability
+        self.enable_augmentation = enable_augmentation
+        
+        # Convert numpy arrays to tensors if needed
+        if not isinstance(self.fraction, torch.Tensor):
+            self.fraction = torch.tensor(self.fraction, dtype=torch.float32)
+        if not isinstance(self.coverage, torch.Tensor):
+            self.coverage = torch.tensor(self.coverage, dtype=torch.float32)
+    
+    def __getitem__(self, idx):
+        """
+        Get a dataset item with optional augmentation.
+        """
+        # Get the base item from parent class
+        item = super().__getitem__(idx)
+        
+        # Apply augmentation during training if enabled
+        if self.enable_augmentation and self.training and self.y is not None:
+            # Convert to numpy for augmentation
+            fraction_np = item['X'].numpy().reshape(1, -1)
+            coverage_np = item['coverage'].numpy().reshape(1, -1)
+            
+            # Apply augmentation with some probability
+            if np.random.random() < self.augmentation_probability:
+                # Augment the data
+                aug_fraction, aug_coverage = coverage_matched_augmentation(
+                    fraction_np, 
+                    coverage_np, 
+                    augmentation_prob=1.0  # Always augment since we already decided to
+                )
+                
+                # Update item with augmented data
+                item['X'] = torch.tensor(aug_fraction[0], dtype=torch.float32)
+                item['coverage'] = torch.tensor(aug_coverage[0], dtype=torch.float32)
+        
+        return item
+    
+    def set_training(self, training=True):
+        """Enable/disable training mode for augmentation"""
+        self.training = training
+
+        
 class TissueDeconvolutionDataset(Dataset):
     """
     A PyTorch Dataset for loading cfDNA methylation data and optional labels.
