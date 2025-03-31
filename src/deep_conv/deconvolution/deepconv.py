@@ -488,7 +488,7 @@ def load_training_with_augmentation(
         shuffle=False  
     )
 
-def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.2):
+def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.15):
     """
     Add negative examples for all cell types with realistic stochastic sampling
     
@@ -557,19 +557,15 @@ def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.2):
             selected_y[:, cell_idx] = 0.0
             
             # Create different coverage variants for these samples
-            variant_X = []
-            variant_coverage = []
-            variant_y = []
-            
             for i in range(len(selected_X)):
                 # Original sample
-                variant_X.append(selected_X[i])
-                variant_coverage.append(selected_coverage[i])
-                variant_y.append(selected_y[i])
+                negative_samples_X.append(selected_X[i])
+                negative_samples_coverage.append(selected_coverage[i])
+                negative_samples_y.append(selected_y[i])
                 
                 # Low coverage variant with proper stochastic sampling
-                low_coverage = selected_coverage[i] * 0.5  # 50% reduction
                 low_X = np.zeros_like(selected_X[i])
+                low_coverage = selected_coverage[i] * 0.5  # 50% reduction
                 
                 # Apply realistic stochastic sampling for each marker
                 for j in range(len(selected_X[i])):
@@ -578,7 +574,7 @@ def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.2):
                         orig_reads = max(1, int(round(selected_coverage[i, j])))
                         
                         # Target read count for low coverage
-                        target_reads = max(1, int(round(low_coverage[i, j])))
+                        target_reads = max(1, int(round(low_coverage[j])))
                         
                         if target_reads < orig_reads:
                             # Simulate taking a random subset of reads
@@ -594,21 +590,18 @@ def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.2):
                             )
                             
                             # Calculate new marker value based on sampled reads
-                            if target_reads > 0:
-                                low_X[j] = methylated_in_sample / target_reads
-                            else:
-                                low_X[j] = 0.0
+                            low_X[j] = methylated_in_sample / target_reads
                         else:
                             # No reduction needed
                             low_X[j] = selected_X[i, j]
                 
-                variant_X.append(low_X)
-                variant_coverage.append(low_coverage)
-                variant_y.append(selected_y[i])
+                negative_samples_X.append(low_X)
+                negative_samples_coverage.append(low_coverage)
+                negative_samples_y.append(selected_y[i])
                 
                 # Very low coverage variant
-                very_low_coverage = selected_coverage[i] * 0.2  # 80% reduction
                 very_low_X = np.zeros_like(selected_X[i])
+                very_low_coverage = selected_coverage[i] * 0.2  # 80% reduction
                 
                 # Apply stochastic sampling for each marker
                 for j in range(len(selected_X[i])):
@@ -617,7 +610,7 @@ def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.2):
                         orig_reads = max(1, int(round(selected_coverage[i, j])))
                         
                         # Target read count for very low coverage
-                        target_reads = max(0, int(round(very_low_coverage[i, j])))
+                        target_reads = max(0, int(round(very_low_coverage[j])))
                         
                         if target_reads > 0:
                             # If we have any reads, sample them
@@ -635,30 +628,21 @@ def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.2):
                         else:
                             # No reads = no value (coverage will be 0)
                             very_low_X[j] = 0.0
-                            very_low_coverage[i, j] = 0.0
+                            very_low_coverage[j] = 0.0
                             
-                variant_X.append(very_low_X)
-                variant_coverage.append(very_low_coverage)
-                variant_y.append(selected_y[i])
-            
-            # Add variants to overall collection
-            negative_samples_X.extend(variant_X)
-            negative_samples_coverage.extend(variant_coverage)
-            negative_samples_y.extend(variant_y)
-            
-            total_added += len(variant_X)
+                negative_samples_X.append(very_low_X)
+                negative_samples_coverage.append(very_low_coverage)
+                negative_samples_y.append(selected_y[i])
+                
+                total_added += 3  # Original + low + very low
     
     # Combine original data with negative examples
     if total_added > 0:
         print(f"Adding {total_added} negative examples to the dataset")
         
-        negative_X = np.stack(negative_samples_X)
-        negative_coverage = np.stack(negative_samples_coverage)
-        negative_y = np.stack(negative_samples_y)
-        
-        combined_X = np.vstack([X, negative_X])
-        combined_coverage = np.vstack([coverage, negative_coverage])
-        combined_y = np.vstack([y, negative_y])
+        combined_X = np.vstack([X] + negative_samples_X)
+        combined_coverage = np.vstack([coverage] + negative_samples_coverage)
+        combined_y = np.vstack([y] + negative_samples_y)
     else:
         print("No negative examples were added")
         combined_X = X
@@ -687,7 +671,6 @@ def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.2):
     print(f"Added {final_count - original_count} explicit negative examples")
     
     return enhanced_loader
-
 
 def analyze_coverage_distribution(data_loader):
     """
