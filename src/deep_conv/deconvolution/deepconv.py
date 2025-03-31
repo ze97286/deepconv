@@ -4,17 +4,18 @@ import random
 import pandas as pd
 import numpy as np
 import torch
-from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from pathlib import Path
 from typing import Tuple 
 
 from deep_conv.benchmark.benchmark_utils import *
-from deep_conv.deconvolution.model import CellTypeDeconvolutionModel, TissueDeconvolutionDataset, AugmentedTissueDataset, coverage_matched_augmentation
+from deep_conv.deconvolution.model import CellTypeDeconvolutionModel, TissueDeconvolutionDataset
 from deep_conv.deconvolution.train import train_model
+from deep_conv.deconvolution.predict import predict_with_consensus
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')
+
 torch.autograd.set_detect_anomaly(True)
 from torch.utils.data import Sampler
 
@@ -837,7 +838,7 @@ def train_and_eval(
     # The 'names' set ensures we only keep relevant markers
     names = set(atlas.name.unique())
 
-    # 2) Build the training DataLoader from parquet files in train_pat_dir with coverage augmentation
+    # 2) Build the training DataLoader from parquet files in train_pat_dir
     clinical_dist_params = {
         'mean': 5.0,
         'std': 4.0,
@@ -877,18 +878,14 @@ def train_and_eval(
     # save the figure
     os.makedirs(output_path, exist_ok=True)
     plt.savefig(output_path/"augmentation_effect.png", dpi=300)
-        
-    # train_dl = load_training(train_pat_dir, atlas, names)
 
     # 3) Build DataLoaders for each validation subset
     
     if use_loyfer:
         validation_dls = {}
-        clinical_validation_dls = {}  # New clinical-like validation set
+        clinical_validation_dls = {}
         y_vals = {}
-        
         for cov in ['high','med','low']:
-            # For each validation set, get both standard and clinical variants
             tier1_dl, tier1_clinical_dl, t1_yval = get_validation_set_with_augmentation(
                 str(Path(eval_pat_dir+"_"+cov) / "tier1"), 
                 atlas, names, 
@@ -959,11 +956,9 @@ def train_and_eval(
 
     # Build an array mapping each marker to its cell type index
     target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
-
-    problematic_cell_types = ['Colon', 'Gastric', 'Small-intestine', 'Esophagus']
     enhanced_train_dl = enhance_with_negatives(
         train_dl, 
-        problematic_cell_types, 
+        cell_types, 
         cell_types,
         sample_fraction=0.2 
     )
@@ -973,54 +968,37 @@ def train_and_eval(
         num_markers=len(atlas),
         num_cell_types=len(cell_types),
         target_ids=target_ids,
-        cell_types=cell_types,
+        presence_models_dir=presence_models_dir,
         feature_dim=64,
     )
 
-    # 6) Train the model, saving best checkpoint to `output_path`
     combined_val_loaders = {**validation_dls, **clinical_validation_dls}
-    model, _ = train_model(
+    # 6) Train the model, saving best checkpoint to `output_path`
+    model, best_threshold = train_model(
         model=model,
-        train_loader=enhanced_train_dl,
+        train_loader=train_dl,
         val_loaders=combined_val_loaders,
-        model_path=output_path,
-        num_epochs=1000,
+        model_path=output_path
     )
     
-    # Evaluate on both standard and clinical validation sets
-    model.post_processing_enabled = False  # Disable for standard validation
     print("\nStandard Validation Sets:")
+
+    # 7) Evaluate final model predictions on each validation set
     for tier in validation_dls.keys():
         tier_dl = validation_dls[tier]
         y_val = y_vals[tier]
-        
-        deep_conv_estimation = model.predict(
-            tier_dl.dataset.fraction,
-            tier_dl.dataset.coverage,            
-        )
-        
-        deep_conv_eval_metrics = evaluate_performance(
-            y_val.detach().numpy(), 
-            deep_conv_estimation, 
-            cell_types
-        )
-        
+        # Use the simple predict function to get proportions
+        deep_conv_estimation = predict_with_consensus(model, tier_dl.dataset.fraction, tier_dl.dataset.coverage)
+        deep_conv_eval_metrics = evaluate_performance(y_val.detach().numpy(), deep_conv_estimation, cell_types)
         print(f"Standard validation metrics for tier {tier}")
         log_metrics(deep_conv_eval_metrics)
 
-
     print("\nClinical-Like Validation Sets:")
-    model.post_processing_enabled = True  
-    model.min_detection_threshold = 0.001  
-
     for tier in clinical_validation_dls.keys():
         tier_dl = clinical_validation_dls[tier]
         y_val = y_vals[tier]
         
-        deep_conv_estimation = model.predict(
-            tier_dl.dataset.fraction,
-            tier_dl.dataset.coverage,
-        )
+        deep_conv_estimation = predict_with_consensus(model, tier_dl.dataset.fraction, tier_dl.dataset.coverage)
         
         deep_conv_eval_metrics = evaluate_performance(
             y_val.detach().numpy(), 
