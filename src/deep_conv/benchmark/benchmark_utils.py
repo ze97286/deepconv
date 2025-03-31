@@ -1191,24 +1191,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         fig.add_vline(x=0, line_dash="dash", line_color="red", row=5, col=2)
         
         # --------- Row 6: Clinical Relevance Score and Summary Metrics ---------- #
-        # Create a summary table with key metrics
-        summary_metrics = {
-            'Metric': ['R²', 'Pearson r', 'Spearman r', 'MAE', 'RMSE', 'ROC-AUC', 'PR-AUC', 
-                       '0.1% Sensitivity', '0.5% Sensitivity', '1% Sensitivity'],
-            'Value': [
-                f"{r2:.3f}",
-                f"{pearson_r:.3f}",
-                f"{spearman_r:.3f}",
-                f"{mae:.5f}",
-                f"{rmse:.5f}",
-                f"{roc_auc:.3f}",
-                f"{avg_precision:.3f}",
-                f"{detection_metrics['threshold_0.001']['sensitivity']:.3f}",
-                f"{detection_metrics['threshold_0.005']['sensitivity']:.3f}",
-                f"{detection_metrics['threshold_0.010']['sensitivity']:.3f}"
-            ]
-        }
-        
+        # Create a summary text display instead of a table (which isn't compatible with xy subplots)
         # Calculate a composite Clinical Relevance Score (CRS)
         # Higher is better, weight components by clinical importance
         weights = {
@@ -1238,23 +1221,33 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         # Calculate final CRS (normalized to 0-100)
         crs = 100 * sum(crs_components) / sum(weights.values())
         
-        summary_metrics['Metric'].append('Clinical Relevance Score')
-        summary_metrics['Value'].append(f"{crs:.1f}/100")
+        # Create text summary
+        summary_text = [
+            f"<b>Summary Metrics for {cell_type}</b>",
+            f"R²: {r2:.3f} | Pearson r: {pearson_r:.3f} | Spearman r: {spearman_r:.3f}",
+            f"MAE: {mae:.5f} | RMSE: {rmse:.5f}",
+            f"ROC-AUC: {roc_auc:.3f} | PR-AUC: {avg_precision:.3f}",
+            f"Detection at 0.1%: {detection_metrics['threshold_0.001']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.001']['specificity']:.3f} spec",
+            f"Detection at 0.5%: {detection_metrics['threshold_0.005']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.005']['specificity']:.3f} spec",
+            f"Detection at 1.0%: {detection_metrics['threshold_0.010']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.010']['specificity']:.3f} spec",
+            f"<b>Clinical Relevance Score: {crs:.1f}/100</b>"
+        ]
         
-        # Create table in bottom section
-        fig.add_trace(
-            go.Table(
-                header=dict(
-                    values=list(summary_metrics.keys()),
-                    fill_color='paleturquoise',
-                    align='center'
-                ),
-                cells=dict(
-                    values=[summary_metrics[k] for k in summary_metrics.keys()],
-                    fill_color='lavender',
-                    align='center'
-                )
-            ),
+        # Add summary text annotation
+        fig.add_annotation(
+            xref="x domain",
+            yref="y domain",
+            x=0.5,
+            y=0.5,
+            text="<br>".join(summary_text),
+            showarrow=False,
+            font=dict(size=14),
+            align="center",
+            bordercolor="black",
+            borderwidth=1,
+            borderpad=10,
+            bgcolor="white",
+            opacity=0.8,
             row=6, col=1
         )
         
@@ -1406,7 +1399,6 @@ def calculate_metrics_by_dilution(y_true, y_pred, intended_dilutions):
         })
     
     return pd.DataFrame(metrics)
-
 
 def calculate_metrics_per_dilution(y_true, y_pred, intended_dilution):
     """
