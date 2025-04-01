@@ -77,10 +77,12 @@ def get_validation_set(eval_pat_dir: str, target_cell_type:int, names: set) -> T
           np.median(coverage_val, axis=1).mean())
     
     y_val = y_val.to_numpy()
+
+    markers, coverage, y_val = augment_presence_model_data(X_val, coverage_val, y_val, target_cell_type)
     
     val_dataset = BinaryCellTypeDataset(
-        fraction=X_val,
-        coverage=coverage_val,
+        fraction=markers,
+        coverage=coverage,
         y=y_val,
         # target_ids=list(atlas.columns[8:]),
         target_cell_type=target_cell_type,
@@ -100,6 +102,96 @@ def get_validation_set(eval_pat_dir: str, target_cell_type:int, names: set) -> T
     
     return val_loader, y_val
 
+
+def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_threshold=0.0005):
+    """
+    Create augmented training data for a specific cell type's presence model.
+    
+    Args:
+        markers: Cell-type specific marker values [samples, markers_for_cell_type]
+        coverage: Cell-type specific coverage values [samples, markers_for_cell_type]
+        y: Ground truth concentrations [samples, n_cell_types]
+        cell_type_idx: Index of the target cell type
+        presence_threshold: Minimum concentration to consider a cell type present
+        
+    Returns:
+        Augmented markers, coverage, and ground truth concentrations
+    """
+    augmented_markers = []
+    augmented_coverage = []
+    augmented_y = []
+    
+    # Keep the original data
+    augmented_markers.append(markers.copy())
+    augmented_coverage.append(coverage.copy())
+    augmented_y.append(y.copy())
+    
+    # 1. Augment true negative examples (where target cell type is absent)
+    negative_mask = y[:, cell_type_idx] < presence_threshold
+    negative_indices = np.where(negative_mask)[0]
+    
+    if len(negative_indices) > 0:
+        # Sample a subset of these negatives
+        sample_size = min(len(negative_indices), max(5000, len(negative_indices)//2))
+        sample_indices = np.random.choice(negative_indices, sample_size, replace=False)
+        
+        # Create variants with different coverage profiles
+        for coverage_factor in [1.0, 0.5, 0.2, 0.1, 0.05]:
+            neg_markers = markers[sample_indices].copy()
+            neg_coverage = coverage[sample_indices].copy() * coverage_factor
+            
+            # Add appropriate noise based on coverage level
+            noise_level = 0.1 / np.sqrt(coverage_factor + 0.1)
+            noise = np.random.normal(0, noise_level, size=neg_markers.shape)
+            neg_markers = np.clip(neg_markers + noise, 0, 1)
+            
+            # Zero out some markers completely for very low coverage
+            if coverage_factor < 0.3:
+                zero_prob = min(0.3, 0.1 / coverage_factor)
+                zero_mask = np.random.random(neg_markers.shape) < zero_prob
+                neg_coverage[zero_mask] = 0
+            
+            # Add to augmented datasets with the original labels
+            augmented_markers.append(neg_markers)
+            augmented_coverage.append(neg_coverage)
+            augmented_y.append(y[sample_indices].copy())
+    
+    # 2. Augment positive examples (where target cell type is present)
+    positive_mask = y[:, cell_type_idx] >= presence_threshold
+    positive_indices = np.where(positive_mask)[0]
+    
+    if len(positive_indices) > 0:
+        # Sample a subset
+        sample_size = min(len(positive_indices), 5000)
+        sample_indices = np.random.choice(positive_indices, sample_size, replace=False)
+        
+        # Create multiple copies with varied coverage
+        for coverage_factor in [1.0, 0.6, 0.3, 0.15, 0.08]:
+            pos_markers = markers[sample_indices].copy()
+            pos_coverage = coverage[sample_indices].copy() * coverage_factor
+            
+            # Add coverage-dependent noise
+            noise_level = 0.12 / np.sqrt(coverage_factor + 0.1)
+            noise = np.random.normal(0, noise_level, size=pos_markers.shape)
+            pos_markers = np.clip(pos_markers + noise, 0, 1)
+            
+            # Zero out some markers
+            if coverage_factor < 0.3:
+                zero_prob = min(0.2, 0.05 / coverage_factor)
+                zero_mask = np.random.random(pos_markers.shape) < zero_prob
+                pos_coverage[zero_mask] = 0
+            
+            # Add to augmented datasets with the original labels
+            augmented_markers.append(pos_markers)
+            augmented_coverage.append(pos_coverage)
+            augmented_y.append(y[sample_indices].copy())
+    
+    # Combine all augmented data
+    final_markers = np.vstack(augmented_markers)
+    final_coverage = np.vstack(augmented_coverage)
+    final_y = np.vstack(augmented_y)
+    
+    return final_markers, final_coverage, final_y
 
 def load_training(base_dir: str, names: set, target_cell_type: int, num_files: int = 5) -> DataLoader:
     """
@@ -181,10 +273,13 @@ def load_training(base_dir: str, names: set, target_cell_type: int, num_files: i
     # Convert the label DataFrame to numpy
     y_train = y.to_numpy()
     
-    # Build a TissueDeconvolutionDataset
+    # augment with positive and negative examples
+    markers, coverage, y_train = augment_presence_model_data(X_train, coverage_train, y_train, target_cell_type)
+
+    # Build a BinaryCellTypeDataset
     train_dataset = BinaryCellTypeDataset(
-        fraction=X_train,
-        coverage=coverage_train,
+        fraction=markers,
+        coverage=coverage,
         y=y_train,
         target_cell_type=target_cell_type,
     )
@@ -653,7 +748,10 @@ def analyse_detection_by_concentration(model, dataloader,
 
 
 def find_minimum_detection_concentration_continuous(
-    results_df, output_path,target_cell_type, detection_rate_threshold=0.95
+    results_df, output_path, target_cell_type, 
+    detection_rate_threshold=0.95,
+    confidence_level=0.95,  # Typically 0.95 for 95% confidence
+    min_sample_size=10      # Minimum samples required for reliable estimation
 ):
     """
     Find minimum detection concentration treating concentration as a continuous variable.
@@ -661,7 +759,21 @@ def find_minimum_detection_concentration_continuous(
     This approach directly calculates detection rates at each unique concentration
     value without binning, then finds the exact threshold where detection rate crosses
     the specified threshold.
+    
+    Args:
+        results_df: DataFrame with columns for concentration, ground_truth, and prediction
+        output_path: Path to save visualizations
+        target_cell_type: Name of the cell type being analyzed
+        detection_rate_threshold: Minimum acceptable detection rate (e.g., 0.95 for 95%)
+        confidence_level: Level for confidence interval calculations (e.g., 0.95 for 95% CI)
+        min_sample_size: Minimum number of samples required for reliable estimation
+        
+    Returns:
+        min_reliable_conc: Minimum concentration with detection rate above threshold
+        results_table: DataFrame with detection rates and confidence intervals by concentration
     """
+    from scipy import stats
+    
     # Identify column names
     concentration_col = 'concentration' if 'concentration' in results_df.columns else 'true_concentration'
     ground_truth_col = 'ground_truth' if 'ground_truth' in results_df.columns else 'label'
@@ -676,7 +788,7 @@ def find_minimum_detection_concentration_continuous(
     # Sort by concentration for cumulative analysis
     positive_samples = positive_samples.sort_values(by=concentration_col)
     
-    # Initialise arrays for tracking
+    # Initialize arrays for tracking
     concentrations = []
     detection_rates = []
     sample_counts = []
@@ -709,17 +821,62 @@ def find_minimum_detection_concentration_continuous(
         'sample_count': sample_counts
     })
     
-    # Find minimum concentration with detection rate at or above threshold
-    above_threshold = results_table[results_table['detection_rate'] >= detection_rate_threshold]
+    # Add columns for confidence intervals using Wilson score interval
+    results_table['reliable_estimate'] = False
+    results_table['lower_ci'] = None
+    results_table['upper_ci'] = None
     
-    if len(above_threshold) > 0:
-        min_reliable_conc = above_threshold['concentration'].min()
-        detection_at_min = above_threshold.loc[above_threshold['concentration'].idxmin(), 'detection_rate']
-        print(f"Minimum concentration with {detection_rate_threshold*100:.1f}% detection rate: {min_reliable_conc:.8f} " +
-              f"(actual rate: {detection_at_min:.4f})")
+    for idx, row in results_table.iterrows():
+        n = row['sample_count']
+        p = row['detection_rate']
+        
+        if n < min_sample_size:
+            # Mark as unreliable if sample size is too small
+            continue
+            
+        # Calculate Wilson score interval
+        z = stats.norm.ppf(1 - (1 - confidence_level) / 2)
+        denominator = 1 + z**2 / n
+        center = (p + z**2 / (2 * n)) / denominator
+        half_width = z * np.sqrt(p * (1 - p) / n + z**2 / (4 * n**2)) / denominator
+        
+        results_table.at[idx, 'reliable_estimate'] = True
+        results_table.at[idx, 'lower_ci'] = max(0, center - half_width)
+        results_table.at[idx, 'upper_ci'] = min(1, center + half_width)
+    
+    # Find minimum concentration with detection rate at or above threshold
+    reliable_results = results_table[results_table['reliable_estimate']]
+    
+    # First check with both detection rate and lower CI above threshold (conservative)
+    conservative_above_threshold = reliable_results[
+        (reliable_results['detection_rate'] >= detection_rate_threshold) & 
+        (reliable_results['lower_ci'] >= detection_rate_threshold)
+    ]
+    
+    if len(conservative_above_threshold) > 0:
+        min_reliable_conc = conservative_above_threshold['concentration'].min()
+        detection_at_min = conservative_above_threshold.loc[
+            conservative_above_threshold['concentration'].idxmin(), 'detection_rate'
+        ]
+        lower_ci_at_min = conservative_above_threshold.loc[
+            conservative_above_threshold['concentration'].idxmin(), 'lower_ci'
+        ]
+        print(f"Minimum concentration with {detection_rate_threshold*100:.1f}% detection rate (with 95% confidence): "
+              f"{min_reliable_conc:.8f} (rate: {detection_at_min:.4f}, lower CI: {lower_ci_at_min:.4f})")
+        is_conservative = True
     else:
-        min_reliable_conc = None
-        print(f"No concentration achieved {detection_rate_threshold*100:.1f}% detection rate")
+        # Fall back to just detection rate above threshold if no points satisfy the conservative criteria
+        above_threshold = results_table[results_table['detection_rate'] >= detection_rate_threshold]
+        if len(above_threshold) > 0:
+            min_reliable_conc = above_threshold['concentration'].min()
+            detection_at_min = above_threshold.loc[above_threshold['concentration'].idxmin(), 'detection_rate']
+            print(f"Minimum concentration with {detection_rate_threshold*100:.1f}% detection rate (lower confidence bound below threshold): "
+                  f"{min_reliable_conc:.8f} (actual rate: {detection_at_min:.4f})")
+            is_conservative = False
+        else:
+            min_reliable_conc = None
+            print(f"No concentration achieved {detection_rate_threshold*100:.1f}% detection rate")
+            is_conservative = False
     
     # Create a plot showing the continuous nature of the data
     fig = go.Figure()
@@ -737,6 +894,34 @@ def find_minimum_detection_concentration_continuous(
         )
     )
     
+    # Add confidence interval curves for reliable estimates
+    reliable_for_plot = reliable_results.sort_values('concentration')
+    
+    if len(reliable_for_plot) > 0:
+        fig.add_trace(
+            go.Scatter(
+                x=reliable_for_plot['concentration'],
+                y=reliable_for_plot['lower_ci'],
+                mode='lines',
+                line=dict(color='blue', width=1, dash='dot'),
+                name=f'{int(confidence_level*100)}% CI Lower',
+                showlegend=True
+            )
+        )
+        
+        fig.add_trace(
+            go.Scatter(
+                x=reliable_for_plot['concentration'],
+                y=reliable_for_plot['upper_ci'],
+                mode='lines',
+                line=dict(color='blue', width=1, dash='dot'),
+                name=f'{int(confidence_level*100)}% CI Upper',
+                showlegend=True,
+                fill='tonexty',  # Fill area between this trace and the previous one
+                fillcolor='rgba(0, 0, 255, 0.1)'  # Light blue fill
+            )
+        )
+    
     # Add sample points for reference
     fig.add_trace(
         go.Scatter(
@@ -744,11 +929,14 @@ def find_minimum_detection_concentration_continuous(
             y=results_table['detection_rate'],
             mode='markers',
             marker=dict(
-                color='blue',
+                color=results_table['reliable_estimate'].map({True: 'blue', False: 'gray'}),
                 size=8,
-                opacity=0.5
+                opacity=0.5,
+                symbol=results_table['reliable_estimate'].map({True: 'circle', False: 'x'})
             ),
             name='Data Points',
+            text=results_table['sample_count'].apply(lambda x: f"n={x}"),
+            hovertemplate='Concentration: %{x:.8f}<br>Detection Rate: %{y:.4f}<br>%{text}',
             showlegend=False
         )
     )
@@ -766,13 +954,16 @@ def find_minimum_detection_concentration_continuous(
     
     # Add marker for minimum reliable concentration if found
     if min_reliable_conc is not None:
+        marker_color = 'green' if is_conservative else 'orange'
+        marker_name = 'Min Reliable Conc (with CI)' if is_conservative else 'Min Reliable Conc'
+        
         fig.add_trace(
             go.Scatter(
                 x=[min_reliable_conc],
                 y=[detection_rate_threshold],
                 mode='markers',
-                marker=dict(color='green', size=15, symbol='star'),
-                name=f'Min Reliable Conc: {min_reliable_conc:.8f}'
+                marker=dict(color=marker_color, size=15, symbol='star'),
+                name=f'{marker_name}: {min_reliable_conc:.8f}'
             )
         )
         
@@ -799,7 +990,14 @@ def find_minimum_detection_concentration_continuous(
             range=[0, 1.05]
         ),
         height=600,
-        width=900
+        width=900,
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=0.01,
+            bgcolor="rgba(255, 255, 255, 0.8)"
+        )
     )
     
     # Add sample count as a separate trace with secondary y-axis
@@ -829,9 +1027,14 @@ def find_minimum_detection_concentration_continuous(
     if output_path:
         file_path = os.path.join(output_path, f"{target_cell_type}_detection_rate_continuous.html")
         fig.write_html(file_path)
-        print(f"Saved visualisation to {file_path}")
+        print(f"Saved visualization to {file_path}")
     
-    fig.write_html(f"{str(output_path)}/{target_cell_type}_minimum_detection_concentration.html")    
+    # Save the full result table with confidence intervals
+    results_table.to_csv(os.path.join(output_path, f"{target_cell_type}_detection_rates.csv"))
+    
+    # Save the plot
+    fig.write_html(f"{str(output_path)}/{target_cell_type}_minimum_detection_concentration.html")
+    
     return min_reliable_conc, results_table
 
 

@@ -89,9 +89,9 @@ def train_binary_classifier(
         # Calculate mean coverage for each sample
         sample_coverage = coverage.mean(dim=1, keepdim=True)
         
-        # Calculate coverage weights (higher weight for higher coverage)
-        # For coverage=5, weight=0.7; for coverage=20, weight=1.3; for coverage=50, weight=1.8
-        coverage_weights = torch.clamp(sample_coverage / 15.0, 0.5, 2.0)
+        # Calculate coverage weights (higher weight for lower coverage)
+        # This gives more training focus to low-coverage samples
+        coverage_weights = torch.clamp(1.0 + (10.0 / (sample_coverage + 5.0)), 0.8, 2.0)
         
         # Class weights based on positive/negative imbalance
         per_sample_weights = torch.ones_like(targets)
@@ -101,9 +101,33 @@ def train_binary_classifier(
         combined_weights = per_sample_weights * coverage_weights
         
         # Calculate weighted loss
-        return F.binary_cross_entropy_with_logits(
+        bce_loss = F.binary_cross_entropy_with_logits(
             logits, targets, weight=combined_weights, reduction='mean'
         )
+        
+        # Add low-coverage regularization term
+        # This penalizes high-confidence predictions in very low coverage scenarios
+        very_low_coverage_mask = (sample_coverage < 5.0).squeeze(-1)
+        
+        if torch.any(very_low_coverage_mask):
+            # Get logits for very low coverage samples
+            very_low_cov_logits = logits[very_low_coverage_mask]
+            
+            # Calculate probabilities
+            probs = torch.sigmoid(very_low_cov_logits)
+            
+            # Penalize high confidence (far from 0.5) for very low coverage
+            # This encourages the model to be more uncertain when coverage is very low
+            confidence_penalty = torch.abs(probs - 0.5).mean()
+            
+            # Add to the loss with a scaling factor
+            # 0.2 is a hyperparameter you can tune
+            reg_weight = 0.2
+            total_loss = bce_loss + reg_weight * confidence_penalty
+            
+            return total_loss
+        else:
+            return bce_loss
     
     # Tracking variables
     best_metric = 0.0
