@@ -384,16 +384,16 @@ def train_and_eval(
         y_vals = {}
         for cov in ['high','med','low']:
             tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "tier1"), target_cell_type, names)
-            tcells_dl, tcells_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "T-cells"), target_cell_type, names)
-            oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "OAC"), target_cell_type, names)
+            # tcells_dl, tcells_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "T-cells"), target_cell_type, names)
+            # oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "OAC"), target_cell_type, names)
 
             validation_dls[f"tier1_{cov}"] = tier1_dl
-            validation_dls[f"t-cells_{cov}"] = tcells_dl
-            validation_dls[f"oac_{cov}"] = oac_dl
+            # validation_dls[f"t-cells_{cov}"] = tcells_dl
+            # validation_dls[f"oac_{cov}"] = oac_dl
 
             y_vals[f"tier1_{cov}"] = t1_yval
-            y_vals[f"t-cells_{cov}"] = tcells_yval
-            y_vals[f"oac_{cov}"] = oac_yval        
+            # y_vals[f"t-cells_{cov}"] = tcells_yval
+            # y_vals[f"oac_{cov}"] = oac_yval        
     else:
         tier1_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "tier1"), target_cell_type, names)
         tier2_dl, _ = get_validation_set(str(Path(eval_pat_dir) / "OAC"), target_cell_type, names)
