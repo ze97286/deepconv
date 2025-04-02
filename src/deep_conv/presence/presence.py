@@ -419,19 +419,7 @@ def train_and_eval(
     )
 
     val_dl = validation_dls[f"tier1_low"]
-    if target_cell_type_name=="OAC":
-        check_prediction_distributions(trained_model, validation_dls[f"oac_low"])    
-        val_dl = validation_dls[f"oac_low"]
-    if target_cell_type_name=="CD4-T-cells":
-        check_prediction_distributions(trained_model, tier3_dl)
-        val_dl = tier3_dl
-    if target_cell_type_name=="CD8-T-cells":
-        check_prediction_distributions(trained_model, tier4_dl)
-        val_dl = tier4_dl
-    if target_cell_type_name=="T-cells":
-        check_prediction_distributions(trained_model, validation_dls[f"t-cells_low"])
-        val_dl = validation_dls[f"t-cells_low"]
-
+    
     results_df = analyse_detection_by_concentration(trained_model, val_dl, output_path, target_cell_type_name)
     find_minimum_detection_concentration_continuous(results_df, output_path, target_cell_type_name)
 
