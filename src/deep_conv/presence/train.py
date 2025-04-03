@@ -85,19 +85,37 @@ def train_binary_classifier(
     # Create loss function with class weights and coverage awareness
     weights = torch.tensor([1.0, class_weight], device=device)
     
-    def weighted_bce_loss(logits, targets, coverage):
+    def weighted_bce_loss(logits, targets, coverage, missing_rate=None):
         """
-        Coverage-aware weighted BCE loss with coverage-dependent thresholding.
+        Enhanced coverage-aware weighted BCE loss with:
+        1. Better handling of missing markers
+        2. Stronger regularization for very low coverage 
+        3. Calibration penalty for low confidence regions
+        
+        Args:
+            logits: [B, 1] Classification logits
+            targets: [B, 1] Binary targets
+            coverage: [B, M] Coverage values
+            missing_rate: [B, 1] Missing marker rate (optional, will be calculated if not provided)
         """
         # Calculate mean coverage for each sample
         sample_coverage = coverage.mean(dim=1, keepdim=True)
         
+        # Calculate missing rate if not provided
+        if missing_rate is None:
+            missing_rate = (coverage == 0).float().mean(dim=1, keepdim=True)
+        
         # Calculate coverage weights (higher weight for lower coverage)
-        coverage_weights = torch.clamp(1.0 + (10.0 / (sample_coverage + 5.0)), 0.8, 2.0)
+        # Enhanced to be more sensitive to very low coverage
+        coverage_weights = torch.where(
+            sample_coverage < 5.0,
+            torch.clamp(1.5 + (15.0 / (sample_coverage + 3.0)), 1.0, 3.0),  # Higher weight for very low coverage
+            torch.clamp(1.0 + (10.0 / (sample_coverage + 5.0)), 0.8, 2.0)   # Original scaling
+        )
         
         # Class weights based on positive/negative imbalance
         per_sample_weights = torch.ones_like(targets)
-        per_sample_weights[targets == 1] = weights[1]
+        per_sample_weights[targets == 1] = weights[1]  # Assuming 'weights' is defined outside
         
         # Add concentration-based weighting for more balanced focus
         target_conc = targets.view(-1)
@@ -111,7 +129,6 @@ def train_binary_classifier(
             
             # Initialize weights for different concentration ranges
             # Higher weights for very low and very high concentrations
-            # to ensure model learns these ranges well
             very_low_conc = (pos_conc > 0) & (pos_conc < 0.01)
             low_conc = (pos_conc >= 0.01) & (pos_conc < 0.05)
             med_conc = (pos_conc >= 0.05) & (pos_conc < 0.2)
@@ -119,10 +136,10 @@ def train_binary_classifier(
             very_high_conc = pos_conc >= 0.5
             
             # Assign weights to each concentration range
-            # Focusing more on very low and very high ranges
+            # Enhanced weights for extreme cases
             pos_weights = torch.ones_like(pos_conc)
-            pos_weights[very_low_conc] = 1.3
-            pos_weights[low_conc] = 1.1
+            pos_weights[very_low_conc] = 1.5  # Increased from 1.3
+            pos_weights[low_conc] = 1.2      # Increased from 1.1
             pos_weights[med_conc] = 1.0
             pos_weights[high_conc] = 1.2
             pos_weights[very_high_conc] = 1.5
@@ -130,37 +147,55 @@ def train_binary_classifier(
             # Update weights for positive samples
             conc_weights[pos_samples] = pos_weights
         
-        # Apply coverage-dependent bias adjustment
-        # This makes the model more conservative at low coverage and more sensitive at high coverage
+        # Apply coverage-dependent bias adjustment with missing marker awareness
+        # This makes the model more conservative at low coverage and high missing rates
         coverage_bias = 0.2 * torch.clamp((sample_coverage - 20.0) / 30.0, -1.0, 1.0)
-        adjusted_logits = logits + coverage_bias
+        missing_bias = -0.1 * torch.clamp(missing_rate * 2.0, 0.0, 1.0)  # Bias toward negative for many missing markers
+        combined_bias = coverage_bias + missing_bias
+        adjusted_logits = logits + combined_bias
         
         # Combine all weights: class balance × coverage × concentration
-        combined_weights = per_sample_weights * coverage_weights * conc_weights.view(-1, 1)
+        # Add missing rate factor to give higher weight to samples with fewer missing markers
+        missing_factor = torch.clamp(1.0 - missing_rate * 0.5, 0.5, 1.0)  # Reduce weight for high missing rate
+        combined_weights = per_sample_weights * coverage_weights * conc_weights.view(-1, 1) * missing_factor
         
         # Calculate weighted loss with the adjusted logits
         bce_loss = F.binary_cross_entropy_with_logits(
             adjusted_logits, targets, weight=combined_weights, reduction='mean'
         )
         
-        # Add low-coverage regularization term
-        very_low_coverage_mask = (sample_coverage < 5.0).squeeze(-1)
-        if torch.any(very_low_coverage_mask):
-            # Get logits for very low coverage samples
-            very_low_cov_logits = logits[very_low_coverage_mask]
+        # Enhanced regularization for very low coverage and high missing rate
+        very_low_cov_mask = (sample_coverage < 5.0).squeeze(-1)
+        high_missing_mask = (missing_rate > 0.3).squeeze(-1)
+        challenging_mask = very_low_cov_mask | high_missing_mask
+        
+        # Add focal loss component for challenging samples
+        if torch.any(challenging_mask):
+            # Get logits for challenging samples
+            challenging_logits = logits[challenging_mask]
+            challenging_targets = targets[challenging_mask]
             
             # Calculate probabilities
-            probs = torch.sigmoid(very_low_cov_logits)
+            probs = torch.sigmoid(challenging_logits)
             
-            # Penalize high confidence for very low coverage
+            # Focal loss component (focus on hard examples)
+            gamma = 2.0
+            pt = torch.where(challenging_targets == 1, probs, 1 - probs)
+            focal_loss = -((1 - pt) ** gamma) * torch.log(pt + 1e-7)
+            
+            # Penalize high confidence for challenging samples
             confidence_penalty = torch.abs(probs - 0.5).mean()
             
+            # Scale regularization based on how challenging the samples are
+            challenge_factor = missing_rate[challenging_mask].mean() + (5.0 / (sample_coverage[challenging_mask].mean() + 1e-5))
+            reg_weight = torch.clamp(0.2 * challenge_factor, 0.2, 0.5)
+            
             # Add to the loss
-            reg_weight = 0.2
-            total_loss = bce_loss + reg_weight * confidence_penalty
+            total_loss = bce_loss + reg_weight * confidence_penalty + 0.1 * focal_loss.mean()
             return total_loss
         else:
             return bce_loss
+        
     # Tracking variables
     best_metric = 0.0
     best_epoch = 0
@@ -189,14 +224,19 @@ def train_binary_classifier(
             high_cov_mask = (mean_coverage >= coverage_med_threshold)
             
             # Forward pass with mixed precision if enabled
+            # Forward pass with mixed precision if enabled
             if scaler is not None:
                 with torch.cuda.amp.autocast():
-                    logits, _ = model(marker_values, coverage)
-                    loss = weighted_bce_loss(logits, labels, coverage)
+                    # Get logits and missing_rate from the model
+                    logits, _, missing_rate = model(marker_values, coverage)
+                    # Pass missing_rate to the loss function
+                    loss = weighted_bce_loss(logits, labels, coverage, missing_rate)
                     loss = loss / gradient_accumulation  # Scale for gradient accumulation
             else:
-                logits, _ = model(marker_values, coverage)
-                loss = weighted_bce_loss(logits, labels, coverage)
+                # Get logits and missing_rate from the model
+                logits, _, missing_rate = model(marker_values, coverage)
+                # Pass missing_rate to the loss function
+                loss = weighted_bce_loss(logits, labels, coverage, missing_rate)
                 loss = loss / gradient_accumulation  # Scale for gradient accumulation
             
             # Backward pass with mixed precision
@@ -317,8 +357,8 @@ def train_binary_classifier(
                     high_cov_mask = (mean_coverage >= coverage_med_threshold)
                     
                     # Forward pass
-                    logits, _ = model(marker_values, coverage)
-                    loss = weighted_bce_loss(logits, labels, coverage)
+                    logits, _, missing_rate = model(marker_values, coverage)
+                    loss = weighted_bce_loss(logits, labels, coverage, missing_rate)
                     
                     # Calculate metrics
                     probabilities = torch.sigmoid(logits)

@@ -31,6 +31,96 @@ def set_seed(seed: int = 42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+def analyze_dataset_distribution(dataset_name, dataloader):
+    """Analyze and log the distribution of samples in a dataset"""
+    all_labels = []
+    all_coverages = []
+    all_missing_percentages = []
+    for batch in dataloader:
+        marker_values = batch['X'].numpy()
+        coverage = batch['coverage'].numpy()
+        if 'label' in batch:
+            labels = batch['label'].numpy()
+            all_labels.append(labels)
+        elif 'concentration' in batch:
+            concentrations = batch['concentration'].numpy()
+            # Create binary labels based on presence threshold
+            presence_threshold = 0.0005
+            labels = (concentrations >= presence_threshold).astype(float)
+            all_labels.append(labels)
+        # Calculate mean coverage for each sample
+        mean_coverage = coverage.mean(axis=1)
+        all_coverages.append(mean_coverage)
+        # Calculate missing marker percentage for each sample
+        missing_percentages = (coverage == 0).sum(axis=1) / coverage.shape[1] * 100
+        all_missing_percentages.append(missing_percentages)
+    # Combine all data
+    all_labels = np.concatenate(all_labels).flatten()
+    all_coverages = np.concatenate(all_coverages).flatten()
+    all_missing_percentages = np.concatenate(all_missing_percentages).flatten()
+    # Calculate statistics
+    positive_mask = all_labels > 0.5
+    negative_mask = ~positive_mask
+    print(f"\n=== {dataset_name} Distribution Analysis ===")
+    print(f"Total samples: {len(all_labels)}")
+    print(f"Positive samples: {np.sum(positive_mask)} ({np.mean(positive_mask)*100:.1f}%)")
+    print(f"Negative samples: {np.sum(negative_mask)} ({np.mean(negative_mask)*100:.1f}%)")
+    # Coverage distribution
+    high_cov = all_coverages >= 30.0
+    med_cov = (all_coverages >= 10.0) & (all_coverages < 30.0)
+    low_cov = all_coverages < 10.0
+    very_low_cov = all_coverages < 5.0
+    print("\nCoverage distribution:")
+    print(f"High coverage (≥30): {np.sum(high_cov)} ({np.mean(high_cov)*100:.1f}%)")
+    print(f"Medium coverage (10-30): {np.sum(med_cov)} ({np.mean(med_cov)*100:.1f}%)")
+    print(f"Low coverage (<10): {np.sum(low_cov)} ({np.mean(low_cov)*100:.1f}%)")
+    print(f"Very low coverage (<5): {np.sum(very_low_cov)} ({np.mean(very_low_cov)*100:.1f}%)")
+    # Class distribution by coverage
+    print("\nClass distribution by coverage:")
+    print(f"High coverage, positive: {np.sum(high_cov & positive_mask)} ({np.mean(positive_mask[high_cov])*100:.1f}%)")
+    print(f"High coverage, negative: {np.sum(high_cov & negative_mask)} ({np.mean(negative_mask[high_cov])*100:.1f}%)")
+    print(f"Medium coverage, positive: {np.sum(med_cov & positive_mask)} ({np.mean(positive_mask[med_cov])*100:.1f}%)")
+    print(f"Medium coverage, negative: {np.sum(med_cov & negative_mask)} ({np.mean(negative_mask[med_cov])*100:.1f}%)")
+    print(f"Low coverage, positive: {np.sum(low_cov & positive_mask)} ({np.mean(positive_mask[low_cov])*100:.1f}%)")
+    print(f"Low coverage, negative: {np.sum(low_cov & negative_mask)} ({np.mean(negative_mask[low_cov])*100:.1f}%)")
+    # Missing marker statistics
+    print("\nMissing marker statistics:")
+    print(f"Average % missing markers: {np.mean(all_missing_percentages):.1f}%")
+    print(f"Samples with >10% missing: {np.sum(all_missing_percentages > 10)} ({np.mean(all_missing_percentages > 10)*100:.1f}%)")
+    print(f"Samples with >30% missing: {np.sum(all_missing_percentages > 30)} ({np.mean(all_missing_percentages > 30)*100:.1f}%)")
+    print(f"Samples with >50% missing: {np.sum(all_missing_percentages > 50)} ({np.mean(all_missing_percentages > 50)*100:.1f}%)")
+    # Correlation between missing markers and coverage
+    corr = np.corrcoef(all_coverages, all_missing_percentages)[0, 1]
+    print(f"\nCorrelation between coverage and missing percentage: {corr:.3f}")
+    # Missing marker distribution by class
+    print("\nMissing marker percentage by class:")
+    print(f"Positive samples: {np.mean(all_missing_percentages[positive_mask]):.1f}%")
+    print(f"Negative samples: {np.mean(all_missing_percentages[negative_mask]):.1f}%")
+    
+    return {
+        'class_balance': {
+            'positive': np.mean(positive_mask),
+            'negative': np.mean(negative_mask)
+        },
+        'coverage': {
+            'high': np.mean(high_cov),
+            'medium': np.mean(med_cov),
+            'low': np.mean(low_cov),
+            'very_low': np.mean(very_low_cov)
+        },
+        'missing_markers': {
+            'average': np.mean(all_missing_percentages),
+            '>10%': np.mean(all_missing_percentages > 10),
+            '>30%': np.mean(all_missing_percentages > 30),
+            '>50%': np.mean(all_missing_percentages > 50)
+        },
+        'missing_by_class': {
+            'positive': np.mean(all_missing_percentages[positive_mask]),
+            'negative': np.mean(all_missing_percentages[negative_mask])
+        },
+        'coverage_missing_correlation': corr
+    }
+
 
 def get_validation_set(eval_pat_dir: str, target_cell_type:int, names: set) -> Tuple[DataLoader, torch.Tensor]:
     """
@@ -822,15 +912,16 @@ def train_and_eval(
     # 2) Build the training DataLoader from parquet files in train_pat_dir
     train_dl = load_training(train_pat_dir, names, target_cell_type=target_cell_type)
     # 3) Build DataLoaders for each validation subset
+    analyze_dataset_distribution("training", train_dl)
 
     if use_loyfer:
         validation_dls = {}
         y_vals = {}
         for cov in ['high','med','low']:
             tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "tier1"), target_cell_type, names)
+            analyze_dataset_distribution(cov+"_validation", tier1_dl)
             # tcells_dl, tcells_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "T-cells"), target_cell_type, names)
             # oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "OAC"), target_cell_type, names)
-
             validation_dls[f"tier1_{cov}"] = tier1_dl
             # validation_dls[f"t-cells_{cov}"] = tcells_dl
             # validation_dls[f"oac_{cov}"] = oac_dl

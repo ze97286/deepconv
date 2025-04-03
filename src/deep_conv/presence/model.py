@@ -70,18 +70,16 @@ class BinaryCellTypeDataset(Dataset):
 
 class SingleCellTypePresenceModel(nn.Module):
     """
-    An enhanced binary classifier for detecting T-cells using multi-resolution analysis.
-    
-    This model addresses the low SNR challenge by analyzing the methylation markers
-    at multiple resolutions, allowing it to detect patterns that might be obscured
-    by noise at a single resolution.
+    An enhanced binary classifier for cell type detection with improved handling of
+    low coverage and missing markers.
     
     Key features:
     1. Multi-resolution analysis with pooling at different scales
-    2. Coverage-aware feature extraction
-    3. Attention mechanism to focus on the most informative markers
-    4. Residual connections for better feature extraction
-    5. Coverage-dependent confidence factors
+    2. Enhanced coverage-aware feature extraction
+    3. Explicit missing marker handling
+    4. Attention mechanism to focus on the most informative markers
+    5. Coverage-adaptive prediction threshold
+    6. Improved confidence factors for very low coverage
     """
     def __init__(self, feature_dim=64, dropout_rate=0.3):
         super().__init__()
@@ -120,9 +118,9 @@ class SingleCellTypePresenceModel(nn.Module):
             nn.Sigmoid()
         )
         
-        # Classification head
+        # Classification head with missing marker information
         self.classifier = nn.Sequential(
-            nn.Linear(feature_dim, 64),
+            nn.Linear(feature_dim + 1, 64),  # +1 for missing rate feature
             nn.ReLU(),
             nn.Dropout(dropout_rate),
             nn.Linear(64, 32),
@@ -169,7 +167,7 @@ class SingleCellTypePresenceModel(nn.Module):
     
     def forward(self, marker_values, coverage):
         """
-        Forward pass of the enhanced binary classifier using multi-resolution analysis.
+        Forward pass of the enhanced binary classifier.
         
         Args:
             marker_values: [B, M] Methylation values
@@ -178,22 +176,32 @@ class SingleCellTypePresenceModel(nn.Module):
         Returns:
             logits: [B, 1] Logits for binary classification
             attention_weights: [B, M] Attention weights for each marker
+            missing_rate: [B, 1] Percentage of missing markers per sample
         """
         B, M = marker_values.shape
         
         # Create valid markers mask (coverage > 0)
         valid_mask = (coverage > 0)
         
+        # Calculate missing marker rate for each sample
+        missing_rate = (1.0 - valid_mask.float().mean(dim=1, keepdim=True))
+        
         # Replace NaNs with zeros (these will be masked out later)
         marker_values_safe = torch.where(valid_mask, marker_values, torch.zeros_like(marker_values))
         
-        # Coverage-aware normalization
+        # Coverage-aware normalization with enhanced confidence factor
         # Reduce confidence for low coverage markers
         coverage_safe = coverage.clone() + 1e-10  # Add epsilon to avoid division by zero
         
-        # Create a confidence factor that scales with coverage
-        # For coverage=1, factor=0.2; for coverage=5, factor=0.5; for coverage=20, factor=0.8
-        confidence_factor = torch.clamp(coverage_safe / (coverage_safe + 10.0), 0.3, 1.0)
+        # Enhanced confidence factor - more conservative at very low coverage
+        confidence_factor = torch.clamp(
+            torch.where(
+                coverage_safe < 5.0,
+                coverage_safe / (coverage_safe + 15.0),  # More skeptical of very low coverage
+                coverage_safe / (coverage_safe + 10.0)   # Original scaling for higher coverage
+            ),
+            0.2, 1.0  # Lower minimum confidence for very low coverage
+        )
         
         # Apply the confidence factor to marker values
         normalised_markers = marker_values_safe * confidence_factor
@@ -256,7 +264,7 @@ class SingleCellTypePresenceModel(nn.Module):
         # Calculate attention weights
         attention_flat = self.attention(features).reshape(B, M)  # [B, M]
         
-        # Apply valid mask to attention and weight by coverage confidence
+        # Apply valid mask to attention and weight by confidence factor
         masked_attention = attention_flat * valid_mask.float() * confidence_factor
         
         # Normalize attention weights to sum to 1 for each sample
@@ -274,10 +282,13 @@ class SingleCellTypePresenceModel(nn.Module):
         # Aggregate features across markers
         aggregated_features = weighted_features.sum(dim=1)  # [B, feature_dim]
         
-        # Final classification
-        logits = self.classifier(aggregated_features)
+        # Include missing marker rate as an additional feature
+        enhanced_features = torch.cat([aggregated_features, missing_rate], dim=1)
         
-        return logits, normalized_attention
+        # Final classification
+        logits = self.classifier(enhanced_features)
+        
+        return logits, normalized_attention, missing_rate
     
     def predict(self, marker_values, coverage, threshold=0.5):
         """
@@ -292,7 +303,43 @@ class SingleCellTypePresenceModel(nn.Module):
             predictions: [B] Binary predictions (0/1)
             probabilities: [B] Prediction probabilities
         """
-        logits, _ = self.forward(marker_values, coverage)
+        logits, _, _ = self.forward(marker_values, coverage)
         probabilities = torch.sigmoid(logits).squeeze(-1)
         predictions = (probabilities >= threshold).float()
         return predictions, probabilities
+    
+    def adaptive_predict(self, marker_values, coverage):
+        """
+        Make predictions with coverage-adaptive threshold.
+        
+        Args:
+            marker_values: [B, M] Methylation values
+            coverage: [B, M] Coverage values
+        
+        Returns:
+            predictions: [B] Binary predictions (0/1)
+            probabilities: [B] Prediction probabilities
+            thresholds: [B] Coverage-adaptive thresholds used for each sample
+        """
+        logits, _, missing_rate = self.forward(marker_values, coverage)
+        probabilities = torch.sigmoid(logits).squeeze(-1)
+        
+        # Calculate mean coverage for each sample
+        mean_coverage = coverage.mean(dim=1)
+        
+        # Create base threshold
+        base_threshold = 0.5
+        
+        # Adjust threshold based on coverage and missing rate
+        # Higher threshold (more conservative) for lower coverage and more missing markers
+        coverage_adjustment = torch.clamp(0.15 - 0.005 * mean_coverage, 0.0, 0.15)
+        missing_adjustment = torch.clamp(0.15 * missing_rate.squeeze(), 0.0, 0.15)
+        
+        # Combined adjustment (max 0.25 total adjustment)
+        total_adjustment = torch.clamp(coverage_adjustment + missing_adjustment, 0.0, 0.25)
+        adaptive_threshold = base_threshold + total_adjustment
+        
+        # Make predictions
+        predictions = (probabilities >= adaptive_threshold).float()
+        
+        return predictions, probabilities, adaptive_threshold
