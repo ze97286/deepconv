@@ -1211,25 +1211,25 @@ def eval_model(presence_models_dir, target_cell_type_name):
         dataloaders['tier1_'+cov] = tier1_dl
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
-    # diagnostic_results = run_high_coverage_diagnostic(model, tier1_dl, device)
-    # print(diagnostic_results)
-    # standardized_results = evaluate_with_standardized_metrics(model, dataloaders)
-    # max_balanced_high_cov = 0
-    # max_balanced_low_cov = 0
-    # best_dataset = None
-    # for dataset_name, metrics in standardized_results.items():
-    #     if 'balanced_high_cov' in metrics and 'balanced_low_cov' in metrics:
-    #         high_bal_acc = metrics['balanced_high_cov']['balanced_acc']
-    #         low_bal_acc = metrics['balanced_low_cov']['balanced_acc']
-    #         # We want both high and low coverage to perform well
-    #         combined_score = 0.4 * high_bal_acc + 0.6 * low_bal_acc
-    #         if combined_score > max_balanced_high_cov + max_balanced_low_cov:
-    #             max_balanced_high_cov = high_bal_acc
-    #             max_balanced_low_cov = low_bal_acc
-    #             best_dataset = dataset_name
-    # print(f"Best validation set: {best_dataset}")
-    # print(f"  Balanced High Coverage Accuracy: {max_balanced_high_cov:.4f}")
-    # print(f"  Balanced Low Coverage Accuracy: {max_balanced_low_cov:.4f}")
+    diagnostic_results = run_high_coverage_diagnostic(model, tier1_dl, device)
+    print(diagnostic_results)
+    standardized_results = evaluate_with_standardized_metrics(model, dataloaders)
+    max_balanced_high_cov = 0
+    max_balanced_low_cov = 0
+    best_dataset = None
+    for dataset_name, metrics in standardized_results.items():
+        if 'balanced_high_cov' in metrics and 'balanced_low_cov' in metrics:
+            high_bal_acc = metrics['balanced_high_cov']['balanced_acc']
+            low_bal_acc = metrics['balanced_low_cov']['balanced_acc']
+            # We want both high and low coverage to perform well
+            combined_score = 0.4 * high_bal_acc + 0.6 * low_bal_acc
+            if combined_score > max_balanced_high_cov + max_balanced_low_cov:
+                max_balanced_high_cov = high_bal_acc
+                max_balanced_low_cov = low_bal_acc
+                best_dataset = dataset_name
+    print(f"Best validation set: {best_dataset}")
+    print(f"  Balanced High Coverage Accuracy: {max_balanced_high_cov:.4f}")
+    print(f"  Balanced Low Coverage Accuracy: {max_balanced_low_cov:.4f}")
     evaluate_model_with_visualizations(model, dataloaders, cell_type=target_cell_type_name, save_path=presence_models_dir)
 
 # 

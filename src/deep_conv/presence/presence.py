@@ -125,11 +125,11 @@ def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_th
     # 1. Augment true negative examples (where target cell type is absent)
     negative_mask = y[:, cell_type_idx] < presence_threshold
     
-    # Stratify negative examples by coverage
+    # Stratify negative examples by coverage - INCREASE LOW COVERAGE COUNTS
     strata = [
-        (high_cov_mask & negative_mask, "high_neg", 6000),  # Extra negatives for high coverage
-        (med_cov_mask & negative_mask, "med_neg", 4000),
-        (low_cov_mask & negative_mask, "low_neg", 3000)
+        (high_cov_mask & negative_mask, "high_neg", 6000), 
+        (med_cov_mask & negative_mask, "med_neg", 6000),  # Increased from 4000
+        (low_cov_mask & negative_mask, "low_neg", 8000)   # Increased from 3000
     ]
     
     for combined_mask, stratum_name, max_samples in strata:
@@ -138,15 +138,15 @@ def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_th
         if len(indices) > 0:
             # Sample from this stratum
             sample_size = min(len(indices), max_samples)
-            sample_indices = np.random.choice(indices, sample_size, replace=False)
+            sample_indices = np.random.choice(indices, sample_size, replace=True)  # Allow replacement for small datasets
             
-            # Set coverage factors based on stratum
+            # Set coverage factors based on stratum - MORE LOW COVERAGE FACTORS
             if "high" in stratum_name:
                 cov_factors = [1.0, 0.7, 0.4, 0.2, 0.1]
             elif "med" in stratum_name:
-                cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08]
-            else:  # low coverage
-                cov_factors = [1.0, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005]
+                cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08, 0.05]  # Added 0.05
+            else:  # low coverage - MORE ULTRA-LOW FACTORS
+                cov_factors = [1.0, 0.5, 0.3, 0.2, 0.1, 0.05, 0.03, 0.01, 0.005, 0.003]  # Added more factors
             
             for coverage_factor in cov_factors:
                 neg_markers = markers[sample_indices].copy()
@@ -177,18 +177,19 @@ def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_th
                 
                 neg_markers = np.clip(neg_markers + noise, 0, 1)
                 
-                # Zero out markers with more aggressive probabilities
-                if coverage_factor < 0.5:
+                # INCREASE MARKER ZEROING FOR ALL COVERAGE LEVELS
+                if coverage_factor < 0.8:  # Lower threshold to apply zeroing
                     # More aggressive zeroing - higher chance at lower coverage
-                    zero_prob = min(0.6, 0.25 / coverage_factor)
+                    zero_prob = min(0.75, 0.3 / (coverage_factor + 0.05))  # More aggressive
                     
                     # Optional: create contiguous dropout regions to simulate technical artifacts
-                    if np.random.random() < 0.3:  # 30% chance of contiguous dropouts
+                    # INCREASE FREQUENCY OF DROPOUT REGIONS
+                    if np.random.random() < 0.5:  # Increased from 0.3
                         for i in range(len(neg_markers)):
-                            # Create 1-3 dropout regions per sample
-                            for _ in range(np.random.randint(1, 4)):
-                                # Dropout region length between 2-8 markers
-                                length = np.random.randint(2, min(9, neg_markers.shape[1]//3))
+                            # Create 1-4 dropout regions per sample
+                            for _ in range(np.random.randint(1, 5)):  # Increased max regions
+                                # Dropout region length between 2-12 markers
+                                length = np.random.randint(2, min(13, neg_markers.shape[1]//3))  # Increased max length
                                 if length > 0 and neg_markers.shape[1] > length:
                                     start = np.random.randint(0, neg_markers.shape[1] - length)
                                     neg_coverage[i, start:start+length] = 0
@@ -204,13 +205,14 @@ def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_th
     
     # 2. Augment positive examples (where target cell type is present)
     # Stratify positives by concentration and coverage
+    # INCREASE VERY LOW CONCENTRATION COUNTS
     ranges = [
-        (presence_threshold, 0.005, "very_low", 8000),
-        (0.005, 0.01, "low", 7000),
-        (0.01, 0.05, "med_low", 6000),
-        (0.05, 0.2, "medium", 5000),
-        (0.2, 0.5, "high", 4000),
-        (0.5, 1.0, "very_high", 3000)
+        (presence_threshold, 0.005, "very_low", 10000),  # Increased from 8000
+        (0.005, 0.01, "low", 8000),                      # Increased from 7000
+        (0.01, 0.05, "med_low", 6000),                   # Same
+        (0.05, 0.2, "medium", 5000),                     # Same
+        (0.2, 0.5, "high", 4000),                        # Same
+        (0.5, 1.0, "very_high", 3000)                    # Same
     ]
     
     for min_conc, max_conc, stratum_name, max_samples in ranges:
@@ -226,37 +228,39 @@ def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_th
             
             if len(indices) > 0:
                 # Sample from this stratum (adjust sample size based on coverage)
+                # INCREASE LOW COVERAGE SAMPLE SIZES
                 if "high_" in cov_name:
-                    sample_size = min(len(indices), max_samples // 3)
+                    sample_size = min(len(indices), max_samples // 4)  # Reduced from 1/3
                 elif "med_" in cov_name:
-                    sample_size = min(len(indices), max_samples // 3)
-                else:  # low coverage
-                    sample_size = min(len(indices), max_samples // 2)
+                    sample_size = min(len(indices), max_samples // 3)  # Same
+                else:  # low coverage - INCREASED PROPORTION
+                    sample_size = min(len(indices), max_samples // 2 + max_samples // 4)  # Increased from 1/2
                 
-                sample_indices = np.random.choice(indices, sample_size, replace=False)
+                sample_indices = np.random.choice(indices, sample_size, replace=True)  # Allow replacement
                 
                 # Different coverage ranges based on concentration and coverage stratum
+                # ADD MORE ULTRA-LOW COVERAGE FACTORS FOR ALL STRATA
                 if stratum_name in ["very_low", "low"]:
                     if "high_" in cov_name:
-                        cov_factors = [1.0, 0.6, 0.3, 0.15]
+                        cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08, 0.04]  # Added lower factors
                     elif "med_" in cov_name:
-                        cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08]
+                        cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08, 0.04, 0.02]  # Added lower factors
                     else:  # low coverage
-                        cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08, 0.04, 0.02]
+                        cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08, 0.04, 0.02, 0.01, 0.005]  # Added lower factors
                 elif stratum_name in ["med_low", "medium"]:
                     if "high_" in cov_name:
-                        cov_factors = [1.0, 0.6, 0.3]
+                        cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08]  # Added lower factors
                     elif "med_" in cov_name:
-                        cov_factors = [1.0, 0.6, 0.3, 0.15]
+                        cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08, 0.04]  # Added lower factors
                     else:  # low coverage
-                        cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08, 0.04]
+                        cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08, 0.04, 0.02, 0.01]  # Added lower factors
                 else:  # high and very_high
                     if "high_" in cov_name:
-                        cov_factors = [1.0, 0.7, 0.4]
+                        cov_factors = [1.0, 0.7, 0.4, 0.2, 0.1]  # Added lower factors
                     elif "med_" in cov_name:
-                        cov_factors = [1.0, 0.7, 0.4, 0.2]
+                        cov_factors = [1.0, 0.7, 0.4, 0.2, 0.1, 0.05]  # Added lower factors
                     else:  # low coverage
-                        cov_factors = [1.0, 0.7, 0.4, 0.2, 0.1, 0.05]
+                        cov_factors = [1.0, 0.7, 0.4, 0.2, 0.1, 0.05, 0.03, 0.01]  # Added lower factors
                 
                 for coverage_factor in cov_factors:
                     pos_markers = markers[sample_indices].copy()
@@ -293,24 +297,24 @@ def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_th
                         
                     pos_markers = np.clip(pos_markers + noise, 0, 1)
                     
-                    # Zero out some markers, different strategy by concentration
-                    if coverage_factor < 0.3:
+                    # INCREASED ZEROING FOR POSITIVE SAMPLES TO MATCH NEGATIVES BETTER
+                    if coverage_factor < 0.4:  # Lowered threshold (was 0.3)
                         # Scale zeroing probability by concentration stratum
                         if stratum_name in ["very_low", "low"]:
-                            base_zero_prob = 0.07  # Higher for low conc
+                            base_zero_prob = 0.1  # Increased
                         elif stratum_name in ["med_low", "medium"]:
-                            base_zero_prob = 0.05
+                            base_zero_prob = 0.08  # Increased
                         else:
-                            base_zero_prob = 0.03  # Lower for high conc
+                            base_zero_prob = 0.06  # Increased
                             
-                        zero_prob = min(0.5, base_zero_prob / coverage_factor)
+                        zero_prob = min(0.7, base_zero_prob / coverage_factor)  # More aggressive
                         
-                        # Optional: create contiguous dropout regions
-                        if np.random.random() < 0.3:
+                        # INCREASE FREQUENCY OF CONTIGUOUS DROPOUT FOR POSITIVES
+                        if np.random.random() < 0.4:  # Increased from 0.3
                             for i in range(len(pos_markers)):
-                                # Create 1-2 dropout regions per sample
-                                for _ in range(np.random.randint(1, 3)):
-                                    length = np.random.randint(2, min(7, pos_markers.shape[1]//4))
+                                # Create 1-3 dropout regions per sample
+                                for _ in range(np.random.randint(1, 4)):  # Increased max regions
+                                    length = np.random.randint(2, min(10, pos_markers.shape[1]//4))  # Increased max length
                                     if length > 0 and pos_markers.shape[1] > length:
                                         start = np.random.randint(0, pos_markers.shape[1] - length)
                                         pos_coverage[i, start:start+length] = 0
@@ -365,18 +369,17 @@ def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_th
                 augmented_y.append(enriched_y)
     
     # 4. Add extremely challenging cases for robustness
-    # These are variants with very extreme coverage reduction and high marker dropout
     # Focus on medium and high concentrations for robustness training
     focus_pos_mask = (y[:, cell_type_idx] >= 0.05)
     focus_pos_indices = np.where(focus_pos_mask)[0]
     
     if len(focus_pos_indices) > 0:
-        # Sample a smaller subset for extreme augmentation
-        sample_size = min(len(focus_pos_indices), 2000)
-        sample_indices = np.random.choice(focus_pos_indices, sample_size, replace=False)
+        # Sample a larger subset for extreme augmentation - INCREASED COUNT
+        sample_size = min(len(focus_pos_indices), 4000)  # Increased from 2000
+        sample_indices = np.random.choice(focus_pos_indices, sample_size, replace=True)
         
-        # Create extreme variants
-        for coverage_factor in [0.03, 0.015, 0.008]:
+        # Create extreme variants - ADDED MORE EXTREME FACTORS
+        for coverage_factor in [0.05, 0.03, 0.015, 0.008, 0.004, 0.002]:  # Added 0.05, 0.004, 0.002
             extreme_markers = markers[sample_indices].copy()
             extreme_coverage = coverage[sample_indices].copy() * coverage_factor
             
@@ -385,8 +388,8 @@ def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_th
             noise = np.random.normal(0, noise_level, size=extreme_markers.shape)
             extreme_markers = np.clip(extreme_markers + noise, 0, 1)
             
-            # Very high marker dropout (60-80%)
-            zero_prob = np.random.uniform(0.6, 0.8)
+            # Very high marker dropout (60-90%) - INCREASED UPPER BOUND
+            zero_prob = np.random.uniform(0.6, 0.9)  # Increased upper bound from 0.8
             zero_mask = np.random.random(extreme_markers.shape) < zero_prob
             extreme_coverage[zero_mask] = 0
             
@@ -395,13 +398,243 @@ def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_th
             augmented_coverage.append(extreme_coverage)
             augmented_y.append(y[sample_indices].copy())
     
+    # 5. ADD SPECIFIC MISSING MARKER PERCENTAGE EXAMPLES
+    # Create examples with specific percentages of missing markers
+    for missing_percentage in [30, 50, 70]:  # Added 70% missing
+        # For both positive and negative examples
+        for is_positive, base_mask in [(True, y[:, cell_type_idx] >= presence_threshold), 
+                                       (False, y[:, cell_type_idx] < presence_threshold)]:
+            # Sample from different coverage levels
+            for cov_mask, cov_name in [
+                (high_cov_mask, "high_"),
+                (med_cov_mask, "med_"),
+                (low_cov_mask, "low_")
+            ]:
+                combined_mask = cov_mask & base_mask
+                indices = np.where(combined_mask)[0]
+                
+                if len(indices) > 0:
+                    sample_size = min(len(indices), 2000)  # Create 2000 samples per category
+                    sample_indices = np.random.choice(indices, sample_size, replace=True)
+                    
+                    missing_markers = markers[sample_indices].copy()
+                    missing_coverage = coverage[sample_indices].copy()
+                    
+                    # Create missing pattern
+                    for i in range(len(missing_markers)):
+                        # Determine how many markers to zero out
+                        zero_count = int(missing_markers.shape[1] * missing_percentage / 100)
+                        
+                        # Decide between random zeroing and contiguous zeroing
+                        if np.random.random() < 0.5:
+                            # Random zeroing
+                            zero_indices = np.random.choice(missing_markers.shape[1], zero_count, replace=False)
+                            missing_coverage[i, zero_indices] = 0
+                        else:
+                            # Contiguous zeroing (in chunks)
+                            remaining = zero_count
+                            while remaining > 0:
+                                # Choose chunk size (between 1 and remaining, up to 1/4 of markers)
+                                chunk_size = min(remaining, np.random.randint(1, max(2, min(remaining, missing_markers.shape[1]//4))))
+                                
+                                # Choose start position
+                                if missing_markers.shape[1] > chunk_size:
+                                    start = np.random.randint(0, missing_markers.shape[1] - chunk_size)
+                                    missing_coverage[i, start:start+chunk_size] = 0
+                                    remaining -= chunk_size
+                                else:
+                                    break
+                    
+                    # Add to augmented datasets
+                    augmented_markers.append(missing_markers)
+                    augmented_coverage.append(missing_coverage)
+                    augmented_y.append(y[sample_indices].copy())
+    
+    # 6. ADD MORE REALISTIC LOW COVERAGE SIMULATION
+    # For some samples, use binomial sampling to more realistically model low coverage
+    for cov_factor in [0.2, 0.1, 0.05, 0.02]:
+        # Choose samples to apply this to
+        sample_count = 5000  # Number of samples to process with this method
+        
+        # Select samples from both positive and negative classes
+        pos_indices = np.where(y[:, cell_type_idx] >= presence_threshold)[0]
+        neg_indices = np.where(y[:, cell_type_idx] < presence_threshold)[0]
+        
+        if len(pos_indices) > 0 and len(neg_indices) > 0:
+            # Balance between positive and negative
+            pos_sample_size = min(len(pos_indices), sample_count // 2)
+            neg_sample_size = min(len(neg_indices), sample_count // 2)
+            
+            pos_sample_indices = np.random.choice(pos_indices, pos_sample_size, replace=True)
+            neg_sample_indices = np.random.choice(neg_indices, neg_sample_size, replace=True)
+            
+            for sample_indices in [pos_sample_indices, neg_sample_indices]:
+                bin_markers = markers[sample_indices].copy()
+                bin_coverage = coverage[sample_indices].copy()
+                bin_y = y[sample_indices].copy()
+                
+                # Apply binomial sampling to each value
+                for i in range(len(bin_markers)):
+                    for j in range(bin_markers.shape[1]):
+                        if bin_coverage[i, j] > 0:
+                            # Calculate target coverage (minimum 1)
+                            target_cov = max(1, int(bin_coverage[i, j] * cov_factor))
+                            
+                            # Generate a new marker value by binomial sampling
+                            if bin_markers[i, j] > 0 and target_cov > 0:
+                                # Original count of positive reads
+                                orig_count = int(bin_markers[i, j] * bin_coverage[i, j])
+                                
+                                # Only do binomial sampling if we have at least 1 positive read
+                                if orig_count > 0:
+                                    # Probability of each read being positive
+                                    prob = orig_count / bin_coverage[i, j]
+                                    
+                                    # Resample with new (lower) coverage
+                                    new_pos_count = np.random.binomial(target_cov, prob)
+                                    
+                                    # Update marker value
+                                    bin_markers[i, j] = new_pos_count / target_cov
+                            
+                            # Update coverage
+                            bin_coverage[i, j] = target_cov
+                
+                # Add to augmented datasets
+                augmented_markers.append(bin_markers)
+                augmented_coverage.append(bin_coverage)
+                augmented_y.append(bin_y)
+    
+    # 7. BALANCE CLASSES AT LOW COVERAGE
+    # Analyze the class balance we have so far
+    final_markers = np.vstack(augmented_markers)
+    final_coverage = np.vstack(augmented_coverage)
+    final_y = np.vstack(augmented_y)
+    
+    # Calculate mean coverage
+    mean_covs = final_coverage.mean(axis=1)
+    
+    # Define coverage levels
+    very_low_cov = mean_covs < 5.0
+    low_cov = (mean_covs >= 5.0) & (mean_covs < 10.0)
+    med_cov = (mean_covs >= 10.0) & (mean_covs < 30.0)
+    
+    # Define presence/absence
+    presence = final_y[:, cell_type_idx] >= presence_threshold
+    
+    # Check class balance at each coverage level
+    very_low_pos_count = np.sum(very_low_cov & presence)
+    very_low_neg_count = np.sum(very_low_cov & ~presence)
+    low_pos_count = np.sum(low_cov & presence)
+    low_neg_count = np.sum(low_cov & ~presence)
+    med_pos_count = np.sum(med_cov & presence)
+    med_neg_count = np.sum(med_cov & ~presence)
+    
+    # If we have severe imbalance in low coverage, add more of the minority class
+    if very_low_pos_count > 2 * very_low_neg_count:  # If positive class is over-represented
+        # Add more negative samples at very low coverage
+        existing_neg = np.where(~presence)[0]
+        if len(existing_neg) > 0:
+            # Sample from existing negatives
+            sample_count = min(very_low_pos_count - very_low_neg_count, len(existing_neg))
+            sample_indices = np.random.choice(existing_neg, sample_count, replace=True)
+            
+            # Create very low coverage versions
+            for _ in range(2):  # Add multiple copies to balance
+                new_markers = final_markers[sample_indices].copy()
+                new_coverage = final_coverage[sample_indices].copy() * 0.05  # Very low coverage factor
+                new_y = final_y[sample_indices].copy()
+                
+                # Apply heavy zeroing
+                zero_prob = 0.7  # Zero out 70% of markers
+                for i in range(len(new_markers)):
+                    # Random zeroing
+                    zero_mask = np.random.random(new_markers.shape[1]) < zero_prob
+                    new_coverage[i, zero_mask] = 0
+                
+                augmented_markers.append(new_markers)
+                augmented_coverage.append(new_coverage)
+                augmented_y.append(new_y)
+    
+    elif very_low_neg_count > 2 * very_low_pos_count:  # If negative class is over-represented
+        # Add more positive samples at very low coverage
+        existing_pos = np.where(presence)[0]
+        if len(existing_pos) > 0:
+            # Sample from existing positives
+            sample_count = min(very_low_neg_count - very_low_pos_count, len(existing_pos))
+            sample_indices = np.random.choice(existing_pos, sample_count, replace=True)
+            
+            # Create very low coverage versions
+            for _ in range(2):  # Add multiple copies to balance
+                new_markers = final_markers[sample_indices].copy()
+                new_coverage = final_coverage[sample_indices].copy() * 0.05  # Very low coverage factor
+                new_y = final_y[sample_indices].copy()
+                
+                # Apply heavy zeroing
+                zero_prob = 0.7  # Zero out 70% of markers
+                for i in range(len(new_markers)):
+                    # Random zeroing
+                    zero_mask = np.random.random(new_markers.shape[1]) < zero_prob
+                    new_coverage[i, zero_mask] = 0
+                
+                augmented_markers.append(new_markers)
+                augmented_coverage.append(new_coverage)
+                augmented_y.append(new_y)
+    
+    # Similar balancing for low coverage (not very low)
+    if low_pos_count > 2 * low_neg_count:  # If positive class is over-represented
+        # Add more negative samples at low coverage
+        existing_neg = np.where(~presence)[0]
+        if len(existing_neg) > 0:
+            # Sample from existing negatives
+            sample_count = min(low_pos_count - low_neg_count, len(existing_neg))
+            sample_indices = np.random.choice(existing_neg, sample_count, replace=True)
+            
+            # Create low coverage versions
+            new_markers = final_markers[sample_indices].copy()
+            new_coverage = final_coverage[sample_indices].copy() * 0.1  # Low coverage factor
+            new_y = final_y[sample_indices].copy()
+            
+            # Apply moderate zeroing
+            zero_prob = 0.5  # Zero out 50% of markers
+            for i in range(len(new_markers)):
+                # Random zeroing
+                zero_mask = np.random.random(new_markers.shape[1]) < zero_prob
+                new_coverage[i, zero_mask] = 0
+            
+            augmented_markers.append(new_markers)
+            augmented_coverage.append(new_coverage)
+            augmented_y.append(new_y)
+    
+    elif low_neg_count > 2 * low_pos_count:  # If negative class is over-represented
+        # Add more positive samples at low coverage
+        existing_pos = np.where(presence)[0]
+        if len(existing_pos) > 0:
+            # Sample from existing positives
+            sample_count = min(low_neg_count - low_pos_count, len(existing_pos))
+            sample_indices = np.random.choice(existing_pos, sample_count, replace=True)
+            
+            # Create low coverage versions
+            new_markers = final_markers[sample_indices].copy()
+            new_coverage = final_coverage[sample_indices].copy() * 0.1  # Low coverage factor
+            new_y = final_y[sample_indices].copy()
+            
+            # Apply moderate zeroing
+            zero_prob = 0.5  # Zero out 50% of markers
+            for i in range(len(new_markers)):
+                # Random zeroing
+                zero_mask = np.random.random(new_markers.shape[1]) < zero_prob
+                new_coverage[i, zero_mask] = 0
+            
+            augmented_markers.append(new_markers)
+            augmented_coverage.append(new_coverage)
+            augmented_y.append(new_y)
+    
     # Combine all augmented data
     final_markers = np.vstack(augmented_markers)
     final_coverage = np.vstack(augmented_coverage)
     final_y = np.vstack(augmented_y)
     
     return final_markers, final_coverage, final_y
-
 
 
 def load_training(base_dir: str, names: set, target_cell_type: int, num_files: int = 5) -> DataLoader:
