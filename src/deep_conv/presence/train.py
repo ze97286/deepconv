@@ -86,6 +86,17 @@ def train_binary_classifier(
     weights = torch.tensor([1.0, class_weight], device=device)
     
     def weighted_bce_loss(logits, targets, coverage):
+        """
+        Coverage-aware weighted binary cross entropy loss with additional regularization.
+        
+        Args:
+            logits: Raw model output logits
+            targets: Binary target labels (0 or 1)
+            coverage: Coverage values for each sample
+            
+        Returns:
+            Loss value with appropriate weighting and regularization
+        """
         # Calculate mean coverage for each sample
         sample_coverage = coverage.mean(dim=1, keepdim=True)
         
@@ -97,10 +108,41 @@ def train_binary_classifier(
         per_sample_weights = torch.ones_like(targets)
         per_sample_weights[targets == 1] = weights[1]
         
-        # Combine class weights with coverage weights
-        combined_weights = per_sample_weights * coverage_weights
+        # Add concentration-based weighting for more balanced focus
+        target_conc = targets.view(-1)
+        conc_weights = torch.ones_like(target_conc)
         
-        # Calculate weighted loss
+        # Only apply concentration weights to positive samples (where conc > 0)
+        pos_samples = (target_conc > 0)
+        if torch.any(pos_samples):
+            # Extract positive sample concentrations
+            pos_conc = target_conc[pos_samples]
+            
+            # Initialize weights for different concentration ranges
+            # Higher weights for very low and very high concentrations
+            # to ensure model learns these ranges well
+            very_low_conc = (pos_conc > 0) & (pos_conc < 0.01)
+            low_conc = (pos_conc >= 0.01) & (pos_conc < 0.05)
+            med_conc = (pos_conc >= 0.05) & (pos_conc < 0.2)
+            high_conc = (pos_conc >= 0.2) & (pos_conc < 0.5)
+            very_high_conc = pos_conc >= 0.5
+            
+            # Assign weights to each concentration range
+            # Focusing more on very low and very high ranges
+            pos_weights = torch.ones_like(pos_conc)
+            pos_weights[very_low_conc] = 1.3
+            pos_weights[low_conc] = 1.1
+            pos_weights[med_conc] = 1.0
+            pos_weights[high_conc] = 1.2
+            pos_weights[very_high_conc] = 1.5
+            
+            # Update weights for positive samples
+            conc_weights[pos_samples] = pos_weights
+        
+        # Combine all weights: class balance × coverage × concentration
+        combined_weights = per_sample_weights * coverage_weights * conc_weights.view(-1, 1)
+        
+        # Calculate base weighted BCE loss
         bce_loss = F.binary_cross_entropy_with_logits(
             logits, targets, weight=combined_weights, reduction='mean'
         )
@@ -121,10 +163,8 @@ def train_binary_classifier(
             confidence_penalty = torch.abs(probs - 0.5).mean()
             
             # Add to the loss with a scaling factor
-            # 0.2 is a hyperparameter you can tune
             reg_weight = 0.2
             total_loss = bce_loss + reg_weight * confidence_penalty
-            
             return total_loss
         else:
             return bce_loss
