@@ -482,6 +482,36 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
         
+    def predict_with_adaptive_threshold(self, marker_values, coverage, base_threshold=0.5):
+        """
+        Make predictions with coverage-dependent thresholds.
+        
+        Args:
+            marker_values: Marker values [B, M]
+            coverage: Coverage values [B, M]
+            base_threshold: Base threshold to adjust
+            
+        Returns:
+            predictions: Binary predictions using adaptive thresholds
+            probabilities: Prediction probabilities
+        """
+        logits, _ = self.forward(marker_values, coverage)
+        probabilities = torch.sigmoid(logits).squeeze(-1)
+        
+        # Calculate mean coverage for each sample
+        mean_coverage = coverage.mean(dim=1)
+        
+        # Adjust threshold based on coverage
+        # Higher coverage = lower threshold (more sensitive)
+        # Lower coverage = higher threshold (more conservative)
+        coverage_adjustment = torch.clamp((20.0 - mean_coverage) / 40.0, -0.1, 0.2)
+        adjusted_thresholds = base_threshold + coverage_adjustment
+        
+        # Apply adjusted thresholds
+        predictions = (probabilities >= adjusted_thresholds).float()
+        
+        return predictions, probabilities
+    
     def predict(self, marker_values, coverage, batch_size=256, device=None):
         """
         Makes predictions using the model in evaluation mode.

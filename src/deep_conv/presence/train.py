@@ -15,7 +15,7 @@ def train_binary_classifier(
     learning_rate: float = 5e-4,
     weight_decay: float = 1e-5,
     class_weight: float = None,  # Positive class weight (for imbalance)
-    patience: int = 20,
+    patience: int = 10,
     device: torch.device = None,
     fp16_training: bool = True,  # Use mixed precision
     gradient_accumulation: int = 1,  # Number of batches to accumulate
@@ -87,21 +87,12 @@ def train_binary_classifier(
     
     def weighted_bce_loss(logits, targets, coverage):
         """
-        Coverage-aware weighted binary cross entropy loss with additional regularization.
-        
-        Args:
-            logits: Raw model output logits
-            targets: Binary target labels (0 or 1)
-            coverage: Coverage values for each sample
-            
-        Returns:
-            Loss value with appropriate weighting and regularization
+        Coverage-aware weighted BCE loss with coverage-dependent thresholding.
         """
         # Calculate mean coverage for each sample
         sample_coverage = coverage.mean(dim=1, keepdim=True)
         
         # Calculate coverage weights (higher weight for lower coverage)
-        # This gives more training focus to low-coverage samples
         coverage_weights = torch.clamp(1.0 + (10.0 / (sample_coverage + 5.0)), 0.8, 2.0)
         
         # Class weights based on positive/negative imbalance
@@ -139,18 +130,21 @@ def train_binary_classifier(
             # Update weights for positive samples
             conc_weights[pos_samples] = pos_weights
         
+        # Apply coverage-dependent bias adjustment
+        # This makes the model more conservative at low coverage and more sensitive at high coverage
+        coverage_bias = 0.2 * torch.clamp((sample_coverage - 20.0) / 30.0, -1.0, 1.0)
+        adjusted_logits = logits + coverage_bias
+        
         # Combine all weights: class balance × coverage × concentration
         combined_weights = per_sample_weights * coverage_weights * conc_weights.view(-1, 1)
         
-        # Calculate base weighted BCE loss
+        # Calculate weighted loss with the adjusted logits
         bce_loss = F.binary_cross_entropy_with_logits(
-            logits, targets, weight=combined_weights, reduction='mean'
+            adjusted_logits, targets, weight=combined_weights, reduction='mean'
         )
         
         # Add low-coverage regularization term
-        # This penalizes high-confidence predictions in very low coverage scenarios
         very_low_coverage_mask = (sample_coverage < 5.0).squeeze(-1)
-        
         if torch.any(very_low_coverage_mask):
             # Get logits for very low coverage samples
             very_low_cov_logits = logits[very_low_coverage_mask]
@@ -158,17 +152,15 @@ def train_binary_classifier(
             # Calculate probabilities
             probs = torch.sigmoid(very_low_cov_logits)
             
-            # Penalize high confidence (far from 0.5) for very low coverage
-            # This encourages the model to be more uncertain when coverage is very low
+            # Penalize high confidence for very low coverage
             confidence_penalty = torch.abs(probs - 0.5).mean()
             
-            # Add to the loss with a scaling factor
+            # Add to the loss
             reg_weight = 0.2
             total_loss = bce_loss + reg_weight * confidence_penalty
             return total_loss
         else:
             return bce_loss
-    
     # Tracking variables
     best_metric = 0.0
     best_epoch = 0

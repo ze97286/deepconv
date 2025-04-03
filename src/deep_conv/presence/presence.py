@@ -105,18 +105,7 @@ def get_validation_set(eval_pat_dir: str, target_cell_type:int, names: set) -> T
 
 def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_threshold=0.0005):
     """
-    Create augmented training data for a specific cell type's presence model with 
-    balanced concentration augmentation.
-    
-    Args:
-        markers: Cell-type specific marker values [samples, markers_for_cell_type]
-        coverage: Cell-type specific coverage values [samples, markers_for_cell_type]
-        y: Ground truth concentrations [samples, n_cell_types]
-        cell_type_idx: Index of the target cell type
-        presence_threshold: Minimum concentration to consider a cell type present
-        
-    Returns:
-        Augmented markers, coverage, and ground truth concentrations
+    Create balanced augmentation across coverage levels and class distributions.
     """
     augmented_markers = []
     augmented_coverage = []
@@ -127,72 +116,94 @@ def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_th
     augmented_coverage.append(coverage.copy())
     augmented_y.append(y.copy())
     
+    # Define coverage levels for stratification
+    avg_coverage = coverage.mean(axis=1)
+    high_cov_mask = avg_coverage >= 30.0
+    med_cov_mask = (avg_coverage >= 10.0) & (avg_coverage < 30.0)
+    low_cov_mask = avg_coverage < 10.0
+    
     # 1. Augment true negative examples (where target cell type is absent)
     negative_mask = y[:, cell_type_idx] < presence_threshold
-    negative_indices = np.where(negative_mask)[0]
     
-    if len(negative_indices) > 0:
-        # Sample a subset of these negatives
-        sample_size = min(len(negative_indices), max(8000, len(negative_indices)//2))
-        sample_indices = np.random.choice(negative_indices, sample_size, replace=False)
+    # Stratify negative examples by coverage
+    strata = [
+        (high_cov_mask & negative_mask, "high_neg", 6000),  # Extra negatives for high coverage
+        (med_cov_mask & negative_mask, "med_neg", 4000),
+        (low_cov_mask & negative_mask, "low_neg", 3000)
+    ]
+    
+    for combined_mask, stratum_name, max_samples in strata:
+        indices = np.where(combined_mask)[0]
         
-        # Create variants with different coverage profiles - more aggressive reduction
-        for coverage_factor in [1.0, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005]:
-            neg_markers = markers[sample_indices].copy()
-            neg_coverage = coverage[sample_indices].copy() * coverage_factor
+        if len(indices) > 0:
+            # Sample from this stratum
+            sample_size = min(len(indices), max_samples)
+            sample_indices = np.random.choice(indices, sample_size, replace=False)
             
-            # Choose noise type randomly for more variability
-            noise_type = np.random.choice(['gaussian', 'salt_pepper', 'systematic_bias'], 
-                                         p=[0.7, 0.15, 0.15])
+            # Set coverage factors based on stratum
+            if "high" in stratum_name:
+                cov_factors = [1.0, 0.7, 0.4, 0.2, 0.1]
+            elif "med" in stratum_name:
+                cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08]
+            else:  # low coverage
+                cov_factors = [1.0, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005]
             
-            if noise_type == 'gaussian':
-                # Standard Gaussian noise with coverage-dependent magnitude
-                noise_level = 0.15 / np.sqrt(coverage_factor + 0.1)
-                noise = np.random.normal(0, noise_level, size=neg_markers.shape)
-            elif noise_type == 'salt_pepper':
-                # Salt and pepper noise (sparse high/low values)
-                noise = np.zeros_like(neg_markers)
-                salt_prob = 0.02 + 0.03 / (coverage_factor + 0.1)  # More salt at lower coverage
-                pepper_prob = 0.02 + 0.03 / (coverage_factor + 0.1)
-                salt = np.random.random(neg_markers.shape) < salt_prob
-                pepper = np.random.random(neg_markers.shape) < pepper_prob
-                noise[salt] = 0.3  # Salt (high values)
-                noise[pepper] = -0.3  # Pepper (low values)
-            elif noise_type == 'systematic_bias':
-                # Systematic bias (shifted mean)
-                bias = 0.05 * np.random.choice([-1, 1])  # Random direction
-                noise_level = 0.08 / np.sqrt(coverage_factor + 0.1)
-                noise = np.random.normal(bias, noise_level, size=neg_markers.shape)
-            
-            neg_markers = np.clip(neg_markers + noise, 0, 1)
-            
-            # Zero out markers with more aggressive probabilities
-            if coverage_factor < 0.5:
-                # More aggressive zeroing - higher chance at lower coverage
-                zero_prob = min(0.6, 0.25 / coverage_factor)
+            for coverage_factor in cov_factors:
+                neg_markers = markers[sample_indices].copy()
+                neg_coverage = coverage[sample_indices].copy() * coverage_factor
                 
-                # Optional: create contiguous dropout regions to simulate technical artifacts
-                if np.random.random() < 0.3:  # 30% chance of contiguous dropouts
-                    for i in range(len(neg_markers)):
-                        # Create 1-3 dropout regions per sample
-                        for _ in range(np.random.randint(1, 4)):
-                            # Dropout region length between 2-8 markers
-                            length = np.random.randint(2, min(9, neg_markers.shape[1]//3))
-                            if length > 0 and neg_markers.shape[1] > length:
-                                start = np.random.randint(0, neg_markers.shape[1] - length)
-                                neg_coverage[i, start:start+length] = 0
+                # Choose noise type randomly for more variability
+                noise_type = np.random.choice(['gaussian', 'salt_pepper', 'systematic_bias'], 
+                                             p=[0.7, 0.15, 0.15])
                 
-                # Apply random individual marker zeroing in addition to contiguous regions
-                zero_mask = np.random.random(neg_markers.shape) < zero_prob
-                neg_coverage[zero_mask] = 0
-            
-            # Add to augmented datasets with the original labels
-            augmented_markers.append(neg_markers)
-            augmented_coverage.append(neg_coverage)
-            augmented_y.append(y[sample_indices].copy())
+                if noise_type == 'gaussian':
+                    # Standard Gaussian noise with coverage-dependent magnitude
+                    noise_level = 0.15 / np.sqrt(coverage_factor + 0.1)
+                    noise = np.random.normal(0, noise_level, size=neg_markers.shape)
+                elif noise_type == 'salt_pepper':
+                    # Salt and pepper noise (sparse high/low values)
+                    noise = np.zeros_like(neg_markers)
+                    salt_prob = 0.02 + 0.03 / (coverage_factor + 0.1)  # More salt at lower coverage
+                    pepper_prob = 0.02 + 0.03 / (coverage_factor + 0.1)
+                    salt = np.random.random(neg_markers.shape) < salt_prob
+                    pepper = np.random.random(neg_markers.shape) < pepper_prob
+                    noise[salt] = 0.3  # Salt (high values)
+                    noise[pepper] = -0.3  # Pepper (low values)
+                elif noise_type == 'systematic_bias':
+                    # Systematic bias (shifted mean)
+                    bias = 0.05 * np.random.choice([-1, 1])  # Random direction
+                    noise_level = 0.08 / np.sqrt(coverage_factor + 0.1)
+                    noise = np.random.normal(bias, noise_level, size=neg_markers.shape)
+                
+                neg_markers = np.clip(neg_markers + noise, 0, 1)
+                
+                # Zero out markers with more aggressive probabilities
+                if coverage_factor < 0.5:
+                    # More aggressive zeroing - higher chance at lower coverage
+                    zero_prob = min(0.6, 0.25 / coverage_factor)
+                    
+                    # Optional: create contiguous dropout regions to simulate technical artifacts
+                    if np.random.random() < 0.3:  # 30% chance of contiguous dropouts
+                        for i in range(len(neg_markers)):
+                            # Create 1-3 dropout regions per sample
+                            for _ in range(np.random.randint(1, 4)):
+                                # Dropout region length between 2-8 markers
+                                length = np.random.randint(2, min(9, neg_markers.shape[1]//3))
+                                if length > 0 and neg_markers.shape[1] > length:
+                                    start = np.random.randint(0, neg_markers.shape[1] - length)
+                                    neg_coverage[i, start:start+length] = 0
+                    
+                    # Apply random individual marker zeroing in addition to contiguous regions
+                    zero_mask = np.random.random(neg_markers.shape) < zero_prob
+                    neg_coverage[zero_mask] = 0
+                
+                # Add to augmented datasets with the original labels
+                augmented_markers.append(neg_markers)
+                augmented_coverage.append(neg_coverage)
+                augmented_y.append(y[sample_indices].copy())
     
     # 2. Augment positive examples (where target cell type is present)
-    # Stratify positives by concentration for more balanced augmentation
+    # Stratify positives by concentration and coverage
     ranges = [
         (presence_threshold, 0.005, "very_low", 8000),
         (0.005, 0.01, "low", 7000),
@@ -203,86 +214,115 @@ def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_th
     ]
     
     for min_conc, max_conc, stratum_name, max_samples in ranges:
-        pos_mask = (y[:, cell_type_idx] >= min_conc) & (y[:, cell_type_idx] < max_conc)
-        pos_indices = np.where(pos_mask)[0]
-        
-        if len(pos_indices) > 0:
-            sample_size = min(len(pos_indices), max_samples)
-            sample_indices = np.random.choice(pos_indices, sample_size, replace=False)
+        # Further stratify by coverage
+        for cov_mask, cov_name in [
+            (high_cov_mask, "high_"),
+            (med_cov_mask, "med_"),
+            (low_cov_mask, "low_")
+        ]:
+            # Create combined mask
+            combined_mask = cov_mask & (y[:, cell_type_idx] >= min_conc) & (y[:, cell_type_idx] < max_conc)
+            indices = np.where(combined_mask)[0]
             
-            # Different coverage ranges based on concentration stratum
-            if stratum_name in ["very_low", "low"]:
-                cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08, 0.04, 0.02]
-            elif stratum_name in ["med_low", "medium"]:
-                cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08, 0.04]
-            else:  # high and very_high
-                cov_factors = [1.0, 0.7, 0.4, 0.2, 0.1, 0.05]
-            
-            for coverage_factor in cov_factors:
-                pos_markers = markers[sample_indices].copy()
-                pos_coverage = coverage[sample_indices].copy() * coverage_factor
+            if len(indices) > 0:
+                # Sample from this stratum (adjust sample size based on coverage)
+                if "high_" in cov_name:
+                    sample_size = min(len(indices), max_samples // 3)
+                elif "med_" in cov_name:
+                    sample_size = min(len(indices), max_samples // 3)
+                else:  # low coverage
+                    sample_size = min(len(indices), max_samples // 2)
                 
-                # Choose noise type randomly
-                noise_type = np.random.choice(['gaussian', 'salt_pepper', 'systematic_bias'], 
-                                             p=[0.7, 0.15, 0.15])
+                sample_indices = np.random.choice(indices, sample_size, replace=False)
                 
-                if noise_type == 'gaussian':
-                    # Scale noise level inversely with concentration
-                    # Less noise for high concentrations where signal should be clearer
-                    if stratum_name in ["high", "very_high"]:
-                        base_noise = 0.12
-                    else:
-                        base_noise = 0.15
+                # Different coverage ranges based on concentration and coverage stratum
+                if stratum_name in ["very_low", "low"]:
+                    if "high_" in cov_name:
+                        cov_factors = [1.0, 0.6, 0.3, 0.15]
+                    elif "med_" in cov_name:
+                        cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08]
+                    else:  # low coverage
+                        cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08, 0.04, 0.02]
+                elif stratum_name in ["med_low", "medium"]:
+                    if "high_" in cov_name:
+                        cov_factors = [1.0, 0.6, 0.3]
+                    elif "med_" in cov_name:
+                        cov_factors = [1.0, 0.6, 0.3, 0.15]
+                    else:  # low coverage
+                        cov_factors = [1.0, 0.6, 0.3, 0.15, 0.08, 0.04]
+                else:  # high and very_high
+                    if "high_" in cov_name:
+                        cov_factors = [1.0, 0.7, 0.4]
+                    elif "med_" in cov_name:
+                        cov_factors = [1.0, 0.7, 0.4, 0.2]
+                    else:  # low coverage
+                        cov_factors = [1.0, 0.7, 0.4, 0.2, 0.1, 0.05]
+                
+                for coverage_factor in cov_factors:
+                    pos_markers = markers[sample_indices].copy()
+                    pos_coverage = coverage[sample_indices].copy() * coverage_factor
+                    
+                    # Choose noise type randomly
+                    noise_type = np.random.choice(['gaussian', 'salt_pepper', 'systematic_bias'], 
+                                                 p=[0.7, 0.15, 0.15])
+                    
+                    if noise_type == 'gaussian':
+                        # Scale noise level inversely with concentration
+                        # Less noise for high concentrations where signal should be clearer
+                        if stratum_name in ["high", "very_high"]:
+                            base_noise = 0.12
+                        else:
+                            base_noise = 0.15
+                            
+                        noise_level = base_noise / np.sqrt(coverage_factor + 0.1)
+                        noise = np.random.normal(0, noise_level, size=pos_markers.shape)
+                    elif noise_type == 'salt_pepper':
+                        noise = np.zeros_like(pos_markers)
+                        # Scale salt/pepper probability by concentration
+                        base_prob = 0.02 if stratum_name in ["high", "very_high"] else 0.03
+                        sp_prob = base_prob + base_prob / (coverage_factor + 0.1)
                         
-                    noise_level = base_noise / np.sqrt(coverage_factor + 0.1)
-                    noise = np.random.normal(0, noise_level, size=pos_markers.shape)
-                elif noise_type == 'salt_pepper':
-                    noise = np.zeros_like(pos_markers)
-                    # Scale salt/pepper probability by concentration
-                    base_prob = 0.02 if stratum_name in ["high", "very_high"] else 0.03
-                    sp_prob = base_prob + base_prob / (coverage_factor + 0.1)
-                    
-                    salt = np.random.random(pos_markers.shape) < sp_prob
-                    pepper = np.random.random(pos_markers.shape) < sp_prob
-                    noise[salt] = 0.3
-                    noise[pepper] = -0.3
-                elif noise_type == 'systematic_bias':
-                    bias = 0.05 * np.random.choice([-1, 1])
-                    noise_level = 0.08 / np.sqrt(coverage_factor + 0.1)
-                    noise = np.random.normal(bias, noise_level, size=pos_markers.shape)
-                    
-                pos_markers = np.clip(pos_markers + noise, 0, 1)
-                
-                # Zero out some markers, different strategy by concentration
-                if coverage_factor < 0.3:
-                    # Scale zeroing probability by concentration stratum
-                    if stratum_name in ["very_low", "low"]:
-                        base_zero_prob = 0.07  # Higher for low conc
-                    elif stratum_name in ["med_low", "medium"]:
-                        base_zero_prob = 0.05
-                    else:
-                        base_zero_prob = 0.03  # Lower for high conc
+                        salt = np.random.random(pos_markers.shape) < sp_prob
+                        pepper = np.random.random(pos_markers.shape) < sp_prob
+                        noise[salt] = 0.3
+                        noise[pepper] = -0.3
+                    elif noise_type == 'systematic_bias':
+                        bias = 0.05 * np.random.choice([-1, 1])
+                        noise_level = 0.08 / np.sqrt(coverage_factor + 0.1)
+                        noise = np.random.normal(bias, noise_level, size=pos_markers.shape)
                         
-                    zero_prob = min(0.5, base_zero_prob / coverage_factor)
+                    pos_markers = np.clip(pos_markers + noise, 0, 1)
                     
-                    # Optional: create contiguous dropout regions
-                    if np.random.random() < 0.3:
-                        for i in range(len(pos_markers)):
-                            # Create 1-2 dropout regions per sample
-                            for _ in range(np.random.randint(1, 3)):
-                                length = np.random.randint(2, min(7, pos_markers.shape[1]//4))
-                                if length > 0 and pos_markers.shape[1] > length:
-                                    start = np.random.randint(0, pos_markers.shape[1] - length)
-                                    pos_coverage[i, start:start+length] = 0
+                    # Zero out some markers, different strategy by concentration
+                    if coverage_factor < 0.3:
+                        # Scale zeroing probability by concentration stratum
+                        if stratum_name in ["very_low", "low"]:
+                            base_zero_prob = 0.07  # Higher for low conc
+                        elif stratum_name in ["med_low", "medium"]:
+                            base_zero_prob = 0.05
+                        else:
+                            base_zero_prob = 0.03  # Lower for high conc
+                            
+                        zero_prob = min(0.5, base_zero_prob / coverage_factor)
+                        
+                        # Optional: create contiguous dropout regions
+                        if np.random.random() < 0.3:
+                            for i in range(len(pos_markers)):
+                                # Create 1-2 dropout regions per sample
+                                for _ in range(np.random.randint(1, 3)):
+                                    length = np.random.randint(2, min(7, pos_markers.shape[1]//4))
+                                    if length > 0 and pos_markers.shape[1] > length:
+                                        start = np.random.randint(0, pos_markers.shape[1] - length)
+                                        pos_coverage[i, start:start+length] = 0
+                        
+                        # Apply random individual marker zeroing
+                        zero_mask = np.random.random(pos_markers.shape) < zero_prob
+                        pos_coverage[zero_mask] = 0
                     
-                    # Apply random individual marker zeroing
-                    zero_mask = np.random.random(pos_markers.shape) < zero_prob
-                    pos_coverage[zero_mask] = 0
-                
-                # Add to augmented datasets with the original labels
-                augmented_markers.append(pos_markers)
-                augmented_coverage.append(pos_coverage)
-                augmented_y.append(y[sample_indices].copy())
+                    # Add to augmented datasets with the original labels
+                    augmented_markers.append(pos_markers)
+                    augmented_coverage.append(pos_coverage)
+                    augmented_y.append(y[sample_indices].copy())
     
     # 3. Create synthetic high-concentration examples if needed
     # Check if we have too few high-concentration examples
@@ -361,6 +401,7 @@ def augment_presence_model_data(markers, coverage, y, cell_type_idx, presence_th
     final_y = np.vstack(augmented_y)
     
     return final_markers, final_coverage, final_y
+
 
 
 def load_training(base_dir: str, names: set, target_cell_type: int, num_files: int = 5) -> DataLoader:
