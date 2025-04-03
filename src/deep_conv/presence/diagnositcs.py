@@ -427,8 +427,6 @@ def eval_model(presence_models_dir, target_cell_type_name):
     model.to(device)
     diagnostic_results = run_high_coverage_diagnostic(model, tier1_dl, device)
     print(diagnostic_results)
-
-    dataloaders = {}
     standardized_results = evaluate_with_standardized_metrics(model, dataloaders)
     max_balanced_high_cov = 0
     max_balanced_low_cov = 0
