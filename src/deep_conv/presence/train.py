@@ -20,8 +20,8 @@ def train_binary_classifier(
     fp16_training: bool = True,  # Use mixed precision
     gradient_accumulation: int = 1,  # Number of batches to accumulate
     eval_metric: str = 'balanced_accuracy',  # 'balanced_accuracy', 'f1', 'auroc'
-    coverage_low_threshold: float = 10.0,  # Threshold for low coverage
-    coverage_med_threshold: float = 30.0   # Threshold for medium coverage
+    coverage_low_threshold: float = 6.0,  # Threshold for low coverage
+    coverage_med_threshold: float = 12.0   # Threshold for medium coverage
 ):
     """
     Train a binary classifier for cell type detection with coverage-aware loss.
@@ -61,9 +61,36 @@ def train_binary_classifier(
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     
     # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=patience//2, verbose=True
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer, mode='max', factor=0.5, patience=patience//2, verbose=True
+    # )
+    steps_per_epoch = len(dataloaders['train'])
+
+    # One complete cycle is 2 * step_size_up steps
+    desired_cycles = 2.5
+    total_steps = steps_per_epoch * 10  # 10 epochs
+    step_size_up = int(total_steps / (2 * desired_cycles))
+    from torch.optim.lr_scheduler import ReduceLROnPlateau, CyclicLR
+    cyclic_scheduler = CyclicLR(
+        optimizer,
+        base_lr=1e-4,
+        max_lr=1e-3,
+        step_size_up=step_size_up,  
+        cycle_momentum=False
     )
+
+    print(f"Cyclic LR config: steps_per_epoch={steps_per_epoch}, step_size_up={step_size_up}, "
+      f"cycles in first 10 epochs={10*steps_per_epoch/(2*step_size_up):.2f}")
+
+    # Create ReduceLROnPlateau for later epochs
+    plateau_scheduler = ReduceLROnPlateau(
+        optimizer, 
+        mode='max', 
+        factor=0.5, 
+        patience=patience//2, 
+        verbose=True
+    )
+
     
     # Create directory for saving models
     os.makedirs(model_path, exist_ok=True)
@@ -198,13 +225,16 @@ def train_binary_classifier(
         
     # Tracking variables
     best_metric = 0.0
-    best_epoch = 0
     patience_counter = 0
     
     # Training loop
     for epoch in range(num_epochs):
         model.train()
         train_losses = []
+
+        # Add this at the start of each epoch
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch {epoch+1}/{num_epochs} - Learning rate: {current_lr:.6f}")
         
         # Tracking metrics by coverage level
         coverage_categories = ['all', 'low', 'medium', 'high']
@@ -322,7 +352,19 @@ def train_binary_classifier(
                 specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
                 f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
                 balanced_accuracy = (recall + specificity) / 2
-                
+
+                pos_weight = torch.sum(labels == 1).item() / len(labels) if len(labels) > 0 else 0.5
+                neg_weight = 1.0 - pos_weight
+
+                # Calculate weighted precision and recall
+                weighted_precision = (precision * pos_weight) / (pos_weight + (1 - precision) * neg_weight)
+                weighted_recall = (recall * pos_weight) / (pos_weight + (1 - recall) * neg_weight)
+
+                # Calculate weighted F1
+                weighted_f1 = 2 * weighted_precision * weighted_recall / (weighted_precision + weighted_recall) if (weighted_precision + weighted_recall) > 0 else 0.0
+
+                # Store in metrics
+                metrics['weighted_f1'] = weighted_f1
                 metrics['precision'] = precision
                 metrics['recall'] = recall
                 metrics['specificity'] = specificity
@@ -331,7 +373,9 @@ def train_binary_classifier(
                 
                 print(f"Epoch {epoch+1}/{num_epochs} - Train ({cat} coverage): loss={metrics['loss']:.4f}, " +
                     f"precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}, " +
-                    f"f1={f1:.4f}, balanced_acc={balanced_accuracy:.4f}, count={metrics['count']}")
+                    f"weighted_f1={weighted_f1:.4f}, " +
+                    f"f1={f1:.4f}, balanced_acc={balanced_accuracy:.4f}, count={metrics['count']}"
+                )
         
         # Validation
         model.eval()
@@ -438,6 +482,12 @@ def train_binary_classifier(
                     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
                     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
                     balanced_accuracy = (recall + specificity) / 2
+                    pos_weight = torch.sum(labels == 1).item() / len(labels) if len(labels) > 0 else 0.5
+                    neg_weight = 1.0 - pos_weight
+                    weighted_precision = (precision * pos_weight) / (pos_weight + (1 - precision) * neg_weight)
+                    weighted_recall = (recall * pos_weight) / (pos_weight + (1 - recall) * neg_weight)
+                    weighted_f1 = 2 * weighted_precision * weighted_recall / (weighted_precision + weighted_recall) if (weighted_precision + weighted_recall) > 0 else 0.0
+
                     
                     # Concat all labels and probabilities if available
                     if len(metrics['all_labels']) > 0 and len(metrics['all_probs']) > 0:
@@ -469,13 +519,15 @@ def train_binary_classifier(
                         'recall': recall,
                         'specificity': specificity,
                         'f1': f1,
-                        'balanced_accuracy': balanced_accuracy
+                        'balanced_accuracy': balanced_accuracy,
+                        'weighted_f1': weighted_f1,
                     })
                     
                     # Print validation metrics
                     print(f"Validation ({val_name}, {cat} coverage): loss={metrics['loss']:.4f}, " +
                         f"precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}, " +
                         f"f1={f1:.4f}, balanced_acc={balanced_accuracy:.4f}, " +
+                        f"weighted_f1={weighted_f1:.4f}, "
                         f"AUROC={metrics.get('auroc', 0.0):.4f}, AUPRC={metrics.get('auprc', 0.0):.4f}, count={metrics['count']}")
                     
                     # Print confusion matrix
@@ -497,7 +549,10 @@ def train_binary_classifier(
         print(f"Combined validation metric: {avg_metric:.4f} (All: {avg_metric_all:.4f}, Low: {avg_metric_low:.4f})")
         
         # Update learning rate scheduler
-        scheduler.step(avg_metric)
+        if epoch < 10:
+            cyclic_scheduler.step()
+        else:
+            plateau_scheduler.step(avg_metric)
         
         # Check for improvement
         if avg_metric > best_metric:

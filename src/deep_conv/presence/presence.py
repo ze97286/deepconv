@@ -1015,7 +1015,7 @@ def analyse_detection_by_concentration(model, dataloader,
                 concentrations = labels.cpu().numpy()
             
             # Forward pass
-            logits, attention_weights = model(marker_values, coverage)
+            logits, _,_ = model(marker_values, coverage)
             probabilities = torch.sigmoid(logits).cpu().numpy()
             predictions = (probabilities >= threshold).astype(int)
             
