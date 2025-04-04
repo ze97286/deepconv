@@ -360,12 +360,11 @@ class CellTypeDeconvolutionModel(nn.Module):
                 cell_type_coverage = coverage[:, cell_type_marker_mask]
                 
                 # Pass only the relevant markers to the presence model
-                logits, _ = presence_model(cell_type_marker_values, cell_type_coverage)
-                probs = torch.sigmoid(logits)
-                
+                logits, _, _ = presence_model(cell_type_marker_values, cell_type_coverage)
+                _, adaptive_probs, _ = presence_model.adaptive_predict(cell_type_marker_values, cell_type_coverage)
                 # Store results
                 presence_logits[:, cell_type_idx] = logits.squeeze(-1)
-                presence_probs[:, cell_type_idx] = probs.squeeze(-1)
+                presence_probs[:, cell_type_idx] = adaptive_probs.squeeze(-1)
                 
         return presence_probs, presence_logits
 
