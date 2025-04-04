@@ -353,28 +353,33 @@ def train_binary_classifier(
                 f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
                 balanced_accuracy = (recall + specificity) / 2
 
-                pos_weight = torch.sum(labels == 1).item() / len(labels) if len(labels) > 0 else 0.5
-                neg_weight = 1.0 - pos_weight
-
-                # Calculate weighted precision and recall
-                weighted_precision = (precision * pos_weight) / (pos_weight + (1 - precision) * neg_weight)
-                weighted_recall = (recall * pos_weight) / (pos_weight + (1 - recall) * neg_weight)
-
-                # Calculate weighted F1
-                weighted_f1 = 2 * weighted_precision * weighted_recall / (weighted_precision + weighted_recall) if (weighted_precision + weighted_recall) > 0 else 0.0
+                pos_count = tp + tn
+                neg_count = tn + fp
+                total_count = pos_count + neg_count
+                if total_count > 0:
+                    pos_weight = pos_count / total_count
+                    neg_weight = neg_count / total_count
+                    pos_precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                    pos_recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                    pos_f1 = 2 * pos_precision * pos_recall / (pos_precision + pos_recall) if (pos_precision + pos_recall) > 0 else 0.0
+                    neg_precision = tn / (tn + fn) if (tn + fn) > 0 else 0.0
+                    neg_recall = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+                    neg_f1 = 2 * neg_precision * neg_recall / (neg_precision + neg_recall) if (neg_precision + neg_recall) > 0 else 0.0
+                    weighted_f1 = pos_weight * pos_f1 + neg_weight * neg_f1
+                else:
+                    weighted_f1 = 0.0
 
                 # Store in metrics
-                metrics['weighted_f1'] = weighted_f1
                 metrics['precision'] = precision
                 metrics['recall'] = recall
                 metrics['specificity'] = specificity
                 metrics['f1'] = f1
+                metrics['weighted_f1'] = weighted_f1
                 metrics['balanced_accuracy'] = balanced_accuracy
                 
                 print(f"Epoch {epoch+1}/{num_epochs} - Train ({cat} coverage): loss={metrics['loss']:.4f}, " +
                     f"precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}, " +
-                    f"weighted_f1={weighted_f1:.4f}, " +
-                    f"f1={f1:.4f}, balanced_acc={balanced_accuracy:.4f}, count={metrics['count']}"
+                    f"f1={f1:.4f}, weighted_f1={weighted_f1:.4f}, balanced_acc={balanced_accuracy:.4f}, count={metrics['count']}"
                 )
         
         # Validation
@@ -482,12 +487,22 @@ def train_binary_classifier(
                     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
                     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
                     balanced_accuracy = (recall + specificity) / 2
-                    pos_weight = torch.sum(labels == 1).item() / len(labels) if len(labels) > 0 else 0.5
-                    neg_weight = 1.0 - pos_weight
-                    weighted_precision = (precision * pos_weight) / (pos_weight + (1 - precision) * neg_weight)
-                    weighted_recall = (recall * pos_weight) / (pos_weight + (1 - recall) * neg_weight)
-                    weighted_f1 = 2 * weighted_precision * weighted_recall / (weighted_precision + weighted_recall) if (weighted_precision + weighted_recall) > 0 else 0.0
 
+                    pos_count = tp + tn
+                    neg_count = tn + fp
+                    total_count = pos_count + neg_count
+                    if total_count > 0:
+                        pos_weight = pos_count / total_count
+                        neg_weight = neg_count / total_count
+                        pos_precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                        pos_recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                        pos_f1 = 2 * pos_precision * pos_recall / (pos_precision + pos_recall) if (pos_precision + pos_recall) > 0 else 0.0
+                        neg_precision = tn / (tn + fn) if (tn + fn) > 0 else 0.0
+                        neg_recall = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+                        neg_f1 = 2 * neg_precision * neg_recall / (neg_precision + neg_recall) if (neg_precision + neg_recall) > 0 else 0.0
+                        weighted_f1 = pos_weight * pos_f1 + neg_weight * neg_f1
+                    else:
+                        weighted_f1 = 0.0
                     
                     # Concat all labels and probabilities if available
                     if len(metrics['all_labels']) > 0 and len(metrics['all_probs']) > 0:
