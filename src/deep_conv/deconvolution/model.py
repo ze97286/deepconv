@@ -34,13 +34,29 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         nan_to_num_fn = torch.nan_to_num
         binomial_fn = lambda n, p: torch.distributions.binomial.Binomial(n, p).sample()
         where_fn = torch.where
-        triangular_fn = lambda shape, left, mode, right: (
-            torch.distributions.Triangular(
-                low=torch.tensor(left, device=device),
-                peak=torch.tensor(clamp_fn(mode, left, right), device=device),  # Clamp mode
-                high=torch.tensor(right, device=device)
-            ).sample(shape)
-        )
+        
+        # Check if Triangular distribution is available
+        try:
+            torch.distributions.Triangular
+            triangular_fn = lambda shape, left, mode, right: (
+                torch.distributions.Triangular(
+                    low=torch.tensor(left, device=device),
+                    peak=torch.tensor(clamp_fn(mode, left, right), device=device),
+                    high=torch.tensor(right, device=device)
+                ).sample(shape)
+            )
+        except AttributeError:
+            # Fallback implementation for triangular distribution
+            def triangular_fn(shape, left, mode, right):
+                mode = clamp_fn(mode, left, right)
+                u = torch.rand(shape, device=device)
+                F = (mode - left) / (right - left)
+                mask = u < F
+                # Left side: X = left + sqrt(U * (right - left) * (mode - left))
+                left_side = left + torch.sqrt(u * (right - left) * (mode - left))
+                # Right side: X = right - sqrt((1 - U) * (right - left) * (right - mode))
+                right_side = right - torch.sqrt((1 - u) * (right - left) * (right - mode))
+                return torch.where(mask, left_side, right_side)
     else:
         augmented_values = marker_values.copy()
         augmented_coverage = coverage.copy()
@@ -54,7 +70,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         binomial_fn = np.random.binomial
         where_fn = np.where
         triangular_fn = lambda shape, left, mode, right: np.random.triangular(
-            left, clamp_fn(mode, left, right), right, shape  # Clamp mode
+            left, clamp_fn(mode, left, right), right, shape
         )
     
     # Generate augmentation mask
