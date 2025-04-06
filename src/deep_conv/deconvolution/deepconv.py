@@ -627,6 +627,7 @@ def test_augmentation(train_pat_dir, atlas, names, target_dist_params=None):
     aug_X_train, aug_coverage_train = coverage_matched_augmentation(
         X_train, 
         coverage_train, 
+        target_dist_params,
         augmentation_prob=1.0  
     )
     

@@ -165,6 +165,7 @@ def merge_all():
     merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "high")
     merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "med")
     merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "low")
+    merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "clinical")
 
 
 def sample_to_dilution(sample):
