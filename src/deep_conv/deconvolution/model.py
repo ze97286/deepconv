@@ -8,41 +8,72 @@ import pandas as pd
 from pathlib import Path
 from deep_conv.presence.model import SingleCellTypePresenceModel
 
-def coverage_matched_augmentation(marker_values, coverage, target_dist_params, augmentation_prob=0.7):
+def coverage_matched_augmentation(marker_values, coverage, augmentation_prob=0.7):
+    """
+    Augmentation to match clinical data coverage profile.
+    Targets 50-98% markers > 0 and 10-88% > 4.
+    Assumes marker_values is NaN where coverage == 0.
+    """
     augmented_values = marker_values.copy()
     augmented_coverage = coverage.copy()
     num_samples = len(marker_values)
     augment_mask = np.random.random(num_samples) < augmentation_prob
     
+    # Initial sanitization: where coverage == 0, set marker_values to 0 (NaN -> 0)
+    zero_coverage_mask = augmented_coverage == 0
+    augmented_values[zero_coverage_mask] = 0  # Overwrites NaN where coverage is 0
+    # For non-zero coverage, clamp to [0, 1] and replace any remaining NaN with 0
+    non_zero_mask = ~zero_coverage_mask
+    augmented_values[non_zero_mask] = np.clip(augmented_values[non_zero_mask], 0, 1)
+    augmented_values[non_zero_mask] = np.nan_to_num(augmented_values[non_zero_mask], nan=0.0)
+    
     for i in range(num_samples):
-        if not augment_mask[i] or coverage[i].mean() < 1.0:
+        if not augment_mask[i]:
             continue
         
-        # Use zero_rate for presence
-        presence_prob = 1 - target_dist_params['zero_rate']
-        zero_mask = np.random.random(marker_values[i].shape) < target_dist_params['zero_rate']
+        current_cov = coverage[i].mean()
+        if current_cov < 1.0:
+            continue
+            
+        # Randomly set fraction of markers > 0 between 50% and 98%
+        presence_prob = np.random.uniform(0.5, 0.98)
+        zero_mask = np.random.random(marker_values[i].shape) < (1 - presence_prob)
         augmented_coverage[i, zero_mask] = 0
+        augmented_values[i, zero_mask] = 0  # Ensure marker_values is 0 where coverage is 0
         
-        # Estimate reliable_prob from quantiles (e.g., % > 4)
+        # For non-zero markers, adjust coverage to match 10-88% > 4
         non_zero_mask = ~zero_mask
         if non_zero_mask.sum() > 0:
-            # Approximate % > 4 from quantiles (interpolate if needed)
-            reliable_prob = np.interp(4, 
-                                    [target_dist_params['quantiles']['5%'], target_dist_params['quantiles']['95%']],
-                                    [0.05, 0.95])
+            reliable_prob = np.random.uniform(0.1, 0.88)
             reliable_count = int(reliable_prob * non_zero_mask.sum())
             reliable_indices = np.random.choice(np.where(non_zero_mask)[0], reliable_count, replace=False)
             
             for j in reliable_indices:
                 augmented_coverage[i, j] = np.random.uniform(5, 20)
-                successes = np.random.binomial(int(augmented_coverage[i, j]), marker_values[i, j])
-                augmented_values[i, j] = successes / augmented_coverage[i, j]
+                n = int(augmented_coverage[i, j])
+                # Use original marker value if non-NaN, else sample from [0, 1]
+                p = marker_values[i, j]
+                if np.isnan(p):
+                    p = np.random.uniform(0, 1)  # Reasonable default for new coverage
+                else:
+                    p = np.clip(p, 0, 1)  # Ensure p is valid
+                successes = np.random.binomial(n, p)
+                augmented_values[i, j] = successes / augmented_coverage[i, j] if n > 0 else 0.0
             
             low_cov_indices = np.setdiff1d(np.where(non_zero_mask)[0], reliable_indices)
             for j in low_cov_indices:
                 augmented_coverage[i, j] = np.random.uniform(1, 4)
-                successes = np.random.binomial(int(augmented_coverage[i, j]), marker_values[i, j])
-                augmented_values[i, j] = successes / augmented_coverage[i, j]
+                n = int(augmented_coverage[i, j])
+                p = marker_values[i, j]
+                if np.isnan(p):
+                    p = np.random.uniform(0, 1)
+                else:
+                    p = np.clip(p, 0, 1)
+                successes = np.random.binomial(n, p)
+                augmented_values[i, j] = successes / augmented_coverage[i, j] if n > 0 else 0.0
+    
+    # Final consistency: where coverage == 0, marker_values must be 0
+    augmented_values[augmented_coverage == 0] = 0
     
     return augmented_values, augmented_coverage
 
