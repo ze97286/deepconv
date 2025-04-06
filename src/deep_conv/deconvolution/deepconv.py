@@ -108,74 +108,6 @@ def set_seed(seed: int = 42):
     torch.backends.cudnn.benchmark = False
 
 
-def get_validation_set(eval_pat_dir: str, atlas: pd.DataFrame, names: set) -> Tuple[DataLoader, torch.Tensor]:
-    """
-    Reads marker coverage, methylation, and ground-truth label files from a validation set directory,
-    filters them down to the set of markers in 'names', and returns a DataLoader plus normalized labels.
-
-    Args:
-        eval_pat_dir (str):
-            Directory containing "marker_values.parquet", "coverage.parquet", and "ground_truth_y.parquet" 
-            for the validation data.
-        atlas (pd.DataFrame):
-            A DataFrame that includes marker metadata and cell-type columns. 
-            We use atlas.columns[8:] as the cell-type columns for the dataset constructor.
-        names (set):
-            The set of marker names (strings) to include, ensuring we only keep markers that appear
-            in both 'atlas' and the parquet files.
-
-    Returns:
-        val_loader (DataLoader):
-            A DataLoader wrapping the TissueDeconvolutionDataset for the validation set, 
-            with batch_size=512.
-        y_val (torch.Tensor):
-            A [N, C] Tensor of ground-truth cell-type proportions, normalized so each row sums to 1.
-    """
-    # Load marker values, coverage, and labels from parquet
-    X_val = pd.read_parquet(Path(eval_pat_dir) / "marker_values.parquet")
-    coverage_val = pd.read_parquet(Path(eval_pat_dir) / "coverage.parquet")
-    y_val = pd.read_parquet(Path(eval_pat_dir) / "ground_truth_y.parquet")
-
-    # Filter to only include markers in 'names'
-    X_val = X_val[X_val.name.isin(names)]
-    coverage_val = coverage_val[coverage_val.name.isin(names)]
-    
-    # Drop name/direction columns and transpose => shape [samples, markers]
-    X_val = X_val.drop(columns=["name", "direction"]).T.to_numpy()
-    coverage_val = coverage_val.drop(columns=["name", "direction"]).T.to_numpy()
-
-    # Print some coverage stats for debug/monitoring
-    print("median coverage", 
-          np.median(coverage_val, axis=1), 
-          "median of medians", 
-          np.median(np.median(coverage_val, axis=1)), 
-          "mean median", 
-          np.median(coverage_val, axis=1).mean())
-    
-    y_val = y_val.to_numpy()
-    
-    val_dataset = TissueDeconvolutionDataset(
-        X_val,
-        coverage_val,
-        atlas[atlas.columns[8:]].T.to_numpy(),
-        y_val
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=512,
-        num_workers=2,
-        persistent_workers=True,
-        shuffle=False
-    )
-    
-    # Convert y_val to a PyTorch tensor and normalize each row
-    y_val = torch.tensor(y_val, dtype=torch.float32)
-    y_val = y_val / y_val.sum(dim=1, keepdim=True)
-    
-    return val_loader, y_val
-
-
 def get_validation_set_with_augmentation(
     eval_pat_dir: str, 
     atlas: pd.DataFrame, 
@@ -288,107 +220,6 @@ def get_validation_set_with_augmentation(
     return val_loader, clinical_val_loader, y_val_tensor
 
 
-def load_training(base_dir: str, atlas: pd.DataFrame, names: set, num_files: int = 5) -> DataLoader:
-    """
-    Loads and merges multiple parquet files containing training data (marker_values, coverage, ground_truth_y),
-    filters them to only include the markers in 'names', and returns a DataLoader for training.
-
-    Args:
-        base_dir (str):
-            Path prefix for the training parquet files. We expect files named like:
-                base_dir + "1_marker_values.parquet",
-                base_dir + "1_coverage.parquet",
-                base_dir + "1_ground_truth_y.parquet",
-                and so on up to num_files.
-        atlas (pd.DataFrame):
-            DataFrame with marker metadata plus columns for each cell type (atlas.columns[8:] are cell types).
-        names (set):
-            The set of marker names to keep (usually matches the set in the atlas).
-        num_files (int):
-            Number of parquet file batches to merge. Defaults to 4.
-
-    Returns:
-        DataLoader:
-            A DataLoader over the merged training dataset with batch_size=256, shuffle=True, etc.
-    """
-    markers = []
-    coverage = []
-    y = []
-    
-    print("loading training from", base_dir)
-    suffixes = [f"_batch{i}" for i in range(1, (num_files + 1)*3)]
-    
-    # Read multiple parquet files and accumulate marker values, coverage, and ground-truth
-    for cov in ['high', 'med', 'low']:
-        for i in range(1, num_files + 1):
-            markers.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_marker_values.parquet"))
-            coverage.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_coverage.parquet"))
-            y.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_ground_truth_y.parquet"))
-    
-    # Merge all marker tables on ['name','direction']
-    merged_markers = markers[0]
-    for i, m in enumerate(markers[1:]):
-        merged_markers = merged_markers.merge(
-            m,
-            on=['name', 'direction'],
-            how='outer',
-            suffixes=('', suffixes[i])
-        )
-    
-    # Merge all coverage tables on ['name','direction']
-    merged_coverage = coverage[0]
-    for i, c in enumerate(coverage[1:]):
-        merged_coverage = merged_coverage.merge(
-            c,
-            on=['name', 'direction'],
-            how='outer',
-            suffixes=('', suffixes[i])
-        )
-    
-    # Concatenate all label DataFrames
-    y = pd.concat(y, ignore_index=True).fillna(0)
-    
-    # Filter out any markers not in 'names'
-    X_train = merged_markers[merged_markers.name.isin(names)]
-    coverage_train = merged_coverage[merged_coverage.name.isin(names)]
-    
-    # Drop unnecessary columns and transpose => shape [samples, markers]
-    X_train = X_train.drop(columns=["name", "direction"]).T.to_numpy()
-    coverage_train = coverage_train.drop(columns=["name", "direction"]).T.to_numpy()
-    
-    # Print coverage stats for debug
-    print("median coverage", 
-          np.median(coverage_train, axis=1), 
-          "median of medians", 
-          np.median(np.median(coverage_train, axis=1)), 
-          "mean median", 
-          np.median(coverage_train, axis=1).mean())
-    
-    # Convert the label DataFrame to numpy
-    y_train = y.to_numpy()
-    
-    # Build a TissueDeconvolutionDataset
-    train_dataset = TissueDeconvolutionDataset(
-        X_train,
-        coverage_train,
-        atlas[atlas.columns[8:]].T.to_numpy(),
-        y_train
-    )
-    
-    # Also create a normalized version of y for potential usage
-    y_train = torch.tensor(y_train, dtype=torch.float32)
-    y_train = y_train / y_train.sum(dim=1, keepdim=True)
-    
-    # Return a DataLoader for training
-    return DataLoader(
-        train_dataset,
-        batch_size=256,
-        shuffle=True,
-        num_workers=4,
-        persistent_workers=True
-    )
-   
-
 def load_training_with_augmentation(
     base_dir: str, 
     atlas: pd.DataFrame, 
@@ -487,6 +318,7 @@ def load_training_with_augmentation(
         persistent_workers=True,
         shuffle=False  
     )
+
 
 def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.15):
     """
@@ -640,6 +472,8 @@ def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.15):
     )
     
     return enhanced_loader
+
+
 def analyze_coverage_distribution(data_loader):
     """
     Analyze the coverage distribution in a dataset for calibration.
@@ -821,203 +655,129 @@ def train_and_eval(
     use_loyfer: bool,
     presence_models_dir: str,
 ) -> nn.Module:
-    """
-    Loads data, trains a CellTypeDeconvolutionModel, and evaluates it on multiple validation sets.
-
-    Steps:
-      1. Set random seeds and threads for reproducibility.
-      2. Read the atlas (marker metadata + cell types).
-      3. Build a training DataLoader from training parquet files in `train_pat_dir`.
-      4. Build validation DataLoaders for multiple subsets (e.g. tier1, CD4, CD8, OAC).
-      5. Construct the CellTypeDeconvolutionModel, mapping each marker to a specific cell type.
-      6. Train the model (train_model) with early stopping, saving best model checkpoints to `output_path`.
-      7. Retrieve the best threshold recommended by the training process.
-      8. Evaluate final model predictions on each validation subset and log performance metrics.
-      9. Return the trained model (with best checkpoint loaded).
-
-    Args:
-        atlas_path (str):
-            Path to a TSV (or CSV with sep="\t") containing at least columns 
-            ['name', 'target', ... plus cell type columns in columns[8:]].
-        train_pat_dir (str):
-            Directory containing training parquet files:
-               e.g. "1_marker_values.parquet", "1_coverage.parquet", 
-                    "1_ground_truth_y.parquet", etc.
-        eval_pat_dir (str):
-            Directory containing separate validation parquet files 
-            (subfolders for "tier1", "CD4", "CD8", "OAC", etc.).
-        threads (int):
-            Number of CPU threads to use for PyTorch operations and data loading.
-        output_path (str):
-            Where to save the final trained model checkpoints and any ancillary outputs.
-
-    Returns:
-        nn.Module:
-            The final trained model with the best checkpoint loaded.
-            (Primarily for additional inference in the calling scope.)
-    """
-    # Fix random seeds and threads for reproducibility
     set_seed()
     torch.set_num_threads(threads)
     torch.set_num_interop_threads(1)
 
-    # 1) Read the atlas of markers and cell types
     atlas = pd.read_csv(atlas_path, sep="\t")
-    
-    # The 'names' set ensures we only keep relevant markers
     names = set(atlas.name.unique())
 
-    # 2) Build the training DataLoader from parquet files in train_pat_dir
     clinical_dist_params = {
-        'mean': 5.0,
-        'std': 4.0,
-        'log_params': {
-            'mean': 1.2,
-            'std': 0.8
+        'low': {
+            'mean': 10.0, 'std': 6.0, 'log_params': {'mean': 2.08, 'std': 0.8},
+            'quantiles': {'5%': 1.0, '25%': 4.0, '50%': 8.0, '75%': 12.0, '95%': 20.0},
+            'zero_rate': 0.03
         },
-        'quantiles': {
-            '5%': 0.5,
-            '25%': 2.0,
-            '50%': 4.0,
-            '75%': 7.0,
-            '95%': 12.0
+        'med': {
+            'mean': 25.0, 'std': 10.0, 'log_params': {'mean': 3.0, 'std': 0.7},
+            'quantiles': {'5%': 5.0, '25%': 12.0, '50%': 20.0, '75%': 30.0, '95%': 50.0},
+            'zero_rate': 0.004
         },
-        'zero_rate': 0.1
+        'high': {
+            'mean': 70.0, 'std': 20.0, 'log_params': {'mean': 4.2, 'std': 0.6},
+            'quantiles': {'5%': 30.0, '25%': 50.0, '50%': 67.0, '75%': 85.0, '95%': 120.0},
+            'zero_rate': 0.004
+        },
+        'clinical': {
+            'mean': 5.0, 'std': 4.0, 'log_params': {'mean': 1.4, 'std': 0.9},
+            'quantiles': {'5%': 0.5, '25%': 2.0, '50%': 4.0, '75%': 7.0, '95%': 12.0},
+            'zero_rate': 0.2
+        }
     }
 
-    train_dl = load_training_with_augmentation(
-        train_pat_dir, 
-        atlas, 
-        names,
-        enable_augmentation=True,
-        target_dist_params=clinical_dist_params,
-        augmentation_probability=0.7
+    train_dl_low = load_training_with_augmentation(
+        f"{train_pat_dir}_low", atlas, names, num_files=5,
+        enable_augmentation=True, target_dist_params=clinical_dist_params['low'],
+        augmentation_probability=1.0, subset_size=350_000
     )
-    
-    analyze_coverage_distribution(train_dl)
+    train_dl_med = load_training_with_augmentation(
+        f"{train_pat_dir}_med", atlas, names, num_files=2,
+        enable_augmentation=True, target_dist_params=clinical_dist_params['med'],
+        augmentation_probability=1.0, subset_size=75_000
+    )
+    train_dl_high = load_training_with_augmentation(
+        f"{train_pat_dir}_high", atlas, names, num_files=2,
+        enable_augmentation=True, target_dist_params=clinical_dist_params['high'],
+        augmentation_probability=1.0, subset_size=75_000
+    )
+
+    from torch.utils.data import ConcatDataset
+    train_dataset = ConcatDataset([train_dl_low.dataset, train_dl_med.dataset, train_dl_high.dataset])
+    train_dl = DataLoader(
+        train_dataset, batch_size=64, sampler=RandomSubsetSampler(train_dataset, 500_000),
+        num_workers=24, pin_memory=True, persistent_workers=True, shuffle=False
+    )
+
+    dist_params = analyze_coverage_distribution(train_dl)
+    print("Training coverage distribution:", dist_params)
+
     import matplotlib.pyplot as plt
-    # Call the test function
-    fig = test_augmentation(
-        train_pat_dir, 
-        atlas, 
-        names,
-        target_dist_params=clinical_dist_params
-    )
-
-    # save the figure
+    fig = test_augmentation(train_pat_dir + "_low", atlas, names, clinical_dist_params['low'])
     os.makedirs(output_path, exist_ok=True)
-    plt.savefig(output_path/"augmentation_effect.png", dpi=300)
+    plt.savefig(os.path.join(output_path, "augmentation_effect.png"), dpi=300)
 
-    # 3) Build DataLoaders for each validation subset
-    
-    if use_loyfer:
-        validation_dls = {}
-        clinical_validation_dls = {}
-        y_vals = {}
-        for cov in ['high','med','low']:
-            tier1_dl, tier1_clinical_dl, t1_yval = get_validation_set_with_augmentation(
-                str(Path(eval_pat_dir+"_"+cov) / "tier1"), 
-                atlas, names, 
-                target_dist_params=clinical_dist_params,
-                block_size=100_000,
-            )
+    validation_dls = {}
+    clinical_validation_dls = {}
+    y_vals = {}
+    for cov in ['high', 'med', 'low', 'clinical']:
+        tier1_dl, tier1_clinical_dl, t1_yval = get_validation_set_with_augmentation(
+            str(Path(eval_pat_dir + "_" + cov) / "tier1"), atlas, names,
+            block_size=50_000, target_dist_params=clinical_dist_params[cov],
+            enable_augmentation=True
+        )
+        print(f"Validation set {cov} tier1 length={len(t1_yval)}")
 
-            print(f"validation set for {cov} tier1 length={len(t1_yval)}")
-            
-            tcells_dl, tcells_clinical_dl, tcells_yval = get_validation_set_with_augmentation(
-                str(Path(eval_pat_dir+"_"+cov) / "T-cells"), 
-                atlas, names,
-                target_dist_params=clinical_dist_params,
-                block_size=10_000,
-            )
+        tcells_dl, tcells_clinical_dl, tcells_yval = get_validation_set_with_augmentation(
+            str(Path(eval_pat_dir + "_" + cov) / "T-cells"), atlas, names,
+            block_size=10_000, target_dist_params=clinical_dist_params[cov],
+            enable_augmentation=True
+        )
+        print(f"Validation set {cov} tcells length={len(tcells_yval)}")
 
-            print(f"validation set for {cov} tcells length={len(tcells_yval)}")
-            
-            oac_dl, oac_clinical_dl, oac_yval = get_validation_set_with_augmentation(
-                str(Path(eval_pat_dir+"_"+cov) / "OAC"), 
-                atlas, names,
-                target_dist_params=clinical_dist_params,
-                block_size=1_000,
-            )
+        oac_dl, oac_clinical_dl, oac_yval = get_validation_set_with_augmentation(
+            str(Path(eval_pat_dir + "_" + cov) / "OAC"), atlas, names,
+            block_size=1_000, target_dist_params=clinical_dist_params[cov],
+            enable_augmentation=True
+        )
+        print(f"Validation set {cov} oac length={len(oac_yval)}")
 
-            print(f"validation set for {cov} oac length={len(oac_yval)}")
+        # Store loaders
+        validation_dls[f"tier1_{cov}"] = tier1_dl
+        validation_dls[f"t-cells_{cov}"] = tcells_dl
+        validation_dls[f"oac_{cov}"] = oac_dl
+        clinical_validation_dls[f"tier1_{cov}_clinical"] = tier1_clinical_dl
+        clinical_validation_dls[f"t-cells_{cov}_clinical"] = tcells_clinical_dl
+        clinical_validation_dls[f"oac_{cov}_clinical"] = oac_clinical_dl
+        y_vals[f"tier1_{cov}"] = t1_yval
+        y_vals[f"t-cells_{cov}"] = tcells_yval
+        y_vals[f"oac_{cov}"] = oac_yval
+        y_vals[f"tier1_{cov}_clinical"] = t1_yval
+        y_vals[f"t-cells_{cov}_clinical"] = tcells_yval
+        y_vals[f"oac_{cov}_clinical"] = oac_yval
 
-            # Store both standard and clinical variants
-            validation_dls[f"tier1_{cov}"] = tier1_dl
-            validation_dls[f"t-cells_{cov}"] = tcells_dl
-            validation_dls[f"oac_{cov}"] = oac_dl
-            
-            clinical_validation_dls[f"tier1_{cov}_clinical"] = tier1_clinical_dl
-            clinical_validation_dls[f"t-cells_{cov}_clinical"] = tcells_clinical_dl
-            clinical_validation_dls[f"oac_{cov}_clinical"] = oac_clinical_dl
-
-            y_vals[f"tier1_{cov}"] = t1_yval
-            y_vals[f"t-cells_{cov}"] = tcells_yval
-            y_vals[f"oac_{cov}"] = oac_yval
-            
-            # Use the same ground truth for clinical variants
-            y_vals[f"tier1_{cov}_clinical"] = t1_yval
-            y_vals[f"t-cells_{cov}_clinical"] = tcells_yval
-            y_vals[f"oac_{cov}_clinical"] = oac_yval
-    else:
-        tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir) / "tier1"), atlas, names)
-        cd4_dl, cd4_yval = get_validation_set(str(Path(eval_pat_dir) / "CD4"), atlas, names)
-        cd8_dl, cd8_yval = get_validation_set(str(Path(eval_pat_dir) / "CD8"), atlas, names)
-        oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, names)
-
-        validation_dls = {
-            "tier1": tier1_dl,
-            "cd4": cd4_dl,
-            "cd8": cd8_dl,
-            "oac": oac_dl
-        }
-
-        y_vals = {
-            "tier1": t1_yval,
-            "cd4": cd4_yval,
-            "cd8": cd8_yval,
-            "oac": oac_yval
-        }
-
-
-    # 4) Identify all cell type columns (atlas.columns[8:])
+    # 5) Enhance negative examples
     cell_types = list(atlas.columns[8:])
+    enhanced_train_dl = enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.05)
 
-    # Build an array mapping each marker to its cell type index
+    # 6) Create the model
     target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
-    print("starting enhancing negative examples")
-    enhanced_train_dl = enhanced_negative_examples(
-        train_dl=train_dl, 
-        cell_types=cell_types,
-        sample_fraction=0.05, 
-    )
-    print("finished enhancing negative examples")
-
-    # 5) Create the model
     model = CellTypeDeconvolutionModel(
-        num_markers=len(atlas),
-        num_cell_types=len(cell_types),
-        target_ids=target_ids,
-        presence_models_dir=presence_models_dir,
-        feature_dim=64,
+        num_markers=len(atlas), num_cell_types=len(cell_types),
+        target_ids=target_ids, presence_models_dir=presence_models_dir, feature_dim=64
     )
 
+    # 7) Train the model
     combined_val_loaders = {**validation_dls, **clinical_validation_dls}
-    # 6) Train the model, saving best checkpoint to `output_path`
     model, _ = train_model(
-        model=model,
-        train_loader=enhanced_train_dl,
-        val_loaders=combined_val_loaders,
+        model=model, train_loader=enhanced_train_dl, val_loaders=combined_val_loaders,
         model_path=output_path
     )
-    
-    print("\nStandard Validation Sets:")
 
-    # 7) Evaluate final model predictions on each validation set
+    # 8) Evaluate
+    print("\nStandard Validation Sets:")
     for tier in validation_dls.keys():
         tier_dl = validation_dls[tier]
         y_val = y_vals[tier]
-        # Use the simple predict function to get proportions
         deep_conv_estimation = predict_with_consensus(model, tier_dl.dataset.fraction, tier_dl.dataset.coverage)
         deep_conv_eval_metrics = evaluate_performance(y_val.detach().numpy(), deep_conv_estimation, cell_types)
         print(f"Standard validation metrics for tier {tier}")
@@ -1027,19 +787,12 @@ def train_and_eval(
     for tier in clinical_validation_dls.keys():
         tier_dl = clinical_validation_dls[tier]
         y_val = y_vals[tier]
-        
         deep_conv_estimation = predict_with_consensus(model, tier_dl.dataset.fraction, tier_dl.dataset.coverage)
-        
-        deep_conv_eval_metrics = evaluate_performance(
-            y_val.detach().numpy(), 
-            deep_conv_estimation, 
-            cell_types
-        )
-        
+        deep_conv_eval_metrics = evaluate_performance(y_val.detach().numpy(), deep_conv_estimation, cell_types)
         print(f"Clinical-like validation metrics for tier {tier}")
-        log_metrics(deep_conv_eval_metrics)    
-    # Return the trained model for downstream usage
-    return model    
+        log_metrics(deep_conv_eval_metrics)
+
+    return model
 
 
 def main():
