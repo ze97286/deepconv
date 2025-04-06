@@ -46,20 +46,19 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
             # Estimate fraction of non-zero markers with coverage >= 5 from quantiles
             q_values = [target_dist_params['quantiles'][k] for k in ['5%', '25%', '50%', '75%', '95%']]
             q_probs = [0.05, 0.25, 0.5, 0.75, 0.95]
-            reliable_prob = 1 - np.interp(5, q_values, q_probs)  # Fraction >= 5
+            base_reliable_prob = 1 - np.interp(5, q_values, q_probs)  # Base fraction >= 5
+            # Introduce variability in reliable_prob per sample
+            reliable_prob = np.random.normal(base_reliable_prob, 0.1)
+            reliable_prob = np.clip(reliable_prob, 0, 1)  # Ensure valid probability
             reliable_count = max(1, int(reliable_prob * num_non_zero))  # Ensure at least 1
             
             # Randomly select markers to get reliable coverage
             non_zero_indices = np.where(non_zero_mask)[0]
             reliable_indices = np.random.choice(non_zero_indices, reliable_count, replace=False)
             
-            # Assign coverage to reliable markers (5-20), skewed toward median
-            median_cov = target_dist_params['quantiles']['50%']
-            # Clamp median_cov to ensure 5 <= median_cov <= 20
-            median_cov = np.clip(median_cov, 5, 20)
+            # Assign coverage to reliable markers (5-20), uniform to match expected mean
             for j in reliable_indices:
-                # Sample from a triangular distribution
-                augmented_coverage[i, j] = np.random.triangular(5, median_cov, 20)
+                augmented_coverage[i, j] = np.random.uniform(5, 20)  # Uniform for mean ~12.5
                 n = int(augmented_coverage[i, j])
                 p = marker_values[i, j]
                 if np.isnan(p):

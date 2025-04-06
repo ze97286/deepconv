@@ -458,7 +458,7 @@ def enhanced_negative_examples(train_dl, cell_types, atlas, sample_fraction=0.15
     enhanced_dataset = TissueDeconvolutionDataset(
         combined_X,
         combined_coverage,
-        atlas,
+        atlas[atlas.columns[8:]].T.to_numpy(),
         combined_y
     )
     
@@ -591,57 +591,50 @@ def visualize_augmentation_effect(original_coverage, augmented_coverage, title="
     return fig
 
 
-def test_augmentation(train_pat_dir, atlas, names, target_dist_params=None):
-    """
-    Generate test augmentations and visualize their effect.
+def test_augmentation(base_dir, atlas, names, target_dist_params):
+    # Load a small subset of data
+    dataset = load_training_with_augmentation(
+        base_dir, atlas, names, num_files=1, enable_augmentation=False, subset_size=1000
+    )
+    fraction = dataset.dataset.fraction
+    coverage = dataset.dataset.coverage
     
-    Args:
-        train_pat_dir: Directory containing training files
-        atlas: DataFrame with marker metadata
-        names: Set of marker names to include
-        target_dist_params: Target coverage distribution parameters
-    
-    Returns:
-        Matplotlib figure showing the augmentation effect
-    """
-    # Load a small subset of training data
-    markers = []
-    coverage = []
-    y = []
-    
-    # Just load one batch for testing
-    i = 1
-    markers.append(pd.read_parquet(f"{train_pat_dir}/{str(i)}_marker_values.parquet"))
-    coverage.append(pd.read_parquet(f"{train_pat_dir}/{str(i)}_coverage.parquet"))
-    y.append(pd.read_parquet(f"{train_pat_dir}/{str(i)}_ground_truth_y.parquet"))
-    
-    # Process data
-    X_train = markers[0][markers[0].name.isin(names)]
-    coverage_train = coverage[0][coverage[0].name.isin(names)]
-    
-    X_train = X_train.drop(columns=["name", "direction"]).T.to_numpy()
-    coverage_train = coverage_train.drop(columns=["name", "direction"]).T.to_numpy()
-    y_train = y[0].to_numpy()
-    
-    # Apply augmentation to all samples (100% probability)
-    aug_X_train, aug_coverage_train = coverage_matched_augmentation(
-        X_train, 
-        coverage_train, 
-        target_dist_params,
-        augmentation_prob=1.0  
+    # Apply augmentation
+    aug_fraction, aug_coverage = coverage_matched_augmentation(
+        fraction, coverage, target_dist_params, augmentation_prob=1.0
     )
     
-    # Create the visualization
-    fig = visualize_augmentation_effect(
-        coverage_train, 
-        aug_coverage_train,
-        title="Coverage Augmentation Effect on Training Data"
-    )
+    # Plot
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
     
-    # Print some statistics
-    print(f"Original coverage - Mean: {np.mean(coverage_train):.2f}, Median: {np.median(coverage_train):.2f}")
-    print(f"Augmented coverage - Mean: {np.mean(aug_coverage_train):.2f}, Median: {np.median(aug_coverage_train):.2f}")
+    # Original mean coverage
+    orig_means = coverage.mean(axis=1)
+    axes[0, 0].hist(orig_means, bins=50, color='blue', alpha=0.7)
+    axes[0, 0].set_title("Original Mean Coverage Distribution")
+    axes[0, 0].set_xlabel("Mean Coverage")
     
+    # Augmented mean coverage
+    aug_means = aug_coverage.mean(axis=1)
+    axes[0, 1].hist(aug_means, bins=50, color='blue', alpha=0.7)
+    axes[0, 1].set_title("Augmented Mean Coverage Distribution")
+    axes[0, 1].set_xlabel("Mean Coverage")
+    
+    # Scatter: Original vs. Augmented
+    axes[1, 0].scatter(orig_means, aug_means, color='blue', alpha=0.5)
+    axes[1, 0].plot([0, 14], [0, 14], 'r--')
+    axes[1, 0].set_xlabel("Original Mean Coverage")
+    axes[1, 0].set_ylabel("Augmented Mean Coverage")
+    axes[1, 0].set_title("Original vs Augmented Coverage")
+    
+    # Per-marker coverage comparison (not per-sample mean)
+    axes[1, 1].hist(coverage.flatten(), bins=50, color='blue', alpha=0.5, label='Original', range=(0, 20))
+    axes[1, 1].hist(aug_coverage.flatten(), bins=50, color='orange', alpha=0.5, label='Augmented', range=(0, 20))
+    axes[1, 1].set_xlabel("Coverage (Per Marker)")
+    axes[1, 1].set_title("Per-Marker Coverage Comparison")
+    axes[1, 1].legend()
+    
+    plt.tight_layout()
     return fig
 
 
