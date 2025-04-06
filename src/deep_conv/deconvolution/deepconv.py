@@ -319,7 +319,7 @@ def load_training_with_augmentation(
     )
 
 
-def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.15):
+def enhanced_negative_examples(train_dl, cell_types, atlas, sample_fraction=0.15):
     """
     Create additional negative examples (for each cell type) by applying 
     stochastic coverage reduction and hypergeometric sampling in a vectorized manner.
@@ -458,7 +458,7 @@ def enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.15):
     enhanced_dataset = TissueDeconvolutionDataset(
         combined_X,
         combined_coverage,
-        train_dl.dataset.atlas,
+        atlas,
         combined_y
     )
     
@@ -756,7 +756,7 @@ def train_and_eval(
 
     # 5) Enhance negative examples
     cell_types = list(atlas.columns[8:])
-    enhanced_train_dl = enhanced_negative_examples(train_dl, cell_types, sample_fraction=0.05)
+    enhanced_train_dl = enhanced_negative_examples(train_dl, cell_types, atlas, sample_fraction=0.05)
 
     # 6) Create the model
     target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()

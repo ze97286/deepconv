@@ -8,6 +8,7 @@ import pandas as pd
 from pathlib import Path
 from deep_conv.presence.model import SingleCellTypePresenceModel
 
+
 def coverage_matched_augmentation(marker_values, coverage, target_dist_params, augmentation_prob=0.7):
     """
     Augmentation using target_dist_params to match coverage profile.
@@ -17,7 +18,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     """
     augmented_values = marker_values.copy()
     augmented_coverage = coverage.copy()
-    num_samples = len(marker_values)
+    num_samples, num_markers = marker_values.shape
     augment_mask = np.random.random(num_samples) < augmentation_prob
     
     # Initial sanitization: where coverage == 0, set marker_values to 0 (NaN -> 0)
@@ -31,15 +32,11 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     for i in range(num_samples):
         if not augment_mask[i]:
             continue
-        
-        current_cov = coverage[i].mean()
-        if current_cov < 1.0:
-            continue
             
         # Use zero_rate to determine presence probability
         presence_prob = 1 - target_dist_params['zero_rate']
         # Generate mask where True means non-zero coverage (present)
-        non_zero_mask = np.random.random(marker_values[i].shape) < presence_prob
+        non_zero_mask = np.random.random(num_markers) < presence_prob
         augmented_coverage[i, ~non_zero_mask] = 0  # Set to 0 where not present
         augmented_values[i, ~non_zero_mask] = 0    # Ensure marker_values is 0 where coverage is 0
         
@@ -56,8 +53,11 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
             non_zero_indices = np.where(non_zero_mask)[0]
             reliable_indices = np.random.choice(non_zero_indices, reliable_count, replace=False)
             
+            # Assign coverage to reliable markers (5-20), skewed toward median
+            median_cov = target_dist_params['quantiles']['50%']
             for j in reliable_indices:
-                augmented_coverage[i, j] = np.random.uniform(5, 20)
+                # Sample from a triangular distribution to add variability
+                augmented_coverage[i, j] = np.random.triangular(5, median_cov, 20)
                 n = int(augmented_coverage[i, j])
                 p = marker_values[i, j]
                 if np.isnan(p):
