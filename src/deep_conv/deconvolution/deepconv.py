@@ -610,11 +610,10 @@ def test_augmentation(train_pat_dir, atlas, names, target_dist_params=None):
     y = []
     
     # Just load one batch for testing
-    cov = 'high'  # Start with high coverage to see the effect clearly
     i = 1
-    markers.append(pd.read_parquet(f"{train_pat_dir}_{cov}/{str(i)}_marker_values.parquet"))
-    coverage.append(pd.read_parquet(f"{train_pat_dir}_{cov}/{str(i)}_coverage.parquet"))
-    y.append(pd.read_parquet(f"{train_pat_dir}_{cov}/{str(i)}_ground_truth_y.parquet"))
+    markers.append(pd.read_parquet(f"{train_pat_dir}/{str(i)}_marker_values.parquet"))
+    coverage.append(pd.read_parquet(f"{train_pat_dir}/{str(i)}_coverage.parquet"))
+    y.append(pd.read_parquet(f"{train_pat_dir}/{str(i)}_ground_truth_y.parquet"))
     
     # Process data
     X_train = markers[0][markers[0].name.isin(names)]
