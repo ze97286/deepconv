@@ -96,11 +96,19 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
             for j in reliable_indices:
                 augmented_coverage[i, j] = rand_fn(1) * (20 - 5) + 5  # Uniform 5-20
                 n = int(augmented_coverage[i, j].item() if is_torch else augmented_coverage[i, j])
-                p = marker_values[i, j].item() if is_torch else marker_values[i, j]
-                if np.isnan(p) if not is_torch else torch.isnan(p):
-                    p = rand_fn(1).item() if is_torch else rand_fn(1)  # Default for new coverage
+                p_tensor = marker_values[i, j]  # Keep as tensor for PyTorch
+                if is_torch:
+                    if torch.isnan(p_tensor):
+                        p_tensor = rand_fn(1)  # Default for new coverage
+                    else:
+                        p_tensor = clamp_fn(p_tensor, 0, 1)  # Ensure valid p
+                    p = p_tensor.item()  # Convert to scalar for binomial
                 else:
-                    p = clamp_fn(p, 0, 1)  # Ensure valid p
+                    p = p_tensor
+                    if np.isnan(p):
+                        p = rand_fn(1)  # Default for new coverage
+                    else:
+                        p = clamp_fn(p, 0, 1)
                 successes = binomial_fn(n, p)
                 augmented_values[i, j] = successes / augmented_coverage[i, j] if n > 0 else 0.0
             
@@ -110,11 +118,19 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
             for j in low_cov_indices:
                 augmented_coverage[i, j] = rand_fn(1) * (4 - 1) + 1  # Uniform 1-4
                 n = int(augmented_coverage[i, j].item() if is_torch else augmented_coverage[i, j])
-                p = marker_values[i, j].item() if is_torch else marker_values[i, j]
-                if np.isnan(p) if not is_torch else torch.isnan(p):
-                    p = rand_fn(1).item() if is_torch else rand_fn(1)
+                p_tensor = marker_values[i, j]  # Keep as tensor for PyTorch
+                if is_torch:
+                    if torch.isnan(p_tensor):
+                        p_tensor = rand_fn(1)
+                    else:
+                        p_tensor = clamp_fn(p_tensor, 0, 1)
+                    p = p_tensor.item()
                 else:
-                    p = clamp_fn(p, 0, 1)
+                    p = p_tensor
+                    if np.isnan(p):
+                        p = rand_fn(1)
+                    else:
+                        p = clamp_fn(p, 0, 1)
                 successes = binomial_fn(n, p)
                 augmented_values[i, j] = successes / augmented_coverage[i, j] if n > 0 else 0.0
     
@@ -122,6 +138,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     augmented_values[augmented_coverage == 0] = 0
     
     return augmented_values, augmented_coverage
+
 
 class TissueDeconvolutionDataset(Dataset):
     """
