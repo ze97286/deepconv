@@ -55,8 +55,10 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
             
             # Assign coverage to reliable markers (5-20), skewed toward median
             median_cov = target_dist_params['quantiles']['50%']
+            # Clamp median_cov to ensure 5 <= median_cov <= 20
+            median_cov = np.clip(median_cov, 5, 20)
             for j in reliable_indices:
-                # Sample from a triangular distribution to add variability
+                # Sample from a triangular distribution
                 augmented_coverage[i, j] = np.random.triangular(5, median_cov, 20)
                 n = int(augmented_coverage[i, j])
                 p = marker_values[i, j]
