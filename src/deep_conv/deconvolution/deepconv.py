@@ -599,6 +599,12 @@ def test_augmentation(base_dir, atlas, names, target_dist_params):
     fraction = dataset.dataset.fraction
     coverage = dataset.dataset.coverage
     
+    # Ensure coverage and fraction are 2D (num_samples, num_markers)
+    if fraction.dim() > 2:
+        fraction = fraction.reshape(fraction.shape[0], -1)
+    if coverage.dim() > 2:
+        coverage = coverage.reshape(coverage.shape[0], -1)
+    
     # Apply augmentation
     aug_fraction, aug_coverage = coverage_matched_augmentation(
         fraction, coverage, target_dist_params, augmentation_prob=1.0
@@ -609,26 +615,22 @@ def test_augmentation(base_dir, atlas, names, target_dist_params):
     fig, axes = plt.subplots(2, 2, figsize=(10, 8))
     
     # Original mean coverage
-    orig_means = coverage.mean(dim=1)  # Ensure correct dimension
-    if orig_means.dim() > 1:  # Flatten if necessary
-        orig_means = orig_means.flatten()
-    axes[0, 0].hist(orig_means.cpu() if isinstance(orig_means, torch.Tensor) else orig_means, 
+    orig_means = coverage.mean(dim=1)  # Shape: (num_samples,)
+    axes[0, 0].hist(orig_means.cpu().numpy() if isinstance(orig_means, torch.Tensor) else orig_means, 
                     bins=50, color='blue', alpha=0.7)
     axes[0, 0].set_title("Original Mean Coverage Distribution")
     axes[0, 0].set_xlabel("Mean Coverage")
     
     # Augmented mean coverage
-    aug_means = aug_coverage.mean(dim=1)
-    if aug_means.dim() > 1:
-        aug_means = aug_means.flatten()
-    axes[0, 1].hist(aug_means.cpu() if isinstance(aug_means, torch.Tensor) else aug_means, 
+    aug_means = aug_coverage.mean(dim=1)  # Shape: (num_samples,)
+    axes[0, 1].hist(aug_means.cpu().numpy() if isinstance(aug_means, torch.Tensor) else aug_means, 
                     bins=50, color='blue', alpha=0.7)
     axes[0, 1].set_title("Augmented Mean Coverage Distribution")
     axes[0, 1].set_xlabel("Mean Coverage")
     
     # Scatter: Original vs. Augmented
-    axes[1, 0].scatter(orig_means.cpu() if isinstance(orig_means, torch.Tensor) else orig_means, 
-                       aug_means.cpu() if isinstance(aug_means, torch.Tensor) else aug_means, 
+    axes[1, 0].scatter(orig_means.cpu().numpy() if isinstance(orig_means, torch.Tensor) else orig_means, 
+                       aug_means.cpu().numpy() if isinstance(aug_means, torch.Tensor) else aug_means, 
                        color='blue', alpha=0.5)
     axes[1, 0].plot([0, 14], [0, 14], 'r--')
     axes[1, 0].set_xlabel("Original Mean Coverage")
@@ -638,9 +640,9 @@ def test_augmentation(base_dir, atlas, names, target_dist_params):
     # Per-marker coverage comparison (not per-sample mean)
     coverage_flat = coverage.flatten()
     aug_coverage_flat = aug_coverage.flatten()
-    axes[1, 1].hist(coverage_flat.cpu() if isinstance(coverage_flat, torch.Tensor) else coverage_flat, 
+    axes[1, 1].hist(coverage_flat.cpu().numpy() if isinstance(coverage_flat, torch.Tensor) else coverage_flat, 
                     bins=50, color='blue', alpha=0.5, label='Original', range=(0, 20))
-    axes[1, 1].hist(aug_coverage_flat.cpu() if isinstance(aug_coverage_flat, torch.Tensor) else aug_coverage_flat, 
+    axes[1, 1].hist(aug_coverage_flat.cpu().numpy() if isinstance(aug_coverage_flat, torch.Tensor) else aug_coverage_flat, 
                     bins=50, color='orange', alpha=0.5, label='Augmented', range=(0, 20))
     axes[1, 1].set_xlabel("Coverage (Per Marker)")
     axes[1, 1].set_title("Per-Marker Coverage Comparison")
