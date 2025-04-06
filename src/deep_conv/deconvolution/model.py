@@ -37,7 +37,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         triangular_fn = lambda shape, left, mode, right: (
             torch.distributions.Triangular(
                 low=torch.tensor(left, device=device),
-                peak=torch.tensor(mode, device=device),
+                peak=torch.tensor(clamp_fn(mode, left, right), device=device),  # Clamp mode
                 high=torch.tensor(right, device=device)
             ).sample(shape)
         )
@@ -53,7 +53,9 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         nan_to_num_fn = np.nan_to_num
         binomial_fn = np.random.binomial
         where_fn = np.where
-        triangular_fn = lambda shape, left, mode, right: np.random.triangular(left, mode, right, shape)
+        triangular_fn = lambda shape, left, mode, right: np.random.triangular(
+            left, clamp_fn(mode, left, right), right, shape  # Clamp mode
+        )
     
     # Generate augmentation mask
     augment_mask = rand_fn((num_samples,)) < augmentation_prob
