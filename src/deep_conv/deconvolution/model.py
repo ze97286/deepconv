@@ -34,6 +34,13 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         nan_to_num_fn = torch.nan_to_num
         binomial_fn = lambda n, p: torch.distributions.binomial.Binomial(n, p).sample()
         where_fn = torch.where
+        triangular_fn = lambda shape, left, mode, right: (
+            torch.distributions.Triangular(
+                low=torch.tensor(left, device=device),
+                peak=torch.tensor(mode, device=device),
+                high=torch.tensor(right, device=device)
+            ).sample(shape)
+        )
     else:
         augmented_values = marker_values.copy()
         augmented_coverage = coverage.copy()
@@ -46,6 +53,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         nan_to_num_fn = np.nan_to_num
         binomial_fn = np.random.binomial
         where_fn = np.where
+        triangular_fn = lambda shape, left, mode, right: np.random.triangular(left, mode, right, shape)
     
     # Generate augmentation mask
     augment_mask = rand_fn((num_samples,)) < augmentation_prob
@@ -62,6 +70,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     q_values = [target_dist_params['quantiles'][k] for k in ['5%', '25%', '50%', '75%', '95%']]
     q_probs = [0.05, 0.25, 0.5, 0.75, 0.95]
     base_reliable_prob = 1 - np.interp(5, q_values, q_probs)  # Fraction >= 5
+    median_cov = target_dist_params['quantiles']['50%']  # Peak for triangular distribution
     
     for i in range(num_samples):
         if not augment_mask[i]:
@@ -79,7 +88,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         num_non_zero = num_non_zero.item() if is_torch else num_non_zero  # Convert to scalar
         if num_non_zero > 0:
             # Introduce variability in reliable_prob per sample
-            reliable_prob = normal_fn(base_reliable_prob, 0.1, (1,))
+            reliable_prob = normal_fn(base_reliable_prob, 0.15, (1,))  # Increased std for more variability
             reliable_prob = clamp_fn(reliable_prob, 0, 1)  # Ensure valid probability
             reliable_prob = reliable_prob.item() if is_torch else reliable_prob  # Convert to scalar
             reliable_count = max(1, int(reliable_prob * num_non_zero))  # Ensure at least 1
@@ -97,7 +106,8 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
             
             # Vectorized assignment for reliable markers (5-20)
             if len(reliable_indices) > 0:
-                new_coverage = rand_fn((len(reliable_indices),)) * (20 - 5) + 5  # Uniform 5-20
+                # Use triangular distribution peaking at median_cov
+                new_coverage = triangular_fn((len(reliable_indices),), 5, median_cov, 20)
                 augmented_coverage[i, reliable_indices] = new_coverage
                 n = new_coverage.to(torch.int) if is_torch else new_coverage.astype(int)
                 p = marker_values[i, reliable_indices]
