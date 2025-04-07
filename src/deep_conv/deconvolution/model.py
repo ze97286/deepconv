@@ -83,11 +83,16 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     # Only process samples where augment_mask is True
     if augment_mask.any():
         # Introduce sample-level variability in fractions for all samples
-        delta = normal_fn(0, 0.3, (num_samples,))
-        delta = clamp_fn(delta, -0.3, 0.3)
+        delta = normal_fn(0, 0.4, (num_samples,))  # Increased variability: ±40%
+        delta = clamp_fn(delta, -0.4, 0.4)
         zero_frac = clamp_fn(zero_fraction + delta, 0.0, 0.15)  # Shape: (num_samples,)
-        low_cov_frac = clamp_fn(low_cov_fraction - delta / 2, 0.1, 0.67)
+        low_cov_frac = clamp_fn(low_cov_fraction - delta / 2, 0.05, 0.72)  # Adjusted to allow more variability
         high_cov_frac = 1.0 - zero_frac - low_cov_frac  # Shape: (num_samples,)
+        
+        # Debug: Print fraction ranges
+        print(f"zero_frac range: {zero_frac.min().item() if is_torch else zero_frac.min()} to {zero_frac.max().item() if is_torch else zero_frac.max()}")
+        print(f"low_cov_frac range: {low_cov_frac.min().item() if is_torch else low_cov_frac.min()} to {low_cov_frac.max().item() if is_torch else low_cov_frac.max()}")
+        print(f"high_cov_frac range: {high_cov_frac.min().item() if is_torch else high_cov_frac.min()} to {high_cov_frac.max().item() if is_torch else high_cov_frac.max()}")
         
         # Generate random values for all samples and markers
         rand_vals = rand_fn((num_samples, num_markers))  # Shape: (num_samples, num_markers)
@@ -138,9 +143,18 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         augmented_values = where_fn(high_cov_mask & samples_to_augment, new_values_high, augmented_values)
     
     # Final consistency: where coverage == 0, marker_values must be 0
-    augmented_values = where_fn(augmented_coverage == 0, zeros_fn(augmented_coverage.shape), augmented_values)   
+    augmented_values = where_fn(augmented_coverage == 0, zeros_fn(augmented_coverage.shape), augmented_values)
+    
+    # Debugging: Print statistics
+    print(f"max_coverage: {max_coverage}")
+    print(f"augmentation_prob: {augmentation_prob}")
+    print(f"Overall mean coverage: {augmented_coverage.mean().item() if is_torch else augmented_coverage.mean()}")
+    print(f"Fraction at 0: {(augmented_coverage == 0).float().mean().item() if is_torch else (augmented_coverage == 0).mean()}")
+    print(f"Fraction in 1-4: {((augmented_coverage >= 1) & (augmented_coverage <= 4)).float().mean().item() if is_torch else ((augmented_coverage >= 1) & (augmented_coverage <= 4)).mean()}")
+    print(f"Fraction >5: {(augmented_coverage > 5).float().mean().item() if is_torch else (augmented_coverage > 5).mean()}")
+    print(f"Mean coverage in 5-22 range: {augmented_coverage[augmented_coverage > 5].mean().item() if is_torch else augmented_coverage[augmented_coverage > 5].mean()}")
+    
     return augmented_values, augmented_coverage
-
 
 class TissueDeconvolutionDataset(Dataset):
     """
