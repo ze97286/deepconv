@@ -47,19 +47,18 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         binomial_fn = np.random.binomial
         where_fn = np.where
     
-    # Generate augmentation mask
-    augment_mask = rand_fn((num_samples,)) < augmentation_prob
-    
     # Initial sanitization: where coverage == 0, set marker_values to 0 (NaN -> 0)
     zero_coverage_mask = augmented_coverage == 0
     augmented_values[zero_coverage_mask] = zeros_fn(zero_coverage_mask.sum().item() if is_torch else zero_coverage_mask.sum())
     # For non-zero coverage, clamp to [0, 1] and replace any remaining NaN with 0
     non_zero_mask = ~zero_coverage_mask
-    augmented_values[non_zero_mask] = clamp_fn(augmented_values[non_zero_mask], 0, 1)
+    augmented_values[non_zero_mask] = clamp_fn(augmented_values[non_zero_mask], 0.0, 1.0)
     augmented_values[non_zero_mask] = nan_to_num_fn(augmented_values[non_zero_mask], nan=0.0)
     
-    # Extract zero_rate from target_dist_params
+    # Extract zero_rate from target_dist_params and convert to tensor if needed
     zero_fraction = target_dist_params['zero_rate']  # 0.03 for low
+    if is_torch:
+        zero_fraction = torch.tensor(zero_fraction, device=device)
     
     # Estimate upper bound from quantiles (extrapolate to 99th percentile)
     q_values = [target_dist_params['quantiles'][k] for k in ['5%', '25%', '50%', '75%', '95%']]
@@ -69,82 +68,78 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     target_prob = 0.99
     max_coverage = q_values[-1] + slope * (target_prob - q_probs[-1])
     max_coverage = min(max_coverage, 30.0)  # Cap at 30 based on observed tail
-    # For low: 20 + (30 - 20) / (1.0 - 0.95) * (0.99 - 0.95) = 20 + 10 / 0.05 * 0.04 = 20 + 8 = 28
-    # Use 25 for consistency with previous iterations
-    max_coverage = 25.0
+    max_coverage = 25.0  # Use 25 for consistency
     
     # Target fractions
     high_cov_fraction = 0.60  # 60% in 5-<max>
     low_cov_fraction = 1.0 - zero_fraction - high_cov_fraction  # Remaining in 1-4
+    if is_torch:
+        high_cov_fraction = torch.tensor(high_cov_fraction, device=device)
+        low_cov_fraction = torch.tensor(low_cov_fraction, device=device)
     
-    for i in range(num_samples):
-        if not augment_mask[i]:
-            continue
-            
-        # Introduce sample-level variability in fractions
-        delta = normal_fn(0, 0.05, (1,))  # ±5% variability
-        delta = clamp_fn(delta, -0.05, 0.05)  # Limit variability
-        delta = delta.item() if is_torch else delta
-        zero_frac = clamp_fn(zero_fraction + delta, 0, 0.1)  # Ensure valid fractions
-        low_cov_frac = clamp_fn(low_cov_fraction - delta / 2, 0.3, 0.5)
-        high_cov_frac = 1.0 - zero_frac - low_cov_frac
+    # Generate augmentation mask for all samples
+    augment_mask = rand_fn((num_samples,)) < augmentation_prob
+    
+    # Only process samples where augment_mask is True
+    if augment_mask.any():
+        # Introduce sample-level variability in fractions for all samples
+        delta = normal_fn(0, 0.05, (num_samples,))  # ±5% variability
+        delta = clamp_fn(delta, -0.05, 0.05)
+        zero_frac = clamp_fn(zero_fraction + delta, 0.0, 0.1)  # Shape: (num_samples,)
+        low_cov_frac = clamp_fn(low_cov_fraction - delta / 2, 0.3, 0.5)  # Shape: (num_samples,)
+        high_cov_frac = 1.0 - zero_frac - low_cov_frac  # Shape: (num_samples,)
         
-        # Generate masks for each coverage range using where_fn
-        rand_vals = rand_fn((num_markers,))
-        zero_mask = where_fn(rand_vals < zero_frac, True, False)
-        low_cov_mask = where_fn((rand_vals >= zero_frac) & (rand_vals < (zero_frac + low_cov_frac)), True, False)
-        high_cov_mask = where_fn(rand_vals >= (1.0 - high_cov_frac), True, False)
+        # Generate random values for all samples and markers
+        rand_vals = rand_fn((num_samples, num_markers))  # Shape: (num_samples, num_markers)
         
-        # Assign coverage values
-        if zero_mask.sum() > 0:
-            augmented_coverage[i] = where_fn(zero_mask, zeros_fn((num_markers,)), augmented_coverage[i])
-            augmented_values[i] = where_fn(zero_mask, zeros_fn((num_markers,)), augmented_values[i])
+        # Compute cumulative thresholds for each sample
+        zero_threshold = zero_frac.unsqueeze(1) if is_torch else zero_frac[:, np.newaxis]  # Shape: (num_samples, 1)
+        low_cov_threshold = (zero_frac + low_cov_frac).unsqueeze(1) if is_torch else (zero_frac + low_cov_frac)[:, np.newaxis]  # Shape: (num_samples, 1)
+        
+        # Generate masks for each coverage range
+        zero_mask = rand_vals < zero_threshold  # Shape: (num_samples, num_markers)
+        low_cov_mask = (rand_vals >= zero_threshold) & (rand_vals < low_cov_threshold)  # Shape: (num_samples, num_markers)
+        high_cov_mask = rand_vals >= (1.0 - high_cov_frac.unsqueeze(1) if is_torch else high_cov_frac[:, np.newaxis])  # Shape: (num_samples, num_markers)
+        
+        # Apply augmentation only to samples where augment_mask is True
+        samples_to_augment = where_fn(augment_mask, True, False)
+        
+        # Zero coverage
+        augmented_coverage = where_fn(zero_mask & samples_to_augment.unsqueeze(1), zeros_fn((num_samples, num_markers)), augmented_coverage)
+        augmented_values = where_fn(zero_mask & samples_to_augment.unsqueeze(1), zeros_fn((num_samples, num_markers)), augmented_values)
         
         # 1-4 range: Uniform 1-4
-        if low_cov_mask.sum() > 0:
-            # Create new_coverage with the correct shape (num_markers,)
-            new_coverage = zeros_fn((num_markers,))
-            indices = where_fn(low_cov_mask, True, False)
-            new_coverage_values = rand_fn((low_cov_mask.sum().item() if is_torch else low_cov_mask.sum(),)) * (4 - 1) + 1
-            new_coverage[indices] = new_coverage_values
-            augmented_coverage[i] = where_fn(low_cov_mask, new_coverage, augmented_coverage[i])
-            n = new_coverage[indices].to(torch.int) if is_torch else new_coverage[indices].astype(int)
-            p = marker_values[i, indices]
-            p = nan_to_num_fn(p, nan=0.0)
-            p = clamp_fn(p, 0, 1)
-            nan_mask = p == 0
-            if nan_mask.any():
-                p[nan_mask] = rand_fn((nan_mask.sum().item() if is_torch else nan_mask.sum(),))
-            successes = binomial_fn(n, p)
-            new_values = zeros_fn((num_markers,))
-            new_values[indices] = successes / new_coverage[indices]
-            augmented_values[i] = where_fn(low_cov_mask, new_values, augmented_values[i])
+        new_coverage_low = rand_fn((num_samples, num_markers)) * (4 - 1) + 1  # Shape: (num_samples, num_markers)
+        augmented_coverage = where_fn(low_cov_mask & samples_to_augment.unsqueeze(1), new_coverage_low, augmented_coverage)
+        n_low = new_coverage_low.to(torch.int) if is_torch else new_coverage_low.astype(int)
+        p_low = where_fn(low_cov_mask & samples_to_augment.unsqueeze(1), marker_values, zeros_fn((num_samples, num_markers)))
+        p_low = nan_to_num_fn(p_low, nan=0.0)
+        p_low = clamp_fn(p_low, 0.0, 1.0)
+        nan_mask_low = p_low == 0
+        if nan_mask_low.any():
+            p_low = where_fn(nan_mask_low, rand_fn((num_samples, num_markers)), p_low)
+        successes_low = binomial_fn(n_low, p_low)
+        new_values_low = successes_low / new_coverage_low
+        augmented_values = where_fn(low_cov_mask & samples_to_augment.unsqueeze(1), new_values_low, augmented_values)
         
         # 5-<max> range: Uniform 5-<max>
-        if high_cov_mask.sum() > 0:
-            # Create new_coverage with the correct shape (num_markers,)
-            new_coverage = zeros_fn((num_markers,))
-            indices = where_fn(high_cov_mask, True, False)
-            new_coverage_values = rand_fn((high_cov_mask.sum().item() if is_torch else high_cov_mask.sum(),)) * (max_coverage - 5) + 5
-            new_coverage[indices] = new_coverage_values
-            augmented_coverage[i] = where_fn(high_cov_mask, new_coverage, augmented_coverage[i])
-            n = new_coverage[indices].to(torch.int) if is_torch else new_coverage[indices].astype(int)
-            p = marker_values[i, indices]
-            p = nan_to_num_fn(p, nan=0.0)
-            p = clamp_fn(p, 0, 1)
-            nan_mask = p == 0
-            if nan_mask.any():
-                p[nan_mask] = rand_fn((nan_mask.sum().item() if is_torch else nan_mask.sum(),))
-            successes = binomial_fn(n, p)
-            new_values = zeros_fn((num_markers,))
-            new_values[indices] = successes / new_coverage[indices]
-            augmented_values[i] = where_fn(high_cov_mask, new_values, augmented_values[i])
+        new_coverage_high = rand_fn((num_samples, num_markers)) * (max_coverage - 5) + 5  # Shape: (num_samples, num_markers)
+        augmented_coverage = where_fn(high_cov_mask & samples_to_augment.unsqueeze(1), new_coverage_high, augmented_coverage)
+        n_high = new_coverage_high.to(torch.int) if is_torch else new_coverage_high.astype(int)
+        p_high = where_fn(high_cov_mask & samples_to_augment.unsqueeze(1), marker_values, zeros_fn((num_samples, num_markers)))
+        p_high = nan_to_num_fn(p_high, nan=0.0)
+        p_high = clamp_fn(p_high, 0.0, 1.0)
+        nan_mask_high = p_high == 0
+        if nan_mask_high.any():
+            p_high = where_fn(nan_mask_high, rand_fn((num_samples, num_markers)), p_high)
+        successes_high = binomial_fn(n_high, p_high)
+        new_values_high = successes_high / new_coverage_high
+        augmented_values = where_fn(high_cov_mask & samples_to_augment.unsqueeze(1), new_values_high, augmented_values)
     
     # Final consistency: where coverage == 0, marker_values must be 0
     augmented_values = where_fn(augmented_coverage == 0, zeros_fn(augmented_coverage.shape), augmented_values)
     
     return augmented_values, augmented_coverage
-
 
 class TissueDeconvolutionDataset(Dataset):
     """
