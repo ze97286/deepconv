@@ -40,21 +40,23 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
             torch.distributions.Triangular
             triangular_fn = lambda shape, left, mode, right: (
                 torch.distributions.Triangular(
-                    low=torch.tensor(left, device=device),
-                    peak=torch.tensor(clamp_fn(mode, left, right), device=device),
-                    high=torch.tensor(right, device=device)
+                    low=torch.tensor(left, device=device, dtype=torch.float),
+                    peak=torch.tensor(clamp_fn(mode, left, right), device=device, dtype=torch.float),
+                    high=torch.tensor(right, device=device, dtype=torch.float)
                 ).sample(shape)
             )
         except AttributeError:
             # Fallback implementation for triangular distribution
             def triangular_fn(shape, left, mode, right):
+                # Convert all inputs to tensors
+                left = torch.tensor(left, device=device, dtype=torch.float)
+                right = torch.tensor(right, device=device, dtype=torch.float)
+                mode = torch.tensor(mode, device=device, dtype=torch.float)
                 mode = clamp_fn(mode, left, right)
                 u = torch.rand(shape, device=device)
                 F = (mode - left) / (right - left)
                 mask = u < F
-                # Left side: X = left + sqrt(U * (right - left) * (mode - left))
                 left_side = left + torch.sqrt(u * (right - left) * (mode - left))
-                # Right side: X = right - sqrt((1 - U) * (right - left) * (right - mode))
                 right_side = right - torch.sqrt((1 - u) * (right - left) * (right - mode))
                 return torch.where(mask, left_side, right_side)
     else:
@@ -156,7 +158,6 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     augmented_values[augmented_coverage == 0] = 0
     
     return augmented_values, augmented_coverage
-
 
 class TissueDeconvolutionDataset(Dataset):
     """
