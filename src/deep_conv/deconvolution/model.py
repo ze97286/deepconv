@@ -9,7 +9,7 @@ from pathlib import Path
 from deep_conv.presence.model import SingleCellTypePresenceModel
 
 
-def coverage_matched_augmentation(marker_values, coverage, target_dist_params, augmentation_prob=0.7):
+def coverage_matched_augmentation(marker_values, coverage, target_dist_params, augmentation_prob=1.0):
     """
     Augmentation to match the clinical dataset's coverage profile using target_dist_params.
     - zero_rate: Fraction of markers at 0.
@@ -68,7 +68,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     target_prob = 0.99
     max_coverage = q_values[-1] + slope * (target_prob - q_probs[-1])
     max_coverage = min(max_coverage, 30.0)  # Cap at 30 based on observed tail
-    max_coverage = 22.0  # Adjusted to achieve mean ~9.1
+    max_coverage = 22.0
     
     # Target fractions
     high_cov_fraction = 0.60  # 60% in 5-<max>
@@ -83,10 +83,10 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     # Only process samples where augment_mask is True
     if augment_mask.any():
         # Introduce sample-level variability in fractions for all samples
-        delta = normal_fn(0, 0.3, (num_samples,))  # Increased variability: ±30%
+        delta = normal_fn(0, 0.3, (num_samples,))
         delta = clamp_fn(delta, -0.3, 0.3)
         zero_frac = clamp_fn(zero_fraction + delta, 0.0, 0.15)  # Shape: (num_samples,)
-        low_cov_frac = clamp_fn(low_cov_fraction - delta / 2, 0.2, 0.67)  # Shape: (num_samples,)
+        low_cov_frac = clamp_fn(low_cov_fraction - delta / 2, 0.1, 0.67)
         high_cov_frac = 1.0 - zero_frac - low_cov_frac  # Shape: (num_samples,)
         
         # Generate random values for all samples and markers
@@ -103,7 +103,6 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         
         # Apply augmentation only to samples where augment_mask is True
         samples_to_augment = where_fn(augment_mask, True, False)  # Shape: (num_samples,)
-        # Ensure samples_to_augment is broadcastable to (num_samples, num_markers)
         samples_to_augment = samples_to_augment.unsqueeze(1) if is_torch else samples_to_augment[:, np.newaxis]  # Shape: (num_samples, 1)
         
         # Zero coverage
@@ -139,17 +138,9 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         augmented_values = where_fn(high_cov_mask & samples_to_augment, new_values_high, augmented_values)
     
     # Final consistency: where coverage == 0, marker_values must be 0
-    augmented_values = where_fn(augmented_coverage == 0, zeros_fn(augmented_coverage.shape), augmented_values)
-    
-    # Debugging: Print statistics
-    print(f"max_coverage: {max_coverage}")
-    print(f"Overall mean coverage: {augmented_coverage.mean().item() if is_torch else augmented_coverage.mean()}")
-    print(f"Fraction at 0: {(augmented_coverage == 0).float().mean().item() if is_torch else (augmented_coverage == 0).mean()}")
-    print(f"Fraction in 1-4: {((augmented_coverage >= 1) & (augmented_coverage <= 4)).float().mean().item() if is_torch else ((augmented_coverage >= 1) & (augmented_coverage <= 4)).mean()}")
-    print(f"Fraction >5: {(augmented_coverage > 5).float().mean().item() if is_torch else (augmented_coverage > 5).mean()}")
-    print(f"Mean coverage in 5-22 range: {augmented_coverage[augmented_coverage > 5].mean().item() if is_torch else augmented_coverage[augmented_coverage > 5].mean()}")
-    
+    augmented_values = where_fn(augmented_coverage == 0, zeros_fn(augmented_coverage.shape), augmented_values)   
     return augmented_values, augmented_coverage
+
 
 class TissueDeconvolutionDataset(Dataset):
     """
