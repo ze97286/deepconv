@@ -326,14 +326,12 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         # Load separate presence models
         self.presence_models = nn.ModuleList()
-        
+
         for cell_type_idx in range(num_cell_types):
             model_path = Path(presence_models_dir) / f"presence_model_{cell_type_idx}.pt"
-            
+
             if not model_path.exists():
                 raise FileNotFoundError(f"Presence model not found at {model_path}")
-            
-            # Load the model
             checkpoint = torch.load(model_path)
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 from deep_conv.presence.model import SingleCellTypePresenceModel
@@ -341,20 +339,26 @@ class CellTypeDeconvolutionModel(nn.Module):
                 presence_model.load_state_dict(checkpoint['model_state_dict'])
             else:
                 presence_model = checkpoint
-            
             presence_model.eval()
             self.presence_models.append(presence_model)
 
-        # Marker Feature Extractor: Takes marker values and log(coverage + 1) as input
+        # Marker Feature Extractor: Processes only marker values
         self.marker_feature_extractor = nn.Sequential(
             nn.Linear(1, feature_dim),
             nn.LeakyReLU(),
             nn.Linear(feature_dim, feature_dim)
         )
 
-        # Encoder with presence input
+        # Coverage Feature Extractor: Processes coverage values
+        self.coverage_feature_extractor = nn.Sequential(
+            nn.Linear(1, feature_dim),
+            nn.LeakyReLU(),
+            nn.Linear(feature_dim, feature_dim)
+        )
+
+        # Encoder: Takes combined features from marker and coverage paths, plus presence probs
         self.encoder = nn.Sequential(
-            nn.Linear(num_cell_types * feature_dim + num_cell_types, 128),
+            nn.Linear(num_cell_types * feature_dim * 2 + num_cell_types, 128),  # *2 for marker and coverage features
             nn.LeakyReLU(),
             nn.Linear(128, 128),
             nn.LeakyReLU(),
@@ -367,12 +371,10 @@ class CellTypeDeconvolutionModel(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(128, num_markers)
         )
-        
-        # Initialize presence gating parameters
+
+        # Initialise presence gating parameters
         thresholds = torch.ones(num_cell_types) * 0.5
         slopes = torch.ones(num_cell_types) * 10
-        
-        # Special handling for OAC
         oac_index = 9  # Adjust to your actual OAC index
         thresholds[oac_index] = 0.3
         slopes[oac_index] = 15
@@ -396,73 +398,43 @@ class CellTypeDeconvolutionModel(nn.Module):
             
             self.register_buffer("presence_thresholds", thresholds)
             self.register_buffer("presence_slopes", slopes)
-        
-        # Apply scaling - vector operation across all cell types at once
         scaling = torch.sigmoid(
             self.presence_slopes.unsqueeze(0) * (probs - self.presence_thresholds.unsqueeze(0))
         )
-        
         scaled_props = props * scaling
-        
-        # Normalise to ensure sum to 1
         sum_props = torch.sum(scaled_props, dim=1, keepdim=True) + 1e-8
         gated_props = scaled_props / sum_props
-        
         return gated_props
 
     def predict_presence_with_separate_models(self, marker_values, coverage):
         """
-        Use the separate pre-trained presence models to predict 
-        presence probabilities for each cell type.
-        
-        Each presence model receives only the markers that correspond to its cell type.
-        
-        Args:
-            marker_values (FloatTensor): [B, M], fractional methylation
-            coverage (FloatTensor): [B, M], read coverage
-            
-        Returns:
-            presence_probs (FloatTensor): [B, C], presence probability for each cell type
-            presence_logits (FloatTensor): [B, C], raw logits before sigmoid
+        Use the separate pre-trained presence models to predict presence probabilities.
         """
         B = marker_values.shape[0]
         C = self.num_celltypes
-        
-        # Initialise output tensors
         presence_probs = torch.zeros(B, C, device=marker_values.device)
         presence_logits = torch.zeros(B, C, device=marker_values.device)
-        
-        # For each cell type, use its dedicated presence model
         for cell_type_idx, presence_model in enumerate(self.presence_models):
-            with torch.no_grad():  # No gradients needed for frozen presence models
-                # Create a mask for the markers that belong to this cell type
+            with torch.no_grad():
                 cell_type_marker_mask = (self.target_ids == cell_type_idx)
-                
-                # Skip if no markers for this cell type
                 if not cell_type_marker_mask.any():
                     continue
-                
-                # Filter marker_values and coverage to only include markers for this cell type
                 cell_type_marker_values = marker_values[:, cell_type_marker_mask]
                 cell_type_coverage = coverage[:, cell_type_marker_mask]
-                
-                # Pass only the relevant markers to the presence model
                 logits, _, _ = presence_model(cell_type_marker_values, cell_type_coverage)
                 _, adaptive_probs, _ = presence_model.adaptive_predict(cell_type_marker_values, cell_type_coverage)
-                # Store results
                 presence_logits[:, cell_type_idx] = logits.squeeze(-1)
                 presence_probs[:, cell_type_idx] = adaptive_probs.squeeze(-1)
-                
         return presence_probs, presence_logits
 
     def forward(self, marker_values: torch.Tensor, coverage: torch.Tensor):
         """
-        Forward pass to predict cell-type proportions from methylation + coverage.
+        Forward pass with separate paths for marker values and coverage.
 
         Steps:
             1) Identify valid markers (coverage>0).
-            2) Extract features for each valid marker via `marker_feature_extractor`.
-            3) Aggregate marker features per cell type, weighting by coverage.
+            2) Extract features for marker values and coverage separately.
+            3) Aggregate features per cell type for both paths.
             4) Predict presence_prob for each cell type using separate models.
             5) Combine aggregated features with presence information for proportion prediction.
             6) Apply soft presence-informed scaling and normalize.
@@ -482,7 +454,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         B, M = marker_values.shape
         C = self.num_celltypes
 
-        # valid_mask indicates coverage>0
+        # Valid mask indicates coverage>0
         valid_mask = (coverage > 0)
 
         # Flatten coverage & marker_values for efficient indexing
@@ -494,7 +466,6 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         # Handle all-zero-coverage case
         if valid_inds.numel() == 0:
-            # Provide a fallback (assign 1.0 to the first cell type, 0 to others)
             celltype_props = coverage.new_zeros(B, C)
             celltype_props[:, 0] = 1.0
             reconstructed = coverage.new_zeros(B, M)
@@ -510,60 +481,65 @@ class CellTypeDeconvolutionModel(nn.Module):
         batch_idx = valid_inds // M
         marker_idx = valid_inds % M
 
-        # Each marker is known to correspond to a specific cell type (via self.target_ids)
+        # Each marker corresponds to a specific cell type (via self.target_ids)
         celltype_idx = self.target_ids[marker_idx]
 
         # ----- 1) Marker Feature Extraction -----
         marker_values_valid_2d = marker_values_valid.unsqueeze(1)  # [N, 1]
-        features_valid = self.marker_feature_extractor(marker_values_valid_2d)  # [N, feature_dim]
+        marker_features_valid = self.marker_feature_extractor(marker_values_valid_2d)  # [N, feature_dim]
 
-        # ----- 2) Aggregate features by cell type -----
-        # aggregator shape: [B, C, feature_dim], coverage_sum shape: [B, C]
-        aggregator = coverage.new_zeros(B, C, self.feature_dim)
-        coverage_sum = coverage.new_zeros(B, C)
+        # ----- 2) Coverage Feature Extraction -----
+        coverage_valid_2d = coverage_valid.unsqueeze(1)  # [N, 1]
+        coverage_features_valid = self.coverage_feature_extractor(coverage_valid_2d)  # [N, feature_dim]
 
-        # We'll do index_add_ on a flattened [B*C, feature_dim]
-        aggregator_2d = aggregator.view(B*C, self.feature_dim)
-        coverage_sum_1d = coverage_sum.view(B*C)
-
-        # Flatten to [N], so bc_index is each valid coverage row's (batch, celltype)
+        # ----- 3) Aggregate features by cell type for both paths -----
+        # Marker path
+        marker_aggregator = coverage.new_zeros(B, C, self.feature_dim)
+        marker_coverage_sum = coverage.new_zeros(B, C)
+        marker_aggregator_2d = marker_aggregator.view(B*C, self.feature_dim)
+        marker_coverage_sum_1d = marker_coverage_sum.view(B*C)
         bc_index = batch_idx * C + celltype_idx
-        weighted_feats = coverage_valid.unsqueeze(1) * features_valid  # shape [N, feature_dim]
+        marker_weighted_feats = coverage_valid.unsqueeze(1) * marker_features_valid
+        marker_aggregator_2d.index_add_(0, bc_index, marker_weighted_feats)
+        marker_coverage_sum_1d.index_add_(0, bc_index, coverage_valid)
+        marker_aggregator = marker_aggregator_2d.view(B, C, self.feature_dim)
+        marker_coverage_sum = marker_coverage_sum_1d.view(B, C)
+        mask_cov = (marker_coverage_sum == 0)
+        marker_coverage_sum[mask_cov] = 1.0
+        marker_aggregator = marker_aggregator / marker_coverage_sum.unsqueeze(-1)
 
-        # Scatter-add
-        aggregator_2d.index_add_(0, bc_index, weighted_feats)
-        coverage_sum_1d.index_add_(0, bc_index, coverage_valid)
+        # Coverage path
+        coverage_aggregator = coverage.new_zeros(B, C, self.feature_dim)
+        coverage_coverage_sum = coverage.new_zeros(B, C)
+        coverage_aggregator_2d = coverage_aggregator.view(B*C, self.feature_dim)
+        coverage_coverage_sum_1d = coverage_coverage_sum.view(B*C)
+        coverage_weighted_feats = coverage_valid.unsqueeze(1) * coverage_features_valid
+        coverage_aggregator_2d.index_add_(0, bc_index, coverage_weighted_feats)
+        coverage_coverage_sum_1d.index_add_(0, bc_index, coverage_valid)
+        coverage_aggregator = coverage_aggregator_2d.view(B, C, self.feature_dim)
+        coverage_coverage_sum = coverage_coverage_sum_1d.view(B, C)
+        mask_cov = (coverage_coverage_sum == 0)
+        coverage_coverage_sum[mask_cov] = 1.0
+        coverage_aggregator = coverage_aggregator / coverage_coverage_sum.unsqueeze(-1)
 
-        # Reshape back
-        aggregator = aggregator_2d.view(B, C, self.feature_dim)
-        coverage_sum = coverage_sum_1d.view(B, C)
+        # ----- 4) Combine features from both paths -----
+        combined_aggregator = torch.cat([marker_aggregator, coverage_aggregator], dim=2)  # [B, C, 2*feature_dim]
+        agg_flat = combined_aggregator.view(B, -1)  # [B, C*2*feature_dim]
 
-        # Avoid divide-by-zero
-        mask_cov = (coverage_sum == 0)
-        coverage_sum[mask_cov] = 1.0
-        aggregator = aggregator / coverage_sum.unsqueeze(-1)
-
-        # Flatten aggregator for encoder
-        agg_flat = aggregator.view(B, -1)  # [B, C*feature_dim]
-
-        # ----- 3) Presence detection using separate models -----
+        # ----- 5) Presence detection using separate models -----
         presence_probs, presence_logits = self.predict_presence_with_separate_models(marker_values, coverage)
 
-        # ----- 4) Integrate presence information with aggregated features -----
+        # ----- 6) Integrate presence information with aggregated features -----
         combined_features = torch.cat([agg_flat, presence_probs], dim=1)
 
-        # ----- 5) Proportion Prediction with integrated presence -----
+        # ----- 7) Proportion Prediction with integrated presence -----
         logits = self.encoder(combined_features)  # [B, C]
         celltype_props_raw = F.relu(logits)  # ensure >=0
-        
-        # Apply soft gating that preserves proportion relationships
         celltype_props_gated = self.apply_presence_gating(celltype_props_raw, presence_probs)
-        
-        # Normalize to ensure sum to 1
         sum_props = torch.sum(celltype_props_gated, dim=1, keepdim=True)
         celltype_props = celltype_props_gated / (sum_props + 1e-8)
 
-        # ----- 6) Marker reconstruction -----
+        # ----- 8) Marker reconstruction -----
         reconstructed = self.decoder(celltype_props)  # [B, M]
 
         return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
