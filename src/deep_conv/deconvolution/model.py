@@ -13,7 +13,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     """
     Augmentation to match the clinical dataset's coverage profile using target_dist_params.
     - zero_rate: Fraction of markers at 0.
-    - 60% of markers in 5-<max> (max derived from quantiles).
+    - 62% of markers in 5-<max> (adjusted to achieve mean ~9.1).
     - Remaining non-zero markers in 1-4.
     Works with both NumPy arrays and PyTorch tensors.
     """
@@ -71,8 +71,8 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     max_coverage = 22.25
     
     # Target fractions
-    high_cov_fraction = 0.60  # 60% in 5-<max>
-    low_cov_fraction = 1.0 - zero_fraction - high_cov_fraction  # Remaining in 1-4
+    high_cov_fraction = 0.62
+    low_cov_fraction = 1.0 - zero_fraction - high_cov_fraction
     if is_torch:
         high_cov_fraction = torch.tensor(high_cov_fraction, device=device)
         low_cov_fraction = torch.tensor(low_cov_fraction, device=device)
@@ -83,8 +83,8 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     # Only process samples where augment_mask is True
     if augment_mask.any():
         # Introduce sample-level variability in fractions for all samples
-        delta = normal_fn(0, 0.5, (num_samples,))
-        delta = clamp_fn(delta, -0.5, 0.5)
+        delta = normal_fn(0, 0.6, (num_samples,))
+        delta = clamp_fn(delta, -0.6, 0.6)
         zero_frac = clamp_fn(zero_fraction + delta, 0.0, 0.15)  # Shape: (num_samples,)
         low_cov_frac = clamp_fn(low_cov_fraction - delta / 2, 0.0, 0.77)  # Adjusted to allow more variability
         high_cov_frac = 1.0 - zero_frac - low_cov_frac  # Shape: (num_samples,)
@@ -152,9 +152,10 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     print(f"Fraction at 0: {(augmented_coverage == 0).float().mean().item() if is_torch else (augmented_coverage == 0).mean()}")
     print(f"Fraction in 1-4: {((augmented_coverage >= 1) & (augmented_coverage <= 4)).float().mean().item() if is_torch else ((augmented_coverage >= 1) & (augmented_coverage <= 4)).mean()}")
     print(f"Fraction >5: {(augmented_coverage > 5).float().mean().item() if is_torch else (augmented_coverage > 5).mean()}")
-    print(f"Mean coverage in 5-22 range: {augmented_coverage[augmented_coverage > 5].mean().item() if is_torch else augmented_coverage[augmented_coverage > 5].mean()}")
+    print(f"Mean coverage in 5-22.25 range: {augmented_coverage[augmented_coverage > 5].mean().item() if is_torch else augmented_coverage[augmented_coverage > 5].mean()}")
     
     return augmented_values, augmented_coverage
+
 
 class TissueDeconvolutionDataset(Dataset):
     """
