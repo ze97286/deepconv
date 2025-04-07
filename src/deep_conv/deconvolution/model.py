@@ -93,7 +93,6 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         rand_vals = rand_fn((num_markers,))
         zero_mask = where_fn(rand_vals < zero_frac, True, False)
         low_cov_mask = where_fn((rand_vals >= zero_frac) & (rand_vals < (zero_frac + low_cov_frac)), True, False)
-        # Explicitly use high_cov_frac to define the high coverage range
         high_cov_mask = where_fn(rand_vals >= (1.0 - high_cov_frac), True, False)
         
         # Assign coverage values
@@ -103,31 +102,43 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         
         # 1-4 range: Uniform 1-4
         if low_cov_mask.sum() > 0:
-            new_coverage = rand_fn((low_cov_mask.sum().item() if is_torch else low_cov_mask.sum(),)) * (4 - 1) + 1
+            # Create new_coverage with the correct shape (num_markers,)
+            new_coverage = zeros_fn((num_markers,))
+            indices = where_fn(low_cov_mask, True, False)
+            new_coverage_values = rand_fn((low_cov_mask.sum().item() if is_torch else low_cov_mask.sum(),)) * (4 - 1) + 1
+            new_coverage[indices] = new_coverage_values
             augmented_coverage[i] = where_fn(low_cov_mask, new_coverage, augmented_coverage[i])
-            n = new_coverage.to(torch.int) if is_torch else new_coverage.astype(int)
-            p = marker_values[i, low_cov_mask]
+            n = new_coverage[indices].to(torch.int) if is_torch else new_coverage[indices].astype(int)
+            p = marker_values[i, indices]
             p = nan_to_num_fn(p, nan=0.0)
             p = clamp_fn(p, 0, 1)
             nan_mask = p == 0
             if nan_mask.any():
                 p[nan_mask] = rand_fn((nan_mask.sum().item() if is_torch else nan_mask.sum(),))
             successes = binomial_fn(n, p)
-            augmented_values[i] = where_fn(low_cov_mask, successes / new_coverage, augmented_values[i])
+            new_values = zeros_fn((num_markers,))
+            new_values[indices] = successes / new_coverage[indices]
+            augmented_values[i] = where_fn(low_cov_mask, new_values, augmented_values[i])
         
         # 5-<max> range: Uniform 5-<max>
         if high_cov_mask.sum() > 0:
-            new_coverage = rand_fn((high_cov_mask.sum().item() if is_torch else high_cov_mask.sum(),)) * (max_coverage - 5) + 5
+            # Create new_coverage with the correct shape (num_markers,)
+            new_coverage = zeros_fn((num_markers,))
+            indices = where_fn(high_cov_mask, True, False)
+            new_coverage_values = rand_fn((high_cov_mask.sum().item() if is_torch else high_cov_mask.sum(),)) * (max_coverage - 5) + 5
+            new_coverage[indices] = new_coverage_values
             augmented_coverage[i] = where_fn(high_cov_mask, new_coverage, augmented_coverage[i])
-            n = new_coverage.to(torch.int) if is_torch else new_coverage.astype(int)
-            p = marker_values[i, high_cov_mask]
+            n = new_coverage[indices].to(torch.int) if is_torch else new_coverage[indices].astype(int)
+            p = marker_values[i, indices]
             p = nan_to_num_fn(p, nan=0.0)
             p = clamp_fn(p, 0, 1)
             nan_mask = p == 0
             if nan_mask.any():
                 p[nan_mask] = rand_fn((nan_mask.sum().item() if is_torch else nan_mask.sum(),))
             successes = binomial_fn(n, p)
-            augmented_values[i] = where_fn(high_cov_mask, successes / new_coverage, augmented_values[i])
+            new_values = zeros_fn((num_markers,))
+            new_values[indices] = successes / new_coverage[indices]
+            augmented_values[i] = where_fn(high_cov_mask, new_values, augmented_values[i])
     
     # Final consistency: where coverage == 0, marker_values must be 0
     augmented_values = where_fn(augmented_coverage == 0, zeros_fn(augmented_coverage.shape), augmented_values)
