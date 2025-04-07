@@ -68,7 +68,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     target_prob = 0.99
     max_coverage = q_values[-1] + slope * (target_prob - q_probs[-1])
     max_coverage = min(max_coverage, 30.0)  # Cap at 30 based on observed tail
-    max_coverage = 22.0
+    max_coverage = 22.25
     
     # Target fractions
     high_cov_fraction = 0.60  # 60% in 5-<max>
@@ -83,10 +83,10 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     # Only process samples where augment_mask is True
     if augment_mask.any():
         # Introduce sample-level variability in fractions for all samples
-        delta = normal_fn(0, 0.4, (num_samples,))  # Increased variability: ±40%
-        delta = clamp_fn(delta, -0.4, 0.4)
+        delta = normal_fn(0, 0.5, (num_samples,))
+        delta = clamp_fn(delta, -0.5, 0.5)
         zero_frac = clamp_fn(zero_fraction + delta, 0.0, 0.15)  # Shape: (num_samples,)
-        low_cov_frac = clamp_fn(low_cov_fraction - delta / 2, 0.05, 0.72)  # Adjusted to allow more variability
+        low_cov_frac = clamp_fn(low_cov_fraction - delta / 2, 0.0, 0.77)  # Adjusted to allow more variability
         high_cov_frac = 1.0 - zero_frac - low_cov_frac  # Shape: (num_samples,)
         
         # Debug: Print fraction ranges
