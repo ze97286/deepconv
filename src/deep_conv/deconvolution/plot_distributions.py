@@ -144,7 +144,7 @@ def plot_augmented_vs_non_augmented_coverage(dataloader, num_samples, title, fil
     fig.write_html(os.path.join(plots_dir, f"{filename}.html"))
     fig.write_image(os.path.join(plots_dir, f"{filename}.png"))
 
-    
+
 clinical_dist_params = {
     "low": {
         "mean": 10.0,
@@ -221,7 +221,8 @@ def plot_distributions(train_pat_dir, eval_pat_dir, atlas_path):
     #     persistent_workers=True,
     # )
     validation_dls = {}
-    for cov in ["high", "med", "low", "clinical"]:
+    # for cov in ["high", "med", "low", "clinical"]:
+    for cov in ["clinical"]:
         tier1_dl, t1_yval = get_validation_set_with_augmentation(
             str(Path(eval_pat_dir + "_" + cov) / "tier1"),
             atlas,
