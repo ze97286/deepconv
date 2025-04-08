@@ -88,12 +88,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         zero_frac = clamp_fn(zero_fraction + delta, 0.0, 0.15)  # Shape: (num_samples,)
         low_cov_frac = clamp_fn(low_cov_fraction - delta / 2, 0.0, 0.77)  # Adjusted to allow more variability
         high_cov_frac = 1.0 - zero_frac - low_cov_frac  # Shape: (num_samples,)
-        
-        # Debug: Print fraction ranges
-        print(f"zero_frac range: {zero_frac.min().item() if is_torch else zero_frac.min()} to {zero_frac.max().item() if is_torch else zero_frac.max()}")
-        print(f"low_cov_frac range: {low_cov_frac.min().item() if is_torch else low_cov_frac.min()} to {low_cov_frac.max().item() if is_torch else low_cov_frac.max()}")
-        print(f"high_cov_frac range: {high_cov_frac.min().item() if is_torch else high_cov_frac.min()} to {high_cov_frac.max().item() if is_torch else high_cov_frac.max()}")
-        
+          
         # Generate random values for all samples and markers
         rand_vals = rand_fn((num_samples, num_markers))  # Shape: (num_samples, num_markers)
         
