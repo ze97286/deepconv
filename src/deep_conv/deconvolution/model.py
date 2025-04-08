@@ -150,7 +150,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
 
 
 class TissueDeconvolutionDataset(Dataset):
-   """
+    """
     A PyTorch Dataset for loading cfDNA methylation data and optional labels.
     
     Each sample in this dataset includes:
@@ -192,6 +192,7 @@ class TissueDeconvolutionDataset(Dataset):
         if self.y is not None:
             item['y'] = self.y[idx]
         return item  
+
 
 class AugmentedTissueDataset(TissueDeconvolutionDataset):
     def __init__(self, 
