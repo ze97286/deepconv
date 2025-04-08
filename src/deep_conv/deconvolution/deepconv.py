@@ -557,7 +557,7 @@ def visualize_augmentation_effect(original_coverage, augmented_coverage, title="
 def test_augmentation(base_dir, atlas, names, target_dist_params):
     # Load a small subset of data
     dataset = load_training_with_augmentation(
-        base_dir, atlas, names, num_files=1, enable_augmentation=False, subset_size=1000
+        base_dir, atlas, names, num_files=1, enable_augmentation=False
     )
     fraction = dataset.dataset.fraction
     coverage = dataset.dataset.coverage
