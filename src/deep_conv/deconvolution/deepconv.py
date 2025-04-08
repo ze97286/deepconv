@@ -155,24 +155,10 @@ def get_validation_set_with_augmentation(
     # Convert label DataFrame to numpy
     y_val_np = y_val.to_numpy()
     
-    # Create dataset with light augmentation
-    val_dataset = AugmentedTissueDataset(
-        X_val,
-        coverage_val,
-        atlas[atlas.columns[8:]].T.to_numpy(),
-        y_val_np,
-        target_dist_params=target_dist_params,
-        augmentation_probability=0.3 if enable_augmentation else 0.0,
-        enable_augmentation=enable_augmentation
-    )
-    
-    # Enable augmentation before subsampling
-    val_dataset.set_training(True)  # Moved before subsampling
-    
-    # Block-based subsampling
-    if target_size is not None and target_size < len(val_dataset):
+    # Block-based subsampling (if target_size is specified)
+    if target_size is not None and target_size < len(y_val_np):
         # Calculate the number of blocks
-        dataset_size = len(val_dataset)
+        dataset_size = len(y_val_np)
         num_blocks = (dataset_size + block_size - 1) // block_size  # Ceiling division
         if num_blocks == 0:
             num_blocks = 1
@@ -202,8 +188,25 @@ def get_validation_set_with_augmentation(
         
         # Sort indices to maintain order
         indices = np.sort(indices)
-        val_dataset = Subset(val_dataset, indices)
+        
+        # Subsample the data directly
+        X_val = X_val[indices]
+        coverage_val = coverage_val[indices]
         y_val_np = y_val_np[indices]
+    
+    # Create dataset with light augmentation using the subsampled data
+    val_dataset = AugmentedTissueDataset(
+        X_val,
+        coverage_val,
+        atlas[atlas.columns[8:]].T.to_numpy(),
+        y_val_np,
+        target_dist_params=target_dist_params,
+        augmentation_probability=0.3 if enable_augmentation else 0.0,
+        enable_augmentation=enable_augmentation
+    )
+    
+    # Enable augmentation
+    val_dataset.set_training(True)
     
     # Create DataLoader with shuffling
     val_loader = DataLoader(
