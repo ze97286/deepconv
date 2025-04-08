@@ -1,6 +1,6 @@
 # Training and Validation Data Overview
 
-This document provides a detailed overview of the training and validation datasets used for the cell type deconvolution model, including their quantities (sizes), qualities (characteristics), augmentation strategy, coverage matching, and the inclusion of negative examples.
+This document provides a detailed overview of the training and validation datasets used for the cell type deconvolution model, including their quantities (sizes), qualities (characteristics), augmentation strategy, coverage matching, the inclusion of negative examples, and visualization of the data distributions.
 
 ## Training Dataset
 
@@ -81,7 +81,7 @@ This document provides a detailed overview of the training and validation datase
     - Low tier: Mean ~10.0, zero_rate=0.03
     - Medium tier: Mean ~25.0, zero_rate=0.004
     - High tier: Mean ~70.0, zero_rate=0.004
-  - The 20% non-augmented samples provide diversity, while the 80% augmented samples focus on the clinical distribution.
+  - The 20% non-augmented samples provide diversity across different coverage regimes, while the 80% augmented samples focus on the clinical distribution.
 
 - **Negative Examples**:
   - Added via `enhanced_negative_examples` to improve learning of absent cell types.
@@ -206,14 +206,63 @@ This document provides a detailed overview of the training and validation datase
 - **Training**:
   - The model sees the full enhanced dataset (1,365,000 samples) each epoch, ensuring exposure to all samples and reducing the risk of overfitting to a subset.
   - The focus on low coverage (via the low tier, negative examples, and 80% augmentation to the clinical distribution) aligns with the goal of targeting low coverage scenarios.
-  - Consistent augmentation ensures the training data matches the target clinical distribution, critical for real-world generalization.
+  - The inclusion of medium and high coverage tiers provides diversity in the 20% non-augmented samples, potentially improving generalization across different coverage regimes.
+  - Consistent augmentation ensures the training data matches the target clinical distribution for 80% of samples, critical for real-world generalization.
 
 - **Validation**:
   - The validation sets provide a comprehensive evaluation across different coverage tiers and subsets, with structured subsampling preserving the balance of types/sets in `T-cells` and `OAC`.
   - Light augmentation aligns the validation data more closely with the training data, making the evaluation more meaningful while keeping the task manageable.
   - Shuffling ensures a representative evaluation each epoch, improving robustness.
 
+## Data Visualization
+To verify that the training and validation datasets match expectations, a plotting script (`plot_data_distributions.py`) is provided to visualize key distributions using Plotly. The script generates the following plots, saved in the `plots/` directory as both interactive HTML files (for exploration) and static PNG files (for documentation):
+
+### Training Data Plots
+- **Coverage Distribution** (`train_coverage.html/png`):
+  - Histogram of coverage values across a sample of 10,000 training samples.
+  - Expected: A mix of the clinical distribution (mean ~9.0-9.5, ~80% of samples) and the original distributions (`low`, `med`, `high`, ~20% of samples).
+- **Marker Value Distribution** (`train_marker_values.html/png`):
+  - Histogram of marker values (methylation fractions) across the same sample.
+  - Expected: Values between 0 and 1, with a distribution reflecting the effect of augmentation.
+- **Ground Truth Proportions** (`train_proportions.html/png`):
+  - Boxplot of ground truth proportions for each cell type.
+  - Expected: Balanced distribution of cell type proportions, reflecting the training data composition.
+- **Augmented vs. Non-Augmented Coverage** (`train_augmented_vs_non_augmented_coverage.html/png`):
+  - Histogram comparing coverage for augmented vs. non-augmented samples.
+  - Expected: ~80% of samples (augmented) should follow the clinical distribution, while ~20% (non-augmented) reflect the original `low`, `med`, and `high` distributions.
+
+### Validation Data Plots (Per DataLoader)
+For each validation DataLoader in `validation_dls` (e.g., `tier1_high`, `t-cells_low`, etc.):
+- **Coverage Distribution** (`val_{name}_coverage.html/png`):
+  - Histogram of coverage values across a sample of 5,000 validation samples.
+  - Expected: A mix of the clinical distribution (mean ~9.0-9.5, ~30% of samples) and the original distributions (`high`, `med`, `low`, `clinical`, ~70% of samples). Coverage should vary across tiers.
+- **Marker Value Distribution** (`val_{name}_marker_values.html/png`):
+  - Histogram of marker values across the same sample.
+  - Expected: Values between 0 and 1, similar to the training distribution but with slight differences due to the 0.3 augmentation probability.
+- **Ground Truth Proportions** (`val_{name}_proportions.html/png`):
+  - Boxplot of ground truth proportions for each cell type.
+  - Expected: Similar to the training distribution, confirming that subsampling preserved the balance of cell types.
+
+### Running the Plotting Script
+1. Ensure the `enhanced_train_dl` and `validation_dls` DataLoaders are loaded (run the main data loading code).
+2. Ensure the `cell_types` list is defined (`list(atlas.columns[8:])`).
+3. Install Plotly and Kaleido (for PNG export):
+   ```bash
+   pip install plotly kaleido
+   ```
+4. Run the script:
+   ```bash
+   python plot_data_distributions.py
+   ```
+5. Check the generated plots in the `plots/` directory:
+   - Open the `.html` files in a browser for interactive exploration.
+   - View the `.png` files for static documentation.
+
 ## Notes
 - The training dataset size (1,365,000 samples) is significantly larger than the validation set (148,000 samples, ~10.8% of training), which is a good balance to prevent overfitting to the validation data.
 - The block-based subsampling approach ensures that the structured nature of the `T-cells` and `OAC` datasets is preserved, making the evaluation more representative of the full dataset.
 - The augmentation strategy (0.8 for training, 0.3 for validation) balances the need for clinical relevance with the need for a manageable evaluation task.
+- Retaining the medium and high coverage tiers in the training data provides diversity in the non-augmented samples, which may help the model generalize across different coverage regimes, even though the majority of samples are augmented to the clinical distribution.
+- The Plotly-based plotting script provides interactive visualizations, allowing for detailed exploration of the data distributions, alongside static PNG files for documentation.
+- **Bug Fix in Validation Data Loading**:
+  - A bug in `get_validation_set_with_augmentation` was fixed where `val_dataset` was overwritten with a `Subset` object, causing `val_dataset.set_training(True)` to fail. The fix moves the `set_training(True)` call before subsampling, ensuring it is applied to the `AugmentedTissueDataset` object.
