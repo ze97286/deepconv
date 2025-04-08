@@ -113,10 +113,10 @@ def get_validation_set_with_augmentation(
     eval_pat_dir: str, 
     atlas: pd.DataFrame, 
     names: set,
-    block_size: int, 
+    block_size: int,
     target_dist_params=None,
     enable_augmentation=True,
-    target_size: int = None 
+    target_size: int = None
 ) -> tuple[DataLoader, torch.Tensor]:
     """
     Validation set loader with light coverage augmentation and block-based subsampling.
@@ -166,6 +166,9 @@ def get_validation_set_with_augmentation(
         enable_augmentation=enable_augmentation
     )
     
+    # Enable augmentation before subsampling
+    val_dataset.set_training(True)  # Moved before subsampling
+    
     # Block-based subsampling
     if target_size is not None and target_size < len(val_dataset):
         # Calculate the number of blocks
@@ -201,8 +204,6 @@ def get_validation_set_with_augmentation(
         indices = np.sort(indices)
         val_dataset = Subset(val_dataset, indices)
         y_val_np = y_val_np[indices]
-    
-    val_dataset.set_training(True)  # Enable light augmentation
     
     # Create DataLoader with shuffling
     val_loader = DataLoader(
