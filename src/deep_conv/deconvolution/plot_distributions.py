@@ -307,6 +307,15 @@ def plot_distributions(train_pat_dir, eval_pat_dir, atlas_path):
             f"Validation Data ({name}) Ground Truth Proportions",
             f"val_{name}_proportions.png",
         )
+        print(f"Plotting validation data distributions for {name}...")
+        val_sample_X, val_sample_coverage, val_sample_y = sample_from_dataloader(dl, num_samples=5_000)
+        
+        plot_coverage_distribution(val_sample_coverage, f"Validation Data ({name}) Coverage Distribution", f"val_{name}_coverage")
+        plot_marker_value_distribution(val_sample_X, f"Validation Data ({name}) Marker Value Distribution", f"val_{name}_marker_values")
+        plot_ground_truth_proportions(val_sample_y, cell_types, f"Validation Data ({name}) Ground Truth Proportions", f"val_{name}_proportions")
+        plot_augmented_vs_non_augmented_coverage(dl, num_samples=5_000, 
+                                                title=f"Validation Data ({name}): Augmented vs Non-Augmented Coverage", 
+                                                filename=f"val_{name}_augmented_vs_non_augmented_coverage")
 
 
 atlas_path = (
