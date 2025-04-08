@@ -7,7 +7,11 @@ import os
 import pandas as pd
 from pathlib import Path
 from deep_conv.presence.model import SingleCellTypePresenceModel
+import logging
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def coverage_matched_augmentation(marker_values, coverage, target_dist_params, augmentation_prob=1.0):
     """
@@ -143,6 +147,8 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
     return augmented_values, augmented_coverage
 
 
+
+
 class TissueDeconvolutionDataset(Dataset):
     """
     A PyTorch Dataset for loading cfDNA methylation data and optional labels.
@@ -179,12 +185,6 @@ class TissueDeconvolutionDataset(Dataset):
         return self.fraction.size(0)
 
     def __getitem__(self, idx):
-        """
-        Return a dictionary containing:
-            'X': The methylation fraction row for this sample
-            'coverage': The coverage row for this sample
-            'y': The ground-truth proportions, if available
-        """
         item = {
             'X': self.fraction[idx],
             'coverage': self.coverage[idx],
@@ -195,12 +195,6 @@ class TissueDeconvolutionDataset(Dataset):
 
 
 class AugmentedTissueDataset(TissueDeconvolutionDataset):
-    """
-    Enhanced dataset with coverage-matched augmentation for clinical scenarios.
-    
-    This extends the base TissueDeconvolutionDataset by adding coverage augmentation
-    to better simulate real-world clinical data distributions.
-    """
     def __init__(self, 
                  fraction, 
                  coverage, 
@@ -209,51 +203,52 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
                  target_dist_params=None,
                  augmentation_probability=0.5,
                  enable_augmentation=True):
-        # Initialise the parent class
         super().__init__(fraction, coverage, atlas, y)
-        
-        # Store augmentation parameters
         self.target_dist_params = target_dist_params
         self.augmentation_probability = augmentation_probability
         self.enable_augmentation = enable_augmentation
-        
-        # Convert numpy arrays to tensors if needed
         if not isinstance(self.fraction, torch.Tensor):
             self.fraction = torch.tensor(self.fraction, dtype=torch.float32)
         if not isinstance(self.coverage, torch.Tensor):
             self.coverage = torch.tensor(self.coverage, dtype=torch.float32)
-    
+        # Counter for debugging
+        self.total_samples = 0
+        self.augmented_samples = 0
+
     def __getitem__(self, idx):
-        """
-        Get a dataset item with optional augmentation.
-        """
-        # Get the base item from parent class
         item = super().__getitem__(idx)
         
-        # Apply augmentation during training if enabled
+        # Log training mode
+        logger.info(f"Training mode: {self.training}")
+        
         if self.enable_augmentation and self.training and self.y is not None:
-            # Convert to numpy for augmentation
             fraction_np = item['X'].numpy().reshape(1, -1)
             coverage_np = item['coverage'].numpy().reshape(1, -1)
             
+            # Increment total samples counter
+            self.total_samples += 1
+            
             # Apply augmentation with some probability
             if np.random.random() < self.augmentation_probability:
-                # Augment the data
                 aug_fraction, aug_coverage = coverage_matched_augmentation(
                     fraction_np, 
                     coverage_np, 
                     self.target_dist_params, 
                     augmentation_prob=1.0
                 )
-                
-                # Update item with augmented data
                 item['X'] = torch.tensor(aug_fraction[0], dtype=torch.float32)
                 item['coverage'] = torch.tensor(aug_coverage[0], dtype=torch.float32)
+                # Increment augmented samples counter
+                self.augmented_samples += 1
+            
+            # Log augmentation proportion periodically
+            if self.total_samples % 1000 == 0:
+                proportion = self.augmented_samples / self.total_samples if self.total_samples > 0 else 0
+                logger.info(f"Processed {self.total_samples} samples, augmented {self.augmented_samples} samples, proportion: {proportion:.3f}")
         
         return item
     
     def set_training(self, training=True):
-        """Enable/disable training mode for augmentation"""
         self.training = training
 
 
