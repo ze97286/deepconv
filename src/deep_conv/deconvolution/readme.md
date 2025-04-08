@@ -87,7 +87,7 @@ This document provides a detailed overview of the training and validation datase
   - Added via `enhanced_negative_examples` to improve learning of absent cell types.
   - For each cell type, selects 1% of samples where the cell type is absent (`y[:, cell_idx] < 0.001`).
   - Creates one low-coverage variant per selected sample (50% coverage reduction).
-  - These examples are also augmented with `coverage_matched_augmentation`, ensuring consistency with the target clinical distribution.
+  - These examples are augmented with `coverage_matched_augmentation` using the clinical distribution parameters (`clinical_dist_params['clinical']`), ensuring consistency with the target clinical distribution.
 
 - **Sampling**:
   - Uses the full enhanced dataset (1,365,000 samples) with `shuffle=True`.
@@ -266,3 +266,5 @@ For each validation DataLoader in `validation_dls` (e.g., `tier1_high`, `t-cells
 - The Plotly-based plotting script provides interactive visualizations, allowing for detailed exploration of the data distributions, alongside static PNG files for documentation.
 - **Bug Fix in Validation Data Loading**:
   - A bug in `get_validation_set_with_augmentation` was fixed where `val_dataset` was overwritten with a `Subset` object, causing `val_dataset.set_training(True)` to fail. The fix moves the `set_training(True)` call before subsampling, ensuring it is applied to the `AugmentedTissueDataset` object.
+- **Bug Fix in Enhanced Negative Examples**:
+  - A bug in `enhanced_negative_examples` was fixed where `train_dl.dataset` (a `ConcatDataset`) was used to access `target_dist_params`, `augmentation_probability`, and `enable_augmentation`, which are not defined for `ConcatDataset`. The fix modifies the function to accept these parameters explicitly, using the clinical distribution (`clinical_dist_params['clinical']`) for consistency with the target distribution.

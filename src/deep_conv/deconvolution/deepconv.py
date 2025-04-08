@@ -306,14 +306,26 @@ def load_training_with_augmentation(
     )
 
 
-def enhanced_negative_examples(train_dl, cell_types, atlas, sample_fraction=0.01):
+def enhanced_negative_examples(
+    train_dl,
+    cell_types,
+    atlas,
+    sample_fraction=0.01,
+    target_dist_params=None,
+    augmentation_probability=0.8,
+    enable_augmentation=True
+):
     """
     Create additional negative examples by applying coverage reduction and augmentation.
     
     Args:
         train_dl: Training DataLoader yielding dictionaries with keys 'X', 'coverage', and 'y'
         cell_types: List of cell type names (order must match columns in y)
-        sample_fraction: Fraction of eligible negative examples to select for each cell type.
+        atlas: DataFrame with marker metadata
+        sample_fraction: Fraction of eligible negative examples to select for each cell type
+        target_dist_params: Target distribution parameters for augmentation (default: clinical distribution)
+        augmentation_probability: Probability of applying augmentation to the enhanced dataset
+        enable_augmentation: Whether to enable augmentation for the enhanced dataset
         
     Returns:
         Enhanced DataLoader over a new dataset with original and negative examples.
@@ -321,7 +333,7 @@ def enhanced_negative_examples(train_dl, cell_types, atlas, sample_fraction=0.01
     # Collect original data from the DataLoader
     all_X, all_coverage, all_y = [], [], []
     print("Collecting original data...")
-    for batch in tqdm.tqdm(train_dl):
+    for batch in tqdm(train_dl):
         all_X.append(batch['X'].numpy())
         all_coverage.append(batch['coverage'].numpy())
         all_y.append(batch['y'].numpy())
@@ -398,15 +410,15 @@ def enhanced_negative_examples(train_dl, cell_types, atlas, sample_fraction=0.01
     print(f"Enhanced dataset created: {len(X)} → {len(combined_X)} samples")
     print(f"Added {len(combined_X) - len(X)} explicit negative examples")
     
-    # Create new dataset and dataloader
+    # Create new dataset with specified augmentation parameters
     enhanced_dataset = AugmentedTissueDataset(
         combined_X,
         combined_coverage,
         atlas[atlas.columns[8:]].T.to_numpy(),
         combined_y,
-        target_dist_params=train_dl.dataset.target_dist_params,
-        augmentation_probability=train_dl.dataset.augmentation_probability,
-        enable_augmentation=train_dl.dataset.enable_augmentation
+        target_dist_params=target_dist_params,
+        augmentation_probability=augmentation_probability,
+        enable_augmentation=enable_augmentation
     )
     
     enhanced_dataset.set_training(True)
@@ -420,7 +432,6 @@ def enhanced_negative_examples(train_dl, cell_types, atlas, sample_fraction=0.01
     )
     
     return enhanced_loader
-
 
 def analyze_coverage_distribution(data_loader):
     """
@@ -714,7 +725,15 @@ def train_and_eval(
 
     # 5) Enhance negative examples
     cell_types = list(atlas.columns[8:])
-    enhanced_train_dl = enhanced_negative_examples(train_dl, cell_types, atlas, sample_fraction=0.01)
+    enhanced_train_dl = enhanced_negative_examples(
+        train_dl,
+        cell_types,
+        atlas,
+        sample_fraction=0.01,
+        target_dist_params=clinical_dist_params['clinical'],
+        augmentation_probability=0.8,
+        enable_augmentation=True
+    )
 
     # 6) Create the model
     target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
