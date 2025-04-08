@@ -180,49 +180,48 @@ clinical_dist_params = {
 def plot_distributions(train_pat_dir, eval_pat_dir, atlas_path):
     atlas = pd.read_csv(atlas_path, sep="\t")
     names = set(atlas.name.unique())
-    # train_dl_low = load_training_with_augmentation(
-    #     f"{train_pat_dir}_low",
-    #     atlas,
-    #     names,
-    #     num_files=5,
-    #     enable_augmentation=True,
-    #     target_dist_params=clinical_dist_params["low"],
-    #     augmentation_probability=0.8,
-    # )
-    # train_dl_med = load_training_with_augmentation(
-    #     f"{train_pat_dir}_med",
-    #     atlas,
-    #     names,
-    #     num_files=4,
-    #     enable_augmentation=True,
-    #     target_dist_params=clinical_dist_params["med"],
-    #     augmentation_probability=0.8,
-    # )
-    # train_dl_high = load_training_with_augmentation(
-    #     f"{train_pat_dir}_high",
-    #     atlas,
-    #     names,
-    #     num_files=4,
-    #     enable_augmentation=True,
-    #     target_dist_params=clinical_dist_params["high"],
-    #     augmentation_probability=0.8,
-    # )
+    train_dl_low = load_training_with_augmentation(
+        f"{train_pat_dir}_low",
+        atlas,
+        names,
+        num_files=5,
+        enable_augmentation=True,
+        target_dist_params=clinical_dist_params["low"],
+        augmentation_probability=0.8,
+    )
+    train_dl_med = load_training_with_augmentation(
+        f"{train_pat_dir}_med",
+        atlas,
+        names,
+        num_files=4,
+        enable_augmentation=True,
+        target_dist_params=clinical_dist_params["med"],
+        augmentation_probability=0.8,
+    )
+    train_dl_high = load_training_with_augmentation(
+        f"{train_pat_dir}_high",
+        atlas,
+        names,
+        num_files=4,
+        enable_augmentation=True,
+        target_dist_params=clinical_dist_params["high"],
+        augmentation_probability=0.8,
+    )
 
-    # from torch.utils.data import ConcatDataset
-    # train_dataset = ConcatDataset(
-    #     [train_dl_low.dataset, train_dl_med.dataset, train_dl_high.dataset]
-    # )
-    # train_dl = DataLoader(
-    #     train_dataset,
-    #     batch_size=64,
-    #     shuffle=True,
-    #     num_workers=24,
-    #     pin_memory=True,
-    #     persistent_workers=True,
-    # )
+    from torch.utils.data import ConcatDataset
+    train_dataset = ConcatDataset(
+        [train_dl_low.dataset, train_dl_med.dataset, train_dl_high.dataset]
+    )
+    train_dl = DataLoader(
+        train_dataset,
+        batch_size=64,
+        shuffle=True,
+        num_workers=24,
+        pin_memory=True,
+        persistent_workers=True,
+    )
     validation_dls = {}
-    # for cov in ["high", "med", "low", "clinical"]:
-    for cov in ["clinical"]:
+    for cov in ["high", "med", "low", "clinical"]:
         tier1_dl, t1_yval = get_validation_set_with_augmentation(
             str(Path(eval_pat_dir + "_" + cov) / "tier1"),
             atlas,
@@ -258,40 +257,40 @@ def plot_distributions(train_pat_dir, eval_pat_dir, atlas_path):
         validation_dls[f"oac_{cov}"] = oac_dl
     # 5) Enhance negative examples
     cell_types = list(atlas.columns[8:])
-    # enhanced_train_dl = enhanced_negative_examples(
-    #     train_dl,
-    #     cell_types,
-    #     atlas,
-    #     sample_fraction=0.01,
-    #     target_dist_params=clinical_dist_params['clinical'],  # Use clinical distribution
-    #     augmentation_probability=0.8,
-    #     enable_augmentation=True
-    # )
-    # train_sample_X, train_sample_coverage, train_sample_y = sample_from_dataloader(
-    #     enhanced_train_dl, num_samples=10_000
-    # )
-    # plot_coverage_distribution(
-    #     train_sample_coverage,
-    #     "Training Data Coverage Distribution",
-    #     "train_coverage.png",
-    # )
-    # plot_marker_value_distribution(
-    #     train_sample_X,
-    #     "Training Data Marker Value Distribution",
-    #     "train_marker_values.png",
-    # )
-    # plot_ground_truth_proportions(
-    #     train_sample_y,
-    #     cell_types,
-    #     "Training Data Ground Truth Proportions",
-    #     "train_proportions.png",
-    # )
-    # plot_augmented_vs_non_augmented_coverage(
-    #     enhanced_train_dl,
-    #     num_samples=10_000,
-    #     title="Training Data: Augmented vs Non-Augmented Coverage",
-    #     filename="train_augmented_vs_non_augmented_coverage.png",
-    # )
+    enhanced_train_dl = enhanced_negative_examples(
+        train_dl,
+        cell_types,
+        atlas,
+        sample_fraction=0.01,
+        target_dist_params=clinical_dist_params['clinical'],  # Use clinical distribution
+        augmentation_probability=0.8,
+        enable_augmentation=True
+    )
+    train_sample_X, train_sample_coverage, train_sample_y = sample_from_dataloader(
+        enhanced_train_dl, num_samples=10_000
+    )
+    plot_coverage_distribution(
+        train_sample_coverage,
+        "Training Data Coverage Distribution",
+        "train_coverage.png",
+    )
+    plot_marker_value_distribution(
+        train_sample_X,
+        "Training Data Marker Value Distribution",
+        "train_marker_values.png",
+    )
+    plot_ground_truth_proportions(
+        train_sample_y,
+        cell_types,
+        "Training Data Ground Truth Proportions",
+        "train_proportions.png",
+    )
+    plot_augmented_vs_non_augmented_coverage(
+        enhanced_train_dl,
+        num_samples=10_000,
+        title="Training Data: Augmented vs Non-Augmented Coverage",
+        filename="train_augmented_vs_non_augmented_coverage.png",
+    )
     for name, dl in validation_dls.items():
         print(f"Plotting validation data distributions for {name}...")
         val_sample_X, val_sample_coverage, val_sample_y = sample_from_dataloader(
