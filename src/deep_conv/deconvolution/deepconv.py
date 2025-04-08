@@ -201,7 +201,7 @@ def get_validation_set_with_augmentation(
         atlas[atlas.columns[8:]].T.to_numpy(),
         y_val_np,
         target_dist_params=target_dist_params,
-        augmentation_probability=0.3 if enable_augmentation else 0.0,
+        augmentation_probability=0.5 if enable_augmentation else 0.0,
         enable_augmentation=enable_augmentation
     )
     
