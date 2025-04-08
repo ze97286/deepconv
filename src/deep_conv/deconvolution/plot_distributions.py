@@ -10,6 +10,7 @@ from deep_conv.deconvolution.deepconv import *
 plots_dir = Path("plots")
 plots_dir.mkdir(exist_ok=True)
 
+
 # Function to sample data from a DataLoader
 def sample_from_dataloader(dataloader, num_samples):
     all_X, all_coverage, all_y = [], [], []
@@ -34,10 +35,9 @@ def plot_coverage_distribution(coverage, title, filename):
         histnorm="density",
         title=title,
         labels={"x": "Coverage", "y": "Density"},
-        range_x=[0, 100],  # Adjust based on expected coverage range
+        range_x=[0, 100],
     )
     fig.update_layout(xaxis_title="Coverage", yaxis_title="Density", bargap=0.1)
-    # Save as HTML (interactive) and PNG (static)
     fig.write_html(os.path.join(plots_dir, f"{filename}.html"))
     fig.write_image(os.path.join(plots_dir, f"{filename}.png"))
 
@@ -50,7 +50,7 @@ def plot_marker_value_distribution(X, title, filename):
         histnorm="density",
         title=title,
         labels={"x": "Marker Value (Methylation Fraction)", "y": "Density"},
-        range_x=[0, 1],  # Marker values are in [0, 1]
+        range_x=[0, 1],
     )
     fig.update_layout(
         xaxis_title="Marker Value (Methylation Fraction)",
@@ -63,7 +63,6 @@ def plot_marker_value_distribution(X, title, filename):
 
 # Function to plot ground truth proportions
 def plot_ground_truth_proportions(y, cell_types, title, filename):
-    # Create a box plot for each cell type
     fig = go.Figure()
     for i, cell_type in enumerate(cell_types):
         fig.add_trace(go.Box(x=y[:, i], name=cell_type, orientation="h"))
@@ -78,55 +77,71 @@ def plot_ground_truth_proportions(y, cell_types, title, filename):
     fig.write_image(os.path.join(plots_dir, f"{filename}.png"))
 
 
-# Function to plot augmented vs non-augmented coverage (training only)
+# Updated function to plot augmented vs non-augmented coverage
 def plot_augmented_vs_non_augmented_coverage(dataloader, num_samples, title, filename):
-    # Sample augmented and non-augmented samples
-    dataloader.dataset.set_training(True)  # Enable augmentation
-    augmented_X, augmented_coverage, _ = [], [], []
-    non_augmented_X, non_augmented_coverage, _ = [], [], []
+    # Ensure augmentation is enabled
+    dataloader.dataset.set_training(True)
+
+    # Collect augmented and non-augmented coverage values
+    augmented_coverage = []
+    non_augmented_coverage = []
 
     all_indices = np.arange(len(dataloader.dataset))
     np.random.shuffle(all_indices)
     sampled_indices = all_indices[:num_samples]
 
     for idx in tqdm(sampled_indices, desc="Sampling augmented/non-augmented"):
-        # Get augmented sample
+        # Get sample with augmentation enabled
         batch = dataloader.dataset[idx]
-        augmented_X.append(batch["X"].numpy())
-        augmented_coverage.append(batch["coverage"].numpy())
+        coverage = batch["coverage"].numpy()
+        is_augmented = batch["is_augmented"]  # Use the is_augmented flag
 
-        # Get non-augmented sample by temporarily disabling augmentation
-        dataloader.dataset.set_training(False)
-        batch = dataloader.dataset[idx]
-        non_augmented_X.append(batch["X"].numpy())
-        non_augmented_coverage.append(batch["coverage"].numpy())
-        dataloader.dataset.set_training(True)  # Re-enable augmentation
+        if is_augmented:
+            augmented_coverage.append(coverage)
+        else:
+            non_augmented_coverage.append(coverage)
 
-    augmented_coverage = np.stack(augmented_coverage)
-    non_augmented_coverage = np.stack(non_augmented_coverage)
+    # Stack the coverage arrays
+    augmented_coverage = (
+        np.stack(augmented_coverage) if augmented_coverage else np.array([])
+    )
+    non_augmented_coverage = (
+        np.stack(non_augmented_coverage) if non_augmented_coverage else np.array([])
+    )
+
+    # Log the proportions for debugging
+    total_augmented = len(augmented_coverage)
+    total_non_augmented = len(non_augmented_coverage)
+    total_samples = total_augmented + total_non_augmented
+    print(
+        f"Augmented samples: {total_augmented}, Non-Augmented samples: {total_non_augmented}"
+    )
+    print(f"Proportion augmented: {total_augmented / total_samples:.3f}")
 
     # Create histogram with two traces
     fig = go.Figure()
-    fig.add_trace(
-        go.Histogram(
-            x=augmented_coverage.flatten(),
-            name="Augmented",
-            nbinsx=100,
-            histnorm="density",
-            opacity=0.5,
-            marker_color="blue",
+    if augmented_coverage.size > 0:
+        fig.add_trace(
+            go.Histogram(
+                x=augmented_coverage.flatten(),
+                name="Augmented",
+                nbinsx=100,
+                histnorm="density",
+                opacity=0.5,
+                marker_color="blue",
+            )
         )
-    )
-    fig.add_trace(
-        go.Histogram(
-            x=non_augmented_coverage.flatten(),
-            name="Non-Augmented",
-            nbinsx=100,
-            histnorm="density",
-            opacity=0.5,
-            marker_color="orange",
+    if non_augmented_coverage.size > 0:
+        fig.add_trace(
+            go.Histogram(
+                x=non_augmented_coverage.flatten(),
+                name="Non-Augmented",
+                nbinsx=100,
+                histnorm="density",
+                opacity=0.5,
+                marker_color="orange",
+            )
         )
-    )
 
     fig.update_layout(
         title=title,
@@ -308,14 +323,32 @@ def plot_distributions(train_pat_dir, eval_pat_dir, atlas_path):
             f"val_{name}_proportions.png",
         )
         print(f"Plotting validation data distributions for {name}...")
-        val_sample_X, val_sample_coverage, val_sample_y = sample_from_dataloader(dl, num_samples=5_000)
-        
-        plot_coverage_distribution(val_sample_coverage, f"Validation Data ({name}) Coverage Distribution", f"val_{name}_coverage")
-        plot_marker_value_distribution(val_sample_X, f"Validation Data ({name}) Marker Value Distribution", f"val_{name}_marker_values")
-        plot_ground_truth_proportions(val_sample_y, cell_types, f"Validation Data ({name}) Ground Truth Proportions", f"val_{name}_proportions")
-        plot_augmented_vs_non_augmented_coverage(dl, num_samples=5_000, 
-                                                title=f"Validation Data ({name}): Augmented vs Non-Augmented Coverage", 
-                                                filename=f"val_{name}_augmented_vs_non_augmented_coverage")
+        val_sample_X, val_sample_coverage, val_sample_y = sample_from_dataloader(
+            dl, num_samples=5_000
+        )
+
+        plot_coverage_distribution(
+            val_sample_coverage,
+            f"Validation Data ({name}) Coverage Distribution",
+            f"val_{name}_coverage",
+        )
+        plot_marker_value_distribution(
+            val_sample_X,
+            f"Validation Data ({name}) Marker Value Distribution",
+            f"val_{name}_marker_values",
+        )
+        plot_ground_truth_proportions(
+            val_sample_y,
+            cell_types,
+            f"Validation Data ({name}) Ground Truth Proportions",
+            f"val_{name}_proportions",
+        )
+        plot_augmented_vs_non_augmented_coverage(
+            dl,
+            num_samples=5_000,
+            title=f"Validation Data ({name}): Augmented vs Non-Augmented Coverage",
+            filename=f"val_{name}_augmented_vs_non_augmented_coverage",
+        )
 
 
 atlas_path = (

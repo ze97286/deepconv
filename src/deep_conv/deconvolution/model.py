@@ -150,7 +150,7 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
 
 
 class TissueDeconvolutionDataset(Dataset):
-    """
+   """
     A PyTorch Dataset for loading cfDNA methylation data and optional labels.
     
     Each sample in this dataset includes:
@@ -193,7 +193,6 @@ class TissueDeconvolutionDataset(Dataset):
             item['y'] = self.y[idx]
         return item  
 
-
 class AugmentedTissueDataset(TissueDeconvolutionDataset):
     def __init__(self, 
                  fraction, 
@@ -211,22 +210,16 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
             self.fraction = torch.tensor(self.fraction, dtype=torch.float32)
         if not isinstance(self.coverage, torch.Tensor):
             self.coverage = torch.tensor(self.coverage, dtype=torch.float32)
-        # Counter for debugging
-        self.total_samples = 0
-        self.augmented_samples = 0
 
     def __getitem__(self, idx):
         item = super().__getitem__(idx)
         
-        # Log training mode
-        logger.info(f"Training mode: {self.training}")
+        # Initialize augmentation flag
+        item['is_augmented'] = False
         
         if self.enable_augmentation and self.training and self.y is not None:
             fraction_np = item['X'].numpy().reshape(1, -1)
             coverage_np = item['coverage'].numpy().reshape(1, -1)
-            
-            # Increment total samples counter
-            self.total_samples += 1
             
             # Apply augmentation with some probability
             if np.random.random() < self.augmentation_probability:
@@ -238,13 +231,7 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
                 )
                 item['X'] = torch.tensor(aug_fraction[0], dtype=torch.float32)
                 item['coverage'] = torch.tensor(aug_coverage[0], dtype=torch.float32)
-                # Increment augmented samples counter
-                self.augmented_samples += 1
-            
-            # Log augmentation proportion periodically
-            if self.total_samples % 1000 == 0:
-                proportion = self.augmented_samples / self.total_samples if self.total_samples > 0 else 0
-                logger.info(f"Processed {self.total_samples} samples, augmented {self.augmented_samples} samples, proportion: {proportion:.3f}")
+                item['is_augmented'] = True
         
         return item
     
