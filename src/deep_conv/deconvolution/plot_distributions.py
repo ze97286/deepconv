@@ -41,7 +41,6 @@ def plot_coverage_distribution(coverage, title, filename):
     fig.write_html(os.path.join(plots_dir, f"{filename}.html"))
     fig.write_image(os.path.join(plots_dir, f"{filename}.png"))
 
-
 # Function to plot marker value distribution
 def plot_marker_value_distribution(X, title, filename):
     fig = px.histogram(
@@ -60,7 +59,6 @@ def plot_marker_value_distribution(X, title, filename):
     fig.write_html(os.path.join(plots_dir, f"{filename}.html"))
     fig.write_image(os.path.join(plots_dir, f"{filename}.png"))
 
-
 # Function to plot ground truth proportions
 def plot_ground_truth_proportions(y, cell_types, title, filename):
     fig = go.Figure()
@@ -76,12 +74,11 @@ def plot_ground_truth_proportions(y, cell_types, title, filename):
     fig.write_html(os.path.join(plots_dir, f"{filename}.html"))
     fig.write_image(os.path.join(plots_dir, f"{filename}.png"))
 
-
-# Updated function to plot augmented vs non-augmented coverage
+# Updated function to plot augmented vs non-augmented coverage with counts
 def plot_augmented_vs_non_augmented_coverage(dataloader, num_samples, title, filename):
     # Ensure augmentation is enabled
     dataloader.dataset.set_training(True)
-
+    
     # Collect augmented and non-augmented coverage values
     augmented_coverage = []
     non_augmented_coverage = []
@@ -95,30 +92,24 @@ def plot_augmented_vs_non_augmented_coverage(dataloader, num_samples, title, fil
         batch = dataloader.dataset[idx]
         coverage = batch["coverage"].numpy()
         is_augmented = batch["is_augmented"]  # Use the is_augmented flag
-
+        
         if is_augmented:
             augmented_coverage.append(coverage)
         else:
             non_augmented_coverage.append(coverage)
 
     # Stack the coverage arrays
-    augmented_coverage = (
-        np.stack(augmented_coverage) if augmented_coverage else np.array([])
-    )
-    non_augmented_coverage = (
-        np.stack(non_augmented_coverage) if non_augmented_coverage else np.array([])
-    )
+    augmented_coverage = np.stack(augmented_coverage) if augmented_coverage else np.array([])
+    non_augmented_coverage = np.stack(non_augmented_coverage) if non_augmented_coverage else np.array([])
 
     # Log the proportions for debugging
     total_augmented = len(augmented_coverage)
     total_non_augmented = len(non_augmented_coverage)
     total_samples = total_augmented + total_non_augmented
-    print(
-        f"Augmented samples: {total_augmented}, Non-Augmented samples: {total_non_augmented}"
-    )
+    print(f"Augmented samples: {total_augmented}, Non-Augmented samples: {total_non_augmented}")
     print(f"Proportion augmented: {total_augmented / total_samples:.3f}")
 
-    # Create histogram with two traces
+    # Create histogram with two traces, using counts instead of density
     fig = go.Figure()
     if augmented_coverage.size > 0:
         fig.add_trace(
@@ -126,7 +117,6 @@ def plot_augmented_vs_non_augmented_coverage(dataloader, num_samples, title, fil
                 x=augmented_coverage.flatten(),
                 name="Augmented",
                 nbinsx=100,
-                histnorm="density",
                 opacity=0.5,
                 marker_color="blue",
             )
@@ -137,7 +127,6 @@ def plot_augmented_vs_non_augmented_coverage(dataloader, num_samples, title, fil
                 x=non_augmented_coverage.flatten(),
                 name="Non-Augmented",
                 nbinsx=100,
-                histnorm="density",
                 opacity=0.5,
                 marker_color="orange",
             )
@@ -146,7 +135,7 @@ def plot_augmented_vs_non_augmented_coverage(dataloader, num_samples, title, fil
     fig.update_layout(
         title=title,
         xaxis_title="Coverage",
-        yaxis_title="Density",
+        yaxis_title="Count",  # Change to Count
         xaxis=dict(range=[0, 100]),
         barmode="overlay",
         bargap=0.1,
