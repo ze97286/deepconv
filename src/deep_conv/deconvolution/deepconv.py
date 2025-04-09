@@ -166,9 +166,9 @@ def get_validation_set_with_augmentation(
         val_dataset,
         batch_size=512,
         shuffle=True,
-        num_workers=28,
+        num_workers=8,
         pin_memory=False,
-        persistent_workers=True
+        persistent_workers=False
     )
     
     # Convert y_val to a PyTorch tensor and normalize each row
