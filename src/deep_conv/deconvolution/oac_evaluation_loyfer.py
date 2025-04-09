@@ -755,7 +755,6 @@ def train_and_evaluate(model_name, presence_model_name):
                            eval_pat_dir=eval_pat_dir, 
                            threads=threads,
                            output_path=output_path, 
-                           use_loyfer=True,
                            presence_models_dir=presence_path)
 
 

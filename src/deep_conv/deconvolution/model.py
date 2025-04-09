@@ -240,6 +240,15 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
         self.training = training
 
 
+class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
+    def __init__(self, fraction, coverage, atlas, y=None):
+        super().__init__(fraction, coverage, atlas, y)
+
+    def __getitem__(self, idx):
+        item = super().__getitem__(idx)
+        item['is_augmented'] = idx >= len(self.fraction) // 2 
+        return item
+
 class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=32):
         super().__init__()
