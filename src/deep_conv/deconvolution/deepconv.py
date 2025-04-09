@@ -529,13 +529,19 @@ def train_and_eval(
     target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
     model = CellTypeDeconvolutionModel(
         num_markers=len(atlas), num_cell_types=len(cell_types),
-        target_ids=target_ids, presence_models_dir=presence_models_dir, feature_dim=64
+        target_ids=target_ids, presence_models_dir=presence_models_dir
     )
 
     # Train the model
     model, _ = train_model(
-        model=model, train_loader=enhanced_train_dl, val_loaders=validation_dls,
-        model_path=output_path
+        model=model,
+        train_loader=enhanced_train_dl,
+        val_loaders=validation_dls,
+        model_path=output_path,
+        num_epochs=1000,
+        patience=20, 
+        lr=5e-4, 
+        weight_decay=1e-4 
     )
 
     # Evaluate

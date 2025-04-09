@@ -53,7 +53,9 @@ def train_epoch(
     optimiser: optim.Optimizer,
     device: torch.device,
     log_interval: int = 500,
-    accumulation_steps: int = 4
+    accumulation_steps: int = 2,
+    epoch: int = 0,
+    focal_loss_weight: float = 0.1
 ) -> Dict[str, float]:
     """
     Performs one training epoch on the given data loader.
@@ -84,6 +86,10 @@ def train_epoch(
             Frequency (in mini-batches) with which progress is printed/logged.
         accumulation_steps (int):
             Number of mini-batches over which to accumulate gradients before taking an optimiser step.
+        epoch (int):
+            Current epoch number (used for dynamic loss weighting).
+        focal_loss_weight (float):
+            Current weight for the focal loss term (dynamically adjusted).
 
     Returns:
         Dict[str, float]: 
@@ -110,10 +116,6 @@ def train_epoch(
         y_true = batch['y'].to(device)
         
         # 2) Forward pass
-        #    alpha = predicted proportions
-        #    reconstructed = predicted marker data
-        #    valid_mask = coverage>0
-        #    presence_probs/logits = presence detection
         alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
         
         # 3) Compute loss using our composite loss function
@@ -126,6 +128,7 @@ def train_epoch(
             valid_mask=valid_mask,
             presence_probs=presence_probs,
             presence_logits=presence_logits,
+            focal_loss_weight=focal_loss_weight  # Pass dynamic focal loss weight
         )
         
         # 4) Scale the loss if using gradient accumulation
@@ -168,7 +171,6 @@ def train_epoch(
             print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
             print(f"Alpha Mean: {details['alpha_stats']['mean']:.8f} | "
                   f"Std: {details['alpha_stats']['std']:.8f}")
-            # Example of optional info if your dictionary has such keys
             if 'cd48_under' in details and 'cd48_over' in details:
                 print(f"CD4/CD8 Under: {details['cd48_under']:.8f} | Over: {details['cd48_over']:.8f}")
             if 'weight_stats' in details:
@@ -189,7 +191,7 @@ def validate(
     presence_threshold: float = 0.01  # Fixed threshold for consistent metrics
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
     """
-    Evaluate model on validation sets with consistent metrics.
+    Evaluate model on validation sets with consistent metrics, using weighted average for validation loss.
 
     Args:
         model: The model to be evaluated
@@ -198,7 +200,7 @@ def validate(
         presence_threshold: Fixed threshold for evaluation metrics
         
     Returns:
-        avg_val_loss: Average validation loss
+        avg_val_loss: Weighted average validation loss
         val_stats: Dictionary of validation statistics
     """
     model.eval()
@@ -206,6 +208,8 @@ def validate(
     val_stats = {}
     thresholds = [0.001, 0.005, 0.01, 0.02, 0.05]
     threshold_results = {t: {} for t in thresholds}
+    total_samples = 0
+    weighted_loss_sum = 0.0
 
     print(f"Validating with presence threshold: {presence_threshold}")
 
@@ -395,9 +399,14 @@ def validate(
                     loader_stats[key] /= num_batches
             
             val_stats[val_name] = dict(loader_stats)
+            
+            # Accumulate for weighted average
+            dataset_size = len(val_loader.dataset)
+            total_samples += dataset_size
+            weighted_loss_sum += loader_stats['loss'] * dataset_size
     
-    # Compute mean val loss across sets
-    avg_val_loss = sum(stats['total_loss'] for stats in val_stats.values()) / len(val_stats)
+    # Compute weighted average validation loss
+    avg_val_loss = weighted_loss_sum / total_samples if total_samples > 0 else 0.0
     return avg_val_loss, val_stats
 
 def train_model(
@@ -406,9 +415,9 @@ def train_model(
     val_loaders: Dict[str, DataLoader],
     model_path: str,
     num_epochs: int = 1000,
-    patience: int = 10,
-    lr: float = 1e-3,
-    weight_decay: float = 1e-5,
+    patience: int = 20,  # Increased patience
+    lr: float = 5e-4,  # Reduced learning rate
+    weight_decay: float = 1e-4,  # Increased weight decay
     use_wandb: bool = True,
     wandb_project: str = "cfDNA-Deconvolution",
     wandb_entity: str = None,
@@ -419,6 +428,7 @@ def train_model(
     
     Features:
       - Warmup for learning rate (first few epochs)
+      - Cyclic learning rate schedule to escape local minima
       - Early stopping based on validation loss (patience)
       - Post-training best checkpoint restoration
       - W&B integration for logging/plotting if `use_wandb=True`
@@ -431,7 +441,7 @@ def train_model(
         num_epochs: Max number of epochs to train
         patience: # of epochs to wait for improvement before early stopping
         lr: Base learning rate
-        weight_decay: L2 penalty for Adam
+        weight_decay: L2 penalty for AdamW
         use_wandb: If True, logs metrics/plots to Weights & Biases
         wandb_project: W&B project name
         wandb_entity: W&B entity (team name or username)
@@ -443,16 +453,18 @@ def train_model(
     """
     model = model.to(device)
     
-    # Setup optimizer with a single parameter group
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # Setup optimizer with AdamW
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     
-    # Scheduler that reduces LR on plateau of validation loss
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 
-        mode='min', 
-        factor=0.5, 
-        patience=patience // 2,
-        verbose=True
+    # Cyclic learning rate scheduler (triangular policy)
+    cycle_length = 10  # Number of epochs per cycle
+    scheduler = optim.lr_scheduler.CyclicLR(
+        optimizer,
+        base_lr=1e-5,  # Minimum learning rate
+        max_lr=lr,  # Maximum learning rate
+        step_size_up=cycle_length * len(train_loader) // 2,  # Steps to reach max_lr
+        mode='triangular',
+        cycle_momentum=False
     )
     
     # Ensure model_path exists
@@ -477,10 +489,11 @@ def train_model(
     
     # Preparation
     initial_lr = lr
-    warmup_epochs = 5  # # of epochs for linearly ramping LR from 0 to lr
+    warmup_epochs = 10  # Increased warmup period
     
     history = defaultdict(list)
     best_val_loss = float('inf')
+    best_tcells_f1 = 0.0
     best_epoch = 0
     patience_counter = 0
     
@@ -502,16 +515,34 @@ def train_model(
             for param_group in optimizer.param_groups:
                 param_group['lr'] = current_lr
             print(f"LR Warmup: {current_lr:.1e}")
+        else:
+            # After warmup, use cyclic scheduler
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Cyclic LR: {current_lr:.1e}")
+        
+        # Dynamic focal loss weight
+        focal_loss_weight = 0.1 + 0.05 * min(epoch / 50, 1.0)  # Increase to 0.15 over 50 epochs
         
         # Training for one epoch
-        train_stats = train_epoch(model, train_loader, optimizer, device)
+        train_stats = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            epoch=epoch,
+            focal_loss_weight=focal_loss_weight
+        )
+        
+        # Step the cyclic scheduler after each batch
+        if epoch >= warmup_epochs:
+            scheduler.step()
         
         # Validation with fixed threshold for consistent metrics
         avg_val_loss, val_stats = validate(
             model,
             val_loaders,
             device,
-            presence_threshold=eval_presence_threshold  # Fixed threshold for evaluation
+            presence_threshold=eval_presence_threshold
         )
         
         # Evaluate multiple thresholds for best F1
@@ -540,6 +571,9 @@ def train_model(
             for k, v in stats.items():
                 history[f"{val_name}/{k}"].append(v)
         
+        # Check T-cells F1 score for low coverage set
+        tcells_low_f1 = val_stats.get('t-cells_low', {}).get('avg_f1', 0.0)
+        
         # Print summary
         print(f"\n🔹 Epoch {epoch + 1} Summary:")
         print(f"Train Loss: {train_stats['total_loss']:.8f} | Grad Norm: {train_stats['grad_norm']:.8f}")
@@ -560,8 +594,10 @@ def train_model(
                 "train/grad_norm": train_stats['grad_norm'],
                 "val/avg_loss": avg_val_loss,
                 "lr": optimizer.param_groups[0]['lr'],
+                "focal_loss_weight": focal_loss_weight,
                 "best_threshold": best_threshold,
-                "best_threshold_f1": best_threshold_f1
+                "best_threshold_f1": best_threshold_f1,
+                "tcells_low_f1": tcells_low_f1
             }
             # Add validation stats
             for val_name, stats in val_stats.items():
@@ -575,15 +611,15 @@ def train_model(
             )
             wandb.log(wandb_logs)
         
-        # Scheduler step
-        scheduler.step(avg_val_loss)
-        
-        # Early stopping on avg_val_loss
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
+        # Early stopping on avg_val_loss and T-cells F1
+        if avg_val_loss < best_val_loss or tcells_low_f1 > best_tcells_f1:
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+            if tcells_low_f1 > best_tcells_f1:
+                best_tcells_f1 = tcells_low_f1
             patience_counter = 0
             best_epoch = epoch
-            print(f"New best model with loss: {best_val_loss:.8f}")
+            print(f"New best model with loss: {best_val_loss:.8f}, T-cells low F1: {best_tcells_f1:.4f}")
             
             checkpoint = {
                 'epoch': epoch,
@@ -591,6 +627,7 @@ def train_model(
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
+                'best_tcells_f1': best_tcells_f1,
                 'best_threshold': best_threshold,
                 'history': dict(history)
             }
@@ -606,7 +643,7 @@ def train_model(
             break
     
     # Load the Best Model
-    print("Loading best model (best overall validation loss)")
+    print("Loading best model (best overall validation loss and T-cells F1)")
     checkpoint = torch.load(os.path.join(model_path, "best_model.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
     
@@ -620,6 +657,7 @@ def train_model(
     # Cleanup wandb
     if use_wandb:
         wandb.run.summary["best_val_loss"] = best_val_loss
+        wandb.run.summary["best_tcells_f1"] = best_tcells_f1
         wandb.run.summary["best_epoch"] = best_epoch
         wandb.run.summary["total_epochs"] = epoch + 1
         wandb.run.summary["best_threshold"] = best_threshold
@@ -652,8 +690,8 @@ def plot_training_history(history: Dict[str, List[float]], save_path: str):
          - (row1, col1): 'Loss Evolution'
          - (row1, col2): 'Valid Marker Ratio'
          - (row2, col1): 'Alpha Statistics'
-         - (row2, col2): 'Theta Evolution'
-      3) Plots lines for any keys matching "loss", "valid", "alpha", "theta" in the appropriate subplot.
+         - (row2, col2): 'T-Cells F1 Score'
+      3) Plots lines for any keys matching "loss", "valid", "alpha", "tcells_low_f1" in the appropriate subplot.
       4) Optionally saves the figure to an HTML file for offline viewing or logs it.
 
     Args:
@@ -661,9 +699,6 @@ def plot_training_history(history: Dict[str, List[float]], save_path: str):
             A dictionary where each key is a metric name and the value is a list of epoch-level measurements.
         save_path (str):
             If provided, the figure is saved to `save_path + ".html"`. Otherwise, a fig.show() might be done.
-
-    Note: 
-        The user can adapt which keys go to which subplot as needed. This is just an example layout.
     """
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
@@ -675,7 +710,7 @@ def plot_training_history(history: Dict[str, List[float]], save_path: str):
             'Loss Evolution',
             'Valid Marker Ratio',
             'Alpha Statistics',
-            'Theta Evolution'
+            'T-Cells F1 Score'
         )
     )
 
@@ -687,7 +722,7 @@ def plot_training_history(history: Dict[str, List[float]], save_path: str):
             row=1, col=1
         )
 
-    # (B) Plot valid marker ratio (just an example)
+    # (B) Plot valid marker ratio
     valid_keys = [k for k in history.keys() if 'valid' in k.lower()]
     for key in valid_keys:
         fig.add_trace(
@@ -696,21 +731,21 @@ def plot_training_history(history: Dict[str, List[float]], save_path: str):
         )
 
     # (C) Plot alpha statistics if they exist
-    if 'train_alpha_mean' in history:
+    if 'alpha_stats/mean' in history:
         fig.add_trace(
-            go.Scatter(y=history['train_alpha_mean'], name='Mean'),
+            go.Scatter(y=history['alpha_stats/mean'], name='Mean'),
             row=2, col=1
         )
-    if 'train_alpha_std' in history:
+    if 'alpha_stats/std' in history:
         fig.add_trace(
-            go.Scatter(y=history['train_alpha_std'], name='Std'),
+            go.Scatter(y=history['alpha_stats/std'], name='Std'),
             row=2, col=1
         )
 
-    # (D) Plot theta evolution (placeholder if some 'theta' key is in history)
-    if 'theta_mean' in history:
+    # (D) Plot T-cells F1 score for low coverage
+    if 't-cells_low/avg_f1' in history:
         fig.add_trace(
-            go.Scatter(y=history['theta_mean'], name='Theta'),
+            go.Scatter(y=history['t-cells_low/avg_f1'], name='T-Cells Low F1'),
             row=2, col=2
         )
 
@@ -725,7 +760,7 @@ def plot_training_history(history: Dict[str, List[float]], save_path: str):
     fig.update_yaxes(title_text="Loss", row=1, col=1)
     fig.update_yaxes(title_text="Ratio", row=1, col=2)
     fig.update_yaxes(title_text="Value", row=2, col=1)
-    fig.update_yaxes(title_text="Value", row=2, col=2)
+    fig.update_yaxes(title_text="F1 Score", row=2, col=2)
 
     # X-axis labels
     for i in range(1, 3):

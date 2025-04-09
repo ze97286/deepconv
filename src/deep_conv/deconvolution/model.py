@@ -146,9 +146,6 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params, a
         
     return augmented_values, augmented_coverage
 
-
-
-
 class TissueDeconvolutionDataset(Dataset):
     """
     A PyTorch Dataset for loading cfDNA methylation data and optional labels.
@@ -192,7 +189,6 @@ class TissueDeconvolutionDataset(Dataset):
         if self.y is not None:
             item['y'] = self.y[idx]
         return item  
-
 
 class AugmentedTissueDataset(TissueDeconvolutionDataset):
     def __init__(self, 
@@ -239,18 +235,25 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
     def set_training(self, training=True):
         self.training = training
 
+class ResidualBlock(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(in_dim, out_dim)
+        self.fc2 = nn.Linear(out_dim, out_dim)
+        self.relu = nn.LeakyReLU()
+        self.shortcut = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
 
-class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
-    def __init__(self, fraction, coverage, atlas, y=None):
-        super().__init__(fraction, coverage, atlas, y)
-
-    def __getitem__(self, idx):
-        item = super().__getitem__(idx)
-        item['is_augmented'] = idx >= len(self.fraction) // 2 
-        return item
+    def forward(self, x):
+        residual = self.shortcut(x)
+        out = self.fc1(x)
+        out = self.relu(out)
+        out = self.fc2(out)
+        out = out + residual
+        out = self.relu(out)
+        return out
 
 class CellTypeDeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=32):
+    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=128):
         super().__init__()
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
@@ -278,60 +281,56 @@ class CellTypeDeconvolutionModel(nn.Module):
             presence_model.eval()
             self.presence_models.append(presence_model)
 
-        # Marker Feature Extractor: Processes only marker values
+        # Marker Feature Extractor: Processes marker values and coverage
         self.marker_feature_extractor = nn.Sequential(
-            nn.Linear(1, feature_dim),
+            nn.Linear(2, feature_dim),  # Input: [marker_value, coverage]
+            nn.LeakyReLU(),
+            nn.Linear(feature_dim, feature_dim),
             nn.LeakyReLU(),
             nn.Linear(feature_dim, feature_dim)
         )
 
         # Encoder with presence input
         self.encoder = nn.Sequential(
-            nn.Linear(num_cell_types * feature_dim + num_cell_types, 128),
+            nn.Linear(num_cell_types * feature_dim + num_cell_types, 256),
             nn.LeakyReLU(),
-            nn.Linear(128, 128),
-            nn.LeakyReLU(),
-            nn.Linear(128, num_cell_types)
+            ResidualBlock(256, 256),
+            nn.Linear(256, num_cell_types)
         )
 
         # Decoder
         self.decoder = nn.Sequential(
-            nn.Linear(num_cell_types, 128),
+            nn.Linear(num_cell_types, 256),
             nn.LeakyReLU(),
-            nn.Linear(128, num_markers)
+            nn.Linear(256, 256),
+            nn.LeakyReLU(),
+            nn.Linear(256, num_markers)
         )
+
         # Initialise presence gating parameters
         thresholds = torch.ones(num_cell_types) * 0.5
         slopes = torch.ones(num_cell_types) * 10
-        
-        # Special handling for OAC
         oac_index = 9  # Adjust to your actual OAC index
+        tcells_index = 11  # Adjust to your actual T-cells index
         thresholds[oac_index] = 0.3
+        thresholds[tcells_index] = 0.3  # Lower threshold for T-cells
         slopes[oac_index] = 15
-        
+        slopes[tcells_index] = 5  # Smoother transition for T-cells
         self.register_buffer("presence_thresholds", thresholds)
         self.register_buffer("presence_slopes", slopes)
 
-    def apply_presence_gating(self, props, probs):
+    def apply_presence_gating(self, props, probs, coverage):
         """
-        Apply cell-type specific presence scaling based on empirical data.
+        Apply cell-type specific presence scaling based on empirical data, adjusted by coverage.
         """
-        # Cell-type specific thresholds and slopes
-        if not hasattr(self, "presence_thresholds"):
-            thresholds = torch.ones(self.num_celltypes, device=props.device) * 0.5
-            slopes = torch.ones(self.num_celltypes, device=props.device) * 10
-            
-            # Special handling for OAC based on actual data
-            oac_index = 9  # Adjust to actual OAC index
-            thresholds[oac_index] = 0.3  # Center sigmoid at 0.3 for OAC
-            slopes[oac_index] = 15       # Steeper slope for OAC
-            
-            self.register_buffer("presence_thresholds", thresholds)
-            self.register_buffer("presence_slopes", slopes)
+        # Adjust thresholds based on coverage
+        mean_coverage = coverage.mean(dim=1)  # [B]
+        coverage_adjustment = torch.clamp((20.0 - mean_coverage) / 40.0, -0.1, 0.2)  # [B]
+        adjusted_thresholds = self.presence_thresholds.unsqueeze(0) + coverage_adjustment.unsqueeze(1)  # [B, C]
         
         # Apply scaling - vector operation across all cell types at once
         scaling = torch.sigmoid(
-            self.presence_slopes.unsqueeze(0) * (probs - self.presence_thresholds.unsqueeze(0))
+            self.presence_slopes.unsqueeze(0) * (probs - adjusted_thresholds)
         )
         scaled_props = props * scaling
         
@@ -445,7 +444,9 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         # ----- 1) Marker Feature Extraction -----
         marker_values_valid_2d = marker_values_valid.unsqueeze(1)  # [N, 1]
-        features_valid = self.marker_feature_extractor(marker_values_valid_2d)  # [N, feature_dim]
+        coverage_valid_2d = coverage_valid.unsqueeze(1)  # [N, 1]
+        features_input = torch.cat([marker_values_valid_2d, coverage_valid_2d], dim=1)  # [N, 2]
+        features_valid = self.marker_feature_extractor(features_input)  # [N, feature_dim]
 
         # ----- 2) Aggregate features by cell type -----
         # aggregator shape: [B, C, feature_dim], coverage_sum shape: [B, C]
@@ -487,7 +488,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         celltype_props_raw = F.relu(logits)  # ensure >=0
         
         # Apply soft gating that preserves proportion relationships
-        celltype_props_gated = self.apply_presence_gating(celltype_props_raw, presence_probs)
+        celltype_props_gated = self.apply_presence_gating(celltype_props_raw, presence_probs, coverage)
         
         # Normalise to ensure sum to 1
         sum_props = torch.sum(celltype_props_gated, dim=1, keepdim=True)

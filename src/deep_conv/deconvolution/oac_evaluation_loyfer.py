@@ -586,7 +586,6 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
             num_cell_types=len(cell_types), 
             target_ids=target_ids, 
             presence_models_dir=f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{presence_model_name}",
-            feature_dim=64,
         )
         checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/best_model.pt")
         model.load_state_dict(checkpoint["model_state_dict"], strict=False)
@@ -810,7 +809,6 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
         num_cell_types=len(cell_types),
         target_ids=target_ids,
         presence_models_dir=f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{presence_model_name}",
-        feature_dim=64,
     )
     
     # Load checkpoint
