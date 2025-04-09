@@ -115,7 +115,7 @@ def get_validation_set_with_augmentation(
         indices_to_augment = np.random.choice(num_samples, num_to_augment, replace=False)
 
         # Temporary dataset for augmentation
-        temp_dataset = TissueDeconvolutionDataset(X_val, coverage_val, atlas, y_val_np)
+        temp_dataset = TissueDeconvolutionDataset(X_val, coverage_val, atlas[atlas.columns[8:]].T.to_numpy(), y_val_np)
 
         augmented_fraction = []
         augmented_coverage = []
@@ -239,7 +239,7 @@ def load_training_with_augmentation(
     indices_to_augment = np.random.choice(num_samples, num_to_augment, replace=False)
 
     # Temporary dataset for augmentation
-    temp_dataset = TissueDeconvolutionDataset(X_train, coverage_train, atlas, y_train)
+    temp_dataset = TissueDeconvolutionDataset(X_train, coverage_train, atlas[atlas.columns[8:]].T.to_numpy(), y_train)
 
     augmented_fraction = []
     augmented_coverage = []
@@ -361,7 +361,7 @@ def enhanced_negative_examples(
     temp_dataset = TissueDeconvolutionDataset(
         negative_fraction,
         negative_coverage,
-        atlas,
+        atlas[atlas.columns[8:]].T.to_numpy(),
         negative_y
     )
 
