@@ -235,6 +235,15 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
     def set_training(self, training=True):
         self.training = training
 
+class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
+    def __init__(self, fraction, coverage, atlas, y=None):
+        super().__init__(fraction, coverage, atlas, y)
+
+    def __getitem__(self, idx):
+        item = super().__getitem__(idx)
+        item['is_augmented'] = idx >= len(self.fraction) // 2 
+        return item
+
 class ResidualBlock(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
