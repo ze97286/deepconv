@@ -5,7 +5,110 @@ import os
 import numpy as np
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score
-from deep_conv.presence.presence import calculate_specificity_threshold
+
+def calculate_specificity_threshold(model, dataloader, 
+                                    output_path,
+                                    target_cell_type,
+                                    threshold=0.5,
+                                    target_specificity=0.95,  # Target specificity for threshold optimization
+                                    device=None):
+    """
+    Calculate a single threshold that achieves the target specificity (e.g., 95%) across all samples.
+
+    Args:
+        model: Binary classifier model
+        dataloader: DataLoader containing validation samples
+        output_path: Path to save visualizations and results
+        target_cell_type: Name of the cell type being analyzed
+        threshold: Default decision threshold for binary classification (used for initial plots)
+        target_specificity: Target specificity for threshold optimization (e.g., 0.95 for 95%)
+        device: Device to run on
+        
+    Returns:
+        specificity_threshold: Float value representing the threshold that achieves the target specificity
+        results_df: DataFrame with detection results by sample
+    """
+    if device is None:
+        device = next(model.parameters()).device
+    
+    model.eval()
+    
+    # Store results for each sample
+    results = []
+    
+    # Evaluate
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Calculating specificity threshold"):
+            marker_values = batch['X'].to(device)
+            coverage = batch['coverage'].to(device)
+            labels = batch['label'].to(device).view(-1, 1)
+            
+            # Forward pass with adaptive thresholding
+            predictions, probabilities, _ = model.adaptive_predict(marker_values, coverage)
+            predictions = predictions.cpu().numpy().astype(int)
+            probabilities = probabilities.cpu().numpy()
+            
+            # Store results for each sample
+            for i in range(len(labels)):
+                results.append({
+                    'probability': probabilities[i],
+                    'prediction': predictions[i],
+                    'ground_truth': labels[i].item()
+                })
+    
+    # Convert to DataFrame
+    results_df = pd.DataFrame(results)
+
+    # Calculate overall detection statistics
+    tp = np.sum((results_df['prediction'] == 1) & (results_df['ground_truth'] == 1))
+    fp = np.sum((results_df['prediction'] == 1) & (results_df['ground_truth'] == 0))
+    tn = np.sum((results_df['prediction'] == 0) & (results_df['ground_truth'] == 0))
+    fn = np.sum((results_df['prediction'] == 0) & (results_df['ground_truth'] == 1))
+    
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    
+    print(f"Overall detection stats (using default threshold {threshold}):")
+    print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, Specificity: {specificity:.4f}, F1: {f1:.4f}")
+    print(f"Confusion Matrix: TP={tp}, FP={fp}, TN={tn}, FN={fn}")
+    
+    # Calculate ROC curve to find the threshold that achieves the target specificity
+    if len(results_df) > 10 and len(results_df['ground_truth'].unique()) > 1:
+        fpr, tpr, thresholds = roc_curve(results_df['ground_truth'], results_df['probability'])
+        specificity = 1 - fpr  # Specificity = 1 - FPR
+        
+        # Find the threshold where specificity is closest to the target (but not below)
+        valid_indices = np.where(specificity >= target_specificity)[0]
+        if len(valid_indices) > 0:
+            # Among thresholds that achieve at least target_specificity, choose the one with highest sensitivity
+            best_idx = valid_indices[np.argmax(tpr[valid_indices])]
+            specificity_threshold = thresholds[best_idx]
+            best_specificity = specificity[best_idx]
+            best_sensitivity = tpr[best_idx]
+            
+            # Calculate precision at this threshold
+            predictions = (results_df['probability'] >= specificity_threshold).astype(int)
+            tp = np.sum((predictions == 1) & (results_df['ground_truth'] == 1))
+            fp = np.sum((predictions == 1) & (results_df['ground_truth'] == 0))
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            
+            # Calculate F1 score
+            f1 = 2 * precision * best_sensitivity / (precision + best_sensitivity) if (precision + best_sensitivity) > 0 else 0.0
+            
+            print(f"\nThreshold achieving {target_specificity*100:.1f}% specificity:")
+            print(f"Threshold: {specificity_threshold:.4f}, Specificity: {best_specificity:.4f}, "
+                  f"Sensitivity: {best_sensitivity:.4f}, Precision: {precision:.4f}, F1: {f1:.4f}")
+        else:
+            specificity_threshold = 0.5
+            print(f"\nCould not achieve {target_specificity*100:.1f}% specificity. Using default threshold: {specificity_threshold}")
+    else:
+        specificity_threshold = 0.5
+        print(f"\nInsufficient data to calculate threshold. Using default threshold: {specificity_threshold}")
+    
+    return specificity_threshold, results_df
+
 
 def train_binary_classifier(
     model: nn.Module,
