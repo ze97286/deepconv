@@ -583,6 +583,7 @@ def train_model(
         # Print summary
         print(f"\n🔹 Epoch {epoch + 1} Summary:")
         print(f"Train Loss: {train_stats['total_loss']:.8f} | Grad Norm: {train_stats['grad_norm']:.8f}")
+        # Updated to use flattened keys
         if 'alpha_stats/mean' in train_stats and 'alpha_stats/std' in train_stats:
             print(f"Alpha Mean: {train_stats['alpha_stats/mean']:.8f} | Std: {train_stats['alpha_stats/std']:.8f}")
         
@@ -590,7 +591,7 @@ def train_model(
             print(f"{val_name} Loss: {stats['total_loss']:.8f}")
             if 'avg_precision' in stats and 'avg_recall' in stats and 'avg_f1' in stats:
                 print(f"{val_name} Detection: P={stats['avg_precision']:.4f}, "
-                      f"R={stats['avg_recall']:.4f}, F1={stats['avg_f1']:.4f}")
+                      f"R={stats['avg_recall']:.4f}, F1: {stats['avg_f1']:.4f}")
         
         # Log to W&B
         if use_wandb:
@@ -632,7 +633,8 @@ def train_model(
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
+                # Excluded scheduler_state_dict due to pickling issues with CyclicLR
+                # To resume training, reconstruct the scheduler with the same parameters
                 'best_val_loss': best_val_loss,
                 'best_tcells_f1': best_tcells_f1,
                 'best_threshold': best_threshold,
