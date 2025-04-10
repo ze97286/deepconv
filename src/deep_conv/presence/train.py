@@ -3,17 +3,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 import os
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import roc_curve, roc_auc_score, average_precision_score
 
 def calculate_specificity_threshold(model, dataloader, 
                                     output_path,
                                     target_cell_type,
                                     threshold=0.5,
-                                    target_specificity=0.95,  # Target specificity for threshold optimization
+                                    target_specificity=0.90,
                                     device=None):
     """
-    Calculate a single threshold that achieves the target specificity (e.g., 95%) across all samples.
+    Calculate a single threshold that maximizes balanced accuracy across all samples.
 
     Args:
         model: Binary classifier model
@@ -21,11 +22,11 @@ def calculate_specificity_threshold(model, dataloader,
         output_path: Path to save visualizations and results
         target_cell_type: Name of the cell type being analyzed
         threshold: Default decision threshold for binary classification (used for initial plots)
-        target_specificity: Target specificity for threshold optimization (e.g., 0.95 for 95%)
+        target_specificity: Target specificity for threshold optimization (e.g., 0.90 for 90%)
         device: Device to run on
         
     Returns:
-        specificity_threshold: Float value representing the threshold that achieves the target specificity
+        balanced_threshold: Float value representing the threshold that maximizes balanced accuracy
         results_df: DataFrame with detection results by sample
     """
     if device is None:
@@ -38,7 +39,7 @@ def calculate_specificity_threshold(model, dataloader,
     
     # Evaluate
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Calculating specificity threshold"):
+        for batch in tqdm(dataloader, desc="Calculating balanced threshold"):
             marker_values = batch['X'].to(device)
             coverage = batch['coverage'].to(device)
             labels = batch['label'].to(device).view(-1, 1)
@@ -59,7 +60,7 @@ def calculate_specificity_threshold(model, dataloader,
     # Convert to DataFrame
     results_df = pd.DataFrame(results)
 
-    # Calculate overall detection statistics
+    # Calculate overall detection statistics with default threshold
     tp = np.sum((results_df['prediction'] == 1) & (results_df['ground_truth'] == 1))
     fp = np.sum((results_df['prediction'] == 1) & (results_df['ground_truth'] == 0))
     tn = np.sum((results_df['prediction'] == 0) & (results_df['ground_truth'] == 0))
@@ -69,45 +70,68 @@ def calculate_specificity_threshold(model, dataloader,
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    balanced_accuracy = (recall + specificity) / 2
     
     print(f"Overall detection stats (using default threshold {threshold}):")
-    print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, Specificity: {specificity:.4f}, F1: {f1:.4f}")
+    print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, Specificity: {specificity:.4f}, F1: {f1:.4f}, Balanced Accuracy: {balanced_accuracy:.4f}")
     print(f"Confusion Matrix: TP={tp}, FP={fp}, TN={tn}, FN={fn}")
     
-    # Calculate ROC curve to find the threshold that achieves the target specificity
+    # Calculate ROC curve to find the threshold that maximises balanced accuracy
     if len(results_df) > 10 and len(results_df['ground_truth'].unique()) > 1:
         fpr, tpr, thresholds = roc_curve(results_df['ground_truth'], results_df['probability'])
         specificity = 1 - fpr  # Specificity = 1 - FPR
+        recall = tpr  # Recall = TPR
+        balanced_accuracy = (recall + specificity) / 2
         
-        # Find the threshold where specificity is closest to the target (but not below)
-        valid_indices = np.where(specificity >= target_specificity)[0]
-        if len(valid_indices) > 0:
-            # Among thresholds that achieve at least target_specificity, choose the one with highest sensitivity
-            best_idx = valid_indices[np.argmax(tpr[valid_indices])]
-            specificity_threshold = thresholds[best_idx]
-            best_specificity = specificity[best_idx]
-            best_sensitivity = tpr[best_idx]
-            
-            # Calculate precision at this threshold
-            predictions = (results_df['probability'] >= specificity_threshold).astype(int)
-            tp = np.sum((predictions == 1) & (results_df['ground_truth'] == 1))
-            fp = np.sum((predictions == 1) & (results_df['ground_truth'] == 0))
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            
-            # Calculate F1 score
-            f1 = 2 * precision * best_sensitivity / (precision + best_sensitivity) if (precision + best_sensitivity) > 0 else 0.0
-            
-            print(f"\nThreshold achieving {target_specificity*100:.1f}% specificity:")
-            print(f"Threshold: {specificity_threshold:.4f}, Specificity: {best_specificity:.4f}, "
-                  f"Sensitivity: {best_sensitivity:.4f}, Precision: {precision:.4f}, F1: {f1:.4f}")
-        else:
-            specificity_threshold = 0.5
-            print(f"\nCould not achieve {target_specificity*100:.1f}% specificity. Using default threshold: {specificity_threshold}")
+        # Find the threshold that maximizes balanced accuracy
+        best_idx = np.argmax(balanced_accuracy)
+        balanced_threshold = thresholds[best_idx]
+        best_balanced_accuracy = balanced_accuracy[best_idx]
+        best_sensitivity = recall[best_idx]
+        best_specificity = specificity[best_idx]
+        
+        # Calculate precision at this threshold
+        predictions = (results_df['probability'] >= balanced_threshold).astype(int)
+        tp = np.sum((predictions == 1) & (results_df['ground_truth'] == 1))
+        fp = np.sum((predictions == 1) & (results_df['ground_truth'] == 0))
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        
+        # Calculate F1 score
+        f1 = 2 * precision * best_sensitivity / (precision + best_sensitivity) if (precision + best_sensitivity) > 0 else 0.0
+        
+        print(f"\nThreshold maximizing balanced accuracy:")
+        print(f"Threshold: {balanced_threshold:.4f}, Balanced Accuracy: {best_balanced_accuracy:.4f}, "
+              f"Sensitivity: {best_sensitivity:.4f}, Specificity: {best_specificity:.4f}, Precision: {precision:.4f}, F1: {f1:.4f}")
+        
+        # Ensure the threshold meets the minimum specificity requirement
+        if best_specificity < target_specificity:
+            # Find the threshold where specificity is at least target_specificity
+            valid_indices = np.where(specificity >= target_specificity)[0]
+            if len(valid_indices) > 0:
+                best_idx = valid_indices[np.argmax(balanced_accuracy[valid_indices])]
+                balanced_threshold = thresholds[best_idx]
+                best_balanced_accuracy = balanced_accuracy[best_idx]
+                best_sensitivity = recall[best_idx]
+                best_specificity = specificity[best_idx]
+                
+                # Recalculate precision and F1
+                predictions = (results_df['probability'] >= balanced_threshold).astype(int)
+                tp = np.sum((predictions == 1) & (results_df['ground_truth'] == 1))
+                fp = np.sum((predictions == 1) & (results_df['ground_truth'] == 0))
+                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                f1 = 2 * precision * best_sensitivity / (precision + best_sensitivity) if (precision + best_sensitivity) > 0 else 0.0
+                
+                print(f"\nAdjusted threshold to meet minimum specificity of {target_specificity*100:.1f}%:")
+                print(f"Threshold: {balanced_threshold:.4f}, Balanced Accuracy: {best_balanced_accuracy:.4f}, "
+                      f"Sensitivity: {best_sensitivity:.4f}, Specificity: {best_specificity:.4f}, Precision: {precision:.4f}, F1: {f1:.4f}")
+            else:
+                balanced_threshold = 0.5
+                print(f"\nCould not achieve minimum specificity of {target_specificity*100:.1f}%. Using default threshold: {balanced_threshold}")
     else:
-        specificity_threshold = 0.5
-        print(f"\nInsufficient data to calculate threshold. Using default threshold: {specificity_threshold}")
+        balanced_threshold = 0.5
+        print(f"\nInsufficient data to calculate threshold. Using default threshold: {balanced_threshold}")
     
-    return specificity_threshold, results_df
+    return balanced_threshold, results_df
 
 
 def train_binary_classifier(
@@ -119,14 +143,15 @@ def train_binary_classifier(
     learning_rate: float = 5e-4,
     weight_decay: float = 1e-5,
     class_weight: float = None,  # Positive class weight (for imbalance)
-    patience: int = 10,
+    patience: int = 20,  # Increased patience
+    min_epochs: int = 20,  # Minimum epochs before early stopping
     device: torch.device = None,
     fp16_training: bool = True,  # Use mixed precision
     gradient_accumulation: int = 1,  # Number of batches to accumulate
-    eval_metric: str = 'specificity',
+    eval_metric: str = 'balanced_accuracy',  # Changed to balanced accuracy
     coverage_low_threshold: float = 6.0,  # Threshold for low coverage
     coverage_med_threshold: float = 12.0,  # Threshold for medium coverage
-    target_specificity: float = 0.95  # Target specificity for threshold optimization
+    target_specificity: float = 0.90  # Lowered target specificity to improve recall
 ):
     """
     Train a binary classifier for cell type detection with coverage-aware loss,
@@ -142,13 +167,14 @@ def train_binary_classifier(
         weight_decay: L2 regularization weight
         class_weight: Weight for positive class (None = auto-calculate)
         patience: Early stopping patience
+        min_epochs: Minimum number of epochs before early stopping can trigger
         device: Training device (GPU/CPU)
         fp16_training: Whether to use mixed precision training
         gradient_accumulation: Number of batches to accumulate gradients
-        eval_metric: Metric to use for model selection ('specificity' to prioritize reducing FPs)
+        eval_metric: Metric to use for model selection ('balanced_accuracy' to balance specificity and recall)
         coverage_low_threshold: Threshold for defining low coverage
         coverage_med_threshold: Threshold for defining medium coverage
-        target_specificity: Target specificity for threshold optimization (e.g., 0.95 for 95%)
+        target_specificity: Target specificity for threshold optimization (e.g., 0.90 for 90%)
     
     Returns:
         Trained model
@@ -169,14 +195,14 @@ def train_binary_classifier(
     
     # Learning rate scheduler
     steps_per_epoch = len(dataloaders['train'])
-    desired_cycles = 2.5
+    desired_cycles = 1.0  # Reduced cycles for more gradual learning rate changes
     total_steps = steps_per_epoch * 10  # 10 epochs
     step_size_up = int(total_steps / (2 * desired_cycles))
     from torch.optim.lr_scheduler import ReduceLROnPlateau, CyclicLR
     cyclic_scheduler = CyclicLR(
         optimizer,
-        base_lr=1e-4,
-        max_lr=1e-3,
+        base_lr=5e-5,  # Lowered base_lr
+        max_lr=5e-4,   # Lowered max_lr
         step_size_up=step_size_up,  
         cycle_momentum=False
     )
@@ -211,18 +237,18 @@ def train_binary_classifier(
         print(f"Calculated positive class weight: {class_weight:.4f} (ratio: {pos_ratio:.4f})")
     
     # Create loss function with class weights and coverage awareness
-    weights = torch.tensor([1.5, class_weight], device=device)
+    weights = torch.tensor([1.0, class_weight], device=device)  # Reduced weight for negatives
     
-    def weighted_bce_loss(logits, targets, coverage, missing_rate=None, fp_weight=2.0):
+    def weighted_bce_loss(logits, targets, coverage, missing_rate=None, fp_weight=1.5):  # Reduced FP penalty
         """
-        Enhanced coverage-aware weighted BCE loss with a stronger penalty for false positives.
+        Enhanced coverage-aware weighted BCE loss with a balanced penalty for false positives.
         
         Args:
             logits: [B, 1] Classification logits
             targets: [B, 1] Binary targets
             coverage: [B, M] Coverage values
             missing_rate: [B, 1] Missing marker rate (optional, will be calculated if not provided)
-            fp_weight: Additional weight for false positives to prioritize specificity
+            fp_weight: Additional weight for false positives
         """
         # Calculate mean coverage for each sample
         sample_coverage = coverage.mean(dim=1, keepdim=True)
@@ -601,15 +627,15 @@ def train_binary_classifier(
             val_metrics[val_name] = val_set_metrics
         
         # Calculate average metric for validation sets, with emphasis on low coverage performance
-        avg_metric_all = np.mean([m['all']['specificity'] for m in val_metrics.values() if m['all']['count'] > 0])
-        avg_metric_low = np.mean([m['low']['specificity'] for m in val_metrics.values() if m['low']['count'] > 0])
+        avg_metric_all = np.mean([m['all']['balanced_accuracy'] for m in val_metrics.values() if m['all']['count'] > 0])
+        avg_metric_low = np.mean([m['low']['balanced_accuracy'] for m in val_metrics.values() if m['low']['count'] > 0])
         
         if np.isnan(avg_metric_low):
             avg_metric = avg_metric_all
         else:
             avg_metric = 0.4 * avg_metric_all + 0.6 * avg_metric_low
         
-        print(f"Combined validation metric (specificity): {avg_metric:.4f} (All: {avg_metric_all:.4f}, Low: {avg_metric_low:.4f})")
+        print(f"Combined validation metric (balanced_accuracy): {avg_metric:.4f} (All: {avg_metric_all:.4f}, Low: {avg_metric_low:.4f})")
         
         # Update learning rate scheduler
         if epoch < 10:
@@ -634,19 +660,20 @@ def train_binary_classifier(
             }
             torch.save(checkpoint, os.path.join(model_path, f"presence_model_{target_cell_type_index}.pt"))
             
-            print(f"New best model saved! Combined specificity={best_metric:.4f}")
+            print(f"New best model saved! Combined balanced_accuracy={best_metric:.4f}")
         else:
             patience_counter += 1
             print(f"No improvement. Patience: {patience_counter}/{patience}")
         
-        if patience_counter >= patience:
+        # Early stopping with minimum epochs
+        if epoch + 1 >= min_epochs and patience_counter >= patience:
             print(f"Early stopping triggered after {epoch+1} epochs")
             break
     
     # Load best model
     checkpoint = torch.load(os.path.join(model_path, f"presence_model_{target_cell_type_index}.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
-    print(f"Loaded best model from epoch {checkpoint['epoch']+1} with specificity={checkpoint['best_metric']:.4f}")
+    print(f"Loaded best model from epoch {checkpoint['epoch']+1} with balanced_accuracy={checkpoint['best_metric']:.4f}")
     print(f"Low coverage: {checkpoint.get('low_coverage_metric', 'N/A')}, All coverage: {checkpoint.get('all_coverage_metric', 'N/A')}")
     
     # Calculate the single threshold that achieves the target specificity using the best model
