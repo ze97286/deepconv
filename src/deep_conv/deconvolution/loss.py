@@ -1,23 +1,36 @@
 import torch 
 import torch.nn.functional as F
 
-def focal_loss(pred, target, alpha=0.25, gamma=2.0):
+def focal_loss(pred, target, alpha_pos=0.25, alpha_neg=0.75, gamma=2.0, fp_weight=2.0):
     """
-    Focal loss to focus on hard examples for presence detection.
+    Focal loss to focus on hard examples for presence detection, with an additional penalty for false positives.
     
     Args:
         pred (FloatTensor): Predicted probabilities [B, C]
         target (FloatTensor): Ground truth labels [B, C]
-        alpha (float): Weighting factor for positive class
+        alpha_pos (float): Weighting factor for positive class
+        alpha_neg (float): Weighting factor for negative class (higher to penalize FPs)
         gamma (float): Focusing parameter
+        fp_weight (float): Additional weight for false positives
     
     Returns:
-        loss (FloatTensor): Scalar focal loss
+        loss (FloatTensor): Scalar focal loss with FP penalty
     """
     bce = F.binary_cross_entropy(pred, target, reduction='none')
     pt = torch.exp(-bce)
+    
+    # Apply alpha weighting: alpha_pos for positives, alpha_neg for negatives
+    alpha = torch.where(target > 0, alpha_pos, alpha_neg)
     focal_term = alpha * (1 - pt) ** gamma * bce
-    return focal_term.mean()
+    
+    # Compute FP penalty
+    pred_binary = (pred > 0.5).float()
+    fp_mask = (pred_binary > target).float()  # FP: predicted 1, true 0
+    fp_penalty = fp_weight * fp_mask * bce
+    
+    # Combine focal loss with FP penalty
+    total_loss = focal_term + fp_penalty
+    return total_loss.mean()
 
 def loss_fn(
     pred_props: torch.Tensor,
@@ -34,13 +47,14 @@ def loss_fn(
     presence_threshold: float = 0.005,
     low_snr_indices=[3, 4, 9, 11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-    focal_loss_weight: float = 0.1
+    focal_loss_weight: float = 0.1  # Added parameter
 ):
     """
     Loss function for deconvolution model with integrated presence models.
     
     This updated version focuses on proportion accuracy with presence models
-    treated as features rather than binary gates, and includes focal loss for presence detection.
+    treated as features rather than binary gates, and includes focal loss for presence detection
+    with a stronger penalty for false positives.
 
     Args:
         pred_props (FloatTensor): [B, C]
@@ -116,7 +130,7 @@ def loss_fn(
     underestimation_penalty = 1.3 * underestimation
     
     # Increased penalty for low-SNR underestimation
-    low_snr_under_penalty = low_snr_mask * underestimation * 1.5 
+    low_snr_under_penalty = low_snr_mask * underestimation * 1.5  # Increased from 0.7
     
     # Combine into weighted errors
     weighted_errors = importance_weights * (cell_errors + underestimation_penalty + low_snr_under_penalty)
@@ -142,10 +156,17 @@ def loss_fn(
     sparsity_penalty = torch.mean(torch.sum(pred_props, dim=1))
     
     # -----------------------------
-    # (4) Focal Loss for Presence Detection
+    # (4) Focal Loss for Presence Detection with FP Penalty
     # -----------------------------
     presence_targets = (true_props > presence_threshold).float()
-    presence_loss = focal_loss(presence_probs, presence_targets)
+    presence_loss = focal_loss(
+        presence_probs,
+        presence_targets,
+        alpha_pos=0.25,
+        alpha_neg=0.75,  # Higher weight for negatives to penalize FPs
+        gamma=2.0,
+        fp_weight=2.0  # Additional penalty for FPs
+    )
     
     # -----------------------------
     # Combine All Terms

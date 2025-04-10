@@ -4,9 +4,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 from pathlib import Path
-from torch.utils.data import ConcatDataset
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -30,10 +29,14 @@ def get_validation_set_with_augmentation(
     block_size: int,
     target_dist_params=None,
     enable_augmentation=True,
-    target_size: int = None
+    target_size: int = None,
+    cell_types=None,
+    filter_tcells_below: float = 0.0,
+    filter_oac_below: float = 0.0
 ) -> tuple[DataLoader, torch.Tensor]:
     """
-    Validation set loader with pre-augmented data and block-based subsampling.
+    Validation set loader with pre-augmented data, block-based subsampling,
+    and optional filtering of T-cells and OAC samples below concentration thresholds.
     
     Args:
         eval_pat_dir: Directory with validation data
@@ -43,6 +46,9 @@ def get_validation_set_with_augmentation(
         target_dist_params: Target coverage distribution parameters
         enable_augmentation: Whether to enable augmentation (pre-augmentation will be used)
         target_size: Target number of samples to subsample (if None, use full dataset)
+        cell_types: List of cell type names (to identify T-cells and OAC columns)
+        filter_tcells_below: Concentration threshold below which to filter T-cell samples
+        filter_oac_below: Concentration threshold below which to filter OAC samples
         
     Returns:
         val_loader: DataLoader with pre-augmented data
@@ -68,6 +74,38 @@ def get_validation_set_with_augmentation(
     
     # Convert label DataFrame to numpy
     y_val_np = y_val.to_numpy()
+    
+    # Filter T-cells or OAC samples below their respective thresholds (if applicable)
+    if cell_types is not None:
+        # Filter T-cells
+        if "T-cells" in Path(eval_pat_dir).name and filter_tcells_below > 0:
+            tcells_idx = cell_types.index("T-cells") if "T-cells" in cell_types else -1
+            if tcells_idx >= 0:
+                print(f"Filtering T-cell samples with concentration below {filter_tcells_below}...")
+                tcells_concentration = y_val_np[:, tcells_idx]
+                keep_indices = np.where(tcells_concentration >= filter_tcells_below)[0]
+                print(f"Original number of samples: {len(y_val_np)}")
+                print(f"Number of samples after T-cells filtering: {len(keep_indices)}")
+                
+                # Apply filtering
+                X_val = X_val[keep_indices]
+                coverage_val = coverage_val[keep_indices]
+                y_val_np = y_val_np[keep_indices]
+        
+        # Filter OAC
+        if "OAC" in Path(eval_pat_dir).name and filter_oac_below > 0:
+            oac_idx = cell_types.index("OAC") if "OAC" in cell_types else -1
+            if oac_idx >= 0:
+                print(f"Filtering OAC samples with concentration below {filter_oac_below}...")
+                oac_concentration = y_val_np[:, oac_idx]
+                keep_indices = np.where(oac_concentration >= filter_oac_below)[0]
+                print(f"Original number of samples: {len(y_val_np)}")
+                print(f"Number of samples after OAC filtering: {len(keep_indices)}")
+                
+                # Apply filtering
+                X_val = X_val[keep_indices]
+                coverage_val = coverage_val[keep_indices]
+                y_val_np = y_val_np[keep_indices]
     
     # Block-based subsampling (if target_size is specified)
     if target_size is not None and target_size < len(y_val_np):
@@ -455,6 +493,8 @@ def train_and_eval(
         }
     }
 
+    cell_types = list(atlas.columns[8:]) 
+
     train_dl_low = load_training_with_augmentation(
         f"{train_pat_dir}_low", atlas, names, num_files=3,
         target_dist_params=clinical_dist_params['low'],
@@ -486,7 +526,10 @@ def train_and_eval(
             block_size=50_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
-            target_size=20_000
+            target_size=20_000,
+            cell_types=cell_types,
+            filter_tcells_below=0.0,
+            filter_oac_below=0.0
         )
         print(f"Validation set {cov} tier1 length={len(t1_yval)}")
 
@@ -495,7 +538,10 @@ def train_and_eval(
             block_size=10_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
-            target_size=15_000
+            target_size=15_000,
+            cell_types=cell_types,
+            filter_tcells_below=0.006,
+            filter_oac_below=0.0
         )
         print(f"Validation set {cov} tcells length={len(tcells_yval)}")
 
@@ -504,7 +550,10 @@ def train_and_eval(
             block_size=1_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
-            target_size=2_000
+            target_size=2_000,
+            cell_types=cell_types,
+            filter_tcells_below=0.0,
+            filter_oac_below=0.001
         )
         print(f"Validation set {cov} oac length={len(oac_yval)}")
 
