@@ -810,7 +810,7 @@ def find_minimum_detection_concentration_continuous(
     the specified threshold.
     
     Args:
-        results_df: DataFrame with columns for concentration, ground_truth, and prediction
+        results_df: DataFrame with columns for concentration (if available), ground_truth, and prediction
         output_path: Path to save visualizations
         target_cell_type: Name of the cell type being analyzed
         detection_rate_threshold: Minimum acceptable detection rate (e.g., 0.95 for 95%)
@@ -818,21 +818,27 @@ def find_minimum_detection_concentration_continuous(
         min_sample_size: Minimum number of samples required for reliable estimation
         
     Returns:
-        min_reliable_conc: Minimum concentration with detection rate above threshold
-        results_table: DataFrame with detection rates and confidence intervals by concentration
+        min_reliable_conc: Minimum concentration with detection rate above threshold (or None if not applicable)
+        results_table: DataFrame with detection rates and confidence intervals by concentration (or None if not applicable)
     """
     from scipy import stats
     
-    # Identify column names
-    concentration_col = 'concentration' if 'concentration' in results_df.columns else 'true_concentration'
-    ground_truth_col = 'ground_truth' if 'ground_truth' in results_df.columns else 'label'
-    prediction_col = 'prediction' if 'prediction' in results_df.columns else 'predicted'
+    # Check if concentration column exists
+    concentration_col = 'concentration' if 'concentration' in results_df.columns else 'true_concentration' if 'true_concentration' in results_df.columns else None
     
-    print(f"Using columns: concentration={concentration_col}, ground_truth={ground_truth_col}, prediction={prediction_col}")
+    if concentration_col is None:
+        print("Concentration column not found in results_df. Skipping minimum detection concentration analysis.")
+        return None, None
+    
+    print(f"Using columns: concentration={concentration_col}, ground_truth=ground_truth, prediction=prediction")
     
     # Filter to positive samples only (since we care about detection rate of true positives)
-    positive_samples = results_df[results_df[ground_truth_col] == 1].copy()
+    positive_samples = results_df[results_df['ground_truth'] == 1].copy()
     print(f"Analyzing {len(positive_samples)} positive samples")
+    
+    if len(positive_samples) == 0:
+        print("No positive samples found for analysis.")
+        return None, None
     
     # Sort by concentration for cumulative analysis
     positive_samples = positive_samples.sort_values(by=concentration_col)
@@ -842,7 +848,7 @@ def find_minimum_detection_concentration_continuous(
     detection_rates = []
     sample_counts = []
     
-    # This approach calculates the detection rate for all samples at or above each concentration point
+    # Calculate the detection rate for all samples at or above each concentration point
     prev_conc = None
     for conc in sorted(positive_samples[concentration_col].unique()):
         # Skip duplicate concentrations
@@ -855,7 +861,7 @@ def find_minimum_detection_concentration_continuous(
         
         # Calculate detection rate (true positive rate)
         if len(samples_at_or_above) > 0:
-            true_positives = samples_at_or_above[samples_at_or_above[prediction_col] == 1].shape[0]
+            true_positives = samples_at_or_above[samples_at_or_above['prediction'] == 1].shape[0]
             detection_rate = true_positives / len(samples_at_or_above)
             
             # Store results
@@ -1148,7 +1154,15 @@ def train_and_eval(
     val_dl = validation_dls[f"tier1_low"]
     
     specificity_threshold, results_df = calculate_specificity_threshold(trained_model, val_dl, output_path, target_cell_type_name)
-    find_minimum_detection_concentration_continuous(results_df, output_path, target_cell_type_name)
+    
+    # Check if concentration data is available before calling find_minimum_detection_concentration_continuous
+    if 'concentration' in results_df.columns:
+        find_minimum_detection_concentration_continuous(results_df, output_path, target_cell_type_name)
+    else:
+        print("Concentration data not available in results_df. Skipping minimum detection concentration analysis.")
+
+    return trained_model
+
 
 def main():
     parser = argparse.ArgumentParser(description="Deep conv")

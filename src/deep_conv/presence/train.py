@@ -30,7 +30,7 @@ def calculate_specificity_threshold(model, dataloader,
         
     Returns:
         balanced_threshold: Float value representing the threshold that maximizes balanced accuracy
-        results_df: DataFrame with detection results by sample
+        results_df: DataFrame with detection results by sample, including concentration if available
     """
     if device is None:
         device = next(model.parameters()).device
@@ -50,6 +50,13 @@ def calculate_specificity_threshold(model, dataloader,
             # Calculate mean coverage for each sample
             mean_coverage = coverage.mean(dim=1).cpu().numpy()
             
+            # Get concentration if available
+            concentration = batch.get('concentration', None)
+            if concentration is not None:
+                concentration = concentration.cpu().numpy()
+            else:
+                concentration = [None] * len(labels)
+            
             # Forward pass with adaptive thresholding
             predictions, probabilities, _ = model.adaptive_predict(marker_values, coverage)
             predictions = predictions.cpu().numpy().astype(int)
@@ -57,12 +64,15 @@ def calculate_specificity_threshold(model, dataloader,
             
             # Store results for each sample
             for i in range(len(labels)):
-                results.append({
+                result = {
                     'mean_coverage': mean_coverage[i],
                     'probability': probabilities[i],
                     'prediction': predictions[i],
                     'ground_truth': labels[i].item()
-                })
+                }
+                if concentration[i] is not None:
+                    result['concentration'] = concentration[i]
+                results.append(result)
     
     # Convert to DataFrame
     results_df = pd.DataFrame(results)
@@ -155,7 +165,6 @@ def calculate_specificity_threshold(model, dataloader,
         print(f"\nInsufficient data to calculate threshold. Using default threshold: {balanced_threshold}")
     
     return balanced_threshold, results_df
-
 
 def train_binary_classifier(
     model: nn.Module,
