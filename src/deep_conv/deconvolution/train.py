@@ -53,7 +53,7 @@ def train_epoch(
     optimiser: optim.Optimizer,
     device: torch.device,
     log_interval: int = 500,
-    accumulation_steps: int = 2,
+    accumulation_steps: int = 2,  # Reduced accumulation steps
     epoch: int = 0,
     focal_loss_weight: float = 0.1
 ) -> Dict[str, float]:
@@ -188,7 +188,8 @@ def validate(
     model: nn.Module,
     val_loaders: Dict[str, DataLoader],
     device: torch.device,
-    presence_threshold: float = 0.01  # Fixed threshold for consistent metrics
+    presence_threshold: float = 0.01,  # Fixed threshold for consistent metrics
+    focal_loss_weight: float = 0.15  # Fixed value for validation, matching final training value
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
     """
     Evaluate model on validation sets with consistent metrics, using weighted average for validation loss.
@@ -198,6 +199,7 @@ def validate(
         val_loaders: Dictionary of validation DataLoaders
         device: Device to run validation on
         presence_threshold: Fixed threshold for evaluation metrics
+        focal_loss_weight: Fixed weight for focal loss during validation
         
     Returns:
         avg_val_loss: Weighted average validation loss
@@ -263,6 +265,7 @@ def validate(
                     presence_probs=presence_probs,
                     presence_logits=presence_logits,
                     presence_threshold=presence_threshold,
+                    focal_loss_weight=focal_loss_weight  # Pass fixed focal loss weight
                 )
                 
                 # --- Presence confusion matrix
@@ -520,8 +523,10 @@ def train_model(
             current_lr = optimizer.param_groups[0]['lr']
             print(f"Cyclic LR: {current_lr:.1e}")
         
-        # Dynamic focal loss weight
-        focal_loss_weight = 0.1 + 0.05 * min(epoch / 50, 1.0)  # Increase to 0.15 over 50 epochs
+        # Dynamic focal loss weight for training
+        focal_loss_weight_train = 0.1 + 0.05 * min(epoch / 50, 1.0)  # Increase to 0.15 over 50 epochs
+        # Fixed focal loss weight for validation
+        focal_loss_weight_val = 0.15  # Fixed at the final training value
         
         # Training for one epoch
         train_stats = train_epoch(
@@ -530,7 +535,7 @@ def train_model(
             optimizer,
             device,
             epoch=epoch,
-            focal_loss_weight=focal_loss_weight
+            focal_loss_weight=focal_loss_weight_train
         )
         
         # Step the cyclic scheduler after each batch
@@ -542,7 +547,8 @@ def train_model(
             model,
             val_loaders,
             device,
-            presence_threshold=eval_presence_threshold
+            presence_threshold=eval_presence_threshold,
+            focal_loss_weight=focal_loss_weight_val  # Use fixed value for validation
         )
         
         # Evaluate multiple thresholds for best F1
@@ -578,7 +584,7 @@ def train_model(
         print(f"\n🔹 Epoch {epoch + 1} Summary:")
         print(f"Train Loss: {train_stats['total_loss']:.8f} | Grad Norm: {train_stats['grad_norm']:.8f}")
         if 'alpha_stats/mean' in train_stats:
-            print(f"Alpha Mean: {train_stats['alpha_stats/mean']:.8f} | Std: {train_stats['alpha_stats/std']:.8f}")
+            print(f"Alpha Mean: {train_stats['alpha_stats']['mean']:.8f} | Std: {train_stats['alpha_stats']['std']:.8f}")
         
         for val_name, stats in val_stats.items():
             print(f"{val_name} Loss: {stats['total_loss']:.8f}")
@@ -594,7 +600,8 @@ def train_model(
                 "train/grad_norm": train_stats['grad_norm'],
                 "val/avg_loss": avg_val_loss,
                 "lr": optimizer.param_groups[0]['lr'],
-                "focal_loss_weight": focal_loss_weight,
+                "focal_loss_weight_train": focal_loss_weight_train,
+                "focal_loss_weight_val": focal_loss_weight_val,
                 "best_threshold": best_threshold,
                 "best_threshold_f1": best_threshold_f1,
                 "tcells_low_f1": tcells_low_f1

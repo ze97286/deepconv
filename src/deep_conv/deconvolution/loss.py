@@ -33,7 +33,8 @@ def loss_fn(
     gamma: float = 0.005,
     presence_threshold: float = 0.005,
     low_snr_indices=[3, 4, 9, 11],
-    device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+    focal_loss_weight: float = 0.1
 ):
     """
     Loss function for deconvolution model with integrated presence models.
@@ -70,6 +71,8 @@ def loss_fn(
             Indices of cell types considered "low SNR" or difficult to detect.
         device (torch.device):
             Computation device.
+        focal_loss_weight (float):
+            Weight for the focal loss term (dynamically adjusted during training).
 
     Returns:
         total_loss (Tensor):
@@ -113,7 +116,7 @@ def loss_fn(
     underestimation_penalty = 1.3 * underestimation
     
     # Increased penalty for low-SNR underestimation
-    low_snr_under_penalty = low_snr_mask * underestimation * 1.5
+    low_snr_under_penalty = low_snr_mask * underestimation * 1.5 
     
     # Combine into weighted errors
     weighted_errors = importance_weights * (cell_errors + underestimation_penalty + low_snr_under_penalty)
@@ -147,7 +150,7 @@ def loss_fn(
     # -----------------------------
     # Combine All Terms
     # -----------------------------
-    total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + 0.1 * presence_loss
+    total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss
     
     # -----------------------------
     # (5) Detailed Monitoring / Diagnostics
