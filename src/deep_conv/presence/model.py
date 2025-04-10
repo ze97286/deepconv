@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
-
 class BinaryCellTypeDataset(Dataset):
     """
     A PyTorch Dataset that treats cell type detection as a binary classification problem.
@@ -67,7 +66,6 @@ class BinaryCellTypeDataset(Dataset):
             
         return item
 
-
 class SingleCellTypePresenceModel(nn.Module):
     """
     An enhanced binary classifier for cell type detection with improved handling of
@@ -80,10 +78,12 @@ class SingleCellTypePresenceModel(nn.Module):
     4. Attention mechanism to focus on the most informative markers
     5. Coverage-adaptive prediction threshold
     6. Improved confidence factors for very low coverage
+    7. Single threshold loaded from checkpoint to achieve target specificity
     """
     def __init__(self, feature_dim=64, dropout_rate=0.3):
         super().__init__()
         self.feature_dim = feature_dim
+        self.specificity_threshold = 0.5
         
         # Input normalization
         self.input_norm = nn.BatchNorm1d(2)
@@ -190,7 +190,6 @@ class SingleCellTypePresenceModel(nn.Module):
         marker_values_safe = torch.where(valid_mask, marker_values, torch.zeros_like(marker_values))
         
         # Coverage-aware normalization with enhanced confidence factor
-        # Reduce confidence for low coverage markers
         coverage_safe = coverage.clone() + 1e-10  # Add epsilon to avoid division by zero
         
         # Enhanced confidence factor - more conservative at very low coverage
@@ -290,14 +289,28 @@ class SingleCellTypePresenceModel(nn.Module):
         
         return logits, normalized_attention, missing_rate
     
-    def predict(self, marker_values, coverage, threshold=0.5):
+    def load_threshold(self, checkpoint):
         """
-        Make binary predictions.
-        
+        Load the specificity threshold from the checkpoint.
+
+        Args:
+            checkpoint: Dictionary containing the checkpoint data
+        """
+        if 'specificity_threshold' in checkpoint:
+            self.specificity_threshold = checkpoint['specificity_threshold']
+            print(f"Loaded specificity_threshold: {self.specificity_threshold}")
+        else:
+            print("No specificity_threshold found in checkpoint. Using default threshold: 0.5")
+            self.specificity_threshold = 0.5
+    
+    def predict(self, marker_values, coverage, threshold=None):
+        """
+        Make binary predictions using the loaded specificity threshold.
+
         Args:
             marker_values: [B, M] Methylation values
             coverage: [B, M] Coverage values
-            threshold: Classification threshold
+            threshold: Optional override for the classification threshold
         
         Returns:
             predictions: [B] Binary predictions (0/1)
@@ -305,13 +318,17 @@ class SingleCellTypePresenceModel(nn.Module):
         """
         logits, _, _ = self.forward(marker_values, coverage)
         probabilities = torch.sigmoid(logits).squeeze(-1)
+        
+        # Use the loaded specificity threshold unless overridden
+        threshold = threshold if threshold is not None else self.specificity_threshold
         predictions = (probabilities >= threshold).float()
+        
         return predictions, probabilities
     
     def adaptive_predict(self, marker_values, coverage):
         """
-        Make predictions with coverage-adaptive threshold.
-        
+        Make predictions with coverage-adaptive threshold, using the loaded specificity threshold as the base.
+
         Args:
             marker_values: [B, M] Methylation values
             coverage: [B, M] Coverage values
@@ -327,15 +344,12 @@ class SingleCellTypePresenceModel(nn.Module):
         # Calculate mean coverage for each sample
         mean_coverage = coverage.mean(dim=1)
         
-        # Create base threshold
-        base_threshold = 0.5
+        # Use the loaded specificity threshold as the base
+        base_threshold = self.specificity_threshold
         
         # Adjust threshold based on coverage and missing rate
-        # Higher threshold (more conservative) for lower coverage and more missing markers
         coverage_adjustment = torch.clamp(0.15 - 0.005 * mean_coverage, 0.0, 0.15)
         missing_adjustment = torch.clamp(0.15 * missing_rate.squeeze(), 0.0, 0.15)
-        
-        # Combined adjustment (max 0.25 total adjustment)
         total_adjustment = torch.clamp(coverage_adjustment + missing_adjustment, 0.0, 0.25)
         adaptive_threshold = base_threshold + total_adjustment
         

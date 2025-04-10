@@ -5,6 +5,7 @@ import os
 import numpy as np
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, average_precision_score
+from deep_conv.presence.presence import calculate_specificity_threshold
 
 def train_binary_classifier(
     model: nn.Module,
@@ -19,13 +20,15 @@ def train_binary_classifier(
     device: torch.device = None,
     fp16_training: bool = True,  # Use mixed precision
     gradient_accumulation: int = 1,  # Number of batches to accumulate
-    eval_metric: str = 'specificity',  # Changed to 'specificity' to prioritise reducing FPs
+    eval_metric: str = 'specificity',
     coverage_low_threshold: float = 6.0,  # Threshold for low coverage
-    coverage_med_threshold: float = 12.0   # Threshold for medium coverage
+    coverage_med_threshold: float = 12.0,  # Threshold for medium coverage
+    target_specificity: float = 0.95  # Target specificity for threshold optimization
 ):
     """
-    Train a binary classifier for cell type detection with coverage-aware loss.
-    
+    Train a binary classifier for cell type detection with coverage-aware loss,
+    and store a single threshold that achieves the target specificity in the checkpoint.
+
     Args:
         model: Binary classifier model
         dataloaders: Dictionary containing 'train' and 'val' dataloaders
@@ -39,9 +42,10 @@ def train_binary_classifier(
         device: Training device (GPU/CPU)
         fp16_training: Whether to use mixed precision training
         gradient_accumulation: Number of batches to accumulate gradients
-        eval_metric: Metric to use for model selection ('specificity' to prioritise reducing FPs)
+        eval_metric: Metric to use for model selection ('specificity' to prioritize reducing FPs)
         coverage_low_threshold: Threshold for defining low coverage
         coverage_med_threshold: Threshold for defining medium coverage
+        target_specificity: Target specificity for threshold optimization (e.g., 0.95 for 95%)
     
     Returns:
         Trained model
@@ -75,7 +79,7 @@ def train_binary_classifier(
     )
 
     print(f"Cyclic LR config: steps_per_epoch={steps_per_epoch}, step_size_up={step_size_up}, "
-      f"cycles in first 10 epochs={10*steps_per_epoch/(2*step_size_up):.2f}")
+          f"cycles in first 10 epochs={10*steps_per_epoch/(2*step_size_up):.2f}")
 
     # Create ReduceLROnPlateau for later epochs
     plateau_scheduler = ReduceLROnPlateau(
@@ -341,8 +345,8 @@ def train_binary_classifier(
                 metrics['balanced_accuracy'] = balanced_accuracy
                 
                 print(f"Epoch {epoch+1}/{num_epochs} - Train ({cat} coverage): loss={metrics['loss']:.4f}, " +
-                    f"precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}, " +
-                    f"f1={f1:.4f}, weighted_f1={weighted_f1:.4f}, balanced_acc={balanced_accuracy:.4f}, count={metrics['count']}"
+                      f"precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}, " +
+                      f"f1={f1:.4f}, weighted_f1={weighted_f1:.4f}, balanced_acc={balanced_accuracy:.4f}, count={metrics['count']}"
                 )
         
         # Validation
@@ -485,10 +489,10 @@ def train_binary_classifier(
                     })
                     
                     print(f"Validation ({val_name}, {cat} coverage): loss={metrics['loss']:.4f}, " +
-                        f"precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}, " +
-                        f"f1={f1:.4f}, balanced_acc={balanced_accuracy:.4f}, " +
-                        f"weighted_f1={weighted_f1:.4f}, "
-                        f"AUROC={metrics.get('auroc', 0.0):.4f}, AUPRC={metrics.get('auprc', 0.0):.4f}, count={metrics['count']}")
+                          f"precision={precision:.4f}, recall={recall:.4f}, specificity={specificity:.4f}, " +
+                          f"f1={f1:.4f}, balanced_acc={balanced_accuracy:.4f}, " +
+                          f"weighted_f1={weighted_f1:.4f}, "
+                          f"AUROC={metrics.get('auroc', 0.0):.4f}, AUPRC={metrics.get('auprc', 0.0):.4f}, count={metrics['count']}")
                     print(f"Confusion Matrix: TP={tp}, FP={fp}, TN={tn}, FN={fn}")
             
             val_metrics[val_name] = val_set_metrics
@@ -541,5 +545,21 @@ def train_binary_classifier(
     model.load_state_dict(checkpoint['model_state_dict'])
     print(f"Loaded best model from epoch {checkpoint['epoch']+1} with specificity={checkpoint['best_metric']:.4f}")
     print(f"Low coverage: {checkpoint.get('low_coverage_metric', 'N/A')}, All coverage: {checkpoint.get('all_coverage_metric', 'N/A')}")
+    
+    # Calculate the single threshold that achieves the target specificity using the best model
+    val_dl = dataloaders['val'].get('tier1_low', list(dataloaders['val'].values())[0])  # Use tier1_low if available, else first validation set
+    specificity_threshold, _ = calculate_specificity_threshold(
+        model,
+        val_dl,
+        model_path,
+        f"cell_type_{target_cell_type_index}",
+        target_specificity=target_specificity,
+        device=device
+    )
+    
+    # Save the checkpoint again with the specificity_threshold
+    checkpoint['specificity_threshold'] = specificity_threshold
+    torch.save(checkpoint, os.path.join(model_path, f"presence_model_{target_cell_type_index}.pt"))
+    print(f"Saved specificity_threshold in checkpoint: {specificity_threshold}")
     
     return model

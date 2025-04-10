@@ -795,44 +795,30 @@ def check_prediction_distributions(model, dataloader, device=None):
     
     return pos_probs, neg_probs
 
-def analyse_detection_by_concentration(model, dataloader, 
-                                       output_path,
-                                       target_cell_type,
-                                       concentration_groups=None,
-                                       threshold=0.5,
-                                       target_specificity=0.95,  # Target specificity for threshold optimization
-                                       device=None):
+def calculate_specificity_threshold(model, dataloader, 
+                                    output_path,
+                                    target_cell_type,
+                                    threshold=0.5,
+                                    target_specificity=0.95,  # Target specificity for threshold optimization
+                                    device=None):
     """
-    Analyse the model's detection performance across different concentration levels using Plotly visualisations,
-    and calculate thresholds to achieve a target specificity (e.g., 95%).
+    Calculate a single threshold that achieves the target specificity (e.g., 95%) across all samples.
 
     Args:
         model: Binary classifier model
-        dataloader: DataLoader containing samples with concentration information
+        dataloader: DataLoader containing validation samples
         output_path: Path to save visualizations and results
         target_cell_type: Name of the cell type being analyzed
-        concentration_groups: Dictionary mapping group names to concentration ranges
         threshold: Default decision threshold for binary classification (used for initial plots)
         target_specificity: Target specificity for threshold optimization (e.g., 0.95 for 95%)
         device: Device to run on
         
     Returns:
+        specificity_threshold: Float value representing the threshold that achieves the target specificity
         results_df: DataFrame with detection results by sample
     """
     if device is None:
         device = next(model.parameters()).device
-    
-    if concentration_groups is None:
-        # Default concentration groups if not provided
-        concentration_groups = {
-            'super_high': (0.25, 1.0),   # 24% to 100%
-            'very_high': (0.10, 0.25),   # 10% to 25%
-            'high': (0.05, 0.10),        # 5% to 20%
-            'medium': (0.01, 0.05),      # 1% to 5%
-            'low': (0.001, 0.01),        # 0.1% to 1%
-            'very_low': (0.0005, 0.001), # 0.05% to 0.1%
-            'ultra_low': (0.0001, 0.0005)# 0.001% to 0.05%
-        }
     
     model.eval()
     
@@ -841,17 +827,10 @@ def analyse_detection_by_concentration(model, dataloader,
     
     # Evaluate
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Analyzing concentration detection"):
+        for batch in tqdm(dataloader, desc="Calculating specificity threshold"):
             marker_values = batch['X'].to(device)
             coverage = batch['coverage'].to(device)
             labels = batch['label'].to(device).view(-1, 1)
-            
-            # Get concentrations
-            if 'concentration' in batch:
-                concentrations = batch['concentration'].cpu().numpy()
-            else:
-                # If no concentration provided, use label as binary indicator
-                concentrations = labels.cpu().numpy()
             
             # Forward pass with adaptive thresholding
             predictions, probabilities, _ = model.adaptive_predict(marker_values, coverage)
@@ -859,9 +838,8 @@ def analyse_detection_by_concentration(model, dataloader,
             probabilities = probabilities.cpu().numpy()
             
             # Store results for each sample
-            for i in range(len(concentrations)):
+            for i in range(len(labels)):
                 results.append({
-                    'concentration': concentrations[i],
                     'probability': probabilities[i],
                     'prediction': predictions[i],
                     'ground_truth': labels[i].item()
@@ -870,260 +848,55 @@ def analyse_detection_by_concentration(model, dataloader,
     # Convert to DataFrame
     results_df = pd.DataFrame(results)
 
-    # Add concentration group column
-    def get_concentration_group(conc):
-        for group, (min_conc, max_conc) in concentration_groups.items():
-            if min_conc <= conc < max_conc:
-                return group
-        return 'other'
+    # Calculate overall detection statistics
+    tp = np.sum((results_df['prediction'] == 1) & (results_df['ground_truth'] == 1))
+    fp = np.sum((results_df['prediction'] == 1) & (results_df['ground_truth'] == 0))
+    tn = np.sum((results_df['prediction'] == 0) & (results_df['ground_truth'] == 0))
+    fn = np.sum((results_df['prediction'] == 0) & (results_df['ground_truth'] == 1))
     
-    results_df['concentration_group'] = results_df['concentration'].apply(get_concentration_group)
-    for group in concentration_groups.keys():
-        group_data = results_df[results_df['concentration_group'] == group]
-        n_samples = len(group_data)
-        n_unique_gt = len(group_data['ground_truth'].unique())
-        n_unique_pred = len(group_data['probability'].unique())
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    
+    print(f"Overall detection stats (using default threshold {threshold}):")
+    print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, Specificity: {specificity:.4f}, F1: {f1:.4f}")
+    print(f"Confusion Matrix: TP={tp}, FP={fp}, TN={tn}, FN={fn}")
+    
+    # Calculate ROC curve to find the threshold that achieves the target specificity
+    if len(results_df) > 10 and len(results_df['ground_truth'].unique()) > 1:
+        fpr, tpr, thresholds = roc_curve(results_df['ground_truth'], results_df['probability'])
+        specificity = 1 - fpr  # Specificity = 1 - FPR
         
-        print(f"Group {group}: {n_samples} samples, {n_unique_gt} unique ground truth values, {n_unique_pred} unique predictions")
-        if len(group_data) > 10 and len(group_data['ground_truth'].unique()) > 1:
-            try:
-                fpr, tpr, _ = roc_curve(group_data['ground_truth'], group_data['probability'])
-                print(f"Group {group}: ROC curve calculated with {len(fpr)} points")
-                print(f"First few points: {list(zip(fpr[:5], tpr[:5]))}")
-            except Exception as e:
-                print(f"Error calculating ROC for {group}: {e}")
-
-    # Calculate detection statistics by concentration group
-    group_stats = results_df.groupby('concentration_group').agg({
-        'prediction': 'mean',  # Detection rate
-        'probability': ['mean', 'std', 'count'],
-        'concentration': ['mean', 'min', 'max'],
-        'ground_truth': 'mean'  # Actual rate of positives
-    }).reset_index()
-    
-    # Flatten column names
-    group_stats.columns = ['_'.join(col).strip('_') for col in group_stats.columns.values]
-    
-    # Rename columns
-    group_stats = group_stats.rename(columns={
-        'prediction_mean': 'detection_rate',
-        'probability_mean': 'mean_probability',
-        'probability_std': 'std_probability',
-        'probability_count': 'sample_count',
-        'concentration_mean': 'mean_concentration',
-        'concentration_min': 'min_concentration',
-        'concentration_max': 'max_concentration',
-        'ground_truth_mean': 'true_positive_rate'
-    })
-    
-    # Sort by mean concentration (descending)
-    group_stats = group_stats.sort_values('mean_concentration', ascending=False)
-    
-    print("Detection rates by concentration group (using default threshold):")
-    print(group_stats[['concentration_group', 'detection_rate', 'true_positive_rate', 
-                       'mean_probability', 'sample_count', 'mean_concentration']])
-    
-    # Create Plotly subplots
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=(
-            'Detection Rate by Concentration Group', 
-            'Probability Distribution by Concentration Group',
-            'Predicted Probability vs Concentration (Log Scale)', 
-            'ROC Curves by Concentration Group'
-        ),
-        vertical_spacing=0.15,
-        horizontal_spacing=0.1
-    )
-    
-    # 1. Detection rate by concentration group
-    fig.add_trace(
-        go.Bar(
-            x=group_stats['concentration_group'],
-            y=group_stats['detection_rate'],
-            name='Detection Rate',
-            marker_color='skyblue'
-        ),
-        row=1, col=1
-    )
-    
-    # 2. Distribution of probabilities by concentration group
-    for group in group_stats['concentration_group']:
-        group_data = results_df[results_df['concentration_group'] == group]
-        
-        fig.add_trace(
-            go.Box(
-                x=group_data['concentration_group'],
-                y=group_data['probability'],
-                name=group
-            ),
-            row=1, col=2
-        )
-    
-    # Add threshold line to box plot
-    fig.add_trace(
-        go.Scatter(
-            x=group_stats['concentration_group'],
-            y=[threshold] * len(group_stats),
-            mode='lines',
-            line=dict(color='red', width=2, dash='dash'),
-            name=f'Threshold ({threshold:.2f})'
-        ),
-        row=1, col=2
-    )
-    
-    # 3. Scatter plot of probabilities vs concentration (log scale)
-    fig.add_trace(
-        go.Scatter(
-            x=results_df['concentration'],
-            y=results_df['probability'],
-            mode='markers',
-            marker=dict(
-                color='blue',
-                opacity=0.5,
-                size=8
-            ),
-            name='Predictions'
-        ),
-        row=2, col=1
-    )
-    
-    # Add threshold line to scatter plot
-    fig.add_trace(
-        go.Scatter(
-            x=[results_df['concentration'].min(), results_df['concentration'].max()],
-            y=[threshold, threshold],
-            mode='lines',
-            line=dict(color='red', width=2, dash='dash'),
-            name=f'Threshold ({threshold:.2f})'
-        ),
-        row=2, col=1
-    )
-    
-    # 4. ROC curve for different concentration groups
-    for group in concentration_groups.keys():
-        group_data = results_df[results_df['concentration_group'] == group]
-        
-        # Only calculate ROC if there are enough samples with both classes
-        if len(group_data) > 10 and len(group_data['ground_truth'].unique()) > 1:
-            fpr, tpr, _ = roc_curve(group_data['ground_truth'], group_data['probability'])
+        # Find the threshold where specificity is closest to the target (but not below)
+        valid_indices = np.where(specificity >= target_specificity)[0]
+        if len(valid_indices) > 0:
+            # Among thresholds that achieve at least target_specificity, choose the one with highest sensitivity
+            best_idx = valid_indices[np.argmax(tpr[valid_indices])]
+            specificity_threshold = thresholds[best_idx]
+            best_specificity = specificity[best_idx]
+            best_sensitivity = tpr[best_idx]
             
-            fig.add_trace(
-                go.Scatter(
-                    x=fpr, y=tpr,
-                    mode='lines',
-                    name=group
-                ),
-                row=2, col=2
-            )
-    
-    # Add diagonal line to ROC plot
-    fig.add_trace(
-        go.Scatter(
-            x=[0, 1], y=[0, 1],
-            mode='lines',
-            line=dict(color='black', width=2, dash='dash'),
-            name='Random'
-        ),
-        row=2, col=2
-    )
-    
-    # Update layout
-    fig.update_layout(
-        height=800,
-        width=1200,
-        title_text='Cell Type Detection Performance by Concentration',
-        showlegend=True,
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=-0.2,
-            xanchor="center",
-            x=0.5
-        )
-    )
-    
-    # Update x-axis for log scale on scatter plot
-    fig.update_xaxes(type="log", row=2, col=1, title_text='Concentration (log scale)')
-    fig.update_xaxes(title_text='Concentration Group', row=1, col=1)
-    fig.update_xaxes(title_text='Concentration Group', row=1, col=2)
-    fig.update_xaxes(title_text='False Positive Rate', row=2, col=2)
-    
-    # Update y-axis titles
-    fig.update_yaxes(title_text='Detection Rate', row=1, col=1)
-    fig.update_yaxes(title_text='Predicted Probability', row=1, col=2)
-    fig.update_yaxes(title_text='Predicted Probability', row=2, col=1)
-    fig.update_yaxes(title_text='True Positive Rate', row=2, col=2)
-    
-    # Show the plot
-    fig.write_html(output_path/f"{target_cell_type}_model_analysis.html")
-    
-    # Determine optimal thresholds for each concentration group to achieve target specificity
-    opt_thresholds = {}
-    
-    for group in concentration_groups.keys():
-        group_data = results_df[results_df['concentration_group'] == group]
-        
-        # Only calculate if there are enough samples with both classes
-        if len(group_data) > 10 and len(group_data['ground_truth'].unique()) > 1:
-            # Calculate ROC curve to find threshold for target specificity
-            fpr, tpr, thresholds = roc_curve(group_data['ground_truth'], group_data['probability'])
-            specificity = 1 - fpr  # Specificity = 1 - FPR
+            # Calculate precision at this threshold
+            predictions = (results_df['probability'] >= specificity_threshold).astype(int)
+            tp = np.sum((predictions == 1) & (results_df['ground_truth'] == 1))
+            fp = np.sum((predictions == 1) & (results_df['ground_truth'] == 0))
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
             
-            # Find the threshold where specificity is closest to the target (but not below)
-            valid_indices = np.where(specificity >= target_specificity)[0]
-            if len(valid_indices) > 0:
-                # Among thresholds that achieve at least target_specificity, choose the one with highest sensitivity
-                best_idx = valid_indices[np.argmax(tpr[valid_indices])]
-                best_threshold = thresholds[best_idx]
-                best_specificity = specificity[best_idx]
-                best_sensitivity = tpr[best_idx]
-                
-                # Calculate precision at this threshold
-                predictions = (group_data['probability'] >= best_threshold).astype(int)
-                tp = np.sum((predictions == 1) & (group_data['ground_truth'] == 1))
-                fp = np.sum((predictions == 1) & (group_data['ground_truth'] == 0))
-                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-                
-                # Calculate F1 score
-                f1 = 2 * precision * best_sensitivity / (precision + best_sensitivity) if (precision + best_sensitivity) > 0 else 0.0
-                
-                opt_thresholds[group] = {
-                    'threshold': best_threshold,
-                    'specificity': best_specificity,
-                    'sensitivity': best_sensitivity,
-                    'precision': precision,
-                    'f1_score': f1
-                }
-            else:
-                # If we can't achieve the target specificity, note it
-                opt_thresholds[group] = {
-                    'threshold': None,
-                    'specificity': None,
-                    'sensitivity': None,
-                    'precision': None,
-                    'f1_score': None,
-                    'note': f"Could not achieve {target_specificity*100:.1f}% specificity"
-                }
-    
-    # Print optimal thresholds
-    print(f"\nOptimal thresholds by concentration group to achieve {target_specificity*100:.1f}% specificity:")
-    for group, stats in opt_thresholds.items():
-        if stats['threshold'] is not None:
-            print(f"{group}: threshold={stats['threshold']:.4f}, Specificity={stats['specificity']:.4f}, "
-                  f"Sensitivity={stats['sensitivity']:.4f}, Precision={stats['precision']:.4f}, F1={stats['f1_score']:.4f}")
+            # Calculate F1 score
+            f1 = 2 * precision * best_sensitivity / (precision + best_sensitivity) if (precision + best_sensitivity) > 0 else 0.0
+            
+            print(f"\nThreshold achieving {target_specificity*100:.1f}% specificity:")
+            print(f"Threshold: {specificity_threshold:.4f}, Specificity: {best_specificity:.4f}, "
+                  f"Sensitivity: {best_sensitivity:.4f}, Precision: {precision:.4f}, F1: {f1:.4f}")
         else:
-            print(f"{group}: {stats['note']}")
+            specificity_threshold = 0.5
+            print(f"\nCould not achieve {target_specificity*100:.1f}% specificity. Using default threshold: {specificity_threshold}")
+    else:
+        specificity_threshold = 0.5
+        print(f"\nInsufficient data to calculate threshold. Using default threshold: {specificity_threshold}")
     
-    # Create a mapping of concentration ranges to optimal thresholds
-    threshold_mapping = {}
-    for group, (min_conc, max_conc) in concentration_groups.items():
-        if group in opt_thresholds and opt_thresholds[group]['threshold'] is not None:
-            threshold_mapping[(min_conc, max_conc)] = opt_thresholds[group]['threshold']
-    
-    group_stats.to_csv(output_path/f"{target_cell_type}_group_stats.csv")
-    print("threshold_mapping:", threshold_mapping)
-    return results_df
+    return specificity_threshold, results_df
 
 def find_minimum_detection_concentration_continuous(
     results_df, output_path, target_cell_type, 
@@ -1476,9 +1249,8 @@ def train_and_eval(
 
     val_dl = validation_dls[f"tier1_low"]
     
-    results_df = analyse_detection_by_concentration(trained_model, val_dl, output_path, target_cell_type_name)
+    specificity_threshold, results_df = calculate_specificity_threshold(trained_model, val_dl, output_path, target_cell_type_name)
     find_minimum_detection_concentration_continuous(results_df, output_path, target_cell_type_name)
-
 
 def main():
     parser = argparse.ArgumentParser(description="Deep conv")
@@ -1486,12 +1258,21 @@ def main():
     parser.add_argument("--train_path", type=str, required=True)
     parser.add_argument("--eval_path", type=str, required=True)
     parser.add_argument("--output_path", type=str, required=True)
-    parser.add_argument("--num_threads",required=False, type=int, default=32)
+    parser.add_argument("--num_threads", required=False, type=int, default=32)
+    parser.add_argument("--target_cell_type_name", type=str, required=True)
+    parser.add_argument("--use_loyfer", action="store_true", default=False)
     
     args = parser.parse_args()
     
-    train_and_eval(args.atlas_path, args.train_path+"/train",args.eval_path+"/eval", args.num_threads, args.output_path)
+    train_and_eval(
+        args.atlas_path,
+        args.train_path + "/train",
+        args.eval_path + "/eval",
+        args.num_threads,
+        Path(args.output_path),
+        args.target_cell_type_name,
+        args.use_loyfer
+    )
 
-
-if __name__ == "__main__":    
+if __name__ == "__main__":
     main()
