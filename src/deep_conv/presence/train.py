@@ -19,7 +19,7 @@ def train_binary_classifier(
     device: torch.device = None,
     fp16_training: bool = True,  # Use mixed precision
     gradient_accumulation: int = 1,  # Number of batches to accumulate
-    eval_metric: str = 'specificity',  # to reduce FP
+    eval_metric: str = 'specificity',  # Changed to 'specificity' to prioritise reducing FPs
     coverage_low_threshold: float = 6.0,  # Threshold for low coverage
     coverage_med_threshold: float = 12.0   # Threshold for medium coverage
 ):
@@ -104,7 +104,7 @@ def train_binary_classifier(
         print(f"Calculated positive class weight: {class_weight:.4f} (ratio: {pos_ratio:.4f})")
     
     # Create loss function with class weights and coverage awareness
-    weights = torch.tensor([1.0, class_weight], device=device)
+    weights = torch.tensor([1.5, class_weight], device=device)
     
     def weighted_bce_loss(logits, targets, coverage, missing_rate=None, fp_weight=2.0):
         """
@@ -134,6 +134,7 @@ def train_binary_classifier(
         # Class weights based on positive/negative imbalance
         per_sample_weights = torch.ones_like(targets)
         per_sample_weights[targets == 1] = weights[1]
+        per_sample_weights[targets == 0] = weights[0]
         
         # Add concentration-based weighting for more balanced focus
         target_conc = targets.view(-1)
