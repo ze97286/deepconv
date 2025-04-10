@@ -347,10 +347,10 @@ class SingleCellTypePresenceModel(nn.Module):
         # Use the loaded specificity threshold as the base
         base_threshold = self.specificity_threshold
         
-        # Adjust threshold based on coverage and missing rate, with reduced adjustment
-        coverage_adjustment = torch.clamp(0.10 - 0.003 * mean_coverage, 0.0, 0.10)  # Reduced adjustment
-        missing_adjustment = torch.clamp(0.10 * missing_rate.squeeze(), 0.0, 0.10)  # Reduced adjustment
-        total_adjustment = torch.clamp(coverage_adjustment + missing_adjustment, 0.0, 0.15)  # Reduced max adjustment
+        # Minimal adaptive adjustment to avoid overly increasing the threshold
+        coverage_adjustment = torch.clamp(0.02 - 0.001 * mean_coverage, 0.0, 0.02)  # Minimal adjustment
+        missing_adjustment = torch.clamp(0.02 * missing_rate.squeeze(), 0.0, 0.02)  # Minimal adjustment
+        total_adjustment = torch.clamp(coverage_adjustment + missing_adjustment, 0.0, 0.03)  # Minimal max adjustment
         adaptive_threshold = base_threshold + total_adjustment
         
         # Make predictions

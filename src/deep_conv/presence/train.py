@@ -12,9 +12,11 @@ def calculate_specificity_threshold(model, dataloader,
                                     target_cell_type,
                                     threshold=0.5,
                                     target_specificity=0.90,
+                                    min_low_coverage_recall=0.50,
                                     device=None):
     """
-    Calculate a single threshold that maximizes balanced accuracy across all samples.
+    Calculate a single threshold that maximizes balanced accuracy across all samples,
+    while ensuring a minimum recall in low-coverage scenarios.
 
     Args:
         model: Binary classifier model
@@ -22,7 +24,8 @@ def calculate_specificity_threshold(model, dataloader,
         output_path: Path to save visualizations and results
         target_cell_type: Name of the cell type being analyzed
         threshold: Default decision threshold for binary classification (used for initial plots)
-        target_specificity: Target specificity for threshold optimization (e.g., 0.90 for 90%)
+        target_specificity: Target specificity for reference (not enforced)
+        min_low_coverage_recall: Minimum recall required in low-coverage scenarios
         device: Device to run on
         
     Returns:
@@ -44,6 +47,9 @@ def calculate_specificity_threshold(model, dataloader,
             coverage = batch['coverage'].to(device)
             labels = batch['label'].to(device).view(-1, 1)
             
+            # Calculate mean coverage for each sample
+            mean_coverage = coverage.mean(dim=1).cpu().numpy()
+            
             # Forward pass with adaptive thresholding
             predictions, probabilities, _ = model.adaptive_predict(marker_values, coverage)
             predictions = predictions.cpu().numpy().astype(int)
@@ -52,6 +58,7 @@ def calculate_specificity_threshold(model, dataloader,
             # Store results for each sample
             for i in range(len(labels)):
                 results.append({
+                    'mean_coverage': mean_coverage[i],
                     'probability': probabilities[i],
                     'prediction': predictions[i],
                     'ground_truth': labels[i].item()
@@ -76,57 +83,73 @@ def calculate_specificity_threshold(model, dataloader,
     print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, Specificity: {specificity:.4f}, F1: {f1:.4f}, Balanced Accuracy: {balanced_accuracy:.4f}")
     print(f"Confusion Matrix: TP={tp}, FP={fp}, TN={tn}, FN={fn}")
     
-    # Calculate ROC curve to find the threshold that maximises balanced accuracy
+    # Calculate detection statistics for low-coverage samples
+    low_coverage_df = results_df[results_df['mean_coverage'] < 10.0]
+    if len(low_coverage_df) > 0:
+        tp_low = np.sum((low_coverage_df['prediction'] == 1) & (low_coverage_df['ground_truth'] == 1))
+        fn_low = np.sum((low_coverage_df['prediction'] == 0) & (low_coverage_df['ground_truth'] == 1))
+        recall_low = tp_low / (tp_low + fn_low) if (tp_low + fn_low) > 0 else 0.0
+        print(f"Low-coverage recall (using default threshold {threshold}): {recall_low:.4f}")
+    
+    # Calculate ROC curve to find the threshold that maximizes balanced accuracy
     if len(results_df) > 10 and len(results_df['ground_truth'].unique()) > 1:
         fpr, tpr, thresholds = roc_curve(results_df['ground_truth'], results_df['probability'])
         specificity = 1 - fpr  # Specificity = 1 - FPR
         recall = tpr  # Recall = TPR
         balanced_accuracy = (recall + specificity) / 2
         
-        # Find the threshold that maximizes balanced accuracy
-        best_idx = np.argmax(balanced_accuracy)
-        balanced_threshold = thresholds[best_idx]
-        best_balanced_accuracy = balanced_accuracy[best_idx]
-        best_sensitivity = recall[best_idx]
-        best_specificity = specificity[best_idx]
+        # Calculate recall in low-coverage samples for each threshold
+        low_coverage_recalls = []
+        for thresh in thresholds:
+            predictions_low = (low_coverage_df['probability'] >= thresh).astype(int)
+            tp_low = np.sum((predictions_low == 1) & (low_coverage_df['ground_truth'] == 1))
+            fn_low = np.sum((predictions_low == 0) & (low_coverage_df['ground_truth'] == 1))
+            recall_low = tp_low / (tp_low + fn_low) if (tp_low + fn_low) > 0 else 0.0
+            low_coverage_recalls.append(recall_low)
+        low_coverage_recalls = np.array(low_coverage_recalls)
         
-        # Calculate precision at this threshold
-        predictions = (results_df['probability'] >= balanced_threshold).astype(int)
-        tp = np.sum((predictions == 1) & (results_df['ground_truth'] == 1))
-        fp = np.sum((predictions == 1) & (results_df['ground_truth'] == 0))
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        
-        # Calculate F1 score
-        f1 = 2 * precision * best_sensitivity / (precision + best_sensitivity) if (precision + best_sensitivity) > 0 else 0.0
-        
-        print(f"\nThreshold maximizing balanced accuracy:")
-        print(f"Threshold: {balanced_threshold:.4f}, Balanced Accuracy: {best_balanced_accuracy:.4f}, "
-              f"Sensitivity: {best_sensitivity:.4f}, Specificity: {best_specificity:.4f}, Precision: {precision:.4f}, F1: {f1:.4f}")
-        
-        # Ensure the threshold meets the minimum specificity requirement
-        if best_specificity < target_specificity:
-            # Find the threshold where specificity is at least target_specificity
-            valid_indices = np.where(specificity >= target_specificity)[0]
-            if len(valid_indices) > 0:
-                best_idx = valid_indices[np.argmax(balanced_accuracy[valid_indices])]
-                balanced_threshold = thresholds[best_idx]
-                best_balanced_accuracy = balanced_accuracy[best_idx]
-                best_sensitivity = recall[best_idx]
-                best_specificity = specificity[best_idx]
-                
-                # Recalculate precision and F1
-                predictions = (results_df['probability'] >= balanced_threshold).astype(int)
-                tp = np.sum((predictions == 1) & (results_df['ground_truth'] == 1))
-                fp = np.sum((predictions == 1) & (results_df['ground_truth'] == 0))
-                precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-                f1 = 2 * precision * best_sensitivity / (precision + best_sensitivity) if (precision + best_sensitivity) > 0 else 0.0
-                
-                print(f"\nAdjusted threshold to meet minimum specificity of {target_specificity*100:.1f}%:")
-                print(f"Threshold: {balanced_threshold:.4f}, Balanced Accuracy: {best_balanced_accuracy:.4f}, "
-                      f"Sensitivity: {best_sensitivity:.4f}, Specificity: {best_specificity:.4f}, Precision: {precision:.4f}, F1: {f1:.4f}")
+        # Find the threshold that maximizes balanced accuracy while ensuring minimum recall in low coverage
+        valid_indices = np.where(low_coverage_recalls >= min_low_coverage_recall)[0]
+        if len(valid_indices) > 0:
+            best_idx = valid_indices[np.argmax(balanced_accuracy[valid_indices])]
+            balanced_threshold = thresholds[best_idx]
+            best_balanced_accuracy = balanced_accuracy[best_idx]
+            best_sensitivity = recall[best_idx]
+            best_specificity = specificity[best_idx]
+            best_low_coverage_recall = low_coverage_recalls[best_idx]
+            
+            # Calculate precision at this threshold
+            predictions = (results_df['probability'] >= balanced_threshold).astype(int)
+            tp = np.sum((predictions == 1) & (results_df['ground_truth'] == 1))
+            fp = np.sum((predictions == 1) & (results_df['ground_truth'] == 0))
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            
+            # Calculate F1 score
+            f1 = 2 * precision * best_sensitivity / (precision + best_sensitivity) if (precision + best_sensitivity) > 0 else 0.0
+            
+            print(f"\nThreshold maximizing balanced accuracy with low-coverage recall ≥ {min_low_coverage_recall*100:.1f}%:")
+            print(f"Threshold: {balanced_threshold:.4f}, Balanced Accuracy: {best_balanced_accuracy:.4f}, "
+                  f"Sensitivity: {best_sensitivity:.4f}, Specificity: {best_specificity:.4f}, "
+                  f"Low-Coverage Recall: {best_low_coverage_recall:.4f}, Precision: {precision:.4f}, F1: {f1:.4f}")
+            
+            # Log whether the threshold meets the target specificity (for reference only)
+            if best_specificity < target_specificity:
+                print(f"Note: Specificity ({best_specificity:.4f}) is below the target of {target_specificity*100:.1f}%.")
             else:
-                balanced_threshold = 0.5
-                print(f"\nCould not achieve minimum specificity of {target_specificity*100:.1f}%. Using default threshold: {balanced_threshold}")
+                print(f"Specificity ({best_specificity:.4f}) meets or exceeds the target of {target_specificity*100:.1f}%.")
+        else:
+            # If no threshold meets the minimum recall, choose the one that gets closest
+            best_idx = np.argmax(low_coverage_recalls)
+            balanced_threshold = thresholds[best_idx]
+            best_balanced_accuracy = balanced_accuracy[best_idx]
+            best_sensitivity = recall[best_idx]
+            best_specificity = specificity[best_idx]
+            best_low_coverage_recall = low_coverage_recalls[best_idx]
+            
+            print(f"\nCould not achieve low-coverage recall ≥ {min_low_coverage_recall*100:.1f}%. Using threshold that maximizes low-coverage recall:")
+            print(f"Threshold: {balanced_threshold:.4f}, Balanced Accuracy: {best_balanced_accuracy:.4f}, "
+                  f"Sensitivity: {best_sensitivity:.4f}, Specificity: {best_specificity:.4f}, "
+                  f"Low-Coverage Recall: {best_low_coverage_recall:.4f}")
     else:
         balanced_threshold = 0.5
         print(f"\nInsufficient data to calculate threshold. Using default threshold: {balanced_threshold}")
