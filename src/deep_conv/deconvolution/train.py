@@ -583,8 +583,8 @@ def train_model(
         # Print summary
         print(f"\n🔹 Epoch {epoch + 1} Summary:")
         print(f"Train Loss: {train_stats['total_loss']:.8f} | Grad Norm: {train_stats['grad_norm']:.8f}")
-        if 'alpha_stats/mean' in train_stats:
-            print(f"Alpha Mean: {train_stats['alpha_stats']['mean']:.8f} | Std: {train_stats['alpha_stats']['std']:.8f}")
+        if 'alpha_stats/mean' in train_stats and 'alpha_stats/std' in train_stats:
+            print(f"Alpha Mean: {train_stats['alpha_stats/mean']:.8f} | Std: {train_stats['alpha_stats/std']:.8f}")
         
         for val_name, stats in val_stats.items():
             print(f"{val_name} Loss: {stats['total_loss']:.8f}")
