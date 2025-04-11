@@ -275,6 +275,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Load separate presence models
         self.presence_models = nn.ModuleList()
 
+        print("\nLoading Presence Models:")
         for cell_type_idx in range(num_cell_types):
             model_path = Path(presence_models_dir) / f"presence_model_{cell_type_idx}.pt"
 
@@ -285,9 +286,15 @@ class CellTypeDeconvolutionModel(nn.Module):
                 from deep_conv.presence.model import SingleCellTypePresenceModel
                 presence_model = SingleCellTypePresenceModel()
                 presence_model.load_state_dict(checkpoint['model_state_dict'])
+                # Call load_threshold to set the specificity_threshold
                 presence_model.load_threshold(checkpoint)
+                # Log the loaded specificity_threshold
+                print(f"Cell Type {cell_type_idx}: Loaded Specificity Threshold = {presence_model.specificity_threshold:.4f}")
             else:
                 presence_model = checkpoint
+                if not hasattr(presence_model, 'specificity_threshold'):
+                    presence_model.specificity_threshold = 0.5
+                print(f"Cell Type {cell_type_idx}: Loaded Specificity Threshold = {presence_model.specificity_threshold:.4f} (from model)")
             # Removed presence_model.eval() to allow fine-tuning
             self.presence_models.append(presence_model)
 

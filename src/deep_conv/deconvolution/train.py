@@ -60,6 +60,9 @@ def train_epoch(
 ) -> Dict[str, float]:
     model.train()
     epoch_stats = defaultdict(float)
+    # Initialize nested dictionaries for per-cell-type stats
+    epoch_stats['presence_stats_per_celltype'] = defaultdict(lambda: defaultdict(float))
+    epoch_stats['alpha_stats_per_celltype'] = defaultdict(lambda: defaultdict(float))
     num_batches = 0
 
     optimiser.zero_grad()
@@ -120,8 +123,14 @@ def train_epoch(
         epoch_stats['total_loss'] += scaled_loss.item() * accumulation_steps
         for key, value in details.items():
             if isinstance(value, dict):
+                # Handle nested dictionaries (e.g., presence_stats_per_celltype, alpha_stats_per_celltype)
                 for subkey, subvalue in value.items():
-                    epoch_stats[f"{key}/{subkey}"] += subvalue
+                    if isinstance(subvalue, dict):
+                        # Handle per-cell-type stats
+                        for subsubkey, subsubvalue in subvalue.items():
+                            epoch_stats[f"{key}"][subkey][subsubkey] += subsubvalue
+                    else:
+                        epoch_stats[f"{key}/{subkey}"] += subvalue
             else:
                 epoch_stats[key] += value
         num_batches += 1
@@ -136,8 +145,16 @@ def train_epoch(
                 print(f"Weight Mean: {details['weight_stats']['mean']:.8f} | "
                       f"Max: {details['weight_stats']['max']:.8f}")
     
-    for key in epoch_stats:
-        epoch_stats[key] /= num_batches
+    # Average the scalar stats
+    for key in list(epoch_stats.keys()):
+        if key not in ['presence_stats_per_celltype', 'alpha_stats_per_celltype']:
+            epoch_stats[key] /= num_batches
+    
+    # Average the per-cell-type stats
+    for key in ['presence_stats_per_celltype', 'alpha_stats_per_celltype']:
+        for subkey in epoch_stats[key]:
+            for subsubkey in epoch_stats[key][subkey]:
+                epoch_stats[key][subkey][subsubkey] /= num_batches
     
     # Log average loss components for the epoch
     print(f"\nEpoch {epoch + 1} | Average Loss Components - "
@@ -171,6 +188,9 @@ def validate(
     with torch.no_grad():
         for val_name, val_loader in val_loaders.items():
             loader_stats = defaultdict(float)
+            # Initialize nested dictionaries for per-cell-type stats
+            loader_stats['presence_stats_per_celltype'] = defaultdict(lambda: defaultdict(float))
+            loader_stats['alpha_stats_per_celltype'] = defaultdict(lambda: defaultdict(float))
             num_batches = 0
 
             confusion = {
@@ -301,8 +321,14 @@ def validate(
                 loader_stats['presence_loss'] += details['presence_loss']
                 for key, value in details.items():
                     if isinstance(value, dict):
+                        # Handle nested dictionaries (e.g., presence_stats_per_celltype, alpha_stats_per_celltype)
                         for subkey, subvalue in value.items():
-                            loader_stats[f"{key}/{subkey}"] += subvalue
+                            if isinstance(subvalue, dict):
+                                # Handle per-cell-type stats
+                                for subsubkey, subsubvalue in subvalue.items():
+                                    loader_stats[f"{key}"][subkey][subsubkey] += subsubvalue
+                            else:
+                                loader_stats[f"{key}/{subkey}"] += subvalue
                     else:
                         loader_stats[key] += value
                 
@@ -359,9 +385,16 @@ def validate(
                         if key != 'count':
                             loader_stats[f'thresh_{t}_{key}'] = value
             
-            for key in loader_stats:
-                if key not in ['avg_precision', 'avg_recall', 'avg_f1', 'mae', 'mse']:
+            # Average the scalar stats
+            for key in list(loader_stats.keys()):
+                if key not in ['presence_stats_per_celltype', 'alpha_stats_per_celltype']:
                     loader_stats[key] /= num_batches
+            
+            # Average the per-cell-type stats
+            for key in ['presence_stats_per_celltype', 'alpha_stats_per_celltype']:
+                for subkey in loader_stats[key]:
+                    for subsubkey in loader_stats[key][subkey]:
+                        loader_stats[key][subkey][subsubkey] /= num_batches
             
             # Store absent indices in val_stats
             loader_stats['absent_indices'] = absent_indices
@@ -424,13 +457,13 @@ def train_model(
         run = init_wandb(config, project_name=wandb_project, entity=wandb_entity)
         wandb.watch(model, log="all", log_freq=100)
     
-    # Log presence model thresholds
-    print("\nPresence Model Thresholds:")
+    # Log presence model specificity thresholds
+    print("\nPresence Model Specificity Thresholds:")
     for ct in range(model.num_celltypes):
-        threshold = getattr(model.presence_models[ct], 'threshold', 0.5)  # Default to 0.5 if not found
-        print(f"Cell Type {ct}: Threshold = {threshold:.4f}")
+        threshold = getattr(model.presence_models[ct], 'specificity_threshold', 0.5)  # Default to 0.5 if not found
+        print(f"Cell Type {ct}: Specificity Threshold = {threshold:.4f}")
         if use_wandb:
-            wandb.run.summary[f"presence_threshold_ct{ct}"] = threshold
+            wandb.run.summary[f"presence_specificity_threshold_ct{ct}"] = threshold
     
     # Preparation
     initial_lr = lr
