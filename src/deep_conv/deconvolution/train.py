@@ -53,72 +53,23 @@ def train_epoch(
     optimiser: optim.Optimizer,
     device: torch.device,
     log_interval: int = 500,
-    accumulation_steps: int = 2,  # Reduced accumulation steps
+    accumulation_steps: int = 2,
     epoch: int = 0,
-    focal_loss_weight: float = 0.1
+    focal_loss_weight: float = 0.3
 ) -> Dict[str, float]:
-    """
-    Performs one training epoch on the given data loader.
-
-    Steps:
-      1) Iterate over each batch (fraction, coverage, y).
-      2) Forward pass the batch through the model to get:
-         (proportions, reconstruction, presence info).
-      3) Compute the composite loss from `loss_fn`.
-      4) Accumulate gradients, optionally using `accumulation_steps`.
-      5) Perform an optimiser step (update model params) after `accumulation_steps` mini-batches.
-      6) Keep track of various statistics (loss, presence detection metrics, etc.) and log them.
-      7) Print progress every `log_interval` batches.
-
-    Args:
-        model (nn.Module):
-            The model to be trained (must be in `model.train()` mode outside this function).
-        loader (DataLoader):
-            A DataLoader yielding batches of training data, each containing:
-              - 'X': cfDNA marker methylation values,
-              - 'coverage': coverage array for each marker,
-              - 'y': ground-truth cell-type proportions (if supervised).
-        optimiser (torch.optim.Optimizer):
-            The optimiser (e.g., Adam) used to update model parameters.
-        device (torch.device):
-            The target device (e.g., GPU) where model and data will reside.
-        log_interval (int):
-            Frequency (in mini-batches) with which progress is printed/logged.
-        accumulation_steps (int):
-            Number of mini-batches over which to accumulate gradients before taking an optimiser step.
-        epoch (int):
-            Current epoch number (used for dynamic loss weighting).
-        focal_loss_weight (float):
-            Current weight for the focal loss term (dynamically adjusted).
-
-    Returns:
-        Dict[str, float]: 
-            A dictionary of epoch-level metrics (averaged across all batches), e.g. 
-            {
-                'total_loss': <float>,
-                'grad_norm': <float>,
-                'alpha_stats/mean': ...,
-                ...
-            }
-    """
-    model.train()  # Ensure model is in training mode (affects dropout/BatchNorm, etc.)
-    epoch_stats = defaultdict(float)  # Will aggregate sums that we later average
+    model.train()
+    epoch_stats = defaultdict(float)
     num_batches = 0
 
-    # Start fresh for gradient accumulation
     optimiser.zero_grad()
 
-    # Iterate over all batches
     for batch_idx, batch in enumerate(tqdm(loader, desc='Training')):
-        # 1) Move data to appropriate device
         fraction = batch['X'].to(device)
         coverage = batch['coverage'].to(device)
         y_true = batch['y'].to(device)
         
-        # 2) Forward pass
         alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
         
-        # 3) Compute loss using our composite loss function
         loss, details = loss_fn(
             pred_props=alpha,
             true_props=y_true,
@@ -128,25 +79,34 @@ def train_epoch(
             valid_mask=valid_mask,
             presence_probs=presence_probs,
             presence_logits=presence_logits,
-            focal_loss_weight=focal_loss_weight  # Pass dynamic focal loss weight
+            focal_loss_weight=focal_loss_weight
         )
         
-        # 4) Scale the loss if using gradient accumulation
-        scaled_loss = loss / accumulation_steps
+        # Compute proportion accuracy metrics for training
+        mae = torch.abs(alpha - y_true).mean()
+        mse = F.mse_loss(alpha, y_true)
+        epoch_stats['mae'] += mae.item()
+        epoch_stats['mse'] += mse.item()
         
-        # 5) Backpropagation
+        # Log individual loss components
+        if batch_idx % log_interval == 0:
+            print(f"\nBatch {batch_idx} | Loss Components - "
+                  f"loss_props: {details['loss_props']:.4f}, "
+                  f"recon_loss: {details['recon_loss']:.4f}, "
+                  f"sparsity_penalty: {details['sparsity_loss']:.4f}, "
+                  f"presence_loss: {details['presence_loss']:.4f}")
+            print(f"Batch {batch_idx} | Proportion Accuracy - MAE: {mae.item():.4f}, MSE: {mse.item():.4f}")
+        
+        scaled_loss = loss / accumulation_steps
         scaled_loss.backward()
         
-        # 6) Update params after `accumulation_steps` or final batch
         if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1 == len(loader)):
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimiser.step()
             optimiser.zero_grad()
             
-            # Record the gradient norm
             epoch_stats['grad_norm'] += grad_norm.item()
             
-            # Log intermediate stats (batch-level) if wandb is active
             if wandb.run is not None and (batch_idx + 1) % (log_interval // 2) == 0:
                 wandb.log({
                     "batch/loss": loss.item(),
@@ -155,18 +115,15 @@ def train_epoch(
                     "batch/step": batch_idx
                 })
         
-        # 7) Aggregate stats for this batch
         epoch_stats['total_loss'] += loss.item()
         for key, value in details.items():
             if isinstance(value, dict):
-                # Nested dict means we add e.g. "alpha_stats/mean"
                 for subkey, subvalue in value.items():
                     epoch_stats[f"{key}/{subkey}"] += subvalue
             else:
                 epoch_stats[key] += value
         num_batches += 1
         
-        # 8) Print to console every `log_interval` mini-batches
         if batch_idx % log_interval == 0:
             print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
             print(f"Alpha Mean: {details['alpha_stats']['mean']:.8f} | "
@@ -177,9 +134,16 @@ def train_epoch(
                 print(f"Weight Mean: {details['weight_stats']['mean']:.8f} | "
                       f"Max: {details['weight_stats']['max']:.8f}")
     
-    # 9) Average out stats across all batches
     for key in epoch_stats:
         epoch_stats[key] /= num_batches
+    
+    # Log average loss components for the epoch
+    print(f"\nEpoch {epoch + 1} | Average Loss Components - "
+          f"loss_props: {epoch_stats['loss_props']:.4f}, "
+          f"recon_loss: {epoch_stats['recon_loss']:.4f}, "
+          f"sparsity_penalty: {epoch_stats['sparsity_loss']:.4f}, "
+          f"presence_loss: {epoch_stats['presence_loss']:.4f}")
+    print(f"Epoch {epoch + 1} | Average Proportion Accuracy - MAE: {epoch_stats['mae']:.4f}, MSE: {epoch_stats['mse']:.4f}")
     
     return dict(epoch_stats)
 
@@ -319,6 +283,10 @@ def validate(
                     batch_results['count'] += batch_size
                 
                 loader_stats['loss'] += loss.item()
+                loader_stats['loss_props'] += details['loss_props']
+                loader_stats['recon_loss'] += details['recon_loss']
+                loader_stats['sparsity_loss'] += details['sparsity_loss']
+                loader_stats['presence_loss'] += details['presence_loss']
                 for key, value in details.items():
                     if isinstance(value, dict):
                         for subkey, subvalue in value.items():
@@ -341,7 +309,6 @@ def validate(
             class_recall = confusion['tp'] / (confusion['tp'] + confusion['fn'] + 1e-8)
             class_f1 = 2 * class_precision * class_recall / (class_precision + class_recall + 1e-8)
             
-            # Compute proportion accuracy metrics
             mae_avg = mae_sum / (num_batches * val_loader.batch_size)
             mse_avg = mse_sum / (num_batches * val_loader.batch_size)
             
@@ -352,6 +319,11 @@ def validate(
             print(f"Class-based metrics - Precision: {class_precision.mean().item():.4f}, "
                   f"Recall: {class_recall.mean().item():.4f}, F1: {class_f1.mean().item():.4f}")
             print(f"Proportion accuracy - MAE: {mae_avg:.4f}, MSE: {mse_avg:.4f}")
+            print(f"Average Loss Components - "
+                  f"loss_props: {loader_stats['loss_props']/num_batches:.4f}, "
+                  f"recon_loss: {loader_stats['recon_loss']/num_batches:.4f}, "
+                  f"sparsity_penalty: {loader_stats['sparsity_loss']/num_batches:.4f}, "
+                  f"presence_loss: {loader_stats['presence_loss']/num_batches:.4f}")
             
             loader_stats['avg_precision'] = overall_precision
             loader_stats['avg_recall'] = overall_recall
