@@ -51,7 +51,7 @@ def loss_fn(
     presence_threshold: float = 0.01,
     low_snr_indices=[11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-    focal_loss_weight: float = 0.01
+    focal_loss_weight: float = 0.0
 ):
     # Proportion Error
     cell_errors = torch.abs(pred_props - true_props)
@@ -91,22 +91,24 @@ def loss_fn(
     # Sparsity Regularisation
     sparsity_penalty = torch.mean(torch.sum(pred_props, dim=1))
     
-    # Focal Loss for Presence Detection
-    presence_targets = (true_props > presence_threshold).float()
-    presence_loss = focal_loss(
-        presence_probs,
-        presence_targets,
-        alpha_pos=0.25,
-        alpha_neg=0.75,
-        gamma=2.0,
-        fp_weight=1.5,
-        class_weights=None
-    )
+    # Focal Loss for Presence Detection (now optional)
+    presence_loss = 0.0
+    if focal_loss_weight > 0:
+        presence_targets = (true_props > presence_threshold).float()
+        presence_loss = focal_loss(
+            presence_probs,
+            presence_targets,
+            alpha_pos=0.25,
+            alpha_neg=0.75,
+            gamma=2.0,
+            fp_weight=1.5,
+            class_weights=None
+        )
     
     # Combine All Terms
     total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss
     
-    # Detailed Monitoring / Diagnostics
+    # Detailed Monitoring / Diagnostics (simplified)
     with torch.no_grad():
         presence_targets = (true_props > presence_threshold).float()
         presence_preds = (presence_probs > 0.5).float()
@@ -129,46 +131,12 @@ def loss_fn(
         med_conc_error = torch.mean(torch.masked_select(cell_errors, med_conc_mask))
         high_conc_error = torch.mean(torch.masked_select(cell_errors, high_conc_mask))
 
-        # Per-cell-type presence stats, split by ground truth presence
-        presence_stats_per_celltype = {}
-        alpha_stats_per_celltype = {}
-        for ct in range(pred_props.size(1)):
-            # Presence stats
-            present_mask = presence_targets[:, ct] > 0
-            absent_mask = presence_targets[:, ct] == 0
-            
-            probs_present = presence_probs[:, ct][present_mask]
-            probs_absent = presence_probs[:, ct][absent_mask]
-            
-            mean_prob_present = probs_present.mean().item() if probs_present.numel() > 0 else 0.0
-            std_prob_present = probs_present.std().item() if probs_present.numel() > 1 else 0.0
-            mean_prob_absent = probs_absent.mean().item() if probs_absent.numel() > 0 else 0.0
-            std_prob_absent = probs_absent.std().item() if probs_absent.numel() > 1 else 0.0
-            
-            presence_stats_per_celltype[f'celltype_{ct}'] = {
-                'true_positives': true_positives[ct].item(),
-                'false_positives': false_positives[ct].item(),
-                'false_negatives': false_negatives[ct].item(),
-                'true_negatives': true_negatives[ct].item(),
-                'mean_prob_present': mean_prob_present,
-                'std_prob_present': std_prob_present,
-                'mean_prob_absent': mean_prob_absent,
-                'std_prob_absent': std_prob_absent
-            }
-            
-            # Alpha stats
-            alpha_ct = pred_props[:, ct]
-            alpha_stats_per_celltype[f'celltype_{ct}'] = {
-                'mean_alpha': alpha_ct.mean().item(),
-                'std_alpha': alpha_ct.std().item() if alpha_ct.numel() > 1 else 0.0
-            }
-
     details = {
         'total_loss': total_loss.item(),
         'loss_props': loss_props.item(),
         'recon_loss': recon_loss.item(),
         'sparsity_loss': sparsity_penalty.item(),
-        'presence_loss': presence_loss.item(),
+        'presence_loss': presence_loss.item() if focal_loss_weight > 0 else 0.0,
         'low_snr_under': underestimation[:, low_snr_indices].mean().item(),
         'low_snr_over': overestimation[:, low_snr_indices].mean().item(),
         'alpha_stats': {
@@ -192,8 +160,6 @@ def loss_fn(
             'false_negatives': torch.sum(false_negatives).item(),
             'true_negatives': torch.sum(true_negatives).item()
         },
-        'presence_stats_per_celltype': presence_stats_per_celltype,
-        'alpha_stats_per_celltype': alpha_stats_per_celltype,
         'valid_ratio': torch.mean(valid_mask.float()).item()
     }
 
