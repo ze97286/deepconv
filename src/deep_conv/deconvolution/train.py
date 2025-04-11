@@ -55,7 +55,7 @@ def train_epoch(
     log_interval: int = 500,
     accumulation_steps: int = 2,
     epoch: int = 0,
-    focal_loss_weight: float = 0.3
+    focal_loss_weight: float = 0.1
 ) -> Dict[str, float]:
     model.train()
     epoch_stats = defaultdict(float)
@@ -115,7 +115,8 @@ def train_epoch(
                     "batch/step": batch_idx
                 })
         
-        epoch_stats['total_loss'] += loss.item()
+        # Accumulate the scaled loss to match the gradients
+        epoch_stats['total_loss'] += scaled_loss.item() * accumulation_steps
         for key, value in details.items():
             if isinstance(value, dict):
                 for subkey, subvalue in value.items():
@@ -153,7 +154,7 @@ def validate(
     val_loaders: Dict[str, DataLoader],
     device: torch.device,
     presence_threshold: float = 0.01,
-    focal_loss_weight: float = 0.3
+    focal_loss_weight: float = 0.1
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
     model.eval()
     
@@ -162,6 +163,7 @@ def validate(
     threshold_results = {t: {} for t in thresholds}
     total_samples = 0
     weighted_loss_sum = 0.0
+    total_batches = 0
 
     print(f"Validating with presence threshold: {presence_threshold}")
 
@@ -295,6 +297,8 @@ def validate(
                         loader_stats[key] += value
                 
                 num_batches += 1
+                total_batches += 1
+                weighted_loss_sum += loss.item()
             
             if len(sample_precision_scores) > 0:
                 overall_precision = sum(sample_precision_scores) / len(sample_precision_scores)
@@ -353,9 +357,9 @@ def validate(
             
             dataset_size = len(val_loader.dataset)
             total_samples += dataset_size
-            weighted_loss_sum += loader_stats['loss'] * dataset_size
     
-    avg_val_loss = weighted_loss_sum / total_samples if total_samples > 0 else 0.0
+    # Compute the average validation loss as the mean of per-batch losses
+    avg_val_loss = weighted_loss_sum / total_batches if total_batches > 0 else 0.0
     return avg_val_loss, val_stats
 
 def train_model(
@@ -381,7 +385,7 @@ def train_model(
     cycle_length = 10
     scheduler = optim.lr_scheduler.CyclicLR(
         optimizer,
-        base_lr=5e-5,
+        base_lr=1e-4,
         max_lr=lr,
         step_size_up=cycle_length * len(train_loader) // 2,
         mode='triangular',
@@ -410,7 +414,7 @@ def train_model(
     
     # Preparation
     initial_lr = lr
-    warmup_epochs = 10
+    warmup_epochs = 5
     
     history = defaultdict(list)
     best_val_loss = float('inf')
@@ -437,8 +441,8 @@ def train_model(
             current_lr = optimizer.param_groups[0]['lr']
             print(f"Cyclic LR: {current_lr:.1e}")
         
-        focal_loss_weight_train = 0.3
-        focal_loss_weight_val = 0.3
+        focal_loss_weight_train = 0.1
+        focal_loss_weight_val = 0.1
         
         train_stats = train_epoch(
             model,
@@ -490,7 +494,7 @@ def train_model(
             print(f"Alpha Mean: {train_stats['alpha_stats/mean']:.8f} | Std: {train_stats['alpha_stats/std']:.8f}")
         
         for val_name, stats in val_stats.items():
-            print(f"{val_name} Loss: {stats['total_loss']:.8f}")
+            print(f"{val_name} Loss: {stats['loss']:.8f}")
             if 'avg_precision' in stats and 'avg_recall' in stats and 'avg_f1' in stats:
                 print(f"{val_name} Detection: P={stats['avg_precision']:.4f}, "
                       f"R={stats['avg_recall']:.4f}, F1: {stats['avg_f1']:.4f}")
@@ -569,7 +573,7 @@ def train_model(
             for k in list(model._backward_hooks.keys()):
                 model._backward_hooks.pop(k)
             for k in list(model._forward_pre_hooks.keys()):
-                model._forward_pre_hooks.pop(k)
+                model._forward_hooks.pop(k)
             for child in model.children():
                 remove_wandb_hooks(child)
 

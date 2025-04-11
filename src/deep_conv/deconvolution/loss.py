@@ -47,11 +47,11 @@ def loss_fn(
     presence_logits: torch.Tensor,
     alpha: float = 0.98,
     beta: float = 0.02,
-    gamma: float = 0.005,
+    gamma: float = 0.01,
     presence_threshold: float = 0.005,
     low_snr_indices=[11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-    focal_loss_weight: float = 0.3
+    focal_loss_weight: float = 0.1
 ):
     # Proportion Error
     cell_errors = torch.abs(pred_props - true_props)
@@ -62,9 +62,9 @@ def loss_fn(
     med_conc_mask = (true_props > 0.01) & (true_props <= 0.05)
     high_conc_mask = true_props > 0.05
     
-    importance_weights = torch.where(low_conc_mask, 1.8, importance_weights)
-    importance_weights = torch.where(med_conc_mask, 1.4, importance_weights)
-    importance_weights = torch.where(high_conc_mask, 1.0, importance_weights)
+    importance_weights = torch.where(low_conc_mask, 2.0, importance_weights)
+    importance_weights = torch.where(med_conc_mask, 1.6, importance_weights)
+    importance_weights = torch.where(high_conc_mask, 1.2, importance_weights)
     
     for idx in low_snr_indices:
         capped_fraction = torch.clamp(true_props[:, idx], max=0.10)
@@ -94,7 +94,7 @@ def loss_fn(
     # Focal Loss for Presence Detection
     presence_targets = (true_props > presence_threshold).float()
     class_freq = presence_targets.mean(dim=0)
-    class_weights = 1.0 / (class_freq + 1e-8)
+    class_weights = torch.log(1.0 / (class_freq + 1e-8) + 1.0)
     class_weights = class_weights / class_weights.sum() * pred_props.size(1)
     presence_loss = focal_loss(
         presence_probs,
