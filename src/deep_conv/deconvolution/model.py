@@ -324,6 +324,9 @@ class CellTypeDeconvolutionModel(nn.Module):
             nn.Linear(256, num_markers)
         )
 
+        # Apply Kaiming initialization to all linear layers
+        self._initialize_weights()
+
         # Initialise presence gating parameters
         thresholds = torch.ones(num_cell_types) * 0.5
         slopes = torch.ones(num_cell_types) * 10
@@ -335,6 +338,18 @@ class CellTypeDeconvolutionModel(nn.Module):
         slopes[tcells_index] = 10
         self.register_buffer("presence_thresholds", thresholds)
         self.register_buffer("presence_slopes", slopes)
+
+    def _initialize_weights(self):
+        """
+        Apply Kaiming initialization to all linear layers in the model.
+        """
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                # Apply Kaiming normal initialization for LeakyReLU
+                nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='leaky_relu')
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
 
     def apply_presence_gating(self, props, probs, coverage):
         """
