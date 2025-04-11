@@ -288,7 +288,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                 presence_model.load_threshold(checkpoint)
             else:
                 presence_model = checkpoint
-            presence_model.eval()
+            # Removed presence_model.eval() to allow fine-tuning
             self.presence_models.append(presence_model)
 
         # Marker Feature Extractor: Processes marker values and coverage
@@ -373,25 +373,24 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         # For each cell type, use its dedicated presence model
         for cell_type_idx, presence_model in enumerate(self.presence_models):
-            with torch.no_grad():  # No gradients needed for frozen presence models
-                # Create a mask for the markers that belong to this cell type
-                cell_type_marker_mask = (self.target_ids == cell_type_idx)
-                
-                # Skip if no markers for this cell type
-                if not cell_type_marker_mask.any():
-                    continue
-                
-                # Filter marker_values and coverage to only include markers for this cell type
-                cell_type_marker_values = marker_values[:, cell_type_marker_mask]
-                cell_type_coverage = coverage[:, cell_type_marker_mask]
-                
-                # Pass only the relevant markers to the presence model
-                logits, _, _ = presence_model(cell_type_marker_values, cell_type_coverage)
-                _, adaptive_probs, _ = presence_model.adaptive_predict(cell_type_marker_values, cell_type_coverage)
-                # Store results
-                presence_logits[:, cell_type_idx] = logits.squeeze(-1)
-                presence_probs[:, cell_type_idx] = adaptive_probs.squeeze(-1)
-                
+            # Create a mask for the markers that belong to this cell type
+            cell_type_marker_mask = (self.target_ids == cell_type_idx)
+            
+            # Skip if no markers for this cell type
+            if not cell_type_marker_mask.any():
+                continue
+            
+            # Filter marker_values and coverage to only include markers for this cell type
+            cell_type_marker_values = marker_values[:, cell_type_marker_mask]
+            cell_type_coverage = coverage[:, cell_type_marker_mask]
+            
+            # Pass only the relevant markers to the presence model
+            logits, _, _ = presence_model(cell_type_marker_values, cell_type_coverage)
+            _, adaptive_probs, _ = presence_model.adaptive_predict(cell_type_marker_values, cell_type_coverage)
+            # Store results
+            presence_logits[:, cell_type_idx] = logits.squeeze(-1)
+            presence_probs[:, cell_type_idx] = adaptive_probs.squeeze(-1)
+            
         return presence_probs, presence_logits
 
     def forward(self, marker_values: torch.Tensor, coverage: torch.Tensor):
@@ -508,7 +507,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         reconstructed = self.decoder(celltype_props)  # [B, M]
 
         return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
-        
+    
     def predict_with_adaptive_threshold(self, marker_values, coverage, base_threshold=0.5):
         """
         Make predictions with coverage-dependent thresholds.

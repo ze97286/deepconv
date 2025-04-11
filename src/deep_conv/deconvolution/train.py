@@ -55,7 +55,8 @@ def train_epoch(
     log_interval: int = 500,
     accumulation_steps: int = 2,
     epoch: int = 0,
-    focal_loss_weight: float = 0.1
+    focal_loss_weight: float = 0.01,
+    presence_threshold: float = 0.01
 ) -> Dict[str, float]:
     model.train()
     epoch_stats = defaultdict(float)
@@ -79,7 +80,8 @@ def train_epoch(
             valid_mask=valid_mask,
             presence_probs=presence_probs,
             presence_logits=presence_logits,
-            focal_loss_weight=focal_loss_weight
+            focal_loss_weight=focal_loss_weight,
+            presence_threshold=presence_threshold
         )
         
         # Compute proportion accuracy metrics for training
@@ -115,7 +117,6 @@ def train_epoch(
                     "batch/step": batch_idx
                 })
         
-        # Accumulate the scaled loss to match the gradients
         epoch_stats['total_loss'] += scaled_loss.item() * accumulation_steps
         for key, value in details.items():
             if isinstance(value, dict):
@@ -154,7 +155,7 @@ def validate(
     val_loaders: Dict[str, DataLoader],
     device: torch.device,
     presence_threshold: float = 0.01,
-    focal_loss_weight: float = 0.1
+    focal_loss_weight: float = 0.01
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
     model.eval()
     
@@ -193,6 +194,15 @@ def validate(
                     'detection_accuracy': 0.0,
                     'count': 0
                 }
+
+            # Determine absent indices from the first sample of the dataset
+            first_batch = next(iter(val_loader))
+            y_true_first = first_batch['y'].to(device)  # Shape: [batch_size, num_celltypes]
+            # Use the first sample to determine absent cell types (proportion == 0)
+            first_sample = y_true_first[0]  # Shape: [num_celltypes]
+            absent_mask = (first_sample == 0)
+            absent_indices = torch.nonzero(absent_mask, as_tuple=False).squeeze(-1).tolist()
+            print(f"\nAbsent Cell Types for {val_name}: {absent_indices}")
 
             for batch in tqdm(val_loader, desc=f'Validating {val_name}'):
                 fraction = batch['X'].to(device)
@@ -353,6 +363,8 @@ def validate(
                 if key not in ['avg_precision', 'avg_recall', 'avg_f1', 'mae', 'mse']:
                     loader_stats[key] /= num_batches
             
+            # Store absent indices in val_stats
+            loader_stats['absent_indices'] = absent_indices
             val_stats[val_name] = dict(loader_stats)
             
             dataset_size = len(val_loader.dataset)
@@ -369,7 +381,7 @@ def train_model(
     model_path: str,
     num_epochs: int = 1000,
     patience: int = 20,
-    lr: float = 1e-3,
+    lr: float = 2e-3,
     weight_decay: float = 2e-4,
     use_wandb: bool = True,
     wandb_project: str = "cfDNA-Deconvolution",
@@ -378,8 +390,8 @@ def train_model(
 ) -> Tuple[nn.Module, float]:
     model = model.to(device)
     
-    # Setup optimizer with AdamW
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    # Setup optimizer with AdamW, including presence model parameters
+    optimizer = optim.AdamW(list(model.parameters()) + [param for pm in model.presence_models for param in pm.parameters()], lr=lr, weight_decay=weight_decay)
     
     # Cyclic learning rate scheduler (triangular policy)
     cycle_length = 10
@@ -412,6 +424,14 @@ def train_model(
         run = init_wandb(config, project_name=wandb_project, entity=wandb_entity)
         wandb.watch(model, log="all", log_freq=100)
     
+    # Log presence model thresholds
+    print("\nPresence Model Thresholds:")
+    for ct in range(model.num_celltypes):
+        threshold = getattr(model.presence_models[ct], 'threshold', 0.5)  # Default to 0.5 if not found
+        print(f"Cell Type {ct}: Threshold = {threshold:.4f}")
+        if use_wandb:
+            wandb.run.summary[f"presence_threshold_ct{ct}"] = threshold
+    
     # Preparation
     initial_lr = lr
     warmup_epochs = 5
@@ -441,8 +461,8 @@ def train_model(
             current_lr = optimizer.param_groups[0]['lr']
             print(f"Cyclic LR: {current_lr:.1e}")
         
-        focal_loss_weight_train = 0.1
-        focal_loss_weight_val = 0.1
+        focal_loss_weight_train = 0.01
+        focal_loss_weight_val = 0.01
         
         train_stats = train_epoch(
             model,
@@ -450,7 +470,8 @@ def train_model(
             optimizer,
             device,
             epoch=epoch,
-            focal_loss_weight=focal_loss_weight_train
+            focal_loss_weight=focal_loss_weight_train,
+            presence_threshold=eval_presence_threshold
         )
         
         if epoch >= warmup_epochs:
@@ -491,13 +512,33 @@ def train_model(
         print(f"\n🔹 Epoch {epoch + 1} Summary:")
         print(f"Train Loss: {train_stats['total_loss']:.8f} | Grad Norm: {train_stats['grad_norm']:.8f}")
         if 'alpha_stats/mean' in train_stats and 'alpha_stats/std' in train_stats:
-            print(f"Alpha Mean: {train_stats['alpha_stats/mean']:.8f} | Std: {train_stats['alpha_stats/std']:.8f}")
+            print(f"Alpha Mean: {train_stats['alpha_stats']['mean']:.8f} | Std: {train_stats['alpha_stats']['std']:.8f}")
         
         for val_name, stats in val_stats.items():
             print(f"{val_name} Loss: {stats['loss']:.8f}")
             if 'avg_precision' in stats and 'avg_recall' in stats and 'avg_f1' in stats:
                 print(f"{val_name} Detection: P={stats['avg_precision']:.4f}, "
                       f"R={stats['avg_recall']:.4f}, F1: {stats['avg_f1']:.4f}")
+            # Log per-cell-type presence stats for t-cells_* and oac_* datasets
+            if 't-cells' in val_name or 'oac' in val_name:
+                print(f"\nPer-Cell-Type Presence Stats for {val_name}:")
+                for ct in range(model.num_celltypes):
+                    ct_stats = stats.get('presence_stats_per_celltype', {}).get(f'celltype_{ct}', {})
+                    if ct_stats:
+                        print(f"Cell Type {ct}: TP={ct_stats['true_positives']}, FP={ct_stats['false_positives']}, "
+                              f"FN={ct_stats['false_negatives']}, TN={ct_stats['true_negatives']}, "
+                              f"Mean Prob Present={ct_stats['mean_prob_present']:.4f}, "
+                              f"Std Prob Present={ct_stats['std_prob_present']:.4f}, "
+                              f"Mean Prob Absent={ct_stats['mean_prob_absent']:.4f}, "
+                              f"Std Prob Absent={ct_stats['std_prob_absent']:.4f}")
+                # Log alpha stats for absent cell types (determined in validate)
+                absent_indices = stats.get('absent_indices', [])
+                print(f"\nAlpha Stats for Absent Cell Types {absent_indices} in {val_name}:")
+                for ct in absent_indices:
+                    alpha_stats = stats.get('alpha_stats_per_celltype', {}).get(f'celltype_{ct}', {})
+                    if alpha_stats:
+                        print(f"Cell Type {ct}: Mean Alpha={alpha_stats['mean_alpha']:.8f}, "
+                              f"Std Alpha={alpha_stats['std_alpha']:.8f}")
         
         if use_wandb:
             wandb_logs = {
@@ -514,7 +555,19 @@ def train_model(
             }
             for val_name, stats in val_stats.items():
                 for k, v in stats.items():
-                    wandb_logs[f"val/{val_name}/{k}"] = v
+                    if k == 'presence_stats_per_celltype':
+                        for ct, ct_stats in v.items():
+                            for stat_name, stat_value in ct_stats.items():
+                                wandb_logs[f"val/{val_name}/presence_{stat_name}_ct{ct}"] = stat_value
+                    elif k == 'alpha_stats_per_celltype':
+                        for ct, ct_stats in v.items():
+                            for stat_name, stat_value in ct_stats.items():
+                                wandb_logs[f"val/{val_name}/alpha_{stat_name}_ct{ct}"] = stat_value
+                    elif k == 'absent_indices':
+                        # Log absent indices as a list
+                        wandb_logs[f"val/{val_name}/absent_indices"] = v
+                    else:
+                        wandb_logs[f"val/{val_name}/{k}"] = v
             
             wandb_logs["threshold_comparison"] = wandb.Table(
                 data=[[t, threshold_f1_scores[t]] for t in thresholds],
