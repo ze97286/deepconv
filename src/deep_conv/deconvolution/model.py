@@ -320,12 +320,12 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Initialise presence gating parameters
         thresholds = torch.ones(num_cell_types) * 0.5
         slopes = torch.ones(num_cell_types) * 10
-        oac_index = 9  # Adjust to your actual OAC index
-        tcells_index = 11  # Adjust to your actual T-cells index
-        thresholds[oac_index] = 0.3
-        thresholds[tcells_index] = 0.3  # Lower threshold for T-cells
+        oac_index = 9  
+        tcells_index = 11  
+        thresholds[oac_index] = 0.4  
+        thresholds[tcells_index] = 0.3
         slopes[oac_index] = 15
-        slopes[tcells_index] = 5  # Smoother transition for T-cells
+        slopes[tcells_index] = 10
         self.register_buffer("presence_thresholds", thresholds)
         self.register_buffer("presence_slopes", slopes)
 

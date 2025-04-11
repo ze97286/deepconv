@@ -189,7 +189,7 @@ def validate(
     val_loaders: Dict[str, DataLoader],
     device: torch.device,
     presence_threshold: float = 0.01,  # Fixed threshold for consistent metrics
-    focal_loss_weight: float = 0.15  # Fixed value for validation, matching final training value
+    focal_loss_weight: float = 0.1
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
     """
     Evaluate model on validation sets with consistent metrics, using weighted average for validation loss.
@@ -208,7 +208,7 @@ def validate(
     model.eval()
     
     val_stats = {}
-    thresholds = [0.001, 0.005, 0.01, 0.02, 0.05]
+    thresholds = [0.001, 0.005, 0.01, 0.02, 0.03, 0.05]
     threshold_results = {t: {} for t in thresholds}
     total_samples = 0
     weighted_loss_sum = 0.0
@@ -265,7 +265,7 @@ def validate(
                     presence_probs=presence_probs,
                     presence_logits=presence_logits,
                     presence_threshold=presence_threshold,
-                    focal_loss_weight=focal_loss_weight  # Pass fixed focal loss weight
+                    focal_loss_weight=focal_loss_weight
                 )
                 
                 # --- Presence confusion matrix
@@ -418,9 +418,9 @@ def train_model(
     val_loaders: Dict[str, DataLoader],
     model_path: str,
     num_epochs: int = 1000,
-    patience: int = 20,  # Increased patience
-    lr: float = 5e-4,  # Reduced learning rate
-    weight_decay: float = 1e-4,  # Increased weight decay
+    patience: int = 20,
+    lr: float = 5e-4,
+    weight_decay: float = 2e-4,
     use_wandb: bool = True,
     wandb_project: str = "cfDNA-Deconvolution",
     wandb_entity: str = None,
@@ -524,9 +524,9 @@ def train_model(
             print(f"Cyclic LR: {current_lr:.1e}")
         
         # Dynamic focal loss weight for training
-        focal_loss_weight_train = 0.1 + 0.05 * min(epoch / 50, 1.0)  # Increase to 0.15 over 50 epochs
+        focal_loss_weight_train = 0.1
         # Fixed focal loss weight for validation
-        focal_loss_weight_val = 0.15  # Fixed at the final training value
+        focal_loss_weight_val = 0.1
         
         # Training for one epoch
         train_stats = train_epoch(
@@ -552,7 +552,7 @@ def train_model(
         )
         
         # Evaluate multiple thresholds for best F1
-        thresholds = [0.001, 0.005, 0.01, 0.02, 0.05]
+        thresholds = [0.001, 0.005, 0.01, 0.02, 0.03, 0.05]
         threshold_f1_scores = {t: 0.0 for t in thresholds}
         
         # Sum up detection metric for each threshold across all val sets

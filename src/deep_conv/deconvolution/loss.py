@@ -1,17 +1,17 @@
 import torch 
 import torch.nn.functional as F
 
-def focal_loss(pred, target, alpha_pos=0.25, alpha_neg=0.75, gamma=2.0, fp_weight=2.0):
+def focal_loss(pred, target, alpha_pos=0.25, alpha_neg=0.75, gamma=2.0, fp_weight=1.5):
     """
-    Focal loss to focus on hard examples for presence detection, with an additional penalty for false positives.
+    Focal loss to focus on hard examples for presence detection, with a reduced penalty for false positives.
     
     Args:
         pred (FloatTensor): Predicted probabilities [B, C]
         target (FloatTensor): Ground truth labels [B, C]
         alpha_pos (float): Weighting factor for positive class
-        alpha_neg (float): Weighting factor for negative class (higher to penalize FPs)
+        alpha_neg (float): Weighting factor for negative class
         gamma (float): Focusing parameter
-        fp_weight (float): Additional weight for false positives
+        fp_weight (float): Additional weight for false positives (reduced to 1.5)
     
     Returns:
         loss (FloatTensor): Scalar focal loss with FP penalty
@@ -32,6 +32,7 @@ def focal_loss(pred, target, alpha_pos=0.25, alpha_neg=0.75, gamma=2.0, fp_weigh
     total_loss = focal_term + fp_penalty
     return total_loss.mean()
 
+
 def loss_fn(
     pred_props: torch.Tensor,
     true_props: torch.Tensor,
@@ -45,17 +46,13 @@ def loss_fn(
     beta: float = 0.1,
     gamma: float = 0.005,
     presence_threshold: float = 0.005,
-    low_snr_indices=[3, 4, 9, 11],
+    low_snr_indices=[11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-    focal_loss_weight: float = 0.1  # Added parameter
+    focal_loss_weight: float = 0.1
 ):
     """
     Loss function for deconvolution model with integrated presence models.
     
-    This updated version focuses on proportion accuracy with presence models
-    treated as features rather than binary gates, and includes focal loss for presence detection
-    with a stronger penalty for false positives.
-
     Args:
         pred_props (FloatTensor): [B, C]
             Model's predicted proportions per sample (B) for each cell type (C), summing to ~1.
@@ -82,11 +79,11 @@ def loss_fn(
         presence_threshold (float):
             Threshold on true_props to determine presence (for evaluation metrics).
         low_snr_indices (list[int]):
-            Indices of cell types considered "low SNR" or difficult to detect.
+            Indices of cell types considered "low SNR" or difficult to detect (removed OAC).
         device (torch.device):
             Computation device.
         focal_loss_weight (float):
-            Weight for the focal loss term (dynamically adjusted during training).
+            Weight for the focal loss term.
 
     Returns:
         total_loss (Tensor):
@@ -129,8 +126,8 @@ def loss_fn(
     # Apply moderate penalty for underestimation 
     underestimation_penalty = 1.3 * underestimation
     
-    # Increased penalty for low-SNR underestimation
-    low_snr_under_penalty = low_snr_mask * underestimation * 1.5  # Increased from 0.7
+    # Reduced penalty for low-SNR underestimation
+    low_snr_under_penalty = low_snr_mask * underestimation * 1.2
     
     # Combine into weighted errors
     weighted_errors = importance_weights * (cell_errors + underestimation_penalty + low_snr_under_penalty)
@@ -163,9 +160,9 @@ def loss_fn(
         presence_probs,
         presence_targets,
         alpha_pos=0.25,
-        alpha_neg=0.75,  # Higher weight for negatives to penalize FPs
+        alpha_neg=0.75,
         gamma=2.0,
-        fp_weight=2.0  # Additional penalty for FPs
+        fp_weight=1.5
     )
     
     # -----------------------------
@@ -185,7 +182,7 @@ def loss_fn(
         
         # Confusion counts
         true_positives = torch.sum(presence_preds * presence_targets, dim=0)
-        false_positives = torch.sum(presence_preds * (1 - presence_targets), dim=0)
+        false_positives = torch.sum(presence_probs * (1 - presence_targets), dim=0)
         false_negatives = torch.sum((1 - presence_preds) * presence_targets, dim=0)
         true_negatives = torch.sum((1 - presence_preds) * (1 - presence_targets), dim=0)
         
