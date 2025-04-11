@@ -189,10 +189,10 @@ def validate(
     val_loaders: Dict[str, DataLoader],
     device: torch.device,
     presence_threshold: float = 0.01,
-    focal_loss_weight: float = 0.3,
+    focal_loss_weight: float = 0.3
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
     model.eval()
-
+    
     val_stats = {}
     thresholds = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
     threshold_results = {t: {} for t in thresholds}
@@ -217,6 +217,8 @@ def validate(
             sample_f1_scores = []
             sample_precision_scores = []
             sample_recall_scores = []
+            mae_sum = 0.0
+            mse_sum = 0.0
 
             for t in thresholds:
                 threshold_results[t][val_name] = {
@@ -230,9 +232,9 @@ def validate(
                 fraction = batch['X'].to(device)
                 coverage = batch['coverage'].to(device)
                 y_true = batch['y'].to(device)
-
+                
                 alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
-
+        
                 loss, details = loss_fn(
                     pred_props=alpha,
                     true_props=y_true,
@@ -245,41 +247,47 @@ def validate(
                     presence_threshold=presence_threshold,
                     focal_loss_weight=focal_loss_weight
                 )
-
+                
+                # Compute proportion accuracy metrics
+                mae = torch.abs(alpha - y_true).mean()
+                mse = F.mse_loss(alpha, y_true)
                 batch_size = y_true.size(0)
+                mae_sum += mae.item() * batch_size
+                mse_sum += mse.item() * batch_size
+                
                 true_present = (y_true > presence_threshold)
                 pred_present = (presence_probs > 0.5)
-
+                
                 for i in range(batch_size):
                     sample_tp = torch.sum((pred_present[i] & true_present[i]).float()).item()
                     sample_fp = torch.sum((pred_present[i] & ~true_present[i]).float()).item()
                     sample_fn = torch.sum((~pred_present[i] & true_present[i]).float()).item()
                     sample_tn = torch.sum((~pred_present[i] & ~true_present[i]).float()).item()
-
+                    
                     tp_sum += sample_tp
                     fp_sum += sample_fp
                     fn_sum += sample_fn
                     tn_sum += sample_tn
-
+                    
                     if sample_tp + sample_fp > 0:
                         sample_precision = sample_tp / (sample_tp + sample_fp)
                     else:
                         sample_precision = 1.0
-
+                    
                     if sample_tp + sample_fn > 0:
                         sample_recall = sample_tp / (sample_tp + sample_fn)
                     else:
                         sample_recall = 1.0
-
+                    
                     if sample_precision + sample_recall > 0:
                         sample_f1 = 2 * sample_precision * sample_recall / (sample_precision + sample_recall)
                     else:
                         sample_f1 = 0.0
-
+                    
                     sample_precision_scores.append(sample_precision)
                     sample_recall_scores.append(sample_recall)
                     sample_f1_scores.append(sample_f1)
-
+                
                 for ct in range(model.num_celltypes):
                     ct_true_present = true_present[:, ct]
                     ct_pred_present = pred_present[:, ct]
@@ -287,29 +295,29 @@ def validate(
                     confusion['fp'][ct] += torch.sum((ct_pred_present & ~ct_true_present).float())
                     confusion['tn'][ct] += torch.sum((~ct_pred_present & ~ct_true_present).float())
                     confusion['fn'][ct] += torch.sum((~ct_pred_present & ct_true_present).float())
-
+                
                 for t in thresholds:
                     batch_results = threshold_results[t][val_name]
-
+                    
                     thresholded_preds = torch.where(alpha < t, torch.zeros_like(alpha), alpha)
-
+                    
                     row_sums = thresholded_preds.sum(dim=1, keepdim=True)
                     valid_rows = (row_sums > 0).squeeze(-1)
                     if valid_rows.any():
                         thresholded_preds[valid_rows] /= row_sums[valid_rows]
-
+                    
                     mse = F.mse_loss(thresholded_preds, y_true)
                     mae = torch.abs(thresholded_preds - y_true).mean()
-
+                    
                     pred_present_t = (thresholded_preds > 0)
                     true_present_t = (y_true > presence_threshold)
                     detection_accuracy = (pred_present_t == true_present_t).float().mean()
-
+                    
                     batch_results['mse'] += mse.item() * batch_size
                     batch_results['mae'] += mae.item() * batch_size
                     batch_results['detection_accuracy'] += detection_accuracy.item() * batch_size
                     batch_results['count'] += batch_size
-
+                
                 loader_stats['loss'] += loss.item()
                 for key, value in details.items():
                     if isinstance(value, dict):
@@ -317,9 +325,9 @@ def validate(
                             loader_stats[f"{key}/{subkey}"] += subvalue
                     else:
                         loader_stats[key] += value
-
+                
                 num_batches += 1
-
+            
             if len(sample_precision_scores) > 0:
                 overall_precision = sum(sample_precision_scores) / len(sample_precision_scores)
                 overall_recall = sum(sample_recall_scores) / len(sample_recall_scores)
@@ -328,27 +336,34 @@ def validate(
                 overall_precision = 0.0
                 overall_recall = 0.0
                 overall_f1 = 0.0
-
+            
             class_precision = confusion['tp'] / (confusion['tp'] + confusion['fp'] + 1e-8)
             class_recall = confusion['tp'] / (confusion['tp'] + confusion['fn'] + 1e-8)
             class_f1 = 2 * class_precision * class_recall / (class_precision + class_recall + 1e-8)
-
+            
+            # Compute proportion accuracy metrics
+            mae_avg = mae_sum / (num_batches * val_loader.batch_size)
+            mse_avg = mse_sum / (num_batches * val_loader.batch_size)
+            
             print(f"\nValidation set: {val_name}")
             print(f"Total: TP={tp_sum}, FP={fp_sum}, FN={fn_sum}, TN={tn_sum}")
             print(f"Sample-based metrics - Precision: {overall_precision:.4f}, "
                   f"Recall: {overall_recall:.4f}, F1: {overall_f1:.4f}")
             print(f"Class-based metrics - Precision: {class_precision.mean().item():.4f}, "
                   f"Recall: {class_recall.mean().item():.4f}, F1: {class_f1.mean().item():.4f}")
-
+            print(f"Proportion accuracy - MAE: {mae_avg:.4f}, MSE: {mse_avg:.4f}")
+            
             loader_stats['avg_precision'] = overall_precision
             loader_stats['avg_recall'] = overall_recall
             loader_stats['avg_f1'] = overall_f1
-
+            loader_stats['mae'] = mae_avg
+            loader_stats['mse'] = mse_avg
+            
             for ct in range(model.num_celltypes):
                 loader_stats[f'precision_ct{ct}'] = class_precision[ct].item()
                 loader_stats[f'recall_ct{ct}'] = class_recall[ct].item()
                 loader_stats[f'f1_ct{ct}'] = class_f1[ct].item()
-
+            
             for t in thresholds:
                 batch_results = threshold_results[t][val_name]
                 if batch_results['count'] > 0:
@@ -357,20 +372,19 @@ def validate(
                     for key, value in batch_results.items():
                         if key != 'count':
                             loader_stats[f'thresh_{t}_{key}'] = value
-
+            
             for key in loader_stats:
-                if key not in ['avg_precision', 'avg_recall', 'avg_f1']:
+                if key not in ['avg_precision', 'avg_recall', 'avg_f1', 'mae', 'mse']:
                     loader_stats[key] /= num_batches
-
+            
             val_stats[val_name] = dict(loader_stats)
-
+            
             dataset_size = len(val_loader.dataset)
             total_samples += dataset_size
             weighted_loss_sum += loader_stats['loss'] * dataset_size
-
+    
     avg_val_loss = weighted_loss_sum / total_samples if total_samples > 0 else 0.0
     return avg_val_loss, val_stats
-
 
 def train_model(
     model: nn.Module,

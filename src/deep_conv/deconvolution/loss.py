@@ -1,9 +1,9 @@
 import torch 
 import torch.nn.functional as F
 
-def focal_loss(pred, target, alpha_pos=0.25, alpha_neg=0.75, gamma=2.0, fp_weight=1.5):
+def focal_loss(pred, target, alpha_pos=0.25, alpha_neg=0.75, gamma=2.0, fp_weight=1.5, class_weights=None):
     """
-    Focal loss to focus on hard examples for presence detection, with a reduced penalty for false positives.
+    Focal loss with class weighting to focus on rare cell types.
     
     Args:
         pred (FloatTensor): Predicted probabilities [B, C]
@@ -11,7 +11,8 @@ def focal_loss(pred, target, alpha_pos=0.25, alpha_neg=0.75, gamma=2.0, fp_weigh
         alpha_pos (float): Weighting factor for positive class
         alpha_neg (float): Weighting factor for negative class
         gamma (float): Focusing parameter
-        fp_weight (float): Additional weight for false positives (reduced to 1.5)
+        fp_weight (float): Additional weight for false positives
+        class_weights (FloatTensor): Weights for each class [C]
     
     Returns:
         loss (FloatTensor): Scalar focal loss with FP penalty
@@ -19,19 +20,21 @@ def focal_loss(pred, target, alpha_pos=0.25, alpha_neg=0.75, gamma=2.0, fp_weigh
     bce = F.binary_cross_entropy(pred, target, reduction='none')
     pt = torch.exp(-bce)
     
-    # Apply alpha weighting: alpha_pos for positives, alpha_neg for negatives
+    # Apply alpha weighting
     alpha = torch.where(target > 0, alpha_pos, alpha_neg)
     focal_term = alpha * (1 - pt) ** gamma * bce
     
+    # Apply class weights
+    if class_weights is not None:
+        focal_term = focal_term * class_weights
+    
     # Compute FP penalty
     pred_binary = (pred > 0.5).float()
-    fp_mask = (pred_binary > target).float()  # FP: predicted 1, true 0
+    fp_mask = (pred_binary > target).float()
     fp_penalty = fp_weight * fp_mask * bce
     
-    # Combine focal loss with FP penalty
     total_loss = focal_term + fp_penalty
     return total_loss.mean()
-
 
 def loss_fn(
     pred_props: torch.Tensor,
@@ -42,65 +45,19 @@ def loss_fn(
     valid_mask: torch.Tensor,
     presence_probs: torch.Tensor,
     presence_logits: torch.Tensor,
-    alpha: float = 0.5,
-    beta: float = 0.2,
-    gamma: float = 0.02,
+    alpha: float = 0.98,
+    beta: float = 0.02,
+    gamma: float = 0.005,
     presence_threshold: float = 0.005,
     low_snr_indices=[11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
     focal_loss_weight: float = 0.3
 ):
-    """
-    Loss function for deconvolution model with integrated presence models.
-    
-    Args:
-        pred_props (FloatTensor): [B, C]
-            Model's predicted proportions per sample (B) for each cell type (C), summing to ~1.
-        true_props (FloatTensor): [B, C]
-            Ground-truth cell-type proportions.
-        reconstructed (FloatTensor): [B, M]
-            Model's reconstructed marker methylation values (decoder output).
-        marker_values (FloatTensor): [B, M]
-            True marker methylation values. Can contain invalid entries where coverage=0.
-        coverage (FloatTensor): [B, M]
-            Coverage (read depth) at each marker, used for weighting the reconstruction error.
-        valid_mask (BoolTensor): [B, M]
-            Indicates which (sample, marker) positions have coverage>0 (valid).
-        presence_probs (FloatTensor): [B, C]
-            Sigmoid probabilities from the pre-trained presence detection models.
-        presence_logits (FloatTensor): [B, C]
-            Logits (before sigmoid) from the pre-trained presence detection models.
-        alpha (float):
-            Weight for the proportion error term (often near 1.0).
-        beta (float):
-            Weight for the reconstruction term (marker-level error).
-        gamma (float):
-            Weight for the sparsity penalty (discourage spread-out predictions).
-        presence_threshold (float):
-            Threshold on true_props to determine presence (for evaluation metrics).
-        low_snr_indices (list[int]):
-            Indices of cell types considered "low SNR" or difficult to detect (removed OAC).
-        device (torch.device):
-            Computation device.
-        focal_loss_weight (float):
-            Weight for the focal loss term.
-
-    Returns:
-        total_loss (Tensor):
-            A scalar tensor representing the combined loss.
-        details (dict):
-            A dictionary of intermediate scalars/statistics for monitoring.
-    """
-    # -----------------------------
-    # (1) Proportion Error 
-    # -----------------------------
-    # Standard mean absolute error
+    # Proportion Error
     cell_errors = torch.abs(pred_props - true_props)
-
-    # Create importance weights for different concentration levels
+    
     importance_weights = torch.ones_like(true_props)
     
-
     low_conc_mask = (true_props > 0.001) & (true_props <= 0.01)
     med_conc_mask = (true_props > 0.01) & (true_props <= 0.05)
     high_conc_mask = true_props > 0.05
@@ -136,13 +93,17 @@ def loss_fn(
     
     # Focal Loss for Presence Detection
     presence_targets = (true_props > presence_threshold).float()
+    class_freq = presence_targets.mean(dim=0)
+    class_weights = 1.0 / (class_freq + 1e-8)
+    class_weights = class_weights / class_weights.sum() * pred_props.size(1)
     presence_loss = focal_loss(
         presence_probs,
         presence_targets,
         alpha_pos=0.25,
         alpha_neg=0.75,
         gamma=2.0,
-        fp_weight=1.5
+        fp_weight=1.5,
+        class_weights=class_weights
     )
     
     # Combine All Terms
