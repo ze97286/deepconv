@@ -42,13 +42,13 @@ def loss_fn(
     valid_mask: torch.Tensor,
     presence_probs: torch.Tensor,
     presence_logits: torch.Tensor,
-    alpha: float = 0.92,
-    beta: float = 0.1,
-    gamma: float = 0.005,
+    alpha: float = 0.5,
+    beta: float = 0.2,
+    gamma: float = 0.02,
     presence_threshold: float = 0.005,
     low_snr_indices=[11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-    focal_loss_weight: float = 0.1
+    focal_loss_weight: float = 0.3
 ):
     """
     Loss function for deconvolution model with integrated presence models.
@@ -96,65 +96,45 @@ def loss_fn(
     # -----------------------------
     # Standard mean absolute error
     cell_errors = torch.abs(pred_props - true_props)
-    
+
     # Create importance weights for different concentration levels
     importance_weights = torch.ones_like(true_props)
     
-    # Concentration-dependent masks for weighting
+
     low_conc_mask = (true_props > 0.001) & (true_props <= 0.01)
     med_conc_mask = (true_props > 0.01) & (true_props <= 0.05)
     high_conc_mask = true_props > 0.05
     
-    # Scale importance by concentration range - gentler scaling
     importance_weights = torch.where(low_conc_mask, 1.8, importance_weights)
     importance_weights = torch.where(med_conc_mask, 1.4, importance_weights)
     importance_weights = torch.where(high_conc_mask, 1.0, importance_weights)
     
-    # Special handling for low-SNR cell types - less aggressive
     for idx in low_snr_indices:
         capped_fraction = torch.clamp(true_props[:, idx], max=0.10)
         importance_weights[:, idx] *= (1.0 + 10.0 * capped_fraction)
     
-    # Calculate underestimation/overestimation
-    underestimation = F.relu(true_props - pred_props)  # only positive if true>pred
-    overestimation = F.relu(pred_props - true_props)   # only positive if pred>true
+    underestimation = F.relu(true_props - pred_props)
+    overestimation = F.relu(pred_props - true_props)
     
-    # Create low-SNR mask
     low_snr_mask = torch.zeros_like(true_props)
     low_snr_mask[:, low_snr_indices] = 1.0
     
-    # Apply moderate penalty for underestimation 
     underestimation_penalty = 1.3 * underestimation
-    
-    # Reduced penalty for low-SNR underestimation
     low_snr_under_penalty = low_snr_mask * underestimation * 1.2
     
-    # Combine into weighted errors
     weighted_errors = importance_weights * (cell_errors + underestimation_penalty + low_snr_under_penalty)
-    
-    # Mean across all cells in the batch
     loss_props = weighted_errors.mean()
     
-    # -----------------------------
-    # (2) Coverage-Weighted Reconstruction Loss
-    # -----------------------------
-    # Replace NaN marker values with reconstructed values where invalid
+    # Coverage-Weighted Reconstruction Loss
     safe_marker_values = torch.where(valid_mask, marker_values, reconstructed)
-    
-    # Coverage-weighted L1 loss
     recon_loss = torch.sum(
         valid_mask * coverage * torch.abs(safe_marker_values - reconstructed)
     ) / (torch.sum(valid_mask * coverage) + 1e-8)
     
-    # -----------------------------
-    # (3) Sparsity Regularisation (reduced weight)
-    # -----------------------------
-    # Encourages the model to predict fewer cell types present
+    # Sparsity Regularisation
     sparsity_penalty = torch.mean(torch.sum(pred_props, dim=1))
     
-    # -----------------------------
-    # (4) Focal Loss for Presence Detection with FP Penalty
-    # -----------------------------
+    # Focal Loss for Presence Detection
     presence_targets = (true_props > presence_threshold).float()
     presence_loss = focal_loss(
         presence_probs,
@@ -165,28 +145,19 @@ def loss_fn(
         fp_weight=1.5
     )
     
-    # -----------------------------
     # Combine All Terms
-    # -----------------------------
     total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss
     
-    # -----------------------------
-    # (5) Detailed Monitoring / Diagnostics
-    # -----------------------------
+    # Detailed Monitoring / Diagnostics
     with torch.no_grad():
-        # Convert true_props to presence vs. absence based on threshold
         presence_targets = (true_props > presence_threshold).float()
-        
-        # Use pre-trained presence probabilities for evaluation
         presence_preds = (presence_probs > 0.5).float()
         
-        # Confusion counts
         true_positives = torch.sum(presence_preds * presence_targets, dim=0)
         false_positives = torch.sum(presence_probs * (1 - presence_targets), dim=0)
         false_negatives = torch.sum((1 - presence_preds) * presence_targets, dim=0)
         true_negatives = torch.sum((1 - presence_preds) * (1 - presence_targets), dim=0)
         
-        # Precision / Recall / F1 
         precision = true_positives / (true_positives + false_positives + 1e-8)
         recall = true_positives / (true_positives + false_negatives + 1e-8)
         f1 = 2.0 * precision * recall / (precision + recall + 1e-8)
@@ -196,7 +167,6 @@ def loss_fn(
         avg_f1 = torch.mean(f1)
         accuracy = torch.mean((presence_preds == presence_targets).float())
         
-        # Error in different concentration ranges
         low_conc_error = torch.mean(torch.masked_select(cell_errors, low_conc_mask))
         med_conc_error = torch.mean(torch.masked_select(cell_errors, med_conc_mask))
         high_conc_error = torch.mean(torch.masked_select(cell_errors, high_conc_mask))

@@ -188,27 +188,13 @@ def validate(
     model: nn.Module,
     val_loaders: Dict[str, DataLoader],
     device: torch.device,
-    presence_threshold: float = 0.01,  # Fixed threshold for consistent metrics
-    focal_loss_weight: float = 0.1
+    presence_threshold: float = 0.01,
+    focal_loss_weight: float = 0.3,
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
-    """
-    Evaluate model on validation sets with consistent metrics, using weighted average for validation loss.
-
-    Args:
-        model: The model to be evaluated
-        val_loaders: Dictionary of validation DataLoaders
-        device: Device to run validation on
-        presence_threshold: Fixed threshold for evaluation metrics
-        focal_loss_weight: Fixed weight for focal loss during validation
-        
-    Returns:
-        avg_val_loss: Weighted average validation loss
-        val_stats: Dictionary of validation statistics
-    """
     model.eval()
-    
+
     val_stats = {}
-    thresholds = [0.001, 0.005, 0.01, 0.02, 0.03, 0.05]
+    thresholds = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
     threshold_results = {t: {} for t in thresholds}
     total_samples = 0
     weighted_loss_sum = 0.0
@@ -216,27 +202,22 @@ def validate(
     print(f"Validating with presence threshold: {presence_threshold}")
 
     with torch.no_grad():
-        # Evaluate each named validation set
         for val_name, val_loader in val_loaders.items():
             loader_stats = defaultdict(float)
             num_batches = 0
 
-            # For presence detection, track confusion across cell types
-            num_cell_types = model.num_celltypes
             confusion = {
-                'tp': torch.zeros(num_cell_types, device=device),
-                'fp': torch.zeros(num_cell_types, device=device),
-                'tn': torch.zeros(num_cell_types, device=device),
-                'fn': torch.zeros(num_cell_types, device=device)
+                'tp': torch.zeros(model.num_celltypes, device=device),
+                'fp': torch.zeros(model.num_celltypes, device=device),
+                'tn': torch.zeros(model.num_celltypes, device=device),
+                'fn': torch.zeros(model.num_celltypes, device=device)
             }
 
-            # Sample-based confusion (aggregate)
             tp_sum = fp_sum = fn_sum = tn_sum = 0
             sample_f1_scores = []
             sample_precision_scores = []
             sample_recall_scores = []
 
-            # Prepare an entry for each threshold in this val_name
             for t in thresholds:
                 threshold_results[t][val_name] = {
                     'mse': 0.0,
@@ -245,16 +226,13 @@ def validate(
                     'count': 0
                 }
 
-            # Go through each batch in this val set
             for batch in tqdm(val_loader, desc=f'Validating {val_name}'):
                 fraction = batch['X'].to(device)
                 coverage = batch['coverage'].to(device)
                 y_true = batch['y'].to(device)
-                
-                # Forward pass
+
                 alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
-        
-                # Use our standard loss function
+
                 loss, details = loss_fn(
                     pred_props=alpha,
                     true_props=y_true,
@@ -267,80 +245,71 @@ def validate(
                     presence_threshold=presence_threshold,
                     focal_loss_weight=focal_loss_weight
                 )
-                
-                # --- Presence confusion matrix
+
                 batch_size = y_true.size(0)
                 true_present = (y_true > presence_threshold)
                 pred_present = (presence_probs > 0.5)
-                
-                # Sample-based confusion
+
                 for i in range(batch_size):
                     sample_tp = torch.sum((pred_present[i] & true_present[i]).float()).item()
                     sample_fp = torch.sum((pred_present[i] & ~true_present[i]).float()).item()
                     sample_fn = torch.sum((~pred_present[i] & true_present[i]).float()).item()
                     sample_tn = torch.sum((~pred_present[i] & ~true_present[i]).float()).item()
-                    
+
                     tp_sum += sample_tp
                     fp_sum += sample_fp
                     fn_sum += sample_fn
                     tn_sum += sample_tn
-                    
-                    # Per-sample precision/recall/f1
+
                     if sample_tp + sample_fp > 0:
                         sample_precision = sample_tp / (sample_tp + sample_fp)
                     else:
                         sample_precision = 1.0
-                    
+
                     if sample_tp + sample_fn > 0:
                         sample_recall = sample_tp / (sample_tp + sample_fn)
                     else:
                         sample_recall = 1.0
-                    
+
                     if sample_precision + sample_recall > 0:
                         sample_f1 = 2 * sample_precision * sample_recall / (sample_precision + sample_recall)
                     else:
                         sample_f1 = 0.0
-                    
+
                     sample_precision_scores.append(sample_precision)
                     sample_recall_scores.append(sample_recall)
                     sample_f1_scores.append(sample_f1)
-                
-                # Cell-type-level confusion
-                for ct in range(num_cell_types):
+
+                for ct in range(model.num_celltypes):
                     ct_true_present = true_present[:, ct]
                     ct_pred_present = pred_present[:, ct]
                     confusion['tp'][ct] += torch.sum((ct_pred_present & ct_true_present).float())
                     confusion['fp'][ct] += torch.sum((ct_pred_present & ~ct_true_present).float())
                     confusion['tn'][ct] += torch.sum((~ct_pred_present & ~ct_true_present).float())
                     confusion['fn'][ct] += torch.sum((~ct_pred_present & ct_true_present).float())
-                
-                # --- Evaluate threshold-based metrics for alpha
+
                 for t in thresholds:
                     batch_results = threshold_results[t][val_name]
-                    
+
                     thresholded_preds = torch.where(alpha < t, torch.zeros_like(alpha), alpha)
-                    
-                    # Renormalise
+
                     row_sums = thresholded_preds.sum(dim=1, keepdim=True)
                     valid_rows = (row_sums > 0).squeeze(-1)
                     if valid_rows.any():
                         thresholded_preds[valid_rows] /= row_sums[valid_rows]
-                    
-                    # MSE, MAE
+
                     mse = F.mse_loss(thresholded_preds, y_true)
                     mae = torch.abs(thresholded_preds - y_true).mean()
-                    
-                    # "Detection accuracy": predicted presence vs. true presence
+
                     pred_present_t = (thresholded_preds > 0)
                     true_present_t = (y_true > presence_threshold)
                     detection_accuracy = (pred_present_t == true_present_t).float().mean()
-                    
+
                     batch_results['mse'] += mse.item() * batch_size
                     batch_results['mae'] += mae.item() * batch_size
                     batch_results['detection_accuracy'] += detection_accuracy.item() * batch_size
                     batch_results['count'] += batch_size
-                
-                # Accumulate stats for standard loss details
+
                 loader_stats['loss'] += loss.item()
                 for key, value in details.items():
                     if isinstance(value, dict):
@@ -348,12 +317,9 @@ def validate(
                             loader_stats[f"{key}/{subkey}"] += subvalue
                     else:
                         loader_stats[key] += value
-                
-                num_batches += 1
-            
-            # Post-processing for this validation set
 
-            # Compute sample-based presence metrics
+                num_batches += 1
+
             if len(sample_precision_scores) > 0:
                 overall_precision = sum(sample_precision_scores) / len(sample_precision_scores)
                 overall_recall = sum(sample_recall_scores) / len(sample_recall_scores)
@@ -362,31 +328,27 @@ def validate(
                 overall_precision = 0.0
                 overall_recall = 0.0
                 overall_f1 = 0.0
-            
-            # Cell-type-level confusion => compute class-based precision/recall/f1
+
             class_precision = confusion['tp'] / (confusion['tp'] + confusion['fp'] + 1e-8)
             class_recall = confusion['tp'] / (confusion['tp'] + confusion['fn'] + 1e-8)
             class_f1 = 2 * class_precision * class_recall / (class_precision + class_recall + 1e-8)
-            
+
             print(f"\nValidation set: {val_name}")
             print(f"Total: TP={tp_sum}, FP={fp_sum}, FN={fn_sum}, TN={tn_sum}")
             print(f"Sample-based metrics - Precision: {overall_precision:.4f}, "
                   f"Recall: {overall_recall:.4f}, F1: {overall_f1:.4f}")
             print(f"Class-based metrics - Precision: {class_precision.mean().item():.4f}, "
                   f"Recall: {class_recall.mean().item():.4f}, F1: {class_f1.mean().item():.4f}")
-            
-            # Add sample-based presence metrics
+
             loader_stats['avg_precision'] = overall_precision
             loader_stats['avg_recall'] = overall_recall
             loader_stats['avg_f1'] = overall_f1
-            
-            # Store per-cell-type metrics
-            for ct in range(num_cell_types):
+
+            for ct in range(model.num_celltypes):
                 loader_stats[f'precision_ct{ct}'] = class_precision[ct].item()
                 loader_stats[f'recall_ct{ct}'] = class_recall[ct].item()
                 loader_stats[f'f1_ct{ct}'] = class_f1[ct].item()
-            
-            # Finalise threshold-based results
+
             for t in thresholds:
                 batch_results = threshold_results[t][val_name]
                 if batch_results['count'] > 0:
@@ -395,22 +357,20 @@ def validate(
                     for key, value in batch_results.items():
                         if key != 'count':
                             loader_stats[f'thresh_{t}_{key}'] = value
-            
-            # Average across all batches
+
             for key in loader_stats:
                 if key not in ['avg_precision', 'avg_recall', 'avg_f1']:
                     loader_stats[key] /= num_batches
-            
+
             val_stats[val_name] = dict(loader_stats)
-            
-            # Accumulate for weighted average
+
             dataset_size = len(val_loader.dataset)
             total_samples += dataset_size
             weighted_loss_sum += loader_stats['loss'] * dataset_size
-    
-    # Compute weighted average validation loss
+
     avg_val_loss = weighted_loss_sum / total_samples if total_samples > 0 else 0.0
     return avg_val_loss, val_stats
+
 
 def train_model(
     model: nn.Module,
@@ -419,53 +379,25 @@ def train_model(
     model_path: str,
     num_epochs: int = 1000,
     patience: int = 20,
-    lr: float = 5e-4,
+    lr: float = 1e-3,
     weight_decay: float = 2e-4,
     use_wandb: bool = True,
     wandb_project: str = "cfDNA-Deconvolution",
     wandb_entity: str = None,
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ) -> Tuple[nn.Module, float]:
-    """
-    The main training loop for the cell-type deconvolution model.
-    
-    Features:
-      - Warmup for learning rate (first few epochs)
-      - Cyclic learning rate schedule to escape local minima
-      - Early stopping based on validation loss (patience)
-      - Post-training best checkpoint restoration
-      - W&B integration for logging/plotting if `use_wandb=True`
-
-    Args:
-        model: The cell-type model to train
-        train_loader: Provides training batches
-        val_loaders: Dictionary of validation loaders
-        model_path: Directory to store best model checkpoints
-        num_epochs: Max number of epochs to train
-        patience: # of epochs to wait for improvement before early stopping
-        lr: Base learning rate
-        weight_decay: L2 penalty for AdamW
-        use_wandb: If True, logs metrics/plots to Weights & Biases
-        wandb_project: W&B project name
-        wandb_entity: W&B entity (team name or username)
-        device: Where to run the training (CPU or GPU)
-
-    Returns:
-        model: The trained model, loaded from the best checkpoint
-        best_threshold: The chosen presence threshold for classification
-    """
     model = model.to(device)
     
     # Setup optimizer with AdamW
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     
     # Cyclic learning rate scheduler (triangular policy)
-    cycle_length = 10  # Number of epochs per cycle
+    cycle_length = 10
     scheduler = optim.lr_scheduler.CyclicLR(
         optimizer,
-        base_lr=1e-5,  # Minimum learning rate
-        max_lr=lr,  # Maximum learning rate
-        step_size_up=cycle_length * len(train_loader) // 2,  # Steps to reach max_lr
+        base_lr=5e-5,
+        max_lr=lr,
+        step_size_up=cycle_length * len(train_loader) // 2,
         mode='triangular',
         cycle_momentum=False
     )
@@ -492,7 +424,7 @@ def train_model(
     
     # Preparation
     initial_lr = lr
-    warmup_epochs = 10  # Increased warmup period
+    warmup_epochs = 10
     
     history = defaultdict(list)
     best_val_loss = float('inf')
@@ -500,14 +432,11 @@ def train_model(
     best_epoch = 0
     patience_counter = 0
     
-    # Track the "best presence threshold" by evaluating multiple thresholds
     best_threshold = 0.01
     best_threshold_f1 = 0.0
     
-    # Fixed presence threshold for evaluation metrics
     eval_presence_threshold = 0.01
     
-    # Main Training Loop
     for epoch in range(num_epochs):
         print(f"\n🔹 Epoch {epoch + 1}/{num_epochs}")
         
@@ -519,16 +448,12 @@ def train_model(
                 param_group['lr'] = current_lr
             print(f"LR Warmup: {current_lr:.1e}")
         else:
-            # After warmup, use cyclic scheduler
             current_lr = optimizer.param_groups[0]['lr']
             print(f"Cyclic LR: {current_lr:.1e}")
         
-        # Dynamic focal loss weight for training
-        focal_loss_weight_train = 0.1
-        # Fixed focal loss weight for validation
-        focal_loss_weight_val = 0.1
+        focal_loss_weight_train = 0.3
+        focal_loss_weight_val = 0.3
         
-        # Training for one epoch
         train_stats = train_epoch(
             model,
             train_loader,
@@ -538,24 +463,20 @@ def train_model(
             focal_loss_weight=focal_loss_weight_train
         )
         
-        # Step the cyclic scheduler after each batch
         if epoch >= warmup_epochs:
             scheduler.step()
         
-        # Validation with fixed threshold for consistent metrics
         avg_val_loss, val_stats = validate(
             model,
             val_loaders,
             device,
             presence_threshold=eval_presence_threshold,
-            focal_loss_weight=focal_loss_weight_val  # Use fixed value for validation
+            focal_loss_weight=focal_loss_weight_val
         )
         
-        # Evaluate multiple thresholds for best F1
-        thresholds = [0.001, 0.005, 0.01, 0.02, 0.03, 0.05]
+        thresholds = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
         threshold_f1_scores = {t: 0.0 for t in thresholds}
         
-        # Sum up detection metric for each threshold across all val sets
         for t in thresholds:
             for val_name, stats in val_stats.items():
                 threshold_key = f'thresh_{t}_detection_accuracy'
@@ -564,26 +485,21 @@ def train_model(
             
             threshold_f1_scores[t] /= len(val_stats)
             
-            # Update best threshold if improved
             if threshold_f1_scores[t] > best_threshold_f1:
                 best_threshold_f1 = threshold_f1_scores[t]
                 best_threshold = t
-                print(f"New best threshold: {best_threshold} (F1: {best_threshold_f1:.4f})")
+                print(f"New best threshold: {best_threshold} (Detection Accuracy: {best_threshold_f1:.4f})")
         
-        # Record stats into `history`
         for key, value in train_stats.items():
             history[key].append(value)
         for val_name, stats in val_stats.items():
             for k, v in stats.items():
                 history[f"{val_name}/{k}"].append(v)
         
-        # Check T-cells F1 score for low coverage set
         tcells_low_f1 = val_stats.get('t-cells_low', {}).get('avg_f1', 0.0)
         
-        # Print summary
         print(f"\n🔹 Epoch {epoch + 1} Summary:")
         print(f"Train Loss: {train_stats['total_loss']:.8f} | Grad Norm: {train_stats['grad_norm']:.8f}")
-        # Updated to use flattened keys
         if 'alpha_stats/mean' in train_stats and 'alpha_stats/std' in train_stats:
             print(f"Alpha Mean: {train_stats['alpha_stats/mean']:.8f} | Std: {train_stats['alpha_stats/std']:.8f}")
         
@@ -593,7 +509,6 @@ def train_model(
                 print(f"{val_name} Detection: P={stats['avg_precision']:.4f}, "
                       f"R={stats['avg_recall']:.4f}, F1: {stats['avg_f1']:.4f}")
         
-        # Log to W&B
         if use_wandb:
             wandb_logs = {
                 "epoch": epoch,
@@ -607,19 +522,16 @@ def train_model(
                 "best_threshold_f1": best_threshold_f1,
                 "tcells_low_f1": tcells_low_f1
             }
-            # Add validation stats
             for val_name, stats in val_stats.items():
                 for k, v in stats.items():
                     wandb_logs[f"val/{val_name}/{k}"] = v
             
-            # Table for threshold F1
             wandb_logs["threshold_comparison"] = wandb.Table(
                 data=[[t, threshold_f1_scores[t]] for t in thresholds],
-                columns=["threshold", "f1_score"]
+                columns=["threshold", "detection_accuracy"]
             )
             wandb.log(wandb_logs)
         
-        # Early stopping on avg_val_loss and T-cells F1
         if avg_val_loss < best_val_loss or tcells_low_f1 > best_tcells_f1:
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
@@ -633,8 +545,6 @@ def train_model(
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                # Excluded scheduler_state_dict due to pickling issues with CyclicLR
-                # To resume training, reconstruct the scheduler with the same parameters
                 'best_val_loss': best_val_loss,
                 'best_tcells_f1': best_tcells_f1,
                 'best_threshold': best_threshold,
@@ -646,24 +556,19 @@ def train_model(
         else:
             patience_counter += 1
         
-        # Check patience for early stopping
         if patience_counter >= patience:
             print(f"\n⚠️ Early stopping triggered after {epoch + 1} epochs")
             break
     
-    # Load the Best Model
     print("Loading best model (best overall validation loss and T-cells F1)")
     checkpoint = torch.load(os.path.join(model_path, "best_model.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
     
-    # Plot Training History
     plot_training_history(dict(history), os.path.join(model_path, "model_training"))
     
-    # Summarize final recommended presence threshold
     print(f"\nRecommended threshold for inference: {best_threshold}")
-    print(f"(Based on best F1 score: {best_threshold_f1:.4f})")
+    print(f"(Based on best detection accuracy: {best_threshold_f1:.4f})")
     
-    # Cleanup wandb
     if use_wandb:
         wandb.run.summary["best_val_loss"] = best_val_loss
         wandb.run.summary["best_tcells_f1"] = best_tcells_f1
@@ -673,14 +578,12 @@ def train_model(
         wandb.run.summary["best_threshold_f1"] = best_threshold_f1
         
         def remove_wandb_hooks(model):
-            # Remove forward/backward/pre-forward hooks
             for k in list(model._forward_hooks.keys()):
                 model._forward_hooks.pop(k)
             for k in list(model._backward_hooks.keys()):
                 model._backward_hooks.pop(k)
             for k in list(model._forward_pre_hooks.keys()):
                 model._forward_pre_hooks.pop(k)
-            # Recurse to child modules
             for child in model.children():
                 remove_wandb_hooks(child)
 
