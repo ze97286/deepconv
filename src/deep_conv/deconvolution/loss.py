@@ -91,7 +91,7 @@ def loss_fn(
     # Sparsity Regularisation
     sparsity_penalty = torch.mean(torch.sum(pred_props, dim=1))
     
-    # Focal Loss for Presence Detection (now optional)
+    # Focal Loss for Presence Detection (optional)
     presence_loss = 0.0
     if focal_loss_weight > 0:
         presence_targets = (true_props > presence_threshold).float()
@@ -108,7 +108,7 @@ def loss_fn(
     # Combine All Terms
     total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss
     
-    # Detailed Monitoring / Diagnostics (simplified)
+    # Detailed Monitoring / Diagnostics
     with torch.no_grad():
         presence_targets = (true_props > presence_threshold).float()
         presence_preds = (presence_probs > 0.5).float()
