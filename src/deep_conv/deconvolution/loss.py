@@ -70,6 +70,12 @@ def loss_fn(
     if torch.isnan(presence_probs).any() or torch.isinf(presence_probs).any():
         print("Warning: presence_probs contains nan or inf values")
 
+    # Sanitize marker_values: Replace nan with 0 (should be masked by valid_mask)
+    marker_values = torch.nan_to_num(marker_values, nan=0.0)
+
+    # Ensure valid_mask is False for nan values in coverage
+    valid_mask = (coverage > 0) & (~torch.isnan(coverage))
+
     # Proportion Error
     cell_errors = torch.abs(pred_props - true_props)
     
@@ -139,7 +145,7 @@ def loss_fn(
             presence_preds = (presence_probs > 0.5).float()
             
             true_positives = torch.sum(presence_preds * presence_targets, dim=0)
-            false_positives = torch.sum(presence_probs * (1 - presence_targets), dim=0)
+            false_positives = torch.sum(presence_preds * (1 - presence_targets), dim=0)
             false_negatives = torch.sum((1 - presence_preds) * presence_targets, dim=0)
             true_negatives = torch.sum((1 - presence_preds) * (1 - presence_targets), dim=0)
             
