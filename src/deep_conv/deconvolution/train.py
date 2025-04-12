@@ -189,7 +189,8 @@ def validate(
                     presence_probs=presence_probs,
                     presence_logits=presence_logits,
                     presence_threshold=presence_threshold,
-                    focal_loss_weight=focal_loss_weight
+                    focal_loss_weight=focal_loss_weight,
+                    compute_diagnostics=True
                 )
                 
                 # Compute proportion accuracy metrics
