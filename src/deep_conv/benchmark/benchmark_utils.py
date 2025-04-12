@@ -934,9 +934,9 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 [{"type": "heatmap"}, {"type": "histogram"}],
                 [{"colspan": 2}, None],
             ],
-            vertical_spacing=0.03,
+            vertical_spacing=0.02,
             horizontal_spacing=0.08,
-            row_heights=[0.2, 0.15, 0.15, 0.15, 0.15, 0.3]
+            row_heights=[0.2, 0.15, 0.15, 0.15, 0.15, 0.4]
         )
         
         # --------------------- Row 1, Col 1: Heatmap --------------------- #
@@ -1283,12 +1283,30 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         
         summary_text.append(f"<b>Clinical Relevance Score: {crs:.1f}/100</b>")
         
+        # Wrap long lines to make the table more compact
+        summary_text_wrapped = []
+        for line in summary_text:
+            if len(line) > 50:
+                words = line.split()
+                wrapped_line = ""
+                current_line = ""
+                for word in words:
+                    if len(current_line) + len(word) + 1 <= 50:
+                        current_line += word + " "
+                    else:
+                        wrapped_line += current_line + "<br>"
+                        current_line = word + " "
+                wrapped_line += current_line
+                summary_text_wrapped.append(wrapped_line.strip())
+            else:
+                summary_text_wrapped.append(line)
+        
         fig.add_annotation(
             x=0.5,
-            y=0.1,
-            text="<br>".join(summary_text),
+            y=0.5,
+            text="<br>".join(summary_text_wrapped),
             showarrow=False,
-            font=dict(size=10),
+            font=dict(size=9),
             align="center",
             bordercolor="black",
             borderwidth=1,
@@ -1336,7 +1354,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         
         # --------------------- Layout -------------------- #
         fig.update_layout(
-            height=3000,
+            height=3200,
             width=1600,
             title=f"Cell Type Analysis: {cell_type} (R²={r2:.3f}, Pearson r={pearson_r:.3f})",
             legend=dict(
