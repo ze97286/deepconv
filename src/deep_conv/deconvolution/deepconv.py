@@ -202,9 +202,9 @@ def get_validation_set_with_augmentation(
     # Create DataLoader with shuffling
     val_loader = DataLoader(
         val_dataset,
-        batch_size=512,
-        shuffle=True,
-        num_workers=8,
+        batch_size=1024,
+        shuffle=False,
+        num_workers=16,
         pin_memory=False,
         persistent_workers=False
     )
@@ -319,7 +319,7 @@ def load_training_with_augmentation(
     # Create DataLoader with shuffling
     train_dl = DataLoader(
         pre_augmented_dataset,
-        batch_size=128,
+        batch_size=1024,
         shuffle=True,
         num_workers=28,
         pin_memory=False,
@@ -511,7 +511,7 @@ def train_and_eval(
     train_dataset = ConcatDataset([train_dl_low.dataset, train_dl_med.dataset, train_dl_high.dataset])
     train_dl = DataLoader(
         train_dataset,
-        batch_size=128,
+        batch_size=1024,
         shuffle=True,
         num_workers=28,
         pin_memory=False,

@@ -366,22 +366,44 @@ class CellTypeDeconvolutionModel(nn.Module):
     def predict_presence_with_separate_models(self, marker_values, coverage):
         B = marker_values.shape[0]
         C = self.num_celltypes
-        presence_probs = torch.zeros(B, C, device=marker_values.device)
-        presence_logits = torch.zeros(B, C, device=marker_values.device)
-        
+        M = self.num_markers
+        device = marker_values.device
+
+        # Initialize output tensors
+        presence_probs = torch.zeros(B, C, device=device)
+        presence_logits = torch.zeros(B, C, device=device)
+
+        # Create a mask for markers per cell type
+        cell_type_masks = torch.zeros(C, M, dtype=torch.bool, device=device)
+        for cell_type_idx in range(C):
+            cell_type_masks[cell_type_idx] = (self.target_ids == cell_type_idx)
+
+        # Stack markers for all cell types
+        # Shape: [B, C, M]
+        marker_values_expanded = marker_values.unsqueeze(1).expand(-1, C, -1)
+        coverage_expanded = coverage.unsqueeze(1).expand(-1, C, -1)
+        cell_type_masks_expanded = cell_type_masks.unsqueeze(0).expand(B, -1, -1)
+
+        # Mask markers not belonging to each cell type
+        marker_values_masked = torch.where(cell_type_masks_expanded, marker_values_expanded, torch.zeros_like(marker_values_expanded))
+        coverage_masked = torch.where(cell_type_masks_expanded, coverage_expanded, torch.zeros_like(coverage_expanded))
+
+        # Process each cell type in parallel
         for cell_type_idx, presence_model in enumerate(self.presence_models):
-            cell_type_marker_mask = (self.target_ids == cell_type_idx)
-            if not cell_type_marker_mask.any():
+            # Shape: [B, M_cell_type]
+            cell_type_marker_values = marker_values_masked[:, cell_type_idx, cell_type_masks[cell_type_idx]]
+            cell_type_coverage = coverage_masked[:, cell_type_idx, cell_type_masks[cell_type_idx]]
+
+            if cell_type_marker_values.shape[1] == 0:  # Skip if no markers
                 continue
-            cell_type_marker_values = marker_values[:, cell_type_marker_mask]
-            cell_type_coverage = coverage[:, cell_type_marker_mask]
+
             logits, _, _ = presence_model(cell_type_marker_values, cell_type_coverage)
             _, adaptive_probs, _ = presence_model.adaptive_predict(cell_type_marker_values, cell_type_coverage)
             presence_logits[:, cell_type_idx] = logits.squeeze(-1)
             presence_probs[:, cell_type_idx] = adaptive_probs.squeeze(-1)
-            
-        return presence_probs, presence_logits
 
+        return presence_probs, presence_logits
+    
     def forward(self, marker_values: torch.Tensor, coverage: torch.Tensor):
         B, M = marker_values.shape
         C = self.num_celltypes

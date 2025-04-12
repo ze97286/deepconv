@@ -71,7 +71,8 @@ def train_epoch(
         
         alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
         
-        loss, details = loss_fn(
+        # Call loss_fn without diagnostics, discard details
+        loss, _ = loss_fn(
             pred_props=alpha,
             true_props=y_true,
             reconstructed=reconstructed,
@@ -81,7 +82,8 @@ def train_epoch(
             presence_probs=presence_probs,
             presence_logits=presence_logits,
             focal_loss_weight=focal_loss_weight,
-            presence_threshold=presence_threshold
+            presence_threshold=presence_threshold,
+            compute_diagnostics=False
         )
         
         # Compute proportion accuracy metrics for training
@@ -90,13 +92,9 @@ def train_epoch(
         epoch_stats['mae'] += mae.item()
         epoch_stats['mse'] += mse.item()
         
-        # Log individual loss components
+        # Log only the total loss and proportion accuracy
         if batch_idx % log_interval == 0:
-            print(f"\nBatch {batch_idx} | Loss Components - "
-                  f"loss_props: {details['loss_props']:.4f}, "
-                  f"recon_loss: {details['recon_loss']:.4f}, "
-                  f"sparsity_penalty: {details['sparsity_loss']:.4f}, "
-                  f"presence_loss: {details['presence_loss']:.4f}")
+            print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
             print(f"Batch {batch_idx} | Proportion Accuracy - MAE: {mae.item():.4f}, MSE: {mse.item():.4f}")
         
         scaled_loss = loss / accumulation_steps
@@ -118,37 +116,16 @@ def train_epoch(
                 })
         
         epoch_stats['total_loss'] += scaled_loss.item() * accumulation_steps
-        for key, value in details.items():
-            if isinstance(value, dict):
-                for subkey, subvalue in value.items():
-                    epoch_stats[f"{key}/{subkey}"] += subvalue
-            else:
-                epoch_stats[key] += value
         num_batches += 1
-        
-        if batch_idx % log_interval == 0:
-            print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
-            print(f"Alpha Mean: {details['alpha_stats']['mean']:.8f} | "
-                  f"Std: {details['alpha_stats']['std']:.8f}")
-            if 'cd48_under' in details and 'cd48_over' in details:
-                print(f"CD4/CD8 Under: {details['cd48_under']:.8f} | Over: {details['cd48_over']:.8f}")
-            if 'weight_stats' in details:
-                print(f"Weight Mean: {details['weight_stats']['mean']:.8f} | "
-                      f"Max: {details['weight_stats']['max']:.8f}")
     
     for key in epoch_stats:
         epoch_stats[key] /= num_batches
     
-    # Log average loss components for the epoch
-    print(f"\nEpoch {epoch + 1} | Average Loss Components - "
-          f"loss_props: {epoch_stats['loss_props']:.4f}, "
-          f"recon_loss: {epoch_stats['recon_loss']:.4f}, "
-          f"sparsity_penalty: {epoch_stats['sparsity_loss']:.4f}, "
-          f"presence_loss: {epoch_stats['presence_loss']:.4f}")
+    # Log average metrics for the epoch
+    print(f"\nEpoch {epoch + 1} | Average Loss: {epoch_stats['total_loss']:.8f}")
     print(f"Epoch {epoch + 1} | Average Proportion Accuracy - MAE: {epoch_stats['mae']:.4f}, MSE: {epoch_stats['mse']:.4f}")
     
     return dict(epoch_stats)
-
 
 def validate(
     model: nn.Module,
@@ -417,7 +394,7 @@ def train_model(
     # Log presence model specificity thresholds
     print("\nPresence Model Specificity Thresholds:")
     for ct in range(model.num_celltypes):
-        threshold = getattr(model.presence_models[ct], 'specificity_threshold', 0.5)  # Default to 0.5 if not found
+        threshold = getattr(model.presence_models[ct], 'specificity_threshold', 0.5)
         print(f"Cell Type {ct}: Specificity Threshold = {threshold:.4f}")
         if use_wandb:
             wandb.run.summary[f"presence_specificity_threshold_ct{ct}"] = threshold
@@ -467,6 +444,7 @@ def train_model(
         if epoch >= warmup_epochs:
             scheduler.step()
         
+        # During validation, we want diagnostics
         avg_val_loss, val_stats = validate(
             model,
             val_loaders,
@@ -507,7 +485,6 @@ def train_model(
             if 'avg_precision' in stats and 'avg_recall' in stats and 'avg_f1' in stats:
                 print(f"{val_name} Detection: P={stats['avg_precision']:.4f}, "
                       f"R={stats['avg_recall']:.4f}, F1: {stats['avg_f1']:.4f}")
-            # Log per-cell-type presence stats for t-cells_* and oac_* datasets
             if 't-cells' in val_name or 'oac' in val_name:
                 print(f"\nPer-Cell-Type Presence Stats for {val_name}:")
                 for ct in range(model.num_celltypes):
@@ -519,7 +496,6 @@ def train_model(
                               f"Std Prob Present={ct_stats['std_prob_present']:.4f}, "
                               f"Mean Prob Absent={ct_stats['mean_prob_absent']:.4f}, "
                               f"Std Prob Absent={ct_stats['std_prob_absent']:.4f}")
-                # Log alpha stats for absent cell types (determined in validate)
                 absent_indices = stats.get('absent_indices', [])
                 print(f"\nAlpha Stats for Absent Cell Types {absent_indices} in {val_name}:")
                 for ct in absent_indices:
@@ -552,7 +528,6 @@ def train_model(
                             for stat_name, stat_value in ct_stats.items():
                                 wandb_logs[f"val/{val_name}/alpha_{stat_name}_ct{ct}"] = stat_value
                     elif k == 'absent_indices':
-                        # Log absent indices as a list
                         wandb_logs[f"val/{val_name}/absent_indices"] = v
                     else:
                         wandb_logs[f"val/{val_name}/{k}"] = v
