@@ -408,12 +408,20 @@ class CellTypeDeconvolutionModel(nn.Module):
         B, M = marker_values.shape
         C = self.num_celltypes
 
+        # Debug: Check for nan in inputs
+        if torch.isnan(coverage).any() or torch.isinf(coverage).any():
+            print("Warning: coverage contains nan or inf values")
+
         # Valid mask indicates coverage>0
         valid_mask = (coverage > 0)
 
         # Compute log(coverage + 1) and normalize to [0, 1]
         log_coverage = torch.log(coverage + 1)  # [B, M]
         log_coverage_normalized = log_coverage / self.max_log_coverage  # [B, M]
+
+        # Debug: Check for nan in log_coverage
+        if torch.isnan(log_coverage_normalized).any():
+            print("Warning: log_coverage_normalized contains nan values")
 
         # Flatten coverage, marker_values, and log_coverage for efficient indexing
         coverage_flat = coverage.view(-1)
@@ -445,7 +453,6 @@ class CellTypeDeconvolutionModel(nn.Module):
         celltype_idx = self.target_ids[marker_idx]
 
         # ----- 1) Marker Feature Extraction -----
-        # Input: [marker_value, log_coverage]
         features_input = torch.stack([marker_values_valid, log_coverage_valid], dim=1)  # [N, 2]
         features_valid = self.marker_feature_extractor(features_input)  # [N, feature_dim]
 
@@ -480,17 +487,23 @@ class CellTypeDeconvolutionModel(nn.Module):
         # ----- 5) Proportion Prediction with integrated presence -----
         logits = self.encoder(combined_features)
         celltype_props_raw = F.relu(logits)
-        
         celltype_props_gated = self.apply_presence_gating(celltype_props_raw, presence_probs, coverage)
-        
         sum_props = torch.sum(celltype_props_gated, dim=1, keepdim=True)
         celltype_props = celltype_props_gated / (sum_props + 1e-8)
+
+        # Debug: Check for nan in celltype_props
+        if torch.isnan(celltype_props).any():
+            print("Warning: celltype_props contains nan values")
 
         # ----- 6) Marker reconstruction -----
         reconstructed = self.decoder(celltype_props)
 
-        return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
+        # Debug: Check for nan in reconstructed
+        if torch.isnan(reconstructed).any():
+            print("Warning: reconstructed contains nan values")
 
+        return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
+    
     def predict_with_adaptive_threshold(self, marker_values, coverage, base_threshold=0.5):
         logits, _ = self.forward(marker_values, coverage)
         probabilities = torch.sigmoid(logits).squeeze(-1)
