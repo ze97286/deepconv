@@ -771,12 +771,15 @@ def eval_admixtures_nnls(atlas_path, size="low"):
     suffix = f"_{size}/"
     
     pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
+    pat_dir_tcells_with_heart = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}heart/"
     pat_dir_oac = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
 
     y_true_df, predictions_df, y_dilutions= nnls_estimate(atlas_path, pat_dir_tcells, tcell_dilutions)
     plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_tcells+"nnls/")
     y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir_oac, oac_dilutions)
     plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_oac+"nnls/")
+    y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir_tcells_with_heart, tcell_dilutions)
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_tcells_with_heart+"nnls/")
 
 
 def eval_admixtures(model_name,presence_model_name, size="low"):
@@ -797,11 +800,11 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
         use_low_depth: Whether to use low depth data
     """
     suffix = f"_{size}/"
-        
+
     deepconv_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
     deepconv_atlas = pd.read_csv(deepconv_atlas_path, sep="\t")
     cell_types = list(deepconv_atlas.columns[8:])
-    
+
     target_ids = deepconv_atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
     # Create model
     model = CellTypeDeconvolutionModel(
@@ -810,20 +813,21 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
         target_ids=target_ids,
         presence_models_dir=f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{presence_model_name}",
     )
-    
+
     # Load checkpoint
     best_model = "best_model.pt"
     checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/{best_model}")
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    
+
     # Print the 'best_threshold' if it exists in the checkpoint
     if 'best_threshold' in checkpoint:
         print(f"Model's best threshold from training: {checkpoint['best_threshold']}")
-    
+
     # Evaluation paths
     deepconv_eval_pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
     deepconv_eval_pat_dir_oac = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
-    
+    deepconv_eval_pat_dir_tcells_with_heart = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}heart/"
+
     # Run evaluations
     print("\n===== EVALUATING T-CELLS =====")
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(
@@ -833,7 +837,7 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
         y_true_df, predictions_df, y_dilutions['dilution'], 
         deepconv_eval_pat_dir_tcells+f"{model_name}/"
     )
-    
+
     print("\n===== EVALUATING OAC =====")
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(
         deepconv_atlas_path, deepconv_eval_pat_dir_oac, model, oac_dilutions
@@ -843,6 +847,14 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
         deepconv_eval_pat_dir_oac+f"{model_name}/"
     )
 
+    print("\n===== EVALUATING heart =====")
+    y_true_df, predictions_df, y_dilutions = deepconv_estimate(
+        deepconv_atlas_path, deepconv_eval_pat_dir_tcells_with_heart, model, tcell_dilutions
+    )
+    plot_deconvolution_evaluation(
+        y_true_df, predictions_df, y_dilutions['dilution'], 
+        deepconv_eval_pat_dir_tcells_with_heart+f"{model_name}/"
+    )
 
 # 3
 def run_oac_analysis(model_name, presence_model_name):
