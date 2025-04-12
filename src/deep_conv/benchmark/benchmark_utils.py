@@ -936,7 +936,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ],
             vertical_spacing=0.03,
             horizontal_spacing=0.08,
-            row_heights=[0.2, 0.15, 0.15, 0.15, 0.15, 0.2]
+            row_heights=[0.2, 0.15, 0.15, 0.15, 0.15, 0.3]
         )
         
         # --------------------- Row 1, Col 1: Heatmap --------------------- #
@@ -950,7 +950,12 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 x=np.arange(len(sampled_indices)),
                 y=sorted_cell_types,
                 colorscale='RdBu_r',
-                colorbar=dict(title='Proportion', len=0.2, y=0.9),
+                colorbar=dict(
+                    title='Proportion',
+                    len=0.2,
+                    y=0.9,
+                    yanchor="middle"
+                ),
                 zmin=0,
                 zmax=0.4
             ),
@@ -1195,9 +1200,9 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 y=[f"{conc_bins[i]:.4f}-{conc_bins[i+1]:.4f}" for i in range(len(conc_bins)-1)],
                 colorscale='RdBu_r',
                 colorbar=dict(
-                    title='Z-score', 
-                    len=0.2, 
-                    y=0.35,
+                    title='Z-score',
+                    len=0.2,
+                    y=0.225,
                     yanchor="middle",
                     title_side="right"
                 ),
@@ -1280,10 +1285,10 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         
         fig.add_annotation(
             x=0.5,
-            y=0.3,
+            y=0.1,
             text="<br>".join(summary_text),
             showarrow=False,
-            font=dict(size=12),
+            font=dict(size=10),
             align="center",
             bordercolor="black",
             borderwidth=1,
@@ -1331,7 +1336,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         
         # --------------------- Layout -------------------- #
         fig.update_layout(
-            height=2800,
+            height=3000,
             width=1600,
             title=f"Cell Type Analysis: {cell_type} (R²={r2:.3f}, Pearson r={pearson_r:.3f})",
             legend=dict(
