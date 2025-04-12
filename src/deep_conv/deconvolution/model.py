@@ -351,8 +351,9 @@ class CellTypeDeconvolutionModel(nn.Module):
 
     def apply_presence_gating(self, props, probs, coverage):
         mean_coverage = coverage.mean(dim=1)  # [B]
-        # Normalize mean_coverage to [0, 1]
-        mean_coverage_normalized = mean_coverage / self.max_coverage  # [B]
+        log_mean_coverage = torch.log(mean_coverage + 1)  # [B]
+        max_log_coverage = torch.log(self.max_coverage + 1)  # max_coverage=100
+        mean_coverage_normalized = log_mean_coverage / max_log_coverage  # [B]
         coverage_adjustment = torch.clamp((0.5 - mean_coverage_normalized) * 0.4, -0.1, 0.2)  # [B]
         adjusted_thresholds = self.presence_thresholds.unsqueeze(0) + coverage_adjustment.unsqueeze(1)  # [B, C]
         scaling = torch.sigmoid(
@@ -362,7 +363,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         sum_props = torch.sum(scaled_props, dim=1, keepdim=True) + 1e-8
         gated_props = scaled_props / sum_props
         return gated_props
-
+    
     def predict_presence_with_separate_models(self, marker_values, coverage):
         B = marker_values.shape[0]
         C = self.num_celltypes
