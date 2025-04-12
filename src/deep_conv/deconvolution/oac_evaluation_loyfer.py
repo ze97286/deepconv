@@ -536,7 +536,7 @@ def debug_model_predictions(model, X_val, coverage_val, y_true_df, threshold=0.0
         return props, presence_probs
 
 
-def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, min_cpgs=4, threads=10):
+def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions):
     """
     Consistent evaluation function that matches training behavior.
     

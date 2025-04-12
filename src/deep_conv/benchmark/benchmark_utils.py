@@ -804,7 +804,7 @@ def evaluate_cell_type_performance(y_true, predictions, intended_dilutions):
     return pd.DataFrame(metrics)
 
 
-def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions, output_path, samples_per_dilution=1000):
+def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions, output_path, samples_per_dilution=1000, alpha_threshold=1e-4):
     """
     Create comprehensive evaluation plots with advanced metrics for methylation deconvolution.
     
@@ -814,6 +814,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         intended_dilutions: Series with intended dilution values for each sample
         output_path: Directory to save output files
         samples_per_dilution: Number of samples to use per dilution in heatmap
+        alpha_threshold: Threshold below which predictions are set to 0 (default: 1e-4)
     """
     import os
     import numpy as np
@@ -843,16 +844,20 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
     results = {}
     
     for cell_type in significant_cell_types:
-        # Calculate overall metrics
+        # Extract values
         y_true_vals = y_true_df[cell_type].values
         y_pred_vals = predictions_df[cell_type].values
         
-        # Calculate basic metrics
-        r2 = r2_score(y_true_vals, y_pred_vals)
-        pearson_r = np.corrcoef(y_true_vals, y_pred_vals)[0, 1]
-        spearman_r = spearmanr(y_true_vals, y_pred_vals)[0]
-        mae = np.mean(np.abs(y_true_vals - y_pred_vals))
-        rmse = np.sqrt(np.mean(np.square(y_true_vals - y_pred_vals)))
+        # Apply model's thresholding behavior (alpha < threshold set to 0)
+        y_pred_vals_thresholded = y_pred_vals.copy()
+        y_pred_vals_thresholded[y_pred_vals_thresholded < alpha_threshold] = 0
+        
+        # Calculate overall metrics
+        r2 = r2_score(y_true_vals, y_pred_vals_thresholded)
+        pearson_r = np.corrcoef(y_true_vals, y_pred_vals_thresholded)[0, 1]
+        spearman_r = spearmanr(y_true_vals, y_pred_vals_thresholded)[0]
+        mae = np.mean(np.abs(y_true_vals - y_pred_vals_thresholded))
+        rmse = np.sqrt(np.mean(np.square(y_true_vals - y_pred_vals_thresholded)))
         
         # Calculate concentration-stratified MAE
         conc_strata = [
@@ -868,62 +873,47 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             mask = (y_true_vals >= low) & (y_true_vals < high)
             if np.any(mask):
                 cs_mae[name] = {
-                    'mae': np.mean(np.abs(y_true_vals[mask] - y_pred_vals[mask])),
+                    'mae': np.mean(np.abs(y_true_vals[mask] - y_pred_vals_thresholded[mask])),
                     'count': np.sum(mask)
                 }
         
-        # Detection performance metrics for different thresholds
-        detection_thresholds = [0.001, 0.005, 0.01]
-        detection_metrics = {}
+        # Calculate magnitude-sensitive metrics for different thresholds
+        detection_thresholds = [0.001, 0.005, 0.01, 0.05, 0.10]
         
-        for threshold in detection_thresholds:
-            true_positive = np.sum((y_true_vals >= threshold) & (y_pred_vals >= threshold))
-            false_positive = np.sum((y_true_vals < threshold) & (y_pred_vals >= threshold))
-            true_negative = np.sum((y_true_vals < threshold) & (y_pred_vals < threshold))
-            false_negative = np.sum((y_true_vals >= threshold) & (y_pred_vals < threshold))
-            
-            sensitivity = true_positive / (true_positive + false_negative) if (true_positive + false_negative) > 0 else 0
-            specificity = true_negative / (true_negative + false_positive) if (true_negative + false_positive) > 0 else 0
-            ppv = true_positive / (true_positive + false_positive) if (true_positive + false_positive) > 0 else 0
-            f1 = 2 * sensitivity * ppv / (sensitivity + ppv) if (sensitivity + ppv) > 0 else 0
-            
-            detection_metrics[f'threshold_{threshold:.3f}'] = {
-                'sensitivity': sensitivity,
-                'specificity': specificity,
-                'precision': ppv,
-                'f1_score': f1,
-                'tp': true_positive,
-                'fp': false_positive,
-                'tn': true_negative,
-                'fn': false_negative
-            }
+        def calculate_magnitude_metrics(y_true_vals, y_pred_vals, thresholds):
+            magnitude_metrics = {}
+            for threshold in thresholds:
+                mask = (y_true_vals >= threshold * 0.5) & (y_true_vals <= threshold * 2)
+                if np.sum(mask) == 0:
+                    magnitude_metrics[f'threshold_{threshold:.3f}'] = {
+                        'median_rel_error': np.nan,
+                        'within_10pct': np.nan,
+                        'n_samples': 0
+                    }
+                    continue
+                y_true_subset = y_true_vals[mask]
+                y_pred_subset = y_pred_vals[mask]
+                rel_errors = 2 * (y_pred_subset - y_true_subset) / (y_pred_subset + y_true_subset + 1e-6)
+                median_rel_error = np.median(rel_errors) * 100
+                within_10pct = np.mean(np.abs(rel_errors) <= 0.1) * 100
+                magnitude_metrics[f'threshold_{threshold:.3f}'] = {
+                    'median_rel_error': median_rel_error,
+                    'within_10pct': within_10pct,
+                    'n_samples': np.sum(mask)
+                }
+            return magnitude_metrics
         
-        # Calculate limit of detection (minimum concentration reliably detected)
-        # We'll define "reliable detection" as 95% sensitivity
-        min_detected = {}
-        conc_percentiles = np.percentile(y_true_vals[y_true_vals > 0], [10, 25, 50, 75, 90, 95])
-        for percentile, conc in zip([10, 25, 50, 75, 90, 95], conc_percentiles):
-            y_true_bin = y_true_vals >= conc
-            y_pred_bin = y_pred_vals >= conc
-            
-            tp = np.sum(y_true_bin & y_pred_bin)
-            fn = np.sum(y_true_bin & ~y_pred_bin)
-            sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
-            
-            min_detected[f'p{percentile}'] = {
-                'concentration': conc,
-                'sensitivity': sensitivity
-            }
-            
+        magnitude_metrics = calculate_magnitude_metrics(y_true_vals, y_pred_vals_thresholded, detection_thresholds)
+        
         # Create ROC curve for detection tasks
         detection_threshold = 0.005
         y_true_binary = y_true_vals >= detection_threshold
-        fpr, tpr, _ = roc_curve(y_true_binary, y_pred_vals)
+        fpr, tpr, _ = roc_curve(y_true_binary, y_pred_vals_thresholded)
         roc_auc = auc(fpr, tpr)
         
         # Precision-Recall curve
-        precision, recall, _ = precision_recall_curve(y_true_binary, y_pred_vals)
-        avg_precision = average_precision_score(y_true_binary, y_pred_vals)
+        precision, recall, _ = precision_recall_curve(y_true_binary, y_pred_vals_thresholded)
+        avg_precision = average_precision_score(y_true_binary, y_pred_vals_thresholded)
         
         # Create extended subplot layout
         fig = make_subplots(
@@ -966,69 +956,45 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             row=1, col=1
         )
         
-        # -------- Row 1, Col 2: Detection Performance --------- #
-        # Bar chart of sensitivity/specificity/precision for different thresholds
-        detection_thresholds = [0.001, 0.005, 0.01, 0.05, 0.10]  # Added 5% and 10% thresholds
+        # -------- Row 1, Col 2: Detection Performance Metrics --------- #
         threshold_values = []
-        sensitivity_values = []
-        specificity_values = []
-        precision_values = []
-        f1_values = []
+        median_rel_error_values = []
+        within_10pct_values = []
         
         for threshold in detection_thresholds:
-            # Calculate metrics for this threshold if not already in detection_metrics
-            if f'threshold_{threshold:.3f}' not in detection_metrics:
-                true_positive = np.sum((y_true_vals >= threshold) & (y_pred_vals >= threshold))
-                false_positive = np.sum((y_true_vals < threshold) & (y_pred_vals >= threshold))
-                true_negative = np.sum((y_true_vals < threshold) & (y_pred_vals < threshold))
-                false_negative = np.sum((y_true_vals >= threshold) & (y_pred_vals < threshold))
-                
-                sensitivity = true_positive / (true_positive + false_negative) if (true_positive + false_negative) > 0 else 0
-                specificity = true_negative / (true_negative + false_positive) if (true_negative + false_positive) > 0 else 0
-                ppv = true_positive / (true_positive + false_positive) if (true_positive + false_positive) > 0 else 0
-                f1 = 2 * sensitivity * ppv / (sensitivity + ppv) if (sensitivity + ppv) > 0 else 0
-                
-                detection_metrics[f'threshold_{threshold:.3f}'] = {
-                    'sensitivity': sensitivity,
-                    'specificity': specificity,
-                    'precision': ppv,
-                    'f1_score': f1,
-                    'tp': true_positive,
-                    'fp': false_positive,
-                    'tn': true_negative,
-                    'fn': false_negative
-                }
-            
-            metrics = detection_metrics[f'threshold_{threshold:.3f}']
+            metrics = magnitude_metrics[f'threshold_{threshold:.3f}']
             threshold_values.append(f"{threshold*100:.1f}%")
-            sensitivity_values.append(metrics['sensitivity'])
-            specificity_values.append(metrics['specificity'])
-            precision_values.append(metrics['precision'])
-            f1_values.append(metrics['f1_score'])
+            median_rel_error_values.append(metrics['median_rel_error'])
+            within_10pct_values.append(metrics['within_10pct'])
         
-        for name, values, color in [
-            ("Sensitivity", sensitivity_values, "green"),
-            ("Specificity", specificity_values, "blue"),
-            ("Precision", precision_values, "red"),
-            ("F1 Score", f1_values, "purple")
-        ]:
-            fig.add_trace(
-                go.Bar(
-                    x=threshold_values,
-                    y=values,
-                    name=name,
-                    marker_color=color,
-                    legendgroup="detection_metrics",
-                    legendgrouptitle_text="Detection Metrics"
-                ),
-                row=1, col=2
-            )
+        fig.add_trace(
+            go.Bar(
+                x=threshold_values,
+                y=median_rel_error_values,
+                name="Median Relative Error (%)",
+                marker_color="blue",
+                legendgroup="magnitude_metrics",
+                legendgrouptitle_text="Magnitude Metrics"
+            ),
+            row=1, col=2
+        )
+        
+        fig.add_trace(
+            go.Bar(
+                x=threshold_values,
+                y=within_10pct_values,
+                name="% Within ±10% Rel Error",
+                marker_color="green",
+                legendgroup="magnitude_metrics"
+            ),
+            row=1, col=2
+        )
         
         # ----------------- Row 2, Col 1: Predicted vs. True ---------------- #
         fig.add_trace(
             go.Scatter(
                 x=y_true_vals * 100,  # Convert to percentage
-                y=y_pred_vals * 100,  # Convert to percentage
+                y=y_pred_vals_thresholded * 100,  # Convert to percentage
                 mode='markers',
                 marker=dict(
                     color=np.log10(intended_dilutions),
@@ -1051,7 +1017,8 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         )
         
         # Perfect prediction line - adjust for log scale display
-        min_val = max(y_true_vals.min() * 100, 0.001)  # Convert to percentage
+        non_zero_vals = y_true_vals[y_true_vals > 0]
+        min_val = max(non_zero_vals.min() * 100 if len(non_zero_vals) > 0 else 1e-6, 0.001)  # Convert to percentage
         max_val = y_true_vals.max() * 100  # Convert to percentage
         fig.add_trace(
             go.Scatter(
@@ -1065,17 +1032,16 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             row=2, col=1
         )
         
-        # Update axis settings to use log scale
         fig.update_xaxes(
             title="True Value (%)", 
-            type="log",  # Ensure log scale is used
+            type="log",
             row=2, col=1,
             ticktext=[f"{x:.3g}%" for x in [0.001, 0.01, 0.1, 1, 10]],
             tickvals=[0.001, 0.01, 0.1, 1, 10]
         )
         fig.update_yaxes(
             title="Predicted Value (%)", 
-            type="log",  # Ensure log scale is used
+            type="log",
             row=2, col=1,
             ticktext=[f"{x:.3g}%" for x in [0.001, 0.01, 0.1, 1, 10]],
             tickvals=[0.001, 0.01, 0.1, 1, 10]
@@ -1104,12 +1070,12 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         )
         
         # -------- Row 3, Col 1: Performance Metrics by Dilution --------- #
-        metrics_df = calculate_metrics_by_dilution(y_true_vals, y_pred_vals, intended_dilutions)
+        metrics_df = calculate_metrics_by_dilution(y_true_vals, y_pred_vals_thresholded, intended_dilutions)
         metrics_df = metrics_df.sort_values('dilution', ascending=True)
         
         fig.add_trace(
             go.Scatter(
-                x=metrics_df['dilution'],
+                x=metrics_df['dilution'] * 100,  # Convert to percentage
                 y=metrics_df['within_10pct'],
                 mode='lines+markers',
                 name='% Within ±10%',
@@ -1122,7 +1088,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         
         fig.add_trace(
             go.Scatter(
-                x=metrics_df['dilution'],
+                x=metrics_df['dilution'] * 100,  # Convert to percentage
                 y=metrics_df['median_rel_error'],
                 error_y=dict(
                     type='data',
@@ -1138,7 +1104,6 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             row=3, col=1
         )
         
-        # Add reference lines for row=3, col=1
         fig.add_hline(y=0, line_dash="dot", line_color="gray", row=3, col=1)
         fig.add_hline(y=20, line_dash="dot", line_color="gray", row=3, col=1)
         fig.add_hline(y=-20, line_dash="dot", line_color="gray", row=3, col=1)
@@ -1157,7 +1122,6 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             row=3, col=2
         )
         
-        # Add ROC reference line
         fig.add_trace(
             go.Scatter(
                 x=[0, 1],
@@ -1182,7 +1146,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             if np.any(mask):
                 fig.add_trace(
                     go.Box(
-                        y=2 * (y_pred_vals[mask] - y_true_vals[mask]) / (y_pred_vals[mask] + y_true_vals[mask] + 1e-6) * 100,
+                        y=2 * (y_pred_vals_thresholded[mask] - y_true_vals[mask]) / (y_pred_vals_thresholded[mask] + y_true_vals[mask] + 1e-6) * 100,
                         name=conc_type,
                         legendgroup="concentration",
                         legendgrouptitle_text="Concentration"
@@ -1204,19 +1168,17 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         )
         
         # --------- Row 5, Col 1: Bias-Variance Heatmap ---------- #
-        # Create a 2D heatmap showing error distribution by concentration level
-        conc_bins = np.logspace(-4, -1, 20)  # 20 bins from 0.0001 to 0.1
-        error_matrix = np.zeros((len(conc_bins)-1, 3))  # 3 columns: mean error, abs error, variance
+        conc_bins = np.logspace(-4, -1, 20)
+        error_matrix = np.zeros((len(conc_bins)-1, 3))
         
         for i in range(len(conc_bins)-1):
             mask = (y_true_vals >= conc_bins[i]) & (y_true_vals < conc_bins[i+1])
             if np.sum(mask) > 0:
-                errors = y_pred_vals[mask] - y_true_vals[mask]
-                error_matrix[i, 0] = np.mean(errors)  # Mean error (bias)
-                error_matrix[i, 1] = np.mean(np.abs(errors))  # Mean absolute error
-                error_matrix[i, 2] = np.var(errors)  # Error variance
+                errors = y_pred_vals_thresholded[mask] - y_true_vals[mask]
+                error_matrix[i, 0] = np.mean(errors)
+                error_matrix[i, 1] = np.mean(np.abs(errors))
+                error_matrix[i, 2] = np.var(errors)
         
-        # Convert to z-scores for better color visualization
         for j in range(3):
             if np.std(error_matrix[:, j]) > 0:
                 error_matrix[:, j] = (error_matrix[:, j] - np.mean(error_matrix[:, j])) / np.std(error_matrix[:, j])
@@ -1230,7 +1192,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 colorbar=dict(
                     title='Z-score', 
                     len=0.2, 
-                    y=0.35,  # Positioned lower to avoid overlap
+                    y=0.35,
                     yanchor="middle",
                     title_side="right"
                 ),
@@ -1241,8 +1203,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         )
         
         # --------- Row 5, Col 2: Error Distribution Histogram ---------- #
-        # Histogram of prediction errors
-        errors = y_pred_vals - y_true_vals
+        errors = y_pred_vals_thresholded - y_true_vals
         
         fig.add_trace(
             go.Histogram(
@@ -1254,55 +1215,71 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             row=5, col=2
         )
         
-        # Add reference line for zero error
         fig.add_vline(x=0, line_dash="dash", line_color="red", row=5, col=2)
         
         # --------- Row 6: Clinical Relevance Score and Summary Metrics ---------- #
-        # Create a summary text display instead of a table (which isn't compatible with xy subplots)
-        # Calculate a composite Clinical Relevance Score (CRS)
-        # Higher is better, weight components by clinical importance
-        weights = {
-            '0.1-1%': 2.0,  # Medium concentration weight
-            '1-5%': 1.5,    # Medium-high concentration weight
-            '5-10%': 1.0,   # High concentration weight
-            '>10%': 0.8,    # Very high concentration weight
-            'sensitivity': 2.0,  # Detection capability weight
-            'specificity': 1.0   # Avoid false positives weight
-        }
+        # Define CRS weights based on cell type
+        if "T-cells" in cell_type:
+            weights = {
+                '0.1-1%': 3.0,
+                '1-5%': 1.5,
+                '5-10%': 1.0,
+                '>10%': 0.5,
+                'within_10pct': 2.0  # Replace 'sensitivity' with magnitude metric
+            }
+        else:
+            weights = {
+                '0.1-1%': 2.0,
+                '1-5%': 1.5,
+                '5-10%': 1.0,
+                '>10%': 0.8,
+                'within_10pct': 2.0
+            }
         
         crs_components = []
         
         # Add MAE component (lower is better, so use 1/MAE)
         for range_name, data in cs_mae.items():
             if range_name in weights:
-                # Normalize MAE (lower is better)
-                norm_score = 1.0 / (1.0 + 10*data['mae'])  # Scaled to be ~0-1
+                norm_score = 1.0 / (1.0 + 10*data['mae'])
                 crs_components.append(weights[range_name] * norm_score)
         
-        # Add detection component (higher is better)
-        sens = detection_metrics['threshold_0.005']['sensitivity']
-        spec = detection_metrics['threshold_0.005']['specificity']
-        crs_components.append(weights['sensitivity'] * sens)
-        crs_components.append(weights['specificity'] * spec)
+        # Add magnitude component (higher is better)
+        within_10pct = magnitude_metrics['threshold_0.005']['within_10pct'] / 100
+        crs_components.append(weights['within_10pct'] * within_10pct)
         
         # Calculate final CRS (normalized to 0-100)
         crs = 100 * sum(crs_components) / sum(weights.values())
         
-        # Create summary text with added 5% and 10% thresholds
+        # Create summary text with magnitude metrics and dilution-level errors
         summary_text = [
             f"<b>Summary Metrics for {cell_type}</b>",
             f"R²: {r2:.3f} | Pearson r: {pearson_r:.3f} | Spearman r: {spearman_r:.3f}",
             f"MAE: {mae:.5f} | RMSE: {rmse:.5f}",
-            f"ROC-AUC: {roc_auc:.3f} | PR-AUC: {avg_precision:.3f}",
-            f"Detection at 0.1%: {detection_metrics['threshold_0.001']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.001']['specificity']:.3f} spec",
-            f"Detection at 0.5%: {detection_metrics['threshold_0.005']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.005']['specificity']:.3f} spec",
-            f"Detection at 1.0%: {detection_metrics['threshold_0.010']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.010']['specificity']:.3f} spec",
-            f"Detection at 5.0%: {detection_metrics['threshold_0.050']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.050']['specificity']:.3f} spec",
-            f"Detection at 10.0%: {detection_metrics['threshold_0.100']['sensitivity']:.3f} sens, {detection_metrics['threshold_0.100']['specificity']:.3f} spec",
-            f"<b>Clinical Relevance Score: {crs:.1f}/100</b>"
+            f"ROC-AUC: {roc_auc:.3f} | PR-AUC: {avg_precision:.3f}"
         ]
         
-        # Add summary text annotation in a dedicated subplot cell
+        # Add magnitude metrics
+        for threshold in detection_thresholds:
+            metrics = magnitude_metrics[f'threshold_{threshold:.3f}']
+            summary_text.append(
+                f"Error at {threshold*100:.1f}%: {metrics['median_rel_error']:.2f}% rel err, {metrics['within_10pct']:.1f}% within ±10%"
+            )
+        
+        # Add MAE and median relative error at key dilution levels
+        dilution_metrics = calculate_metrics_by_dilution(y_true_vals, y_pred_vals_thresholded, intended_dilutions)
+        key_dilutions = [0.0001, 0.001, 0.01, 0.1]  # 0.01%, 0.1%, 1%, 10%
+        for dilution in key_dilutions:
+            dil_metrics = dilution_metrics[dilution_metrics['dilution'] == dilution]
+            if not dil_metrics.empty:
+                mae_at_dilution = dil_metrics['mae'].iloc[0]
+                median_rel_error = dil_metrics['median_rel_error'].iloc[0]
+                summary_text.append(
+                    f"MAE at {dilution*100:.2f}%: {mae_at_dilution:.5f} | Median Rel Error: {median_rel_error:.2f}%"
+                )
+        
+        summary_text.append(f"<b>Clinical Relevance Score: {crs:.1f}/100</b>")
+        
         fig.add_annotation(
             x=0.5,
             y=0.5,
@@ -1320,42 +1297,35 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         )
         
         # --------------------- Axis Updates ---------------------- #
-        # Row 1: Heatmap & Detection Performance
         fig.update_xaxes(showticklabels=False, title="Samples", row=1, col=1)
         fig.update_yaxes(title="Cell Types", row=1, col=1)
         fig.update_xaxes(title="Detection Threshold", row=1, col=2)
-        fig.update_yaxes(title="Score (0-1)", range=[0, 1], row=1, col=2)
+        fig.update_yaxes(title="Error (%) / Proportion (%)", row=1, col=2)
         
-        # Row 2: Predicted vs. True & Concentration-Stratified MAE
-        # (Axis formatting now handled separately above)
         fig.update_xaxes(title="Concentration Range", row=2, col=2)
         fig.update_yaxes(title="Mean Absolute Error", row=2, col=2)
         
-        # Row 3: Performance Metrics & ROC Curve
         fig.update_xaxes(
             title="Intended Dilution (%)", 
             type="log", 
             row=3, col=1,
             ticktext=[f"{x:.3g}%" for x in [0.001, 0.01, 0.1, 1, 10]],
-            tickvals=[0.001, 0.01, 0.1, 1, 10]
+            tickvals=[0.00001, 0.0001, 0.001, 0.01, 0.1]
         )
         fig.update_yaxes(title="Percentage / Error", row=3, col=1)
         fig.update_xaxes(title="False Positive Rate", range=[0, 1], row=3, col=2)
         fig.update_yaxes(title="True Positive Rate", range=[0, 1], row=3, col=2)
         
-        # Row 4: Error by Concentration & PR Curve
         fig.update_xaxes(title="Concentration Range", row=4, col=1)
         fig.update_yaxes(title="Relative Error (%)", row=4, col=1)
         fig.update_xaxes(title="Recall", range=[0, 1], row=4, col=2)
         fig.update_yaxes(title="Precision", range=[0, 1], row=4, col=2)
         
-        # Row 5: Bias-Variance & Error Distribution
         fig.update_xaxes(title="Error Component", row=5, col=1)
         fig.update_yaxes(title="Concentration Range", row=5, col=1)
         fig.update_xaxes(title="Prediction Error", row=5, col=2)
         fig.update_yaxes(title="Count", row=5, col=2)
         
-        # Row 6: Summary Metrics
         fig.update_xaxes(title="", showticklabels=False, row=6, col=1)
         fig.update_yaxes(title="", showticklabels=False, row=6, col=1)
         fig.update_xaxes(title="", showticklabels=False, row=6, col=2)
@@ -1363,33 +1333,32 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         
         # --------------------- Layout -------------------- #
         fig.update_layout(
-            height=2600,  # Increased height for dedicated summary section
+            height=2600,
             width=1600,
             title=f"Cell Type Analysis: {cell_type} (R²={r2:.3f}, Pearson r={pearson_r:.3f})",
-            # Separate legends for different plot sections
             legend=dict(
-                y=0.99, x=1.15,  # Main legend position
+                y=0.99, x=1.15,
                 title="Main Legend",
                 bgcolor="rgba(255,255,255,0.8)",
                 bordercolor="Gray",
                 borderwidth=1
             ),
             legend2=dict(
-                y=0.72, x=1.15,  # Detection metrics legend position
-                title="Detection Metrics",
+                y=0.72, x=1.15,
+                title="Magnitude Metrics",
                 bgcolor="rgba(255,255,255,0.8)",
                 bordercolor="Gray",
                 borderwidth=1
             ),
             legend3=dict(
-                y=0.48, x=1.15,  # Error metrics legend position
+                y=0.48, x=1.15,
                 title="Error Metrics",
                 bgcolor="rgba(255,255,255,0.8)",
                 bordercolor="Gray",
                 borderwidth=1
             ),
             legend4=dict(
-                y=0.24, x=1.15,  # ROC/PR curves legend position
+                y=0.24, x=1.15,
                 title="AUROC/PR Metrics",
                 bgcolor="rgba(255,255,255,0.8)", 
                 bordercolor="Gray",
@@ -1397,7 +1366,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             )
         )
         
-        # Save results and return
+        # Save results
         html_file = os.path.join(output_path, f"{cell_type}_evaluation.html")
         csv_file = os.path.join(output_path, f"{cell_type}_metrics.csv")
         print(f"Saving {html_file}")
@@ -1417,9 +1386,8 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 'clinical_relevance_score': crs
             },
             'cs_mae': cs_mae,
-            'detection_metrics': detection_metrics,
-            'metrics_by_dilution': metrics_df,
-            'limit_of_detection': min_detected
+            'magnitude_metrics': magnitude_metrics,
+            'metrics_by_dilution': metrics_df
         }
     
     # Create summary CSV with key metrics for all cell types
@@ -1431,13 +1399,11 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             'pearson_r': metrics['overall_metrics']['pearson_r'],
             'mae': metrics['overall_metrics']['mae'],
             'roc_auc': metrics['overall_metrics']['roc_auc'],
-            'sensitivity_0.5pct': metrics['detection_metrics']['threshold_0.005']['sensitivity'],
-            'precision_0.5pct': metrics['detection_metrics']['threshold_0.005']['precision'],
-            'f1_0.5pct': metrics['detection_metrics']['threshold_0.005']['f1_score'],
+            'within_10pct_0.5pct': metrics['magnitude_metrics']['threshold_0.005']['within_10pct'],
+            'median_rel_error_0.5pct': metrics['magnitude_metrics']['threshold_0.005']['median_rel_error'],
             'clinical_relevance_score': metrics['overall_metrics']['clinical_relevance_score']
         }
         
-        # Add MAE by concentration range
         for range_name in ['Low (<0.1%)', 'Med (0.1-1%)', 'Med-High (1-5%)', 'High (5-10%)', 'Very High (≥10%)']:
             if range_name in metrics['cs_mae']:
                 row[f'mae_{range_name.split()[0].lower()}'] = metrics['cs_mae'][range_name]['mae']
@@ -1446,7 +1412,6 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 
         summary_rows.append(row)
     
-    # Save summary as CSV
     summary_df = pd.DataFrame(summary_rows)
     summary_df.to_csv(os.path.join(output_path, "all_cell_types_summary.csv"), index=False)
     
