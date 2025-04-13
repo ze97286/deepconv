@@ -45,16 +45,17 @@ def loss_fn(
     valid_mask: torch.Tensor,
     presence_probs: torch.Tensor,
     presence_logits: torch.Tensor,
-    alpha: float = 0.98,
+    alpha: float = 0.58,
     beta: float = 0.02,
-    gamma: float = 0.02,
+    gamma: float = 0.3,
     presence_threshold: float = 0.01,
     low_snr_indices=[11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
     focal_loss_weight: float = 0.0,
-    compute_diagnostics: bool = True
+    compute_diagnostics: bool = True,
+    corr_weight: float = 0.1
 ):
-    # Debug: Check for nan or inf in inputs
+    # Sanitize coverage
     if torch.isnan(coverage).any() or torch.isinf(coverage).any():
         print("Warning: coverage contains nan or inf values")
     if (coverage < 0).any():
@@ -68,9 +69,6 @@ def loss_fn(
         print("Warning: reconstructed contains nan or inf values")
     if torch.isnan(presence_probs).any() or torch.isinf(presence_probs).any():
         print("Warning: presence_probs contains nan or inf values")
-
-    # Sanitize marker_values
-    marker_values = torch.nan_to_num(marker_values, nan=0.0)
 
     # Ensure valid_mask is False for nan values in coverage
     valid_mask = (coverage > 0) & (~torch.isnan(coverage))
@@ -94,34 +92,21 @@ def loss_fn(
     low_snr_under_penalty = low_snr_mask * underestimation * 1.2
     weighted_errors = importance_weights * (cell_errors + underestimation_penalty + low_snr_under_penalty)
     loss_props = weighted_errors.mean()
-    
-    # Reconstruction Loss with detailed debug
+
+    # Reconstruction Loss with explicit nan handling
     errors = torch.abs(marker_values - reconstructed)
-    if torch.isnan(errors).any() or torch.isinf(errors).any():
-        print("Warning: errors contains nan or inf values")
-        print(f"marker_values min/max: {marker_values.min().item()}/{marker_values.max().item()}")
-        print(f"reconstructed min/max: {reconstructed.min().item()}/{reconstructed.max().item()}")
-
+    errors = torch.where(valid_mask, errors, torch.zeros_like(errors))
     weighted_errors = valid_mask * coverage * errors
-    if torch.isnan(weighted_errors).any() or torch.isinf(weighted_errors).any():
-        print("Warning: weighted_errors contains nan or inf values")
-        print(f"valid_mask min/max: {valid_mask.min().item()}/{valid_mask.max().item()}")
-        print(f"coverage min/max: {coverage.min().item()}/{coverage.max().item()}")
-
     denominator = torch.sum(valid_mask * coverage) + 1e-8
-    if torch.isnan(denominator) or torch.isinf(denominator):
-        print("Warning: denominator is nan or inf")
-        print(f"valid_mask * coverage min/max: {(valid_mask * coverage).min().item()}/{(valid_mask * coverage).max().item()}")
-
     if denominator < 1e-7:
         recon_loss = torch.tensor(0.0, device=device)
     else:
         recon_loss = torch.sum(weighted_errors) / denominator
-    
+
     # Sparsity Regularisation
     sparsity_penalty = torch.mean(torch.abs(pred_props))
-    
-    # Focal Loss for Presence Detection (optional)
+
+    # Focal Loss for Presence Detection
     presence_loss = 0.0
     if focal_loss_weight > 0:
         presence_probs = torch.clamp(presence_probs, 0.0, 1.0)
@@ -135,14 +120,34 @@ def loss_fn(
             fp_weight=1.5,
             class_weights=None
         )
-    
+
+    # General Correlation Loss (average correlation across all cell types)
+    corr_loss = 0.0
+    num_cell_types = pred_props.shape[1]
+    total_corr = 0.0
+    for i in range(num_cell_types):
+        true_vals = true_props[:, i]
+        pred_vals = pred_props[:, i]
+        true_mean = torch.mean(true_vals)
+        pred_mean = torch.mean(pred_vals)
+        true_centered = true_vals - true_mean
+        pred_centered = pred_vals - pred_mean
+        cov = torch.mean(true_centered * pred_centered)
+        true_std = torch.std(true_vals, unbiased=False)
+        pred_std = torch.std(pred_vals, unbiased=False)
+        corr = cov / (true_std * pred_std + 1e-8)
+        total_corr += corr
+    avg_corr = total_corr / num_cell_types
+    corr_loss = -avg_corr
+
     # Combine All Terms
-    total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss
-    
+    total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss + corr_weight * corr_loss
+
     # Debug: Check for nan in loss components
     if torch.isnan(total_loss):
         print(f"Loss components: loss_props={loss_props.item()}, recon_loss={recon_loss.item()}, "
-              f"sparsity_penalty={sparsity_penalty.item()}, presence_loss={presence_loss.item()}")
+              f"sparsity_penalty={sparsity_penalty.item()}, presence_loss={presence_loss.item()}, "
+              f"corr_loss={corr_loss.item()}")
 
     # Diagnostics (optional)
     details = {}
@@ -150,55 +155,62 @@ def loss_fn(
         with torch.no_grad():
             presence_targets = (true_props > presence_threshold).float()
             presence_preds = (presence_probs > 0.5).float()
-            
+
             true_positives = torch.sum(presence_preds * presence_targets, dim=0)
             false_positives = torch.sum(presence_preds * (1 - presence_targets), dim=0)
             false_negatives = torch.sum((1 - presence_preds) * presence_targets, dim=0)
             true_negatives = torch.sum((1 - presence_preds) * (1 - presence_targets), dim=0)
-            
+
             precision = true_positives / (true_positives + false_positives + 1e-8)
             recall = true_positives / (true_positives + false_negatives + 1e-8)
             f1 = 2.0 * precision * recall / (precision + recall + 1e-8)
-            
+
             avg_precision = torch.mean(precision)
             avg_recall = torch.mean(recall)
             avg_f1 = torch.mean(f1)
             accuracy = torch.mean((presence_preds == presence_targets).float())
-            
+
             low_conc_error = torch.mean(torch.masked_select(cell_errors, low_conc_mask))
             med_conc_error = torch.mean(torch.masked_select(cell_errors, med_conc_mask))
             high_conc_error = torch.mean(torch.masked_select(cell_errors, high_conc_mask))
 
         details = {
-            'total_loss': total_loss.item(),
-            'loss_props': loss_props.item(),
-            'recon_loss': recon_loss.item(),
-            'sparsity_loss': sparsity_penalty.item(),
-            'presence_loss': presence_loss.item() if focal_loss_weight > 0 else 0.0,
-            'low_snr_under': underestimation[:, low_snr_indices].mean().item(),
-            'low_snr_over': overestimation[:, low_snr_indices].mean().item(),
-            'alpha_stats': {
-                'mean': torch.mean(pred_props).item(),
-                'std': torch.std(pred_props).item(),
-                'max': torch.max(pred_props).item(),
-                'min': torch.min(pred_props).item()
+            "total_loss": total_loss.item(),
+            "loss_props": loss_props.item(),
+            "recon_loss": recon_loss.item(),
+            "corr_loss": corr_loss.item(),
+            "sparsity_loss": sparsity_penalty.item(),
+            "presence_loss": presence_loss.item() if focal_loss_weight > 0 else 0.0,
+            "low_snr_under": underestimation[:, low_snr_indices].mean().item(),
+            "low_snr_over": overestimation[:, low_snr_indices].mean().item(),
+            "alpha_stats": {
+                "mean": torch.mean(pred_props).item(),
+                "std": torch.std(pred_props).item(),
+                "max": torch.max(pred_props).item(),
+                "min": torch.min(pred_props).item(),
             },
-            'concentration_errors': {
-                'low_conc': low_conc_error.item() if not torch.isnan(low_conc_error) else 0.0,
-                'med_conc': med_conc_error.item() if not torch.isnan(med_conc_error) else 0.0,
-                'high_conc': high_conc_error.item() if not torch.isnan(high_conc_error) else 0.0
+            "concentration_errors": {
+                "low_conc": (
+                    low_conc_error.item() if not torch.isnan(low_conc_error) else 0.0
+                ),
+                "med_conc": (
+                    med_conc_error.item() if not torch.isnan(med_conc_error) else 0.0
+                ),
+                "high_conc": (
+                    high_conc_error.item() if not torch.isnan(high_conc_error) else 0.0
+                ),
             },
-            'presence_stats': {
-                'accuracy': accuracy.item(),
-                'avg_precision': avg_precision.item(),
-                'avg_recall': avg_recall.item(),
-                'avg_f1': avg_f1.item(),
-                'true_positives': torch.sum(true_positives).item(),
-                'false_positives': torch.sum(false_positives).item(),
-                'false_negatives': torch.sum(false_negatives).item(),
-                'true_negatives': torch.sum(true_negatives).item()
+            "presence_stats": {
+                "accuracy": accuracy.item(),
+                "avg_precision": avg_precision.item(),
+                "avg_recall": avg_recall.item(),
+                "avg_f1": avg_f1.item(),
+                "true_positives": torch.sum(true_positives).item(),
+                "false_positives": torch.sum(false_positives).item(),
+                "false_negatives": torch.sum(false_negatives).item(),
+                "true_negatives": torch.sum(true_negatives).item(),
             },
-            'valid_ratio': torch.mean(valid_mask.float()).item()
+            "valid_ratio": torch.mean(valid_mask.float()).item(),
         }
 
     return total_loss, details

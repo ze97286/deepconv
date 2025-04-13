@@ -149,6 +149,7 @@ def validate(
     cell_types: List[str],
     presence_threshold: float = 0.01,
     focal_loss_weight: float = 0.0,
+    alpha_threshold: float = 1e-4
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
     model.eval()
 
@@ -305,7 +306,12 @@ def validate(
             # Compute R² and MAE for the dataset using evaluate_performance
             all_preds = np.concatenate(all_preds, axis=0)
             all_true = np.concatenate(all_true, axis=0)
-            eval_metrics = evaluate_performance(all_true, all_preds, cell_types)
+            eval_metrics = evaluate_performance(
+                all_true,
+                all_preds,
+                cell_types,
+                alpha_threshold=alpha_threshold
+            )
 
             global_metrics = eval_metrics["Overall"]
             pprint(global_metrics)
@@ -444,10 +450,10 @@ def train_model(
     history = defaultdict(list)
     best_val_loss = float('inf')
     best_tcells_f1 = 0.0
-    best_tcells_r2 = -float('inf')  # Track average T-cells R²
-    best_oac_r2 = -float('inf')     # Track average OAC R²
-    best_tier1_r2 = -float('inf')   # Track average Tier1 global R²
-    best_mae_avg = float('inf')     # Track average MAE across all datasets
+    best_tcells_r2 = -float('inf')
+    best_oac_r2 = -float('inf')
+    best_tier1_r2 = -float('inf')
+    best_mae_avg = float('inf')
     best_epoch = 0
     patience_counter = 0
     
@@ -491,7 +497,8 @@ def train_model(
             device,
             cell_types=cell_types,
             presence_threshold=eval_presence_threshold,
-            focal_loss_weight=focal_loss_weight_val
+            focal_loss_weight=focal_loss_weight_val,
+            alpha_threshold=eval_presence_threshold
         )
         
         thresholds = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
@@ -530,22 +537,18 @@ def train_model(
 
         for val_name in val_stats.keys():
             if 't-cells' in val_name:
-                # Use T-cells R²
                 if 'per_cell_r2' in val_stats[val_name] and 'T-cells' in val_stats[val_name]['per_cell_r2']:
                     tcells_r2_sum += val_stats[val_name]['per_cell_r2']['T-cells']
                     tcells_count += 1
             elif 'oac' in val_name:
-                # Use OAC R²
                 if 'per_cell_r2' in val_stats[val_name] and 'OAC' in val_stats[val_name]['per_cell_r2']:
                     oac_r2_sum += val_stats[val_name]['per_cell_r2']['OAC']
                     oac_count += 1
             elif 'tier1' in val_name:
-                # Use global R²
                 if 'r2' in val_stats[val_name]:
                     tier1_r2_sum += val_stats[val_name]['r2']
                     tier1_count += 1
             
-            # Compute average MAE across all datasets
             if 'mae' in val_stats[val_name]:
                 mae_sum += val_stats[val_name]['mae']
                 mae_count += 1
@@ -679,7 +682,6 @@ def train_model(
             if use_wandb:
                 wandb.save(os.path.join(model_path, "best_model.pt"))
         else:
-            # Increment patience counter if any metric degrades significantly
             if (tcells_r2_degradation > 0.1 or oac_r2_degradation > 0.1 or 
                 tier1_r2_degradation > 0.1 or mae_increase > 0.01):
                 patience_counter += 1
