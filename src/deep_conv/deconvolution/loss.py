@@ -45,15 +45,15 @@ def loss_fn(
     valid_mask: torch.Tensor,
     presence_probs: torch.Tensor,
     presence_logits: torch.Tensor,
-    alpha: float = 0.58,
+    alpha: float = 0.4,
     beta: float = 0.02,
-    gamma: float = 0.3,
+    gamma: float = 0.2,
     presence_threshold: float = 0.01,
     low_snr_indices=[11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-    focal_loss_weight: float = 0.0,
+    focal_loss_weight: float = 0.01,
     compute_diagnostics: bool = True,
-    corr_weight: float = 0.1
+    corr_weight: float = 0.3
 ):
     # Sanitize coverage
     if torch.isnan(coverage).any() or torch.isinf(coverage).any():
@@ -73,7 +73,16 @@ def loss_fn(
     # Ensure valid_mask is False for nan values in coverage
     valid_mask = (coverage > 0) & (~torch.isnan(coverage))
 
-    # Proportion Error
+    # Compute average coverage for the batch
+    avg_coverage = torch.mean(coverage[valid_mask]).item()
+
+    # Dynamically adjust gamma based on coverage
+    effective_gamma = gamma
+    if avg_coverage < 10:  # Low-coverage scenario
+        effective_gamma = gamma * 0.5  # Reduce sparsity penalty
+        print(f"Low coverage detected (avg: {avg_coverage:.2f}), reducing gamma to {effective_gamma:.2f}")
+
+    # Proportion Error (loss_props)
     cell_errors = torch.abs(pred_props - true_props)
     importance_weights = torch.ones_like(true_props)
     low_conc_mask = (true_props > 0.001) & (true_props <= 0.01)
@@ -82,6 +91,12 @@ def loss_fn(
     importance_weights = torch.where(low_conc_mask, 2.0, importance_weights)
     importance_weights = torch.where(med_conc_mask, 1.6, importance_weights)
     importance_weights = torch.where(high_conc_mask, 1.2, importance_weights)
+
+    # Increase importance for T-cells in low-coverage scenarios
+    if avg_coverage < 10:
+        importance_weights[:, low_snr_indices] *= 1.5  # Boost T-cells importance
+        print(f"Low coverage detected (avg: {avg_coverage:.2f}), increasing T-cells importance weight by 1.5x")
+
     capped_fraction = torch.clamp(true_props[:, low_snr_indices], max=0.10)
     importance_weights[:, low_snr_indices] *= (1.0 + 10.0 * capped_fraction)
     underestimation = F.relu(true_props - pred_props)
@@ -146,7 +161,7 @@ def loss_fn(
     corr_loss = 1.0 - avg_corr
 
     # Combine All Terms
-    total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss + corr_weight * corr_loss
+    total_loss = alpha * loss_props + beta * recon_loss + effective_gamma * sparsity_penalty + focal_loss_weight * presence_loss + corr_weight * corr_loss
 
     # Ensure total loss is non-negative
     total_loss = torch.clamp(total_loss, min=0.0)
