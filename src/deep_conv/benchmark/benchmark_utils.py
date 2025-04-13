@@ -71,8 +71,10 @@ def evaluate_performance(
     Returns:
         Dict[str, Any]: Nested dictionary containing metrics per cell type, overall metrics, and range breakdown.
     """
-    # Apply thresholding to estimated proportions
-    est_thresholded = estimated_proportions.copy()
+    # Ensure predictions are non-negative
+    est = np.maximum(estimated_proportions, 0)
+    # Apply thresholding 
+    est_thresholded = est.copy()
     est_thresholded[est_thresholded < alpha_threshold] = 0
 
     # ----------------------------------------------------------------------
@@ -87,7 +89,7 @@ def evaluate_performance(
         rmse = math.sqrt(mean_squared_error(true, est))
         mae = mean_absolute_error(true, est)
         
-        # Check zero variance in true or est
+        # Compute R² using scikit-learn's r2_score to match your method
         if np.std(true) < 1e-12:
             if np.allclose(true, est, atol=1e-12):
                 corr = 1.0

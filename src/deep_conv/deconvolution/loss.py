@@ -125,6 +125,7 @@ def loss_fn(
     corr_loss = 0.0
     num_cell_types = pred_props.shape[1]
     total_corr = 0.0
+    valid_cell_types = 0
     for i in range(num_cell_types):
         true_vals = true_props[:, i]
         pred_vals = pred_props[:, i]
@@ -135,19 +136,24 @@ def loss_fn(
         cov = torch.mean(true_centered * pred_centered)
         true_std = torch.std(true_vals, unbiased=False)
         pred_std = torch.std(pred_vals, unbiased=False)
-        corr = cov / (true_std * pred_std + 1e-8)
+        if true_std < 1e-6 or pred_std < 1e-6:
+            corr = 0.0
+        else:
+            corr = cov / (true_std * pred_std + 1e-8)
+            valid_cell_types += 1
         total_corr += corr
-    avg_corr = total_corr / num_cell_types
-    corr_loss = -avg_corr
+    avg_corr = total_corr / (valid_cell_types if valid_cell_types > 0 else 1)
+    corr_loss = 1.0 - avg_corr
 
     # Combine All Terms
     total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss + corr_weight * corr_loss
 
-    # Debug: Check for nan in loss components
-    if torch.isnan(total_loss):
-        print(f"Loss components: loss_props={loss_props.item()}, recon_loss={recon_loss.item()}, "
-              f"sparsity_penalty={sparsity_penalty.item()}, presence_loss={presence_loss.item()}, "
-              f"corr_loss={corr_loss.item()}")
+    print(f"Loss components: loss_props={loss_props.item():.6f}, recon_loss={recon_loss.item():.6f}, "
+          f"sparsity_penalty={sparsity_penalty.item():.6f}, presence_loss={presence_loss.item():.6f}, "
+          f"corr_loss={corr_loss.item():.6f}, total_loss={total_loss.item():.6f}")
+
+    # Ensure total loss is non-negative
+    total_loss = torch.clamp(total_loss, min=0.0)
 
     # Diagnostics (optional)
     details = {}
