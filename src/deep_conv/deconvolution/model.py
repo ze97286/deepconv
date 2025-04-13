@@ -262,7 +262,7 @@ class ResidualBlock(nn.Module):
         return out
 
 class CellTypeDeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=128):
+    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=128, dropout_rate=0.1):
         super().__init__()
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
@@ -297,27 +297,31 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         # Marker Feature Extractor: Processes marker values and normalized log(coverage)
         self.marker_feature_extractor = nn.Sequential(
-            nn.Linear(2, feature_dim),  # Input: [marker_value, log_coverage]
+            nn.Linear(2, feature_dim),
             nn.LeakyReLU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(feature_dim, feature_dim),
             nn.LeakyReLU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(feature_dim, feature_dim)
         )
 
-        # Encoder with presence input
         self.encoder = nn.Sequential(
             nn.Linear(num_cell_types * feature_dim + num_cell_types, 256),
             nn.LeakyReLU(),
+            nn.Dropout(dropout_rate),
             ResidualBlock(256, 256),
+            nn.Dropout(dropout_rate),
             nn.Linear(256, num_cell_types)
         )
 
-        # Decoder
         self.decoder = nn.Sequential(
             nn.Linear(num_cell_types, 256),
             nn.LeakyReLU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(256, 256),
             nn.LeakyReLU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(256, num_markers)
         )
 

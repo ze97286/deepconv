@@ -1,5 +1,6 @@
 import os
 from collections import defaultdict
+from pprint import pprint
 
 import wandb
 
@@ -12,6 +13,7 @@ from tqdm import tqdm
 import numpy as np
 from typing import Dict, Tuple, List
 from deep_conv.deconvolution.loss import loss_fn
+from deep_conv.benchmark.benchmark_utils import evaluate_performance
 
 import time
 
@@ -131,11 +133,12 @@ def validate(
     model: nn.Module,
     val_loaders: Dict[str, DataLoader],
     device: torch.device,
+    cell_types: List[str],
     presence_threshold: float = 0.01,
-    focal_loss_weight: float = 0.0
+    focal_loss_weight: float = 0.0,
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
     model.eval()
-    
+
     val_stats = {}
     thresholds = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
     threshold_results = {t: {} for t in thresholds}
@@ -164,6 +167,10 @@ def validate(
             mae_sum = 0.0
             mse_sum = 0.0
 
+            # Collect predictions for R² and MAE computation
+            all_preds = []
+            all_true = []
+
             for t in thresholds:
                 threshold_results[t][val_name] = {
                     'mse': 0.0,
@@ -176,9 +183,9 @@ def validate(
                 fraction = batch['X'].to(device)
                 coverage = batch['coverage'].to(device)
                 y_true = batch['y'].to(device)
-                
+
                 alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
-        
+
                 loss, details = loss_fn(
                     pred_props=alpha,
                     true_props=y_true,
@@ -189,50 +196,52 @@ def validate(
                     presence_probs=presence_probs,
                     presence_logits=presence_logits,
                     presence_threshold=presence_threshold,
-                    focal_loss_weight=focal_loss_weight,
-                    compute_diagnostics=True
+                    focal_loss_weight=focal_loss_weight
                 )
-                
-                # Compute proportion accuracy metrics
+
+                # Collect predictions for R² and MAE
+                all_preds.append(alpha.cpu().numpy())
+                all_true.append(y_true.cpu().numpy())
+
                 mae = torch.abs(alpha - y_true).mean()
                 mse = F.mse_loss(alpha, y_true)
                 batch_size = y_true.size(0)
                 mae_sum += mae.item() * batch_size
                 mse_sum += mse.item() * batch_size
-                
+
                 true_present = (y_true > presence_threshold)
                 pred_present = (presence_probs > 0.5)
-                
+
                 for i in range(batch_size):
                     sample_tp = torch.sum((pred_present[i] & true_present[i]).float()).item()
                     sample_fp = torch.sum((pred_present[i] & ~true_present[i]).float()).item()
                     sample_fn = torch.sum((~pred_present[i] & true_present[i]).float()).item()
                     sample_tn = torch.sum((~pred_present[i] & ~true_present[i]).float()).item()
-                    
+
                     tp_sum += sample_tp
                     fp_sum += sample_fp
                     fn_sum += sample_fn
                     tn_sum += sample_tn
-                    
+
                     if sample_tp + sample_fp > 0:
                         sample_precision = sample_tp / (sample_tp + sample_fp)
                     else:
                         sample_precision = 1.0
-                    
+
                     if sample_tp + sample_fn > 0:
                         sample_recall = sample_tp / (sample_tp + sample_fn)
                     else:
                         sample_recall = 1.0
-                    
+
                     if sample_precision + sample_recall > 0:
                         sample_f1 = 2 * sample_precision * sample_recall / (sample_precision + sample_recall)
                     else:
                         sample_f1 = 0.0
-                    
+
                     sample_precision_scores.append(sample_precision)
                     sample_recall_scores.append(sample_recall)
                     sample_f1_scores.append(sample_f1)
-                
+
                 for ct in range(model.num_celltypes):
                     ct_true_present = true_present[:, ct]
                     ct_pred_present = pred_present[:, ct]
@@ -240,31 +249,30 @@ def validate(
                     confusion['fp'][ct] += torch.sum((ct_pred_present & ~ct_true_present).float())
                     confusion['tn'][ct] += torch.sum((~ct_pred_present & ~ct_true_present).float())
                     confusion['fn'][ct] += torch.sum((~ct_pred_present & ct_true_present).float())
-                
+
                 for t in thresholds:
                     batch_results = threshold_results[t][val_name]
-                    
-                    # Apply thresholding to alpha
+
                     thresholded_alpha = alpha.clone()
                     thresholded_alpha[thresholded_alpha < 1e-4] = 0.0
-                    
+
                     row_sums = thresholded_alpha.sum(dim=1, keepdim=True)
                     valid_rows = (row_sums > 0).squeeze(-1)
                     if valid_rows.any():
                         thresholded_alpha[valid_rows] /= row_sums[valid_rows]
-                    
+
                     mse = F.mse_loss(thresholded_alpha, y_true)
                     mae = torch.abs(thresholded_alpha - y_true).mean()
-                    
+
                     pred_present_t = (thresholded_alpha > 0)
                     true_present_t = (y_true > presence_threshold)
                     detection_accuracy = (pred_present_t == true_present_t).float().mean()
-                    
+
                     batch_results['mse'] += mse.item() * batch_size
                     batch_results['mae'] += mae.item() * batch_size
                     batch_results['detection_accuracy'] += detection_accuracy.item() * batch_size
                     batch_results['count'] += batch_size
-                
+
                 loader_stats['loss'] += loss.item()
                 loader_stats['loss_props'] += details['loss_props']
                 loader_stats['recon_loss'] += details['recon_loss']
@@ -276,11 +284,21 @@ def validate(
                             loader_stats[f"{key}/{subkey}"] += subvalue
                     else:
                         loader_stats[key] += value
-                
+
                 num_batches += 1
                 total_batches += 1
                 weighted_loss_sum += loss.item()
-            
+
+            # Compute R² and MAE for the dataset using evaluate_performance
+            all_preds = np.concatenate(all_preds, axis=0)
+            all_true = np.concatenate(all_true, axis=0)
+            eval_metrics = evaluate_performance(all_true, all_preds, cell_types)
+
+            global_metrics = eval_metrics["Overall"]
+            pprint(global_metrics)
+            r2 = eval_metrics["Overall"].get('Global R² (Flattened)', 0.0)
+            overall_mae = eval_metrics["Overall"].get('Overall MAE', 0.0)
+
             if len(sample_precision_scores) > 0:
                 overall_precision = sum(sample_precision_scores) / len(sample_precision_scores)
                 overall_recall = sum(sample_recall_scores) / len(sample_recall_scores)
@@ -289,14 +307,14 @@ def validate(
                 overall_precision = 0.0
                 overall_recall = 0.0
                 overall_f1 = 0.0
-            
+
             class_precision = confusion['tp'] / (confusion['tp'] + confusion['fp'] + 1e-8)
             class_recall = confusion['tp'] / (confusion['tp'] + confusion['fn'] + 1e-8)
             class_f1 = 2 * class_precision * class_recall / (class_precision + class_recall + 1e-8)
-            
+
             mae_avg = mae_sum / (num_batches * val_loader.batch_size)
             mse_avg = mse_sum / (num_batches * val_loader.batch_size)
-            
+
             print(f"\nValidation set: {val_name}")
             print(f"Total: TP={tp_sum}, FP={fp_sum}, FN={fn_sum}, TN={tn_sum}")
             print(f"Sample-based metrics - Precision: {overall_precision:.4f}, "
@@ -304,23 +322,27 @@ def validate(
             print(f"Class-based metrics - Precision: {class_precision.mean().item():.4f}, "
                   f"Recall: {class_recall.mean().item():.4f}, F1: {class_f1.mean().item():.4f}")
             print(f"Proportion accuracy - MAE: {mae_avg:.4f}, MSE: {mse_avg:.4f}")
+            print(f"R²: {r2:.4f}")
+            print(f"Overall MAE (from evaluate_performance): {overall_mae:.4f}")
             print(f"Average Loss Components - "
                   f"loss_props: {loader_stats['loss_props']/num_batches:.4f}, "
                   f"recon_loss: {loader_stats['recon_loss']/num_batches:.4f}, "
                   f"sparsity_penalty: {loader_stats['sparsity_loss']/num_batches:.4f}, "
                   f"presence_loss: {loader_stats['presence_loss']/num_batches:.4f}")
-            
+
             loader_stats['avg_precision'] = overall_precision
             loader_stats['avg_recall'] = overall_recall
             loader_stats['avg_f1'] = overall_f1
-            loader_stats['mae'] = mae_avg
+            loader_stats['mae'] = overall_mae  # Store Overall MAE from evaluate_performance
+            loader_stats['mae_avg'] = mae_avg  # Keep the batch-wise MAE for reference
             loader_stats['mse'] = mse_avg
-            
+            loader_stats['r2'] = r2
+
             for ct in range(model.num_celltypes):
                 loader_stats[f'precision_ct{ct}'] = class_precision[ct].item()
                 loader_stats[f'recall_ct{ct}'] = class_recall[ct].item()
                 loader_stats[f'f1_ct{ct}'] = class_f1[ct].item()
-            
+
             for t in thresholds:
                 batch_results = threshold_results[t][val_name]
                 if batch_results['count'] > 0:
@@ -329,16 +351,15 @@ def validate(
                     for key, value in batch_results.items():
                         if key != 'count':
                             loader_stats[f'thresh_{t}_{key}'] = value
-            
+
             for key in loader_stats:
                 loader_stats[key] /= num_batches
-            
+
             val_stats[val_name] = dict(loader_stats)
-            
+
             dataset_size = len(val_loader.dataset)
             total_samples += dataset_size
-    
-    # Compute the average validation loss as the mean of per-batch losses
+
     avg_val_loss = weighted_loss_sum / total_batches if total_batches > 0 else 0.0
     return avg_val_loss, val_stats
 
@@ -347,10 +368,11 @@ def train_model(
     train_loader: DataLoader,
     val_loaders: Dict[str, DataLoader],
     model_path: str,
+    cell_types: List[str],
     num_epochs: int = 1000,
     patience: int = 20,
     lr: float = 2e-3,
-    weight_decay: float = 2e-4,
+    weight_decay: float = 1e-3,
     use_wandb: bool = True,
     wandb_project: str = "cfDNA-Deconvolution",
     wandb_entity: str = None,
@@ -358,10 +380,8 @@ def train_model(
 ) -> Tuple[nn.Module, float]:
     model = model.to(device)
     
-    # Setup optimizer with AdamW, including presence model parameters
-    optimizer = optim.AdamW(list(model.parameters()) + [param for pm in model.presence_models for param in pm.parameters()], lr=lr, weight_decay=weight_decay)
+    optimizer = optim.AdamW(list(model.parameters()) + [param for pm in model.presence_models for param in pm.parameters()], lr=lr, weight_decay=1e-3)
     
-    # Cyclic learning rate scheduler (triangular policy)
     cycle_length = 10
     scheduler = optim.lr_scheduler.CyclicLR(
         optimizer,
@@ -372,10 +392,8 @@ def train_model(
         cycle_momentum=False
     )
     
-    # Ensure model_path exists
     os.makedirs(model_path, exist_ok=True)
     
-    # Initialize W&B (Optional)
     if use_wandb:
         config = {
             "model_type": model.__class__.__name__,
@@ -392,7 +410,6 @@ def train_model(
         run = init_wandb(config, project_name=wandb_project, entity=wandb_entity)
         wandb.watch(model, log="all", log_freq=100)
     
-    # Log presence model specificity thresholds
     print("\nPresence Model Specificity Thresholds:")
     for ct in range(model.num_celltypes):
         threshold = getattr(model.presence_models[ct], 'specificity_threshold', 0.5)
@@ -400,13 +417,14 @@ def train_model(
         if use_wandb:
             wandb.run.summary[f"presence_specificity_threshold_ct{ct}"] = threshold
     
-    # Preparation
     initial_lr = lr
     warmup_epochs = 5
     
     history = defaultdict(list)
     best_val_loss = float('inf')
     best_tcells_f1 = 0.0
+    best_r2_avg = -float('inf')
+    best_mae_avg = float('inf')
     best_epoch = 0
     patience_counter = 0
     
@@ -418,7 +436,6 @@ def train_model(
     for epoch in range(num_epochs):
         print(f"\n🔹 Epoch {epoch + 1}/{num_epochs}")
         
-        # LR Warmup
         if epoch < warmup_epochs:
             warmup_factor = (epoch + 1) / warmup_epochs
             current_lr = initial_lr * warmup_factor
@@ -429,7 +446,7 @@ def train_model(
             current_lr = optimizer.param_groups[0]['lr']
             print(f"Cyclic LR: {current_lr:.1e}")
         
-        focal_loss_weight_train = 0.01
+        focal_loss_weight_train = 0.005
         focal_loss_weight_val = 0.01
         
         train_stats = train_epoch(
@@ -445,11 +462,11 @@ def train_model(
         if epoch >= warmup_epochs:
             scheduler.step()
         
-        # During validation, we want diagnostics
         avg_val_loss, val_stats = validate(
             model,
             val_loaders,
             device,
+            cell_types=cell_types,
             presence_threshold=eval_presence_threshold,
             focal_loss_weight=focal_loss_weight_val
         )
@@ -478,14 +495,30 @@ def train_model(
         
         tcells_low_f1 = val_stats.get('t-cells_low', {}).get('avg_f1', 0.0)
         
+        # Compute average R² and MAE across datasets
+        r2_sum = 0.0
+        mae_sum = 0.0
+        r2_count = 0
+        for val_name in val_stats.keys():
+            if 'r2' in val_stats[val_name]:
+                r2_sum += val_stats[val_name]['r2']
+                mae_sum += val_stats[val_name]['mae']
+                r2_count += 1
+        r2_avg = r2_sum / r2_count if r2_count > 0 else 0.0
+        mae_avg = mae_sum / r2_count if r2_count > 0 else 0.0
+
         print(f"\n🔹 Epoch {epoch + 1} Summary:")
         print(f"Train Loss: {train_stats['total_loss']:.8f} | Grad Norm: {train_stats['grad_norm']:.8f}")
+        print(f"Average Validation R²: {r2_avg:.4f}")
+        print(f"Average Validation MAE: {mae_avg:.4f}")
         
         for val_name, stats in val_stats.items():
             print(f"{val_name} Loss: {stats['loss']:.8f}")
             if 'avg_precision' in stats and 'avg_recall' in stats and 'avg_f1' in stats:
                 print(f"{val_name} Detection: P={stats['avg_precision']:.4f}, "
                       f"R={stats['avg_recall']:.4f}, F1: {stats['avg_f1']:.4f}")
+            if 'r2' in stats:
+                print(f"{val_name} R²: {stats['r2']:.4f}")
             if 't-cells' in val_name or 'oac' in val_name:
                 print(f"\nPer-Cell-Type Presence Stats for {val_name}:")
                 for ct in range(model.num_celltypes):
@@ -511,6 +544,8 @@ def train_model(
                 "train/loss": train_stats['total_loss'],
                 "train/grad_norm": train_stats['grad_norm'],
                 "val/avg_loss": avg_val_loss,
+                "val/avg_r2": r2_avg,
+                "val/avg_mae": mae_avg,
                 "lr": optimizer.param_groups[0]['lr'],
                 "focal_loss_weight_train": focal_loss_weight_train,
                 "focal_loss_weight_val": focal_loss_weight_val,
@@ -539,14 +574,22 @@ def train_model(
             )
             wandb.log(wandb_logs)
         
-        if avg_val_loss < best_val_loss or tcells_low_f1 > best_tcells_f1:
+        # Early stopping based on R² and MAE
+        r2_degradation = best_r2_avg - r2_avg
+        mae_increase = mae_avg - best_mae_avg
+        if (r2_avg > best_r2_avg or mae_avg < best_mae_avg or tcells_low_f1 > best_tcells_f1):
+            if r2_avg > best_r2_avg:
+                best_r2_avg = r2_avg
+            if mae_avg < best_mae_avg:
+                best_mae_avg = mae_avg
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
             if tcells_low_f1 > best_tcells_f1:
                 best_tcells_f1 = tcells_low_f1
             patience_counter = 0
             best_epoch = epoch
-            print(f"New best model with loss: {best_val_loss:.8f}, T-cells low F1: {best_tcells_f1:.4f}")
+            print(f"New best model with loss: {best_val_loss:.8f}, T-cells low F1: {best_tcells_f1:.4f}, "
+                  f"Avg R²: {best_r2_avg:.4f}, Avg MAE: {best_mae_avg:.4f}")
             
             checkpoint = {
                 'epoch': epoch,
@@ -554,6 +597,8 @@ def train_model(
                 'optimizer_state_dict': optimizer.state_dict(),
                 'best_val_loss': best_val_loss,
                 'best_tcells_f1': best_tcells_f1,
+                'best_r2_avg': best_r2_avg,
+                'best_mae_avg': best_mae_avg,
                 'best_threshold': best_threshold,
                 'history': dict(history)
             }
@@ -561,13 +606,15 @@ def train_model(
             if use_wandb:
                 wandb.save(os.path.join(model_path, "best_model.pt"))
         else:
-            patience_counter += 1
+            # Increment patience counter if R² degrades significantly or MAE increases significantly
+            if r2_degradation > 0.1 or mae_increase > 0.01:
+                patience_counter += 1
         
         if patience_counter >= patience:
-            print(f"\n⚠️ Early stopping triggered after {epoch + 1} epochs")
+            print(f"\n⚠️ Early stopping triggered after {epoch + 1} epochs due to R² degradation or MAE increase")
             break
     
-    print("Loading best model (best overall validation loss and T-cells F1)")
+    print("Loading best model (best overall validation R², MAE, and T-cells F1)")
     checkpoint = torch.load(os.path.join(model_path, "best_model.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
     
@@ -579,6 +626,8 @@ def train_model(
     if use_wandb:
         wandb.run.summary["best_val_loss"] = best_val_loss
         wandb.run.summary["best_tcells_f1"] = best_tcells_f1
+        wandb.run.summary["best_r2_avg"] = best_r2_avg
+        wandb.run.summary["best_mae_avg"] = best_mae_avg
         wandb.run.summary["best_epoch"] = best_epoch
         wandb.run.summary["total_epochs"] = epoch + 1
         wandb.run.summary["best_threshold"] = best_threshold

@@ -55,30 +55,12 @@ def loss_fn(
     compute_diagnostics: bool = False
 ):
     # Sanitize coverage
-    if torch.isnan(coverage).any() or torch.isinf(coverage).any():
-        print("Warning: coverage contains nan or inf values")
-    if (coverage < 0).any():
-        print("Warning: coverage contains negative values")
     coverage = torch.nan_to_num(coverage, nan=0.0, posinf=0.0, neginf=0.0)
     coverage = torch.clamp(coverage, min=0.0)
 
-    # Debug: Check other inputs
-    if torch.isnan(pred_props).any() or torch.isinf(pred_props).any():
-        print("Warning: pred_props contains nan or inf values")
-    if torch.isnan(reconstructed).any() or torch.isinf(reconstructed).any():
-        print("Warning: reconstructed contains nan or inf values")
-    if torch.isnan(presence_probs).any() or torch.isinf(presence_probs).any():
-        print("Warning: presence_probs contains nan or inf values")
-
-    # Sanitize marker_values: Replace nan with 0 (should be masked by valid_mask)
-    marker_values = torch.nan_to_num(marker_values, nan=0.0)
-
-    # Ensure valid_mask is False for nan values in coverage
     valid_mask = (coverage > 0) & (~torch.isnan(coverage))
 
-    # Proportion Error
     cell_errors = torch.abs(pred_props - true_props)
-    
     importance_weights = torch.ones_like(true_props)
     low_conc_mask = (true_props > 0.001) & (true_props <= 0.01)
     med_conc_mask = (true_props > 0.01) & (true_props <= 0.05)
@@ -86,38 +68,30 @@ def loss_fn(
     importance_weights = torch.where(low_conc_mask, 2.0, importance_weights)
     importance_weights = torch.where(med_conc_mask, 1.6, importance_weights)
     importance_weights = torch.where(high_conc_mask, 1.2, importance_weights)
-    
     capped_fraction = torch.clamp(true_props[:, low_snr_indices], max=0.10)
     importance_weights[:, low_snr_indices] *= (1.0 + 10.0 * capped_fraction)
-    
     underestimation = F.relu(true_props - pred_props)
     overestimation = F.relu(pred_props - true_props)
-    
     low_snr_mask = torch.zeros_like(true_props)
     low_snr_mask[:, low_snr_indices] = 1.0
-    
     underestimation_penalty = 1.3 * underestimation
     low_snr_under_penalty = low_snr_mask * underestimation * 1.2
-    
     weighted_errors = importance_weights * (cell_errors + underestimation_penalty + low_snr_under_penalty)
     loss_props = weighted_errors.mean()
     
-    # Reconstruction Loss
     errors = torch.abs(marker_values - reconstructed)
     weighted_errors = valid_mask * coverage * errors
     denominator = torch.sum(valid_mask * coverage) + 1e-8
-    if denominator < 1e-7:  # Avoid division by near-zero
+    if denominator < 1e-7:
         recon_loss = torch.tensor(0.0, device=device)
     else:
         recon_loss = torch.sum(weighted_errors) / denominator
     
-    # Sparsity Regularisation
-    sparsity_penalty = torch.mean(torch.sum(pred_props, dim=1))
+    sparsity_penalty = torch.mean(torch.abs(pred_props))
     
-    # Focal Loss for Presence Detection (optional)
     presence_loss = 0.0
     if focal_loss_weight > 0:
-        presence_probs = torch.clamp(presence_probs, 0.0, 1.0)  # Ensure probabilities are in [0, 1]
+        presence_probs = torch.clamp(presence_probs, 0.0, 1.0)
         presence_targets = (true_props > presence_threshold).float()
         presence_loss = focal_loss(
             presence_probs,
@@ -129,10 +103,7 @@ def loss_fn(
             class_weights=None
         )
     
-    # Combine All Terms
-    total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss
-    
-    # Debug: Check for nan in loss components
+    total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss    
     if torch.isnan(total_loss):
         print(f"Loss components: loss_props={loss_props.item()}, recon_loss={recon_loss.item()}, "
               f"sparsity_penalty={sparsity_penalty.item()}, presence_loss={presence_loss.item()}")

@@ -564,7 +564,6 @@ def train_and_eval(
         y_vals[f"t-cells_{cov}"] = tcells_yval
         y_vals[f"oac_{cov}"] = oac_yval
 
-    # Enhance negative examples
     cell_types = list(atlas.columns[8:])
     enhanced_train_dl = enhanced_negative_examples(
         train_dl,
@@ -574,31 +573,28 @@ def train_and_eval(
         target_dist_params=clinical_dist_params['clinical'],
     )
 
-    # Create the model
     target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
     model = CellTypeDeconvolutionModel(
         num_markers=len(atlas), num_cell_types=len(cell_types),
-        target_ids=target_ids, presence_models_dir=presence_models_dir
+        target_ids=target_ids, presence_models_dir=presence_models_dir,
     )
 
-    # Train the model
     model, _ = train_model(
         model=model,
         train_loader=enhanced_train_dl,
         val_loaders=validation_dls,
         model_path=output_path,
+        cell_types=cell_types,
         num_epochs=1000,
         patience=20, 
         lr=5e-4, 
-        weight_decay=1e-4 
+        weight_decay=1e-3
     )
 
-    # Evaluate
     print("\nStandard Validation Sets:")
     for tier in validation_dls.keys():
         tier_dl = validation_dls[tier]
         y_val = y_vals[tier]
-        # Use the DataLoader for prediction
         deep_conv_estimations = []
         for batch in tier_dl:
             fraction = batch['X']
@@ -611,7 +607,6 @@ def train_and_eval(
         log_metrics(deep_conv_eval_metrics)
 
     return model
-
 def main():
     parser = argparse.ArgumentParser(description="Deep conv")
     parser.add_argument("--atlas_path", type=str, required=True)
