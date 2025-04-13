@@ -53,7 +53,8 @@ def evaluate_performance(
     cell_types: list,
     analyse_proportion_ranges=None,
     min_range_samples: int = 5,
-    zero_threshold: float = 0.001
+    zero_threshold: float = 0.001,
+    alpha_threshold: float = 1e-4
 ):
     """
     Evaluate performance metrics between true and estimated proportions.
@@ -65,10 +66,15 @@ def evaluate_performance(
         analyse_proportion_ranges (callable, optional): Function that returns a dict of range metrics.
         min_range_samples (int, optional): Minimum number of samples required to report bin stats.
         zero_threshold (float, optional): Threshold for zero vs. non-zero classification.
+        alpha_threshold (float, optional): Threshold for setting small proportions to zero.
 
     Returns:
         Dict[str, Any]: Nested dictionary containing metrics per cell type, overall metrics, and range breakdown.
     """
+    # Apply thresholding to estimated proportions
+    est_thresholded = estimated_proportions.copy()
+    est_thresholded[est_thresholded < alpha_threshold] = 0
+
     # ----------------------------------------------------------------------
     # Per-cell-type metrics
     # ----------------------------------------------------------------------
@@ -76,37 +82,34 @@ def evaluate_performance(
 
     for i, cell_type in enumerate(cell_types):
         true = true_proportions[:, i]
-        est = estimated_proportions[:, i]
+        est = est_thresholded[:, i]
         
         rmse = math.sqrt(mean_squared_error(true, est))
         mae = mean_absolute_error(true, est)
         
         # Check zero variance in true or est
         if np.std(true) < 1e-12:
-            # If they're essentially identical:
             if np.allclose(true, est, atol=1e-12):
                 corr = 1.0
                 r2 = 1.0
             else:
                 corr = 0.0
-                r2  = 0.0
+                r2 = 0.0
         elif np.std(est) < 1e-12:
-            # est is constant but true is not
             corr = 0.0
-            r2   = 0.0
+            r2 = 0.0
         else:
             corr, _ = pearsonr(true, est)
-            r2      = r2_score(true, est)
+            r2 = r2_score(true, est)
         
         # Zero vs. Non-Zero classification metrics
-        # (Only useful if your domain cares about absent vs. present.)
         true_binary = (true >= zero_threshold).astype(int)
-        est_binary  = (est >= zero_threshold).astype(int)
+        est_binary = (est >= zero_threshold).astype(int)
         
-        zero_acc  = accuracy_score(true_binary, est_binary)
+        zero_acc = accuracy_score(true_binary, est_binary)
         zero_prec = precision_score(true_binary, est_binary, zero_division=0)
-        zero_rec  = recall_score(true_binary, est_binary, zero_division=0)
-        zero_f1   = f1_score(true_binary, est_binary, zero_division=0)
+        zero_rec = recall_score(true_binary, est_binary, zero_division=0)
+        zero_f1 = f1_score(true_binary, est_binary, zero_division=0)
         
         metrics_per_cell[cell_type] = {
             "N_Samples": len(true),
@@ -123,8 +126,8 @@ def evaluate_performance(
     # ----------------------------------------------------------------------
     # Overall metrics across ALL cell types (flattened errors)
     # ----------------------------------------------------------------------
-    overall_rmse = math.sqrt(mean_squared_error(true_proportions, estimated_proportions))
-    overall_mae  = mean_absolute_error(true_proportions, estimated_proportions)
+    overall_rmse = math.sqrt(mean_squared_error(true_proportions, est_thresholded))
+    overall_mae = mean_absolute_error(true_proportions, est_thresholded)
 
     # Calculate average of per-cell-type R²
     r2_scores = [m["R²"] for m in metrics_per_cell.values()]
@@ -132,9 +135,8 @@ def evaluate_performance(
     
     # "Flattened" global R² (treating all data points as one array)
     true_flat = true_proportions.ravel()
-    est_flat  = estimated_proportions.ravel()
+    est_flat = est_thresholded.ravel()
     if np.std(true_flat) < 1e-12:
-        # all true are constant
         if np.allclose(true_flat, est_flat, atol=1e-12):
             global_r2 = 1.0
         else:
@@ -142,12 +144,8 @@ def evaluate_performance(
     else:
         global_r2 = r2_score(true_flat, est_flat)
     
-    # Per-cell Pearson correlation can be averaged, but let's do the same approach
-    # for correlation we do for R²:
-    correlations = []
-    for i, cell_type in enumerate(cell_types):
-        c = metrics_per_cell[cell_type]["Pearson Correlation"]
-        correlations.append(c)
+    # Average Pearson correlation
+    correlations = [m["Pearson Correlation"] for m in metrics_per_cell.values()]
     average_corr = np.mean(correlations)
     
     metrics_overall = {
@@ -163,10 +161,7 @@ def evaluate_performance(
     # ----------------------------------------------------------------------
     range_metrics = {}
     if analyse_proportion_ranges is not None:
-        # e.g. range_metrics = analyse_proportion_ranges(pred=estimated_proportions, 
-        #                                               true=true_proportions, 
-        #                                               cell_types=cell_types)
-        range_metrics = analyse_proportion_ranges(pred=estimated_proportions, 
+        range_metrics = analyse_proportion_ranges(pred=est_thresholded, 
                                                   true=true_proportions, 
                                                   cell_types=cell_types)
     
@@ -180,7 +175,6 @@ def evaluate_performance(
             cell_range_metrics = range_metrics[cell_type]
             for range_name, stats_dict in cell_range_metrics.items():
                 n_samples = stats_dict.get('n_samples', 0)
-                # Skip if below threshold
                 if n_samples < min_range_samples:
                     continue
                 
@@ -205,7 +199,6 @@ def evaluate_performance(
         "Range_Breakdown": range_metrics
     }
     return results
-
 
 def analyse_proportion_ranges(pred: np.ndarray, 
                               true: np.ndarray, 
