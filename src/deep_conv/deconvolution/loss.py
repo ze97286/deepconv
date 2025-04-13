@@ -52,7 +52,7 @@ def loss_fn(
     low_snr_indices=[11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
     focal_loss_weight: float = 0.0,
-    compute_diagnostics: bool = False
+    compute_diagnostics: bool = True
 ):
     # Debug: Check for nan or inf in inputs
     if torch.isnan(coverage).any() or torch.isinf(coverage).any():
