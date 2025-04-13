@@ -312,6 +312,12 @@ def validate(
             r2 = eval_metrics["Overall"].get('Global R² (Flattened)', 0.0)
             overall_mae = eval_metrics["Overall"].get('Overall MAE', 0.0)
 
+            # Extract per-cell-type R² values
+            per_cell_r2 = {}
+            for cell_type in cell_types:
+                if cell_type in eval_metrics["Per_Cell_Type"]:
+                    per_cell_r2[cell_type] = eval_metrics["Per_Cell_Type"][cell_type].get("R²", 0.0)
+
             if len(sample_precision_scores) > 0:
                 overall_precision = sum(sample_precision_scores) / len(sample_precision_scores)
                 overall_recall = sum(sample_recall_scores) / len(sample_recall_scores)
@@ -346,10 +352,11 @@ def validate(
             loader_stats['avg_precision'] = overall_precision
             loader_stats['avg_recall'] = overall_recall
             loader_stats['avg_f1'] = overall_f1
-            loader_stats['mae'] = overall_mae  # Store Overall MAE from evaluate_performance
-            loader_stats['mae_avg'] = mae_avg  # Keep the batch-wise MAE for reference
+            loader_stats['mae'] = overall_mae
+            loader_stats['mae_avg'] = mae_avg
             loader_stats['mse'] = mse_avg
             loader_stats['r2'] = r2
+            loader_stats['per_cell_r2'] = per_cell_r2
 
             for ct in range(model.num_celltypes):
                 loader_stats[f'precision_ct{ct}'] = class_precision[ct].item()
@@ -366,7 +373,8 @@ def validate(
                             loader_stats[f'thresh_{t}_{key}'] = value
 
             for key in loader_stats:
-                loader_stats[key] /= num_batches
+                if key != 'per_cell_r2':
+                    loader_stats[key] /= num_batches
 
             val_stats[val_name] = dict(loader_stats)
 
@@ -393,7 +401,7 @@ def train_model(
 ) -> Tuple[nn.Module, float]:
     model = model.to(device)
     
-    optimizer = optim.AdamW(list(model.parameters()) + [param for pm in model.presence_models for param in pm.parameters()], lr=lr, weight_decay=1e-3)
+    optimizer = optim.AdamW(list(model.parameters()) + [param for pm in model.presence_models for param in pm.parameters()], lr=lr, weight_decay=weight_decay)
     
     cycle_length = 10
     scheduler = optim.lr_scheduler.CyclicLR(
@@ -436,8 +444,10 @@ def train_model(
     history = defaultdict(list)
     best_val_loss = float('inf')
     best_tcells_f1 = 0.0
-    best_r2_avg = -float('inf')
-    best_mae_avg = float('inf')
+    best_tcells_r2 = -float('inf')  # Track average T-cells R²
+    best_oac_r2 = -float('inf')     # Track average OAC R²
+    best_tier1_r2 = -float('inf')   # Track average Tier1 global R²
+    best_mae_avg = float('inf')     # Track average MAE across all datasets
     best_epoch = 0
     patience_counter = 0
     
@@ -508,21 +518,48 @@ def train_model(
         
         tcells_low_f1 = val_stats.get('t-cells_low', {}).get('avg_f1', 0.0)
         
-        # Compute average R² and MAE across datasets
-        r2_sum = 0.0
+        # Compute dataset-specific metrics
+        tcells_r2_sum = 0.0
+        tcells_count = 0
+        oac_r2_sum = 0.0
+        oac_count = 0
+        tier1_r2_sum = 0.0
+        tier1_count = 0
         mae_sum = 0.0
-        r2_count = 0
+        mae_count = 0
+
         for val_name in val_stats.keys():
-            if 'r2' in val_stats[val_name]:
-                r2_sum += val_stats[val_name]['r2']
+            if 't-cells' in val_name:
+                # Use T-cells R²
+                if 'per_cell_r2' in val_stats[val_name] and 'T-cells' in val_stats[val_name]['per_cell_r2']:
+                    tcells_r2_sum += val_stats[val_name]['per_cell_r2']['T-cells']
+                    tcells_count += 1
+            elif 'oac' in val_name:
+                # Use OAC R²
+                if 'per_cell_r2' in val_stats[val_name] and 'OAC' in val_stats[val_name]['per_cell_r2']:
+                    oac_r2_sum += val_stats[val_name]['per_cell_r2']['OAC']
+                    oac_count += 1
+            elif 'tier1' in val_name:
+                # Use global R²
+                if 'r2' in val_stats[val_name]:
+                    tier1_r2_sum += val_stats[val_name]['r2']
+                    tier1_count += 1
+            
+            # Compute average MAE across all datasets
+            if 'mae' in val_stats[val_name]:
                 mae_sum += val_stats[val_name]['mae']
-                r2_count += 1
-        r2_avg = r2_sum / r2_count if r2_count > 0 else 0.0
-        mae_avg = mae_sum / r2_count if r2_count > 0 else 0.0
+                mae_count += 1
+
+        tcells_r2_avg = tcells_r2_sum / tcells_count if tcells_count > 0 else 0.0
+        oac_r2_avg = oac_r2_sum / oac_count if oac_count > 0 else 0.0
+        tier1_r2_avg = tier1_r2_sum / tier1_count if tier1_count > 0 else 0.0
+        mae_avg = mae_sum / mae_count if mae_count > 0 else 0.0
 
         print(f"\n🔹 Epoch {epoch + 1} Summary:")
         print(f"Train Loss: {train_stats['total_loss']:.8f} | Grad Norm: {train_stats['grad_norm']:.8f}")
-        print(f"Average Validation R²: {r2_avg:.4f}")
+        print(f"Average T-cells R² (t-cells_*): {tcells_r2_avg:.4f}")
+        print(f"Average OAC R² (oac_*): {oac_r2_avg:.4f}")
+        print(f"Average Tier1 R² (tier1_*): {tier1_r2_avg:.4f}")
         print(f"Average Validation MAE: {mae_avg:.4f}")
         
         for val_name, stats in val_stats.items():
@@ -531,7 +568,10 @@ def train_model(
                 print(f"{val_name} Detection: P={stats['avg_precision']:.4f}, "
                       f"R={stats['avg_recall']:.4f}, F1: {stats['avg_f1']:.4f}")
             if 'r2' in stats:
-                print(f"{val_name} R²: {stats['r2']:.4f}")
+                print(f"{val_name} Global R²: {stats['r2']:.4f}")
+            if 'per_cell_r2' in stats:
+                for cell_type, cell_r2 in stats['per_cell_r2'].items():
+                    print(f"{val_name} {cell_type} R²: {cell_r2:.4f}")
             if 't-cells' in val_name or 'oac' in val_name:
                 print(f"\nPer-Cell-Type Presence Stats for {val_name}:")
                 for ct in range(model.num_celltypes):
@@ -557,7 +597,9 @@ def train_model(
                 "train/loss": train_stats['total_loss'],
                 "train/grad_norm": train_stats['grad_norm'],
                 "val/avg_loss": avg_val_loss,
-                "val/avg_r2": r2_avg,
+                "val/tcells_r2_avg": tcells_r2_avg,
+                "val/oac_r2_avg": oac_r2_avg,
+                "val/tier1_r2_avg": tier1_r2_avg,
                 "val/avg_mae": mae_avg,
                 "lr": optimizer.param_groups[0]['lr'],
                 "focal_loss_weight_train": focal_loss_weight_train,
@@ -578,6 +620,9 @@ def train_model(
                                 wandb_logs[f"val/{val_name}/alpha_{stat_name}_ct{ct}"] = stat_value
                     elif k == 'absent_indices':
                         wandb_logs[f"val/{val_name}/absent_indices"] = v
+                    elif k == 'per_cell_r2':
+                        for cell_type, cell_r2 in v.items():
+                            wandb_logs[f"val/{val_name}/r2_{cell_type}"] = cell_r2
                     else:
                         wandb_logs[f"val/{val_name}/{k}"] = v
             
@@ -587,12 +632,21 @@ def train_model(
             )
             wandb.log(wandb_logs)
         
-        # Early stopping based on R² and MAE
-        r2_degradation = best_r2_avg - r2_avg
+        # Early stopping based on dataset-specific metrics
+        tcells_r2_degradation = best_tcells_r2 - tcells_r2_avg
+        oac_r2_degradation = best_oac_r2 - oac_r2_avg
+        tier1_r2_degradation = best_tier1_r2 - tier1_r2_avg
         mae_increase = mae_avg - best_mae_avg
-        if (r2_avg > best_r2_avg or mae_avg < best_mae_avg or tcells_low_f1 > best_tcells_f1):
-            if r2_avg > best_r2_avg:
-                best_r2_avg = r2_avg
+
+        if (tcells_r2_avg > best_tcells_r2 or oac_r2_avg > best_oac_r2 or 
+            tier1_r2_avg > best_tier1_r2 or mae_avg < best_mae_avg or 
+            tcells_low_f1 > best_tcells_f1):
+            if tcells_r2_avg > best_tcells_r2:
+                best_tcells_r2 = tcells_r2_avg
+            if oac_r2_avg > best_oac_r2:
+                best_oac_r2 = oac_r2_avg
+            if tier1_r2_avg > best_tier1_r2:
+                best_tier1_r2 = tier1_r2_avg
             if mae_avg < best_mae_avg:
                 best_mae_avg = mae_avg
             if avg_val_loss < best_val_loss:
@@ -601,8 +655,12 @@ def train_model(
                 best_tcells_f1 = tcells_low_f1
             patience_counter = 0
             best_epoch = epoch
-            print(f"New best model with loss: {best_val_loss:.8f}, T-cells low F1: {best_tcells_f1:.4f}, "
-                  f"Avg R²: {best_r2_avg:.4f}, Avg MAE: {best_mae_avg:.4f}")
+            print(f"New best model with loss: {best_val_loss:.8f}, "
+                  f"T-cells low F1: {best_tcells_f1:.4f}, "
+                  f"T-cells R²: {best_tcells_r2:.4f}, "
+                  f"OAC R²: {best_oac_r2:.4f}, "
+                  f"Tier1 R²: {best_tier1_r2:.4f}, "
+                  f"Avg MAE: {best_mae_avg:.4f}")
             
             checkpoint = {
                 'epoch': epoch,
@@ -610,7 +668,9 @@ def train_model(
                 'optimizer_state_dict': optimizer.state_dict(),
                 'best_val_loss': best_val_loss,
                 'best_tcells_f1': best_tcells_f1,
-                'best_r2_avg': best_r2_avg,
+                'best_tcells_r2': best_tcells_r2,
+                'best_oac_r2': best_oac_r2,
+                'best_tier1_r2': best_tier1_r2,
                 'best_mae_avg': best_mae_avg,
                 'best_threshold': best_threshold,
                 'history': dict(history)
@@ -619,15 +679,16 @@ def train_model(
             if use_wandb:
                 wandb.save(os.path.join(model_path, "best_model.pt"))
         else:
-            # Increment patience counter if R² degrades significantly or MAE increases significantly
-            if r2_degradation > 0.1 or mae_increase > 0.01:
+            # Increment patience counter if any metric degrades significantly
+            if (tcells_r2_degradation > 0.1 or oac_r2_degradation > 0.1 or 
+                tier1_r2_degradation > 0.1 or mae_increase > 0.01):
                 patience_counter += 1
         
         if patience_counter >= patience:
-            print(f"\n⚠️ Early stopping triggered after {epoch + 1} epochs due to R² degradation or MAE increase")
+            print(f"\n⚠️ Early stopping triggered after {epoch + 1} epochs due to metric degradation")
             break
     
-    print("Loading best model (best overall validation R², MAE, and T-cells F1)")
+    print("Loading best model (best dataset-specific metrics)")
     checkpoint = torch.load(os.path.join(model_path, "best_model.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
     
@@ -639,7 +700,9 @@ def train_model(
     if use_wandb:
         wandb.run.summary["best_val_loss"] = best_val_loss
         wandb.run.summary["best_tcells_f1"] = best_tcells_f1
-        wandb.run.summary["best_r2_avg"] = best_r2_avg
+        wandb.run.summary["best_tcells_r2"] = best_tcells_r2
+        wandb.run.summary["best_oac_r2"] = best_oac_r2
+        wandb.run.summary["best_tier1_r2"] = best_tier1_r2
         wandb.run.summary["best_mae_avg"] = best_mae_avg
         wandb.run.summary["best_epoch"] = best_epoch
         wandb.run.summary["total_epochs"] = epoch + 1
