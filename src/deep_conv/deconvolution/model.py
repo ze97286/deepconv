@@ -299,9 +299,11 @@ class CellTypeDeconvolutionModel(nn.Module):
         self.marker_feature_extractor = nn.Sequential(
             nn.Linear(2, feature_dim),
             nn.LeakyReLU(),
+            nn.LayerNorm(feature_dim),  
             nn.Dropout(dropout_rate),
             nn.Linear(feature_dim, feature_dim),
             nn.LeakyReLU(),
+            nn.LayerNorm(feature_dim),  
             nn.Dropout(dropout_rate),
             nn.Linear(feature_dim, feature_dim)
         )
@@ -309,8 +311,10 @@ class CellTypeDeconvolutionModel(nn.Module):
         self.encoder = nn.Sequential(
             nn.Linear(num_cell_types * feature_dim + num_cell_types, 256),
             nn.LeakyReLU(),
+            nn.LayerNorm(256), 
             nn.Dropout(dropout_rate),
             ResidualBlock(256, 256),
+            nn.LayerNorm(256), 
             nn.Dropout(dropout_rate),
             nn.Linear(256, num_cell_types)
         )
@@ -318,9 +322,11 @@ class CellTypeDeconvolutionModel(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(num_cell_types, 256),
             nn.LeakyReLU(),
+            nn.LayerNorm(256),  
             nn.Dropout(dropout_rate),
             nn.Linear(256, 256),
             nn.LeakyReLU(),
+            nn.LayerNorm(256),  
             nn.Dropout(dropout_rate),
             nn.Linear(256, num_markers)
         )
@@ -424,9 +430,8 @@ class CellTypeDeconvolutionModel(nn.Module):
         log_coverage = torch.log(coverage + 1)  # [B, M]
         log_coverage_normalized = log_coverage / self.max_log_coverage  # [B, M]
 
-        # Debug: Check for nan in log_coverage
-        if torch.isnan(log_coverage_normalized).any():
-            print("Warning: log_coverage_normalized contains nan values")
+        if torch.isnan(log_coverage_normalized).any() or torch.isinf(log_coverage_normalized).any():
+            print("Warning: log_coverage_normalized contains nan or inf values")
 
         # Flatten coverage, marker_values, and log_coverage for efficient indexing
         coverage_flat = coverage.view(-1)
@@ -461,6 +466,10 @@ class CellTypeDeconvolutionModel(nn.Module):
         features_input = torch.stack([marker_values_valid, log_coverage_valid], dim=1)  # [N, 2]
         features_valid = self.marker_feature_extractor(features_input)  # [N, feature_dim]
 
+        if torch.isnan(features_valid).any() or torch.isinf(features_valid).any():
+            print("Warning: features_valid contains nan or inf values")
+            print(f"features_input min/max: {features_input.min().item()}/{features_input.max().item()}")
+
         # ----- 2) Aggregate features by cell type -----
         aggregator = coverage.new_zeros(B, C, self.feature_dim)
         coverage_sum = coverage.new_zeros(B, C)
@@ -483,29 +492,48 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         agg_flat = aggregator.view(B, -1)
 
+        if torch.isnan(agg_flat).any() or torch.isinf(agg_flat).any():
+            print("Warning: agg_flat contains nan or inf values")
+            print(f"aggregator min/max: {aggregator.min().item()}/{aggregator.max().item()}")
+            print(f"coverage_sum min/max: {coverage_sum.min().item()}/{coverage_sum.max().item()}")
+
         # ----- 3) Presence detection using separate models -----
         presence_probs, presence_logits = self.predict_presence_with_separate_models(marker_values, coverage)
+
+        if torch.isnan(presence_probs).any() or torch.isinf(presence_probs).any():
+            print("Warning: presence_probs contains nan or inf values")
 
         # ----- 4) Integrate presence information with aggregated features -----
         combined_features = torch.cat([agg_flat, presence_probs], dim=1)
 
+        if torch.isnan(combined_features).any() or torch.isinf(combined_features).any():
+            print("Warning: combined_features contains nan or inf values")
+
         # ----- 5) Proportion Prediction with integrated presence -----
         logits = self.encoder(combined_features)
-        celltype_props_raw = F.relu(logits)
-        celltype_props_gated = self.apply_presence_gating(celltype_props_raw, presence_probs, coverage)
-        sum_props = torch.sum(celltype_props_gated, dim=1, keepdim=True)
-        celltype_props = celltype_props_gated / (sum_props + 1e-8)
+        if torch.isnan(logits).any() or torch.isinf(logits).any():
+            print("Warning: logits contains nan or inf values")
 
-        # Debug: Check for nan in celltype_props
-        if torch.isnan(celltype_props).any():
-            print("Warning: celltype_props contains nan values")
+        celltype_props_raw = F.relu(logits)
+        if torch.isnan(celltype_props_raw).any() or torch.isinf(celltype_props_raw).any():
+            print("Warning: celltype_props_raw contains nan or inf values")
+
+        celltype_props_gated = self.apply_presence_gating(celltype_props_raw, presence_probs, coverage)
+        if torch.isnan(celltype_props_gated).any() or torch.isinf(celltype_props_gated).any():
+            print("Warning: celltype_props_gated contains nan or inf values")
+
+        sum_props = torch.sum(celltype_props_gated, dim=1, keepdim=True)
+        if torch.isnan(sum_props).any() or torch.isinf(sum_props).any():
+            print("Warning: sum_props contains nan or inf values")
+
+        celltype_props = celltype_props_gated / (sum_props + 1e-8)
+        if torch.isnan(celltype_props).any() or torch.isinf(celltype_props).any():
+            print("Warning: celltype_props contains nan or inf values")
 
         # ----- 6) Marker reconstruction -----
         reconstructed = self.decoder(celltype_props)
-
-        # Debug: Check for nan in reconstructed
-        if torch.isnan(reconstructed).any():
-            print("Warning: reconstructed contains nan values")
+        if torch.isnan(reconstructed).any() or torch.isinf(reconstructed).any():
+            print("Warning: reconstructed contains nan or inf values")
 
         return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
     

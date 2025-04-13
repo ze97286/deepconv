@@ -54,12 +54,28 @@ def loss_fn(
     focal_loss_weight: float = 0.0,
     compute_diagnostics: bool = False
 ):
-    # Sanitize coverage
+    # Debug: Check for nan or inf in inputs
+    if torch.isnan(coverage).any() or torch.isinf(coverage).any():
+        print("Warning: coverage contains nan or inf values")
+    if (coverage < 0).any():
+        print("Warning: coverage contains negative values")
     coverage = torch.nan_to_num(coverage, nan=0.0, posinf=0.0, neginf=0.0)
     coverage = torch.clamp(coverage, min=0.0)
 
+    if torch.isnan(pred_props).any() or torch.isinf(pred_props).any():
+        print("Warning: pred_props contains nan or inf values")
+    if torch.isnan(reconstructed).any() or torch.isinf(reconstructed).any():
+        print("Warning: reconstructed contains nan or inf values")
+    if torch.isnan(presence_probs).any() or torch.isinf(presence_probs).any():
+        print("Warning: presence_probs contains nan or inf values")
+
+    # Sanitize marker_values
+    marker_values = torch.nan_to_num(marker_values, nan=0.0)
+
+    # Ensure valid_mask is False for nan values in coverage
     valid_mask = (coverage > 0) & (~torch.isnan(coverage))
 
+    # Proportion Error
     cell_errors = torch.abs(pred_props - true_props)
     importance_weights = torch.ones_like(true_props)
     low_conc_mask = (true_props > 0.001) & (true_props <= 0.01)
@@ -79,16 +95,33 @@ def loss_fn(
     weighted_errors = importance_weights * (cell_errors + underestimation_penalty + low_snr_under_penalty)
     loss_props = weighted_errors.mean()
     
+    # Reconstruction Loss with detailed debug
     errors = torch.abs(marker_values - reconstructed)
+    if torch.isnan(errors).any() or torch.isinf(errors).any():
+        print("Warning: errors contains nan or inf values")
+        print(f"marker_values min/max: {marker_values.min().item()}/{marker_values.max().item()}")
+        print(f"reconstructed min/max: {reconstructed.min().item()}/{reconstructed.max().item()}")
+
     weighted_errors = valid_mask * coverage * errors
+    if torch.isnan(weighted_errors).any() or torch.isinf(weighted_errors).any():
+        print("Warning: weighted_errors contains nan or inf values")
+        print(f"valid_mask min/max: {valid_mask.min().item()}/{valid_mask.max().item()}")
+        print(f"coverage min/max: {coverage.min().item()}/{coverage.max().item()}")
+
     denominator = torch.sum(valid_mask * coverage) + 1e-8
+    if torch.isnan(denominator) or torch.isinf(denominator):
+        print("Warning: denominator is nan or inf")
+        print(f"valid_mask * coverage min/max: {(valid_mask * coverage).min().item()}/{(valid_mask * coverage).max().item()}")
+
     if denominator < 1e-7:
         recon_loss = torch.tensor(0.0, device=device)
     else:
         recon_loss = torch.sum(weighted_errors) / denominator
     
+    # Sparsity Regularisation
     sparsity_penalty = torch.mean(torch.abs(pred_props))
     
+    # Focal Loss for Presence Detection (optional)
     presence_loss = 0.0
     if focal_loss_weight > 0:
         presence_probs = torch.clamp(presence_probs, 0.0, 1.0)
@@ -103,7 +136,10 @@ def loss_fn(
             class_weights=None
         )
     
-    total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss    
+    # Combine All Terms
+    total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss
+    
+    # Debug: Check for nan in loss components
     if torch.isnan(total_loss):
         print(f"Loss components: loss_props={loss_props.item()}, recon_loss={recon_loss.item()}, "
               f"sparsity_penalty={sparsity_penalty.item()}, presence_loss={presence_loss.item()}")

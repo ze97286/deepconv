@@ -64,68 +64,81 @@ def train_epoch(
     epoch_stats = defaultdict(float)
     num_batches = 0
 
-    optimiser.zero_grad()
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU],
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+        schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler('./profiler_logs')
+    ) as prof:
+        optimiser.zero_grad()
 
-    for batch_idx, batch in enumerate(tqdm(loader, desc='Training')):
-        fraction = batch['X'].to(device)
-        coverage = batch['coverage'].to(device)
-        y_true = batch['y'].to(device)
-        
-        alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
-        
-        # Call loss_fn without diagnostics, discard details
-        loss, _ = loss_fn(
-            pred_props=alpha,
-            true_props=y_true,
-            reconstructed=reconstructed,
-            marker_values=fraction,
-            coverage=coverage,
-            valid_mask=valid_mask,
-            presence_probs=presence_probs,
-            presence_logits=presence_logits,
-            focal_loss_weight=focal_loss_weight,
-            presence_threshold=presence_threshold,
-            compute_diagnostics=False
-        )
-        
-        # Compute proportion accuracy metrics for training
-        mae = torch.abs(alpha - y_true).mean()
-        mse = F.mse_loss(alpha, y_true)
-        epoch_stats['mae'] += mae.item()
-        epoch_stats['mse'] += mse.item()
-        
-        # Log only the total loss and proportion accuracy
-        if batch_idx % log_interval == 0:
-            print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
-            print(f"Batch {batch_idx} | Proportion Accuracy - MAE: {mae.item():.4f}, MSE: {mse.item():.4f}")
-        
-        scaled_loss = loss / accumulation_steps
-        scaled_loss.backward()
-        
-        if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1 == len(loader)):
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimiser.step()
-            optimiser.zero_grad()
+        for batch_idx, batch in enumerate(tqdm(loader, desc='Training')):
+            with torch.profiler.record_function("data_loading"):
+                fraction = batch['X'].to(device)
+                coverage = batch['coverage'].to(device)
+                y_true = batch['y'].to(device)
             
-            epoch_stats['grad_norm'] += grad_norm.item()
+            with torch.profiler.record_function("forward_pass"):
+                alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
             
-            if wandb.run is not None and (batch_idx + 1) % (log_interval // 2) == 0:
-                wandb.log({
-                    "batch/loss": loss.item(),
-                    "batch/grad_norm": grad_norm.item(),
-                    "batch/lr": optimiser.param_groups[0]['lr'],
-                    "batch/step": batch_idx
-                })
-        
-        epoch_stats['total_loss'] += scaled_loss.item() * accumulation_steps
-        num_batches += 1
+            with torch.profiler.record_function("loss_computation"):
+                loss, _ = loss_fn(
+                    pred_props=alpha,
+                    true_props=y_true,
+                    reconstructed=reconstructed,
+                    marker_values=fraction,
+                    coverage=coverage,
+                    valid_mask=valid_mask,
+                    presence_probs=presence_probs,
+                    presence_logits=presence_logits,
+                    focal_loss_weight=focal_loss_weight,
+                    presence_threshold=presence_threshold,
+                    compute_diagnostics=False
+                )
+            
+            mae = torch.abs(alpha - y_true).mean()
+            mse = F.mse_loss(alpha, y_true)
+            epoch_stats['mae'] += mae.item()
+            epoch_stats['mse'] += mse.item()
+            
+            if batch_idx % log_interval == 0:
+                print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
+                print(f"Batch {batch_idx} | Proportion Accuracy - MAE: {mae.item():.4f}, MSE: {mse.item():.4f}")
+            
+            scaled_loss = loss / accumulation_steps
+            with torch.profiler.record_function("backward_pass"):
+                scaled_loss.backward()
+            
+            if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1 == len(loader)):
+                with torch.profiler.record_function("optimizer_step"):
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                    optimiser.step()
+                    optimiser.zero_grad()
+                
+                epoch_stats['grad_norm'] += grad_norm.item()
+                
+                if wandb.run is not None and (batch_idx + 1) % (log_interval // 2) == 0:
+                    wandb.log({
+                        "batch/loss": loss.item(),
+                        "batch/grad_norm": grad_norm.item(),
+                        "batch/lr": optimiser.param_groups[0]['lr'],
+                        "batch/step": batch_idx
+                    })
+            
+            epoch_stats['total_loss'] += scaled_loss.item() * accumulation_steps
+            num_batches += 1
+            
+            prof.step()
     
     for key in epoch_stats:
         epoch_stats[key] /= num_batches
     
-    # Log average metrics for the epoch
     print(f"\nEpoch {epoch + 1} | Average Loss: {epoch_stats['total_loss']:.8f}")
     print(f"Epoch {epoch + 1} | Average Proportion Accuracy - MAE: {epoch_stats['mae']:.4f}, MSE: {epoch_stats['mse']:.4f}")
+    
+    print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
     
     return dict(epoch_stats)
 
