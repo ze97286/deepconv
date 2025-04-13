@@ -29,29 +29,26 @@ def get_validation_set_with_augmentation(
     block_size: int,
     target_dist_params=None,
     enable_augmentation=True,
-    target_size: int = None,
-    cell_types=None,
-    filter_tcells_below: float = 0.0,
-    filter_oac_below: float = 0.0
+    target_size: int = None,    
 ) -> tuple[DataLoader, torch.Tensor]:
     """
-    Validation set loader with pre-augmented data, block-based subsampling,
-    and optional filtering of T-cells and OAC samples below concentration thresholds.
+    Validation set loader with optional pre-augmented data and block-based subsampling.
     
     Args:
         eval_pat_dir: Directory with validation data
         atlas: DataFrame with marker metadata
         names: Set of marker names to include
-        block_size: Size of each block (e.g., 10,000 for T-cells, 1,000 for OAC)
+        block_size: Size of each block for subsampling
         target_dist_params: Target coverage distribution parameters
-        enable_augmentation: Whether to enable augmentation (pre-augmentation will be used)
-        target_size: Target number of samples to subsample (if None, use full dataset)
+        enable_augmentation: Whether to enable augmentation
+        target_size: Target number of samples (if None, set to 10% of dataset size)
         cell_types: List of cell type names (to identify T-cells and OAC columns)
         filter_tcells_below: Concentration threshold below which to filter T-cell samples
         filter_oac_below: Concentration threshold below which to filter OAC samples
+        dilution_values: Ignored (subsampling based on blocks)
         
     Returns:
-        val_loader: DataLoader with pre-augmented data
+        val_loader: DataLoader with data
         y_val: Ground truth labels
     """
     # Load marker values, coverage, and labels from parquet
@@ -67,7 +64,7 @@ def get_validation_set_with_augmentation(
     X_val = X_val.drop(columns=["name", "direction"]).T.to_numpy()
     coverage_val = coverage_val.drop(columns=["name", "direction"]).T.to_numpy()
 
-    # Print some coverage stats for debug/monitoring
+    # Print coverage stats for debug/monitoring
     print(f"Validation set {Path(eval_pat_dir).name} - Original coverage stats:")
     print("  Mean:", np.mean(coverage_val))
     print("  Median:", np.median(coverage_val))
@@ -75,50 +72,16 @@ def get_validation_set_with_augmentation(
     # Convert label DataFrame to numpy
     y_val_np = y_val.to_numpy()
     
-    # Filter T-cells or OAC samples below their respective thresholds (if applicable)
-    if cell_types is not None:
-        # Filter T-cells
-        if "T-cells" in Path(eval_pat_dir).name and filter_tcells_below > 0:
-            tcells_idx = cell_types.index("T-cells") if "T-cells" in cell_types else -1
-            if tcells_idx >= 0:
-                print(f"Filtering T-cell samples with concentration below {filter_tcells_below}...")
-                tcells_concentration = y_val_np[:, tcells_idx]
-                keep_indices = np.where(tcells_concentration >= filter_tcells_below)[0]
-                print(f"Original number of samples: {len(y_val_np)}")
-                print(f"Number of samples after T-cells filtering: {len(keep_indices)}")
-                
-                # Apply filtering
-                X_val = X_val[keep_indices]
-                coverage_val = coverage_val[keep_indices]
-                y_val_np = y_val_np[keep_indices]
-        
-        # Filter OAC
-        if "OAC" in Path(eval_pat_dir).name and filter_oac_below > 0:
-            oac_idx = cell_types.index("OAC") if "OAC" in cell_types else -1
-            if oac_idx >= 0:
-                print(f"Filtering OAC samples with concentration below {filter_oac_below}...")
-                oac_concentration = y_val_np[:, oac_idx]
-                keep_indices = np.where(oac_concentration >= filter_oac_below)[0]
-                print(f"Original number of samples: {len(y_val_np)}")
-                print(f"Number of samples after OAC filtering: {len(keep_indices)}")
-                
-                # Apply filtering
-                X_val = X_val[keep_indices]
-                coverage_val = coverage_val[keep_indices]
-                y_val_np = y_val_np[keep_indices]
-    
-    # Block-based subsampling (if target_size is specified)
-    if target_size is not None and target_size < len(y_val_np):
-        # Calculate the number of blocks
-        dataset_size = len(y_val_np)
-        num_blocks = (dataset_size + block_size - 1) // block_size  # Ceiling division
-        if num_blocks == 0:
-            num_blocks = 1
-        
-        # Calculate samples to take from each block
+    # Block-based subsampling: Sample 10% of the dataset
+    dataset_size = len(y_val_np)
+    if target_size is None:
+        target_size = max(dataset_size // 10, 1)  # Sample 10% of the dataset
+
+    if target_size < dataset_size:
+        num_blocks = (dataset_size + block_size - 1) // block_size
         samples_per_block = target_size // num_blocks
         if samples_per_block == 0:
-            samples_per_block = 1  # Ensure at least 1 sample per block
+            samples_per_block = 1
         
         indices = []
         for block_idx in range(num_blocks):
@@ -126,11 +89,9 @@ def get_validation_set_with_augmentation(
             end_idx = min((block_idx + 1) * block_size, dataset_size)
             block_indices = np.arange(start_idx, end_idx)
             np.random.shuffle(block_indices)
-            # Take up to samples_per_block, or fewer if the block is smaller
             selected_indices = block_indices[:min(samples_per_block, len(block_indices))]
             indices.extend(selected_indices)
         
-        # Adjust for any rounding errors (if we have fewer samples than target_size)
         if len(indices) < target_size:
             remaining = target_size - len(indices)
             all_indices = np.arange(dataset_size)
@@ -138,21 +99,18 @@ def get_validation_set_with_augmentation(
             np.random.shuffle(remaining_indices)
             indices.extend(remaining_indices[:remaining])
         
-        # Sort indices to maintain order
         indices = np.sort(indices)
         
-        # Subsample the data directly
         X_val = X_val[indices]
         coverage_val = coverage_val[indices]
         y_val_np = y_val_np[indices]
     
-    # Pre-augment 50% of the dataset if augmentation is enabled
+    # Apply augmentation if enabled
     if enable_augmentation:
         num_samples = len(y_val_np)
         num_to_augment = num_samples // 2
         indices_to_augment = np.random.choice(num_samples, num_to_augment, replace=False)
 
-        # Temporary dataset for augmentation
         temp_dataset = TissueDeconvolutionDataset(X_val, coverage_val, atlas[atlas.columns[8:]].T.to_numpy(), y_val_np)
 
         augmented_fraction = []
@@ -170,20 +128,17 @@ def get_validation_set_with_augmentation(
             augmented_fraction.append(aug_fraction[0])
             augmented_coverage.append(aug_coverage[0])
 
-        # Combine original and augmented data
         augmented_fraction = np.stack(augmented_fraction)
         augmented_coverage = np.stack(augmented_coverage)
         combined_fraction = np.concatenate([X_val[:num_to_augment], augmented_fraction])
         combined_coverage = np.concatenate([coverage_val[:num_to_augment], augmented_coverage])
         combined_y = np.concatenate([y_val_np[:num_to_augment], y_val_np[indices_to_augment]])
 
-        # Save to disk with a unique name based on eval_pat_dir
         dataset_name = Path(eval_pat_dir).name
         np.save(f"pre_augmented_fraction_{dataset_name}.npy", combined_fraction)
         np.save(f"pre_augmented_coverage_{dataset_name}.npy", combined_coverage)
         np.save(f"pre_augmented_y_{dataset_name}.npy", combined_y)
 
-        # Create pre-augmented dataset
         val_dataset = PreAugmentedTissueDataset(
             combined_fraction,
             combined_coverage,
@@ -191,7 +146,6 @@ def get_validation_set_with_augmentation(
             combined_y
         )
     else:
-        # No augmentation, use original data
         val_dataset = PreAugmentedTissueDataset(
             X_val,
             coverage_val,
@@ -199,7 +153,6 @@ def get_validation_set_with_augmentation(
             y_val_np
         )
     
-    # Create DataLoader with shuffling
     val_loader = DataLoader(
         val_dataset,
         batch_size=1024,
@@ -209,7 +162,6 @@ def get_validation_set_with_augmentation(
         persistent_workers=False
     )
     
-    # Convert y_val to a PyTorch tensor and normalize each row
     y_val_tensor = torch.tensor(y_val_np, dtype=torch.float32)
     y_val_tensor = y_val_tensor / y_val_tensor.sum(dim=1, keepdim=True)
     
@@ -518,53 +470,80 @@ def train_and_eval(
         persistent_workers=True
     )
 
-    validation_dls = {}
+    # Create two versions of each validation dataset: unaugmented and augmented
+    val_loaders_unaugmented = {}
+    val_loaders_augmented = {}
     y_vals = {}
     for cov in ['high', 'med', 'low', 'clinical']:
-        tier1_dl, t1_yval = get_validation_set_with_augmentation(
+        # Unaugmented version
+        tier1_dl_unaugmented, t1_yval = get_validation_set_with_augmentation(
+            str(Path(eval_pat_dir + "_" + cov) / "tier1"), atlas, names,
+            block_size=50_000,
+            target_dist_params=clinical_dist_params[cov],
+            enable_augmentation=False,
+            target_size=50_000,
+        )
+        print(f"Validation set {cov} tier1 length (unaugmented)={len(t1_yval)}")
+
+        tcells_dl_unaugmented, tcells_yval = get_validation_set_with_augmentation(
+            str(Path(eval_pat_dir + "_" + cov) / "T-cells"), atlas, names,
+            block_size=10_000,
+            target_dist_params=clinical_dist_params[cov],
+            enable_augmentation=False,
+            target_size=None,            
+        )
+        print(f"Validation set {cov} tcells length (unaugmented)={len(tcells_yval)}")
+
+        oac_dl_unaugmented, oac_yval = get_validation_set_with_augmentation(
+            str(Path(eval_pat_dir + "_" + cov) / "OAC"), atlas, names,
+            block_size=1_000,
+            target_dist_params=clinical_dist_params[cov],
+            enable_augmentation=False,
+            target_size=None,
+        )
+        print(f"Validation set {cov} oac length (unaugmented)={len(oac_yval)}")
+
+        # Augmented version
+        tier1_dl_augmented, _ = get_validation_set_with_augmentation(
             str(Path(eval_pat_dir + "_" + cov) / "tier1"), atlas, names,
             block_size=50_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
-            target_size=20_000,
-            cell_types=cell_types,
-            filter_tcells_below=0.0,
-            filter_oac_below=0.0
+            target_size=50_000,            
         )
-        print(f"Validation set {cov} tier1 length={len(t1_yval)}")
+        print(f"Validation set {cov} tier1 length (augmented)={len(t1_yval)}")
 
-        tcells_dl, tcells_yval = get_validation_set_with_augmentation(
+        tcells_dl_augmented, _ = get_validation_set_with_augmentation(
             str(Path(eval_pat_dir + "_" + cov) / "T-cells"), atlas, names,
             block_size=10_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
-            target_size=15_000,
-            cell_types=cell_types,
-            filter_tcells_below=0.006,
-            filter_oac_below=0.0
+            target_size=None,            
         )
-        print(f"Validation set {cov} tcells length={len(tcells_yval)}")
+        print(f"Validation set {cov} tcells length (augmented)={len(tcells_yval)}")
 
-        oac_dl, oac_yval = get_validation_set_with_augmentation(
+        oac_dl_augmented, _ = get_validation_set_with_augmentation(
             str(Path(eval_pat_dir + "_" + cov) / "OAC"), atlas, names,
             block_size=1_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
-            target_size=2_000,
-            cell_types=cell_types,
-            filter_tcells_below=0.0,
-            filter_oac_below=0.001
+            target_size=None,           
         )
-        print(f"Validation set {cov} oac length={len(oac_yval)}")
+        print(f"Validation set {cov} oac length (augmented)={len(oac_yval)}")
 
-        validation_dls[f"tier1_{cov}"] = tier1_dl
-        validation_dls[f"t-cells_{cov}"] = tcells_dl
-        validation_dls[f"oac_{cov}"] = oac_dl
+        # Store in dictionaries
+        val_loaders_unaugmented[f"tier1_{cov}"] = tier1_dl_unaugmented
+        val_loaders_unaugmented[f"t-cells_{cov}"] = tcells_dl_unaugmented
+        val_loaders_unaugmented[f"oac_{cov}"] = oac_dl_unaugmented
+
+        val_loaders_augmented[f"tier1_{cov}"] = tier1_dl_augmented
+        val_loaders_augmented[f"t-cells_{cov}"] = tcells_dl_augmented
+        val_loaders_augmented[f"oac_{cov}"] = oac_dl_augmented
+
         y_vals[f"tier1_{cov}"] = t1_yval
         y_vals[f"t-cells_{cov}"] = tcells_yval
         y_vals[f"oac_{cov}"] = oac_yval
 
-    cell_types = list(atlas.columns[8:])
     enhanced_train_dl = enhanced_negative_examples(
         train_dl,
         cell_types,
@@ -577,12 +556,13 @@ def train_and_eval(
     model = CellTypeDeconvolutionModel(
         num_markers=len(atlas), num_cell_types=len(cell_types),
         target_ids=target_ids, presence_models_dir=presence_models_dir,
+        dropout_rate=0.1
     )
 
     model, _ = train_model(
         model=model,
         train_loader=enhanced_train_dl,
-        val_loaders=validation_dls,
+        val_loaders=(val_loaders_unaugmented, val_loaders_augmented),
         model_path=output_path,
         cell_types=cell_types,
         num_epochs=1000,
@@ -592,8 +572,8 @@ def train_and_eval(
     )
 
     print("\nStandard Validation Sets:")
-    for tier in validation_dls.keys():
-        tier_dl = validation_dls[tier]
+    for tier in val_loaders_unaugmented.keys():
+        tier_dl = val_loaders_unaugmented[tier]
         y_val = y_vals[tier]
         deep_conv_estimations = []
         for batch in tier_dl:
@@ -607,6 +587,7 @@ def train_and_eval(
         log_metrics(deep_conv_eval_metrics)
 
     return model
+
 def main():
     parser = argparse.ArgumentParser(description="Deep conv")
     parser.add_argument("--atlas_path", type=str, required=True)

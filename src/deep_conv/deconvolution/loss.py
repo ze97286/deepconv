@@ -148,10 +148,6 @@ def loss_fn(
     # Combine All Terms
     total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty + focal_loss_weight * presence_loss + corr_weight * corr_loss
 
-    print(f"Loss components: loss_props={loss_props.item():.6f}, recon_loss={recon_loss.item():.6f}, "
-          f"sparsity_penalty={sparsity_penalty.item():.6f}, presence_loss={presence_loss.item():.6f}, "
-          f"corr_loss={corr_loss.item():.6f}, total_loss={total_loss.item():.6f}")
-
     # Ensure total loss is non-negative
     total_loss = torch.clamp(total_loss, min=0.0)
 

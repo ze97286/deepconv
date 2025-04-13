@@ -73,9 +73,16 @@ def evaluate_performance(
     """
     # Ensure predictions are non-negative
     est = np.maximum(estimated_proportions, 0)
-    # Apply thresholding 
+
+    # Apply thresholding (match plot_deconvolution_evaluation)
     est_thresholded = est.copy()
     est_thresholded[est_thresholded < alpha_threshold] = 0
+
+    # Do NOT re-normalize after thresholding to match your evaluation
+
+    # Debug: Print prediction statistics to identify discrepancies
+    print(f"Prediction stats before thresholding: min={est.min():.6f}, max={est.max():.6f}, mean={est.mean():.6f}")
+    print(f"Prediction stats after thresholding: min={est_thresholded.min():.6f}, max={est_thresholded.max():.6f}, mean={est_thresholded.mean():.6f}")
 
     # ----------------------------------------------------------------------
     # Per-cell-type metrics
@@ -201,6 +208,7 @@ def evaluate_performance(
         "Range_Breakdown": range_metrics
     }
     return results
+
 
 def analyse_proportion_ranges(pred: np.ndarray, 
                               true: np.ndarray, 

@@ -306,6 +306,10 @@ def validate(
             # Compute R² and MAE for the dataset using evaluate_performance
             all_preds = np.concatenate(all_preds, axis=0)
             all_true = np.concatenate(all_true, axis=0)
+
+            # Debug: Compare prediction statistics with deepconv_estimate
+            print(f"Validate predictions for {val_name}: min={all_preds.min():.6f}, max={all_preds.max():.6f}, mean={all_preds.mean():.6f}")
+
             eval_metrics = evaluate_performance(
                 all_true,
                 all_preds,
@@ -393,7 +397,7 @@ def validate(
 def train_model(
     model: nn.Module,
     train_loader: DataLoader,
-    val_loaders: Dict[str, DataLoader],
+    val_loaders: Tuple[Dict[str, DataLoader], Dict[str, DataLoader]],
     model_path: str,
     cell_types: List[str],
     num_epochs: int = 1000,
@@ -462,6 +466,7 @@ def train_model(
     
     eval_presence_threshold = 0.01
     
+    val_loaders_unaugmented, val_loaders_augmented = val_loaders
     for epoch in range(num_epochs):
         print(f"\n🔹 Epoch {epoch + 1}/{num_epochs}")
         
@@ -491,9 +496,13 @@ def train_model(
         if epoch >= warmup_epochs:
             scheduler.step()
         
+        # Curriculum training: Use unaugmented for first 10 epochs, then switch to augmented
+        current_val_loaders = val_loaders_unaugmented if epoch < 10 else val_loaders_augmented
+        print(f"Validation with augmentation: {epoch >= 10}")
+
         avg_val_loss, val_stats = validate(
             model,
-            val_loaders,
+            current_val_loaders,
             device,
             cell_types=cell_types,
             presence_threshold=eval_presence_threshold,
@@ -525,7 +534,6 @@ def train_model(
         
         tcells_low_f1 = val_stats.get('t-cells_low', {}).get('avg_f1', 0.0)
         
-        # Compute dataset-specific metrics
         tcells_r2_sum = 0.0
         tcells_count = 0
         oac_r2_sum = 0.0
@@ -635,7 +643,6 @@ def train_model(
             )
             wandb.log(wandb_logs)
         
-        # Early stopping based on dataset-specific metrics
         tcells_r2_degradation = best_tcells_r2 - tcells_r2_avg
         oac_r2_degradation = best_oac_r2 - oac_r2_avg
         tier1_r2_degradation = best_tier1_r2 - tier1_r2_avg
@@ -725,6 +732,7 @@ def train_model(
         wandb.finish()
     
     return model, best_threshold
+
 
 def plot_training_history(history: Dict[str, List[float]], save_path: str):
     """
