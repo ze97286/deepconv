@@ -308,6 +308,7 @@ def loss_fn(
         total_loss = alpha * loss_props + beta * recon_loss + effective_gamma * sparsity_penalty + focal_loss_weight * presence_loss + corr_weight * corr_loss
         standard_time = time.time() - start_standard
 
+    details = {}
     # Ensure total loss is non-negative
     if x_nnls is not None:
         c = coverage.mean(dim=1)
@@ -318,7 +319,7 @@ def loss_fn(
     total_loss = torch.clamp(total_loss, min=0.0)
 
     # Diagnostics - keep all original calculations 
-    details = {}
+    
     if compute_diagnostics:
         start_diag = time.time()
         with torch.no_grad():
