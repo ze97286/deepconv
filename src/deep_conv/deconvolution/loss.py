@@ -1,6 +1,6 @@
-from typing import List
 import torch 
 import torch.nn.functional as F
+import time
 
 def focal_loss(pred, target, alpha_pos=0.25, alpha_neg=0.75, gamma=2.0, fp_weight=1.5, class_weights=None):
     """
@@ -58,7 +58,9 @@ def loss_fn(
     target_cell_indices=None,
     log_vars=None
 ):
-    # Get or initialise learnable log-variances for dynamic weighting
+    start_total = time.time()
+    # Get or initialize learnable log-variances for dynamic weighting
+    start_init = time.time()
     if log_vars is None:
         # These will be created but not persisted between calls
         log_var_mae = torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True)
@@ -79,8 +81,10 @@ def loss_fn(
         'presence': torch.clamp(torch.exp(-log_var_presence), max=1.0),
         'sparsity': torch.clamp(torch.exp(-log_var_sparsity), max=1.0)
     }
+    init_time = time.time() - start_init
     
     # Sanitize coverage
+    start_sanitize = time.time()
     if torch.isnan(coverage).any() or torch.isinf(coverage).any():
         print("Warning: coverage contains nan or inf values")
     if (coverage < 0).any():
@@ -97,8 +101,10 @@ def loss_fn(
 
     # Ensure valid_mask is False for nan values in coverage
     valid_mask = (coverage > 0) & (~torch.isnan(coverage))
+    sanitize_time = time.time() - start_sanitize
 
     # Compute average coverage for the batch
+    start_preparation = time.time()
     avg_coverage = torch.mean(coverage[valid_mask]).item()
 
     # Check if we have a specialized dataset (T-cells or OAC)
@@ -123,8 +129,10 @@ def loss_fn(
     # Always calculate low_snr_mask (used in diagnostics)
     low_snr_mask = torch.zeros_like(true_props)
     low_snr_mask[:, low_snr_indices] = 1.0
+    preparation_time = time.time() - start_preparation
     
     # Focal Loss for Presence Detection - always compute this
+    start_presence = time.time()
     presence_probs_clipped = torch.clamp(presence_probs, 0.0, 1.0)
     presence_targets = (true_props > presence_threshold).float()
     presence_loss = focal_loss(
@@ -136,9 +144,11 @@ def loss_fn(
         fp_weight=1.5,
         class_weights=None
     )
+    presence_time = time.time() - start_presence
     
     # For specialized datasets (T-cells, OAC), use targeted loss
     if is_specialized:
+        start_specialized = time.time()
         target_idx = target_cell_indices[0]
         
         # 1. Check variance of target cell type
@@ -217,7 +227,9 @@ def loss_fn(
             task_uncertainty['presence'] * target_presence_loss + 0.5 * log_var_presence +
             task_uncertainty['sparsity'] * sparsity_penalty + 0.5 * log_var_sparsity
         )
+        specialized_time = time.time() - start_specialized
     else:
+        start_standard = time.time()
         # Standard loss calculation for general datasets
         
         # Dynamically adjust gamma based on coverage
@@ -292,6 +304,7 @@ def loss_fn(
 
         # Combine all terms
         total_loss = alpha * loss_props + beta * recon_loss + effective_gamma * sparsity_penalty + focal_loss_weight * presence_loss + corr_weight * corr_loss
+        standard_time = time.time() - start_standard
 
     # Ensure total loss is non-negative
     total_loss = torch.clamp(total_loss, min=0.0)
@@ -299,6 +312,7 @@ def loss_fn(
     # Diagnostics - keep all original calculations 
     details = {}
     if compute_diagnostics:
+        start_diag = time.time()
         with torch.no_grad():
             presence_targets = (true_props > presence_threshold).float()
             presence_preds = (presence_probs > 0.5).float()
@@ -376,5 +390,21 @@ def loss_fn(
                 "presence": task_uncertainty['presence'].item(),
                 "sparsity": task_uncertainty['sparsity'].item()
             }
+        diag_time = time.time() - start_diag
+        
+        # Add timing information
+        details["timing"] = {
+            "init": init_time,
+            "sanitize": sanitize_time,
+            "preparation": preparation_time,
+            "presence": presence_time,
+            "diagnostics": diag_time,
+            "total": time.time() - start_total
+        }
+        
+        if is_specialized:
+            details["timing"]["specialized"] = specialized_time
+        else:
+            details["timing"]["standard"] = standard_time
 
     return total_loss, details, log_var_mae, log_var_corr, log_var_presence, log_var_sparsity

@@ -131,6 +131,11 @@ def train_epoch(
                 print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
                 print(f"Batch {batch_idx} | Proportion Accuracy - MAE: {mae.item():.4f}, MSE: {mse.item():.4f}")
                 
+                if 'timing' in details:
+                    print("\nTiming Information:")
+                    for key, value in details['timing'].items():
+                        print(f"  {key}: {value:.6f}s")
+
                 # Log task weights if using specialized loss
                 if details.get('specialized_loss', False) and 'task_weights' in details:
                     tw = details['task_weights']
