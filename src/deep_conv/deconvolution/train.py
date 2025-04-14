@@ -63,6 +63,7 @@ def train_epoch(
 ) -> Dict[str, float]:
     model.train()
     epoch_stats = defaultdict(float)
+    timing_stats = defaultdict(float)
     num_batches = 0
 
     # Initialize log variance parameters if not provided
@@ -82,18 +83,28 @@ def train_epoch(
         schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
         on_trace_ready=torch.profiler.tensorboard_trace_handler('./profiler_logs')
     ) as prof:
+        start_epoch = time.time()
         optimiser.zero_grad()
 
         for batch_idx, batch in enumerate(tqdm(loader, desc='Training')):
+            start_batch = time.time()
+            
+            # 1. Data loading and transfer
+            start_data = time.time()
             with torch.profiler.record_function("data_loading"):
                 fraction = batch['X'].to(device)
                 coverage = batch['coverage'].to(device)
                 y_true = batch['y'].to(device)
+            timing_stats['data_loading'] += time.time() - start_data
             
+            # 2. Forward pass
+            start_forward = time.time()
             with torch.profiler.record_function("forward_pass"):
                 alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
+            timing_stats['forward_pass'] += time.time() - start_forward
             
-            # Determine target cell indices for specialized datasets
+            # Determine target cell indices
+            start_target = time.time()
             target_cell_types = None
             if hasattr(loader.dataset, 'name'):
                 dataset_name = loader.dataset.name.lower() if hasattr(loader.dataset, 'name') else ""
@@ -101,10 +112,13 @@ def train_epoch(
                 dataset_name = ""
                 
             if "t-cells" in dataset_name:
-                target_cell_types = [11]
+                target_cell_types = [11]  # T-cells index
             elif "oac" in dataset_name:
-                target_cell_types = [9]
+                target_cell_types = [9]   # OAC index
+            timing_stats['target_detection'] += time.time() - start_target
             
+            # 3. Loss computation
+            start_loss = time.time()
             with torch.profiler.record_function("loss_computation"):
                 loss, details, log_vars['mae'], log_vars['corr'], log_vars['presence'], log_vars['sparsity'] = loss_fn(
                     pred_props=alpha,
@@ -121,46 +135,57 @@ def train_epoch(
                     target_cell_indices=target_cell_types,
                     log_vars=log_vars
                 )
+            timing_stats['loss_computation'] += time.time() - start_loss
             
+            # Add detailed loss timing if available
+            if 'timing' in details:
+                for key, value in details['timing'].items():
+                    timing_stats[f'loss_{key}'] += value
+            
+            # 4. Metrics calculation
+            start_metrics = time.time()
             mae = torch.abs(alpha - y_true).mean()
             mse = F.mse_loss(alpha, y_true)
             epoch_stats['mae'] += mae.item()
             epoch_stats['mse'] += mse.item()
+            timing_stats['metrics_calculation'] += time.time() - start_metrics
             
-            if batch_idx % log_interval == 0:
-                print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
-                print(f"Batch {batch_idx} | Proportion Accuracy - MAE: {mae.item():.4f}, MSE: {mse.item():.4f}")
-                
-                if 'timing' in details:
-                    print("\nTiming Information:")
-                    for key, value in details['timing'].items():
-                        print(f"  {key}: {value:.6f}s")
-
-                # Log task weights if using specialized loss
-                if details.get('specialized_loss', False) and 'task_weights' in details:
-                    tw = details['task_weights']
-                    print(f"Task weights: MAE={tw['mae']:.4f}, Corr={tw['corr']:.4f}, "
-                          f"Presence={tw['presence']:.4f}, Sparsity={tw['sparsity']:.4f}")
-            
+            # 5. Backward pass
+            start_backward = time.time()
             scaled_loss = loss / accumulation_steps
             with torch.profiler.record_function("backward_pass"):
                 scaled_loss.backward()
+            timing_stats['backward_pass'] += time.time() - start_backward
             
+            # 6. Optimizer step (if applicable)
             if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1 == len(loader)):
+                start_optim = time.time()
                 with torch.profiler.record_function("optimizer_step"):
-                    # Apply gradient clipping to stabilize training
+                    # Apply gradient clipping
+                    start_clip = time.time()
                     all_params = list(model.parameters()) + [
                         log_vars['mae'], log_vars['corr'], 
                         log_vars['presence'], log_vars['sparsity']
                     ]
                     grad_norm = torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+                    timing_stats['gradient_clipping'] += time.time() - start_clip
                     
+                    # Actual optimizer step
+                    start_step = time.time()
                     optimiser.step()
+                    timing_stats['optimizer_step'] += time.time() - start_step
+                    
+                    # Zero gradients
+                    start_zero = time.time()
                     optimiser.zero_grad()
+                    timing_stats['zero_grad'] += time.time() - start_zero
                 
+                timing_stats['total_optimizer'] += time.time() - start_optim
                 epoch_stats['grad_norm'] += grad_norm.item()
                 
+                # 7. Logging to wandb (if applicable)
                 if wandb.run is not None and (batch_idx + 1) % (log_interval // 2) == 0:
+                    start_wandb = time.time()
                     wandb_log = {
                         "batch/loss": loss.item(),
                         "batch/grad_norm": grad_norm.item(),
@@ -179,17 +204,50 @@ def train_epoch(
                         })
                     
                     wandb.log(wandb_log)
+                    timing_stats['wandb_logging'] += time.time() - start_wandb
             
+            # 8. Printing (if applicable)
+            if batch_idx % log_interval == 0:
+                start_print = time.time()
+                print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
+                print(f"Batch {batch_idx} | Proportion Accuracy - MAE: {mae.item():.4f}, MSE: {mse.item():.4f}")
+                
+                # Log task weights if using specialized loss
+                if details.get('specialized_loss', False) and 'task_weights' in details:
+                    tw = details['task_weights']
+                    print(f"Task weights: MAE={tw['mae']:.4f}, Corr={tw['corr']:.4f}, "
+                          f"Presence={tw['presence']:.4f}, Sparsity={tw['sparsity']:.4f}")
+                
+                # Print timing information
+                print("\nTiming Information (seconds per batch):")
+                for key, value in sorted(timing_stats.items()):
+                    print(f"  {key}: {value/max(1, batch_idx):.6f}")
+                timing_stats['printing'] += time.time() - start_print
+            
+            # Store total batch time
             epoch_stats['total_loss'] += scaled_loss.item() * accumulation_steps
+            timing_stats['total_batch'] += time.time() - start_batch
             num_batches += 1
             
             prof.step()
     
+    # Average stats
     for key in epoch_stats:
         epoch_stats[key] /= num_batches
     
+    for key in timing_stats:
+        timing_stats[key] /= num_batches
+        epoch_stats[f'time_{key}'] = timing_stats[key]
+    
+    # Final epoch summary
     print(f"\nEpoch {epoch + 1} | Average Loss: {epoch_stats['total_loss']:.8f}")
     print(f"Epoch {epoch + 1} | Average Proportion Accuracy - MAE: {epoch_stats['mae']:.4f}, MSE: {epoch_stats['mse']:.4f}")
+    
+    print("\nAverage Timing Information (seconds per batch):")
+    for key, value in sorted(timing_stats.items()):
+        print(f"  {key}: {value:.6f}")
+    
+    epoch_stats['time_total_epoch'] = (time.time() - start_epoch) / num_batches
     
     print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=10))
     
