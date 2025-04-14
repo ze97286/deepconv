@@ -55,7 +55,7 @@ def train_epoch(
     optimiser: optim.Optimizer,
     device: torch.device,
     log_interval: int = 500,
-    accumulation_steps: int = 2,
+    accumulation_steps: int = 8,
     epoch: int = 0,
     focal_loss_weight: float = 0.0,
     presence_threshold: float = 0.01,

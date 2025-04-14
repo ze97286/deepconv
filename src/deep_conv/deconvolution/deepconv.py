@@ -271,9 +271,9 @@ def load_training_with_augmentation(
     # Create DataLoader with shuffling
     train_dl = DataLoader(
         pre_augmented_dataset,
-        batch_size=1024,
+        batch_size=256,
         shuffle=True,
-        num_workers=28,
+        num_workers=16,
         pin_memory=False,
         persistent_workers=True
     )
@@ -463,9 +463,9 @@ def train_and_eval(
     train_dataset = ConcatDataset([train_dl_low.dataset, train_dl_med.dataset, train_dl_high.dataset])
     train_dl = DataLoader(
         train_dataset,
-        batch_size=1024,
+        batch_size=256,
         shuffle=True,
-        num_workers=28,
+        num_workers=16,
         pin_memory=False,
         persistent_workers=True
     )
