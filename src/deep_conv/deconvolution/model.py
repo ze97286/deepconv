@@ -9,6 +9,7 @@ import pandas as pd
 from pathlib import Path
 from deep_conv.presence.model import SingleCellTypePresenceModel
 import logging
+from torch.utils.data import DataLoader, TensorDataset
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -240,25 +241,41 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
         self.training = training
 
 class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
-    def __init__(self, fraction, coverage, atlas, y=None, x_nnls=None, presence_models=None):
+    def __init__(self, fraction, coverage, atlas, y=None, x_nnls=None, presence_models=None, batch_size=1024):
         super().__init__(fraction, coverage, atlas, y, x_nnls)
         if presence_models is not None:
-            # Precompute presence probabilities
+            # Precompute presence probabilities in batches
             self.presence_probs = []
-            for presence_model in presence_models:
-                _, adaptive_probs, _ = presence_model.adaptive_predict(
-                    self.fraction, self.coverage
-                )
-                self.presence_probs.append(adaptive_probs.squeeze(-1))
-            self.presence_probs = torch.stack(self.presence_probs, dim=1)  # [num_samples, num_cell_types]
+            num_samples = self.fraction.size(0)
+            num_cell_types = len(presence_models)
+            device = self.fraction.device
+            presence_probs = torch.zeros(num_samples, num_cell_types, device=device)
+
+            # Create a temporary DataLoader for batching
+            temp_dataset = TensorDataset(self.fraction, self.coverage)
+            temp_loader = DataLoader(temp_dataset, batch_size=batch_size, shuffle=False)
+
+            for batch_idx, (batch_fraction, batch_coverage) in enumerate(temp_loader):
+                batch_fraction = batch_fraction.to(device)
+                batch_coverage = batch_coverage.to(device)
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, num_samples)
+
+                for cell_type_idx, presence_model in enumerate(presence_models):
+                    presence_model.eval()
+                    with torch.no_grad():
+                        _, adaptive_probs, _ = presence_model.adaptive_predict(batch_fraction, batch_coverage)
+                        presence_probs[start_idx:end_idx, cell_type_idx] = adaptive_probs.squeeze(-1)
+
+            self.presence_probs = presence_probs
 
     def __getitem__(self, idx):
         item = super().__getitem__(idx)
         item['is_augmented'] = idx >= len(self.fraction) // 2
-        item['presence_probs'] = self.presence_probs[idx]
+        if self.presence_probs is not None:
+            item['presence_probs'] = self.presence_probs[idx]
         return item
     
-
 class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, presence_models_dir, feature_dim=128, dropout_rate=0.1):
         """
