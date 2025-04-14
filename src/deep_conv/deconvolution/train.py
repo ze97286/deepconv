@@ -640,7 +640,6 @@ def train_model(
             focal_loss_weight=focal_loss_weight_train,
             presence_threshold=eval_presence_threshold,
             log_vars=log_vars,
-            A=A,
             k=k,
         )
         
