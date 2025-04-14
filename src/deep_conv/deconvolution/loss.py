@@ -311,6 +311,9 @@ def loss_fn(
     details = {}
     # Ensure total loss is non-negative
     if x_nnls is not None:
+        if x_nnls.shape != pred_props.shape:
+            raise ValueError(f"Shape mismatch: x_nnls {x_nnls.shape}, pred_props {pred_props.shape}")
+        
         c = coverage.mean(dim=1)
         reg_loss = (c * (pred_props - x_nnls).pow(2).sum(dim=1)).mean()
         total_loss += k * reg_loss
