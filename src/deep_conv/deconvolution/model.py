@@ -240,12 +240,22 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
         self.training = training
 
 class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
-    def __init__(self, fraction, coverage, atlas, y=None, x_nnls=None):
+    def __init__(self, fraction, coverage, atlas, y=None, x_nnls=None, presence_models=None):
         super().__init__(fraction, coverage, atlas, y, x_nnls)
+        if presence_models is not None:
+            # Precompute presence probabilities
+            self.presence_probs = []
+            for presence_model in presence_models:
+                _, adaptive_probs, _ = presence_model.adaptive_predict(
+                    self.fraction, self.coverage
+                )
+                self.presence_probs.append(adaptive_probs.squeeze(-1))
+            self.presence_probs = torch.stack(self.presence_probs, dim=1)  # [num_samples, num_cell_types]
 
     def __getitem__(self, idx):
         item = super().__getitem__(idx)
-        item['is_augmented'] = idx >= len(self.fraction) // 2 
+        item['is_augmented'] = idx >= len(self.fraction) // 2
+        item['presence_probs'] = self.presence_probs[idx]
         return item
     
 
@@ -274,7 +284,6 @@ class CellTypeDeconvolutionModel(nn.Module):
             if not model_path.exists():
                 raise FileNotFoundError(f"Presence model not found at {model_path}")
             checkpoint = torch.load(model_path)
-            from deep_conv.presence.model import SingleCellTypePresenceModel
             presence_model = SingleCellTypePresenceModel()
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 presence_model.load_state_dict(checkpoint['model_state_dict'])
@@ -300,6 +309,9 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         # Initialize weights
         self._initialize_weights()
+
+        # Learnable weight for combining deep learning props and x_nnls
+        self.combination_weight = nn.Parameter(torch.tensor(0.5))
 
     def _initialize_weights(self):
         """Initialize weights using Kaiming normalization."""
@@ -331,38 +343,81 @@ class CellTypeDeconvolutionModel(nn.Module):
             presence_probs[:, cell_type_idx] = adaptive_probs.squeeze(-1)
         return presence_probs
 
-    def forward(self, marker_values, coverage, x_nnls):
-        """
-        Forward pass to predict cell type proportions.
-
-        Args:
-            marker_values (torch.Tensor): [B, M] tensor of marker expression values.
-            coverage (torch.Tensor): [B, M] tensor of coverage values.
-            x_nnls (torch.Tensor): [B, C] tensor of NNLS-predicted proportions.
-
-        Returns:
-            tuple: (proportions, presence_probs, x_nnls)
-                - proportions: [B, C] predicted cell type proportions.
-                - presence_probs: [B, C] presence probabilities.
-                - x_nnls: [B, C] input NNLS proportions (passed through).
-        """
+    def forward(self, marker_values, coverage, x_nnls=None, presence_probs=None):
         B = marker_values.shape[0]
 
+        # Use precomputed presence probs if provided, otherwise compute them
+        if presence_probs is None:
+            presence_probs = self.predict_presence(marker_values, coverage)
+        else:
+            presence_probs = presence_probs.to(marker_values.device)
+
         # Normalize coverage
-        log_coverage = torch.log(coverage + 1) / 4.615  # max_coverage=100 assumption
+        log_coverage = torch.log(coverage + 1) / 4.615  # Assuming max_coverage=100
 
-        # Compute presence probabilities
-        presence_probs = self.predict_presence(marker_values, coverage)
-
-        # Flatten and extract features
+        # Extract features
         features_input = torch.cat([marker_values, log_coverage], dim=1)  # [B, M*2]
         features = self.feature_extractor(features_input)  # [B, feature_dim]
 
-        # Combine with presence probabilities
+        # Combine features with presence probabilities
         combined = torch.cat([features, presence_probs], dim=1)  # [B, feature_dim + C]
 
-        # Predict proportions
+        # Predict proportions using the deep learning model
         logits = self.encoder(combined)
-        props = F.softmax(logits, dim=1)  # [B, C], sums to 1
+        props = F.softmax(logits, dim=1)  # [B, C], deep learning proportions
+
+        # Ensemble with x_nnls if provided
+        if x_nnls is not None:
+            props = self.combination_weight * props + (1 - self.combination_weight) * x_nnls
 
         return props, presence_probs, x_nnls
+
+    def predict(self, marker_values, coverage, batch_size=256, device=None, atlas=None):
+        if device is None:
+            device = next(self.parameters()).device
+        
+        if not isinstance(marker_values, torch.Tensor):
+            marker_values = torch.tensor(marker_values, dtype=torch.float32)
+        if not isinstance(coverage, torch.Tensor):
+            coverage = torch.tensor(coverage, dtype=torch.float32)
+        
+        if len(marker_values.shape) == 1:
+            marker_values = marker_values.unsqueeze(0)
+        if len(coverage.shape) == 1:
+            coverage = coverage.unsqueeze(0)
+        
+        self.eval()
+        predictions_list = []
+        
+        num_samples = marker_values.shape[0]
+        num_batches = (num_samples + batch_size - 1) // batch_size
+        
+        with torch.no_grad():
+            for i in range(num_batches):
+                start_idx = i * batch_size
+                end_idx = min((i + 1) * batch_size, num_samples)
+                
+                batch_X = marker_values[start_idx:end_idx].to(device)
+                batch_coverage = coverage[start_idx:end_idx].to(device)
+                
+                # Compute x_nnls if atlas is provided
+                x_nnls = None
+                if atlas is not None:
+                    x_nnls_np = run_weighted_nnls(
+                        batch_X.cpu().numpy(),
+                        batch_coverage.cpu().numpy(),
+                        atlas
+                    )
+                    x_nnls = torch.tensor(x_nnls_np, dtype=torch.float32, device=device)
+                
+                props, _, _ = self.forward(batch_X, batch_coverage, x_nnls)
+                
+                predictions_list.append(props.cpu().numpy())
+                
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+        
+        if len(predictions_list) == 0:
+            return np.zeros((num_samples, self.num_celltypes))
+        
+        return np.vstack(predictions_list)

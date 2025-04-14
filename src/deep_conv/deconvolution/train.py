@@ -75,11 +75,12 @@ def train_epoch(
         coverage = batch['coverage'].to(device)
         x_nnls = batch['x_nnls'].to(device)
         y_true = batch['y'].to(device)
+        presence_probs = batch['presence_probs'].to(device)
         timing_stats['data_loading'] += time.time() - start_data
 
         # Forward pass
         start_forward = time.time()
-        props, presence_probs, _ = model(fraction, coverage, x_nnls)
+        props, presence_probs, _ = model(fraction, coverage, x_nnls, presence_probs)
         timing_stats['forward_pass'] += time.time() - start_forward
 
         # Loss computation
@@ -179,8 +180,9 @@ def validate(
                 coverage = batch['coverage'].to(device)
                 x_nnls = batch['x_nnls'].to(device)
                 y_true = batch['y'].to(device)
+                presence_probs = batch['presence_probs'].to(device)
 
-                props, presence_probs, _ = model(fraction, coverage, x_nnls)
+                props, presence_probs, _ = model(fraction, coverage, x_nnls, presence_probs)
 
                 loss, details = loss_fn(
                     pred_props=props,

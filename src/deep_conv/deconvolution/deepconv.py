@@ -30,6 +30,7 @@ def get_validation_set_with_augmentation(
     target_dist_params=None,
     enable_augmentation=True,
     target_size: int = None,    
+    presence_models=None,
 ) -> tuple[DataLoader, torch.Tensor]:
     """
     Validation set loader with optional pre-augmented data and block-based subsampling.
@@ -150,7 +151,8 @@ def get_validation_set_with_augmentation(
             combined_coverage,
             atlas_np,
             combined_y,
-            x_nnls=combined_x_nnls
+            x_nnls=combined_x_nnls,
+            presence_models=presence_models,
         )
     else:
         val_dataset = PreAugmentedTissueDataset(
@@ -158,7 +160,8 @@ def get_validation_set_with_augmentation(
             coverage_val,
             atlas_np,
             y_val_np,
-            x_nnls=x_nnls_original
+            x_nnls=x_nnls_original,
+            presence_models=presence_models,
         )
     
     val_loader = DataLoader(
@@ -181,6 +184,7 @@ def load_training_with_augmentation(
     names: set, 
     num_files: int = 5,
     target_dist_params: dict = None,
+    presence_models = None,
 ) -> DataLoader:
     """
     Enhanced training data loader with pre-augmented data.
@@ -280,7 +284,8 @@ def load_training_with_augmentation(
         combined_coverage,
         atlas_np,
         combined_y,
-        x_nnls=combined_x_nnls
+        x_nnls=combined_x_nnls,
+        presence_models=presence_models,
     )
     print(f"Training dataset has {len(pre_augmented_dataset)} samples.")
 
@@ -301,6 +306,7 @@ def enhanced_negative_examples(
     atlas: pd.DataFrame,
     sample_fraction: float = 0.01,
     target_dist_params: dict = None,
+    presence_models = None,
 ) -> DataLoader:
     """
     Enhance the training dataset by adding negative examples for each cell type.
@@ -401,7 +407,8 @@ def enhanced_negative_examples(
         combined_negative_coverage,
         atlas_np,
         combined_negative_y,
-        x_nnls=combined_negative_x_nnls
+        x_nnls=combined_negative_x_nnls,
+        presence_models=presence_models,
     )
 
     # Combine original dataset with negative examples
@@ -460,18 +467,25 @@ def train_and_eval(
     }
 
     cell_types = list(atlas.columns[8:]) 
-
+    model = CellTypeDeconvolutionModel(
+        num_markers=len(atlas), num_cell_types=len(cell_types),
+        presence_models_dir=presence_models_dir,
+        dropout_rate=0.1
+    )
     train_dl_low = load_training_with_augmentation(
         f"{train_pat_dir}_low", atlas, names, num_files=3,
         target_dist_params=clinical_dist_params['low'],
+        presence_models=model.presence_models
     )
     train_dl_med = load_training_with_augmentation(
         f"{train_pat_dir}_med", atlas, names, num_files=1,
         target_dist_params=clinical_dist_params['med'],
+        presence_models=model.presence_models
     )
     train_dl_high = load_training_with_augmentation(
         f"{train_pat_dir}_high", atlas, names, num_files=1,
         target_dist_params=clinical_dist_params['high'],
+        presence_models=model.presence_models
     )
 
     train_dataset = ConcatDataset([train_dl_low.dataset, train_dl_med.dataset, train_dl_high.dataset])
@@ -496,6 +510,7 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=50_000,
+            presence_models=model.presence_models,
         )
         print(f"Validation set {cov} tier1 length (unaugmented)={len(t1_yval)}")
 
@@ -504,7 +519,8 @@ def train_and_eval(
             block_size=10_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
-            target_size=None,            
+            target_size=None,    
+            presence_models=model.presence_models        
         )
         print(f"Validation set {cov} tcells length (unaugmented)={len(tcells_yval)}")
 
@@ -514,6 +530,7 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=None,
+            presence_models=model.presence_models
         )
         print(f"Validation set {cov} oac length (unaugmented)={len(oac_yval)}")
 
@@ -523,7 +540,8 @@ def train_and_eval(
             block_size=50_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
-            target_size=50_000,            
+            target_size=50_000,       
+            presence_models=model.presence_models     
         )
         print(f"Validation set {cov} tier1 length (augmented)={len(t1_yval)}")
 
@@ -532,7 +550,8 @@ def train_and_eval(
             block_size=10_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
-            target_size=None,            
+            target_size=None,       
+            presence_models=model.presence_models     
         )
         print(f"Validation set {cov} tcells length (augmented)={len(tcells_yval)}")
 
@@ -541,7 +560,8 @@ def train_and_eval(
             block_size=1_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
-            target_size=None,           
+            target_size=None,    
+            presence_models=model.presence_models       
         )
         print(f"Validation set {cov} oac length (augmented)={len(oac_yval)}")
 
@@ -564,12 +584,7 @@ def train_and_eval(
         atlas,
         sample_fraction=0.01,
         target_dist_params=clinical_dist_params['clinical'],
-    )
-
-    model = CellTypeDeconvolutionModel(
-        num_markers=len(atlas), num_cell_types=len(cell_types),
-        presence_models_dir=presence_models_dir,
-        dropout_rate=0.1
+        presence_models=model.presence_models
     )
 
     model, _ = train_model(
