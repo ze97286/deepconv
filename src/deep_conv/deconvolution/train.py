@@ -58,11 +58,21 @@ def train_epoch(
     accumulation_steps: int = 2,
     epoch: int = 0,
     focal_loss_weight: float = 0.0,
-    presence_threshold: float = 0.01
+    presence_threshold: float = 0.01,
+    log_vars: Dict = None
 ) -> Dict[str, float]:
     model.train()
     epoch_stats = defaultdict(float)
     num_batches = 0
+
+    # Initialize log variance parameters if not provided
+    if log_vars is None:
+        log_vars = {
+            'mae': torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True),
+            'corr': torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True),
+            'presence': torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True),
+            'sparsity': torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True)
+        }
 
     with torch.profiler.profile(
         activities=[torch.profiler.ProfilerActivity.CPU],
@@ -83,8 +93,20 @@ def train_epoch(
             with torch.profiler.record_function("forward_pass"):
                 alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
             
+            # Determine target cell indices for specialized datasets
+            target_cell_types = None
+            if hasattr(loader.dataset, 'name'):
+                dataset_name = loader.dataset.name.lower() if hasattr(loader.dataset, 'name') else ""
+            else:
+                dataset_name = ""
+                
+            if "t-cells" in dataset_name:
+                target_cell_types = [11]
+            elif "oac" in dataset_name:
+                target_cell_types = [9]
+            
             with torch.profiler.record_function("loss_computation"):
-                loss, _ = loss_fn(
+                loss, details, log_vars['mae'], log_vars['corr'], log_vars['presence'], log_vars['sparsity'] = loss_fn(
                     pred_props=alpha,
                     true_props=y_true,
                     reconstructed=reconstructed,
@@ -96,7 +118,8 @@ def train_epoch(
                     focal_loss_weight=focal_loss_weight,
                     presence_threshold=presence_threshold,
                     compute_diagnostics=False,
-                    target_cell_indices=None,
+                    target_cell_indices=target_cell_types,
+                    log_vars=log_vars
                 )
             
             mae = torch.abs(alpha - y_true).mean()
@@ -107,6 +130,12 @@ def train_epoch(
             if batch_idx % log_interval == 0:
                 print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
                 print(f"Batch {batch_idx} | Proportion Accuracy - MAE: {mae.item():.4f}, MSE: {mse.item():.4f}")
+                
+                # Log task weights if using specialized loss
+                if details.get('specialized_loss', False) and 'task_weights' in details:
+                    tw = details['task_weights']
+                    print(f"Task weights: MAE={tw['mae']:.4f}, Corr={tw['corr']:.4f}, "
+                          f"Presence={tw['presence']:.4f}, Sparsity={tw['sparsity']:.4f}")
             
             scaled_loss = loss / accumulation_steps
             with torch.profiler.record_function("backward_pass"):
@@ -114,19 +143,37 @@ def train_epoch(
             
             if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1 == len(loader)):
                 with torch.profiler.record_function("optimizer_step"):
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                    # Apply gradient clipping to stabilize training
+                    all_params = list(model.parameters()) + [
+                        log_vars['mae'], log_vars['corr'], 
+                        log_vars['presence'], log_vars['sparsity']
+                    ]
+                    grad_norm = torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+                    
                     optimiser.step()
                     optimiser.zero_grad()
                 
                 epoch_stats['grad_norm'] += grad_norm.item()
                 
                 if wandb.run is not None and (batch_idx + 1) % (log_interval // 2) == 0:
-                    wandb.log({
+                    wandb_log = {
                         "batch/loss": loss.item(),
                         "batch/grad_norm": grad_norm.item(),
                         "batch/lr": optimiser.param_groups[0]['lr'],
                         "batch/step": batch_idx
-                    })
+                    }
+                    
+                    # Log task weights if available
+                    if details.get('specialized_loss', False) and 'task_weights' in details:
+                        tw = details['task_weights']
+                        wandb_log.update({
+                            "batch/weight_mae": tw['mae'],
+                            "batch/weight_corr": tw['corr'],
+                            "batch/weight_presence": tw['presence'],
+                            "batch/weight_sparsity": tw['sparsity']
+                        })
+                    
+                    wandb.log(wandb_log)
             
             epoch_stats['total_loss'] += scaled_loss.item() * accumulation_steps
             num_batches += 1
@@ -150,9 +197,19 @@ def validate(
     cell_types: List[str],
     presence_threshold: float = 0.01,
     focal_loss_weight: float = 0.0,
-    alpha_threshold: float = 1e-4
+    alpha_threshold: float = 1e-4,
+    log_vars: Dict = None
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
     model.eval()
+
+    # Initialize log variance parameters if not provided
+    if log_vars is None:
+        log_vars = {
+            'mae': torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True),
+            'corr': torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True),
+            'presence': torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True),
+            'sparsity': torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True)
+        }
 
     val_stats = {}
     thresholds = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
@@ -201,13 +258,15 @@ def validate(
 
                 alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
 
+                # Determine target cell indices for specialized datasets
                 target_cell_types = None
-                if "T-cells" in val_name:
-                    target_cell_types = [11]
-                elif "OAC" in val_name:
-                    target_cell_types = [9]
+                if "t-cells" in val_name.lower():
+                    target_cell_types = [11]  # T-cells index
+                elif "oac" in val_name.lower():
+                    target_cell_types = [9]    # OAC index
 
-                loss, details = loss_fn(
+                # Use our enhanced loss function with log_vars
+                loss, details, _, _, _, _ = loss_fn(
                     pred_props=alpha,
                     true_props=y_true,
                     reconstructed=reconstructed,
@@ -219,6 +278,7 @@ def validate(
                     presence_threshold=presence_threshold,
                     focal_loss_weight=focal_loss_weight,
                     target_cell_indices=target_cell_types,
+                    log_vars=log_vars
                 )
 
                 # Collect predictions for R² and MAE
@@ -295,11 +355,10 @@ def validate(
                     batch_results['detection_accuracy'] += detection_accuracy.item() * batch_size
                     batch_results['count'] += batch_size
 
+                # Process loss details, including our new fields
                 loader_stats['loss'] += loss.item()
-                loader_stats['loss_props'] += details['loss_props']
-                loader_stats['recon_loss'] += details['recon_loss']
-                loader_stats['sparsity_loss'] += details['sparsity_loss']
-                loader_stats['presence_loss'] += details['presence_loss']
+                
+                # Process standard fields from details
                 for key, value in details.items():
                     if isinstance(value, dict):
                         for subkey, subvalue in value.items():
@@ -361,12 +420,22 @@ def validate(
             print(f"Proportion accuracy - MAE: {mae_avg:.4f}, MSE: {mse_avg:.4f}")
             print(f"R²: {r2:.4f}")
             print(f"Overall MAE (from evaluate_performance): {overall_mae:.4f}")
-            print(f"Average Loss Components - "
-                  f"loss_props: {loader_stats['loss_props']/num_batches:.4f}, "
-                  f"recon_loss: {loader_stats['recon_loss']/num_batches:.4f}, "
-                  f"sparsity_penalty: {loader_stats['sparsity_loss']/num_batches:.4f}, "
-                  f"presence_loss: {loader_stats['presence_loss']/num_batches:.4f}")
+            
+            # Display loss components
+            print(f"Average Loss Components:")
+            for component in ['loss_props', 'recon_loss', 'sparsity_loss', 'presence_loss', 'corr_loss']:
+                if component in loader_stats:
+                    print(f"  {component}: {loader_stats[component]/num_batches:.4f}")
+            
+            # Display task weights if available
+            if 'task_weights/mae' in loader_stats:
+                print(f"Task weights:")
+                print(f"  MAE: {loader_stats['task_weights/mae']/num_batches:.4f}")
+                print(f"  Corr: {loader_stats['task_weights/corr']/num_batches:.4f}")
+                print(f"  Presence: {loader_stats['task_weights/presence']/num_batches:.4f}")
+                print(f"  Sparsity: {loader_stats['task_weights/sparsity']/num_batches:.4f}")
 
+            # Store metrics in loader_stats
             loader_stats['avg_precision'] = overall_precision
             loader_stats['avg_recall'] = overall_recall
             loader_stats['avg_f1'] = overall_f1
@@ -390,8 +459,9 @@ def validate(
                         if key != 'count':
                             loader_stats[f'thresh_{t}_{key}'] = value
 
+            # Normalize all non-dictionary values by num_batches
             for key in loader_stats:
-                if key != 'per_cell_r2':
+                if key != 'per_cell_r2' and not isinstance(loader_stats[key], dict):
                     loader_stats[key] /= num_batches
 
             val_stats[val_name] = dict(loader_stats)
@@ -401,6 +471,7 @@ def validate(
 
     avg_val_loss = weighted_loss_sum / total_batches if total_batches > 0 else 0.0
     return avg_val_loss, val_stats
+
 
 def train_model(
     model: nn.Module,
@@ -419,17 +490,23 @@ def train_model(
 ) -> Tuple[nn.Module, float]:
     model = model.to(device)
     
-    optimizer = optim.AdamW(list(model.parameters()) + [param for pm in model.presence_models for param in pm.parameters()], lr=lr, weight_decay=weight_decay)
+    # Initialise log variance parameters with appropriate initial values
+    # Setting higher values for presence and sparsity indicates lower initial importance
+    log_vars = {
+        'mae': torch.nn.Parameter(torch.tensor(0.0, device=device)),      # exp(-0.0) = 1.0 weight
+        'corr': torch.nn.Parameter(torch.tensor(0.0, device=device)),     # exp(-0.0) = 1.0 weight
+        'presence': torch.nn.Parameter(torch.tensor(1.0, device=device)), # exp(-1.0) ≈ 0.37 weight
+        'sparsity': torch.nn.Parameter(torch.tensor(1.0, device=device))  # exp(-1.0) ≈ 0.37 weight
+    }
     
-    cycle_length = 10
-    scheduler = optim.lr_scheduler.CyclicLR(
-        optimizer,
-        base_lr=1e-4,
-        max_lr=lr,
-        step_size_up=cycle_length * len(train_loader) // 2,
-        mode='triangular',
-        cycle_momentum=False
-    )
+    # Modified optimizer with fixed learning rates
+    optimizer = optim.AdamW([
+        {'params': list(model.parameters()) + [param for pm in model.presence_models for param in pm.parameters()], 'lr': 1e-4},
+        {'params': [log_vars['mae'], log_vars['corr'], log_vars['presence'], log_vars['sparsity']], 'lr': 0.01}
+    ], weight_decay=weight_decay)
+    
+    # Use CosineAnnealingLR instead of CyclicLR
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
     
     os.makedirs(model_path, exist_ok=True)
     
@@ -439,12 +516,15 @@ def train_model(
             "num_markers": getattr(model, "num_markers", "unknown"),
             "num_cell_types": getattr(model, "num_celltypes", "unknown"),
             "feature_dim": getattr(model, "feature_dim", "unknown"),
-            "learning_rate": lr,
+            "learning_rate_model": 1e-4,
+            "learning_rate_logvars": 0.01,
             "weight_decay": weight_decay,
             "batch_size": train_loader.batch_size if hasattr(train_loader, "batch_size") else "unknown",
             "num_epochs": num_epochs,
             "patience": patience,
-            "device": str(device)
+            "device": str(device),
+            "using_dynamic_weighting": True,
+            "scheduler": "CosineAnnealingLR(T_max=10)"
         }
         run = init_wandb(config, project_name=wandb_project, entity=wandb_entity)
         wandb.watch(model, log="all", log_freq=100)
@@ -455,9 +535,6 @@ def train_model(
         print(f"Cell Type {ct}: Specificity Threshold = {threshold:.4f}")
         if use_wandb:
             wandb.run.summary[f"presence_specificity_threshold_ct{ct}"] = threshold
-    
-    initial_lr = lr
-    warmup_epochs = 5
     
     history = defaultdict(list)
     best_val_loss = float('inf')
@@ -477,20 +554,12 @@ def train_model(
     val_loaders_unaugmented, val_loaders_augmented = val_loaders
     for epoch in range(num_epochs):
         print(f"\n🔹 Epoch {epoch + 1}/{num_epochs}")
-        
-        if epoch < warmup_epochs:
-            warmup_factor = (epoch + 1) / warmup_epochs
-            current_lr = initial_lr * warmup_factor
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = current_lr
-            print(f"LR Warmup: {current_lr:.1e}")
-        else:
-            current_lr = optimizer.param_groups[0]['lr']
-            print(f"Cyclic LR: {current_lr:.1e}")
+        print(f"Current LR: {optimizer.param_groups[0]['lr']:.1e} (model), {optimizer.param_groups[1]['lr']:.1e} (log_vars)")
         
         focal_loss_weight_train = 0.005
         focal_loss_weight_val = 0.01
         
+        # Run training epoch with log_vars
         train_stats = train_epoch(
             model,
             train_loader,
@@ -498,16 +567,18 @@ def train_model(
             device,
             epoch=epoch,
             focal_loss_weight=focal_loss_weight_train,
-            presence_threshold=eval_presence_threshold
+            presence_threshold=eval_presence_threshold,
+            log_vars=log_vars
         )
         
-        if epoch >= warmup_epochs:
-            scheduler.step()
+        # Step the scheduler after each epoch
+        scheduler.step()
         
         # Curriculum training: Use unaugmented for first 10 epochs, then switch to augmented
         current_val_loaders = val_loaders_unaugmented if epoch < 10 else val_loaders_augmented
         print(f"Validation with augmentation: {epoch >= 10}")
 
+        # Run validation with log_vars
         avg_val_loss, val_stats = validate(
             model,
             current_val_loaders,
@@ -515,7 +586,8 @@ def train_model(
             cell_types=cell_types,
             presence_threshold=eval_presence_threshold,
             focal_loss_weight=focal_loss_weight_val,
-            alpha_threshold=eval_presence_threshold
+            alpha_threshold=eval_presence_threshold,
+            log_vars=log_vars
         )
         
         thresholds = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
@@ -534,11 +606,27 @@ def train_model(
                 best_threshold = t
                 print(f"New best threshold: {best_threshold} (Detection Accuracy: {best_threshold_f1:.4f})")
         
+        # Get current task weights
+        task_weights = {
+            'mae': torch.clamp(torch.exp(-log_vars['mae']), max=1.0).item(),
+            'corr': torch.clamp(torch.exp(-log_vars['corr']), max=1.0).item(),
+            'presence': torch.clamp(torch.exp(-log_vars['presence']), max=1.0).item(),
+            'sparsity': torch.clamp(torch.exp(-log_vars['sparsity']), max=1.0).item()
+        }
+        
+        print(f"Task weights: MAE={task_weights['mae']:.4f}, Corr={task_weights['corr']:.4f}, "
+              f"Presence={task_weights['presence']:.4f}, Sparsity={task_weights['sparsity']:.4f}")
+        
+        # Update history
         for key, value in train_stats.items():
             history[key].append(value)
         for val_name, stats in val_stats.items():
             for k, v in stats.items():
                 history[f"{val_name}/{k}"].append(v)
+        
+        # Record task weights in history
+        for k, v in task_weights.items():
+            history[f"task_weight/{k}"].append(v)
         
         tcells_low_f1 = val_stats.get('t-cells_low', {}).get('avg_f1', 0.0)
         
@@ -620,12 +708,21 @@ def train_model(
                 "val/oac_r2_avg": oac_r2_avg,
                 "val/tier1_r2_avg": tier1_r2_avg,
                 "val/avg_mae": mae_avg,
-                "lr": optimizer.param_groups[0]['lr'],
+                "lr/model": optimizer.param_groups[0]['lr'],
+                "lr/log_vars": optimizer.param_groups[1]['lr'],
                 "focal_loss_weight_train": focal_loss_weight_train,
                 "focal_loss_weight_val": focal_loss_weight_val,
                 "best_threshold": best_threshold,
                 "best_threshold_f1": best_threshold_f1,
-                "tcells_low_f1": tcells_low_f1
+                "tcells_low_f1": tcells_low_f1,
+                "task_weight/mae": task_weights['mae'],
+                "task_weight/corr": task_weights['corr'],
+                "task_weight/presence": task_weights['presence'],
+                "task_weight/sparsity": task_weights['sparsity'],
+                "log_var/mae": log_vars['mae'].item(),
+                "log_var/corr": log_vars['corr'].item(),
+                "log_var/presence": log_vars['presence'].item(),
+                "log_var/sparsity": log_vars['sparsity'].item()
             }
             for val_name, stats in val_stats.items():
                 for k, v in stats.items():
@@ -691,7 +788,8 @@ def train_model(
                 'best_tier1_r2': best_tier1_r2,
                 'best_mae_avg': best_mae_avg,
                 'best_threshold': best_threshold,
-                'history': dict(history)
+                'history': dict(history),
+                'log_vars': {k: v.data for k, v in log_vars.items()}  # Save log vars
             }
             torch.save(checkpoint, os.path.join(model_path, "best_model.pt"))
             if use_wandb:
@@ -709,10 +807,25 @@ def train_model(
     checkpoint = torch.load(os.path.join(model_path, "best_model.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
     
+    # Restore log vars from checkpoint if available
+    if 'log_vars' in checkpoint:
+        for k, v in checkpoint['log_vars'].items():
+            log_vars[k].data = v
+    
     plot_training_history(dict(history), os.path.join(model_path, "model_training"))
     
     print(f"\nRecommended threshold for inference: {best_threshold}")
     print(f"(Based on best detection accuracy: {best_threshold_f1:.4f})")
+    
+    # Print final task weights
+    final_task_weights = {
+        'mae': torch.clamp(torch.exp(-log_vars['mae']), max=1.0).item(),
+        'corr': torch.clamp(torch.exp(-log_vars['corr']), max=1.0).item(),
+        'presence': torch.clamp(torch.exp(-log_vars['presence']), max=1.0).item(),
+        'sparsity': torch.clamp(torch.exp(-log_vars['sparsity']), max=1.0).item()
+    }
+    print(f"Final task weights: MAE={final_task_weights['mae']:.4f}, Corr={final_task_weights['corr']:.4f}, "
+          f"Presence={final_task_weights['presence']:.4f}, Sparsity={final_task_weights['sparsity']:.4f}")
     
     if use_wandb:
         wandb.run.summary["best_val_loss"] = best_val_loss
@@ -725,6 +838,10 @@ def train_model(
         wandb.run.summary["total_epochs"] = epoch + 1
         wandb.run.summary["best_threshold"] = best_threshold
         wandb.run.summary["best_threshold_f1"] = best_threshold_f1
+        
+        # Log final task weights
+        for k, v in final_task_weights.items():
+            wandb.run.summary[f"final_task_weight_{k}"] = v
         
         def remove_wandb_hooks(model):
             for k in list(model._forward_hooks.keys()):
@@ -740,7 +857,6 @@ def train_model(
         wandb.finish()
     
     return model, best_threshold
-
 
 def plot_training_history(history: Dict[str, List[float]], save_path: str):
     """
