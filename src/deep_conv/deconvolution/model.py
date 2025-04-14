@@ -1,3 +1,4 @@
+from deep_conv.benchmark.nnls import run_weighted_nnls
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -262,11 +263,12 @@ class ResidualBlock(nn.Module):
         return out
 
 class CellTypeDeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=128, dropout_rate=0.1):
+    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, A=None, feature_dim=128, dropout_rate=0.1):
         super().__init__()
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
+        self.A = A
 
         # Store cell-type assignment for each marker
         target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
@@ -419,6 +421,15 @@ class CellTypeDeconvolutionModel(nn.Module):
         B, M = marker_values.shape
         C = self.num_celltypes
 
+        if self.A is not None:
+            # Convert to NumPy for NNLS
+            marker_np = marker_values.cpu().numpy()
+            coverage_np = coverage.cpu().numpy()
+            x_nnls = run_weighted_nnls(marker_np, coverage_np, self.A)
+            x_nnls = torch.tensor(x_nnls, dtype=torch.float32, device=marker_values.device)
+        else:
+            x_nnls = torch.zeros(B, C, device=marker_values.device) 
+
         # Debug: Check for nan in inputs
         if torch.isnan(coverage).any() or torch.isinf(coverage).any():
             print("Warning: coverage contains nan or inf values")
@@ -448,7 +459,7 @@ class CellTypeDeconvolutionModel(nn.Module):
             reconstructed = coverage.new_zeros(B, M)
             presence_probs = coverage.new_zeros(B, C)
             presence_logits = coverage.new_zeros(B, C)
-            return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
+            return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits, x_nnls
 
         # Extract coverage, marker_values, and log_coverage for valid coverage
         coverage_valid = coverage_flat[valid_inds]
@@ -535,7 +546,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         if torch.isnan(reconstructed).any() or torch.isinf(reconstructed).any():
             print("Warning: reconstructed contains nan or inf values")
 
-        return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
+        return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits, x_nnls
     
     def predict_with_adaptive_threshold(self, marker_values, coverage, base_threshold=0.5):
         logits, _ = self.forward(marker_values, coverage)

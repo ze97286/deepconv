@@ -59,7 +59,8 @@ def train_epoch(
     epoch: int = 0,
     focal_loss_weight: float = 0.0,
     presence_threshold: float = 0.01,
-    log_vars: Dict = None
+    log_vars: Dict = None,
+    k: float = 0.1,
 ) -> Dict[str, float]:
     model.train()
     epoch_stats = defaultdict(float)
@@ -100,7 +101,7 @@ def train_epoch(
             # 2. Forward pass
             start_forward = time.time()
             with torch.profiler.record_function("forward_pass"):
-                alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
+                alpha, reconstructed, valid_mask, presence_probs, presence_logits, x_nnls = model(fraction, coverage)
             timing_stats['forward_pass'] += time.time() - start_forward
             
             # Determine target cell indices
@@ -133,7 +134,9 @@ def train_epoch(
                     presence_threshold=presence_threshold,
                     compute_diagnostics=False,
                     target_cell_indices=target_cell_types,
-                    log_vars=log_vars
+                    log_vars=log_vars,
+                    x_nnls=x_nnls,
+                    k=k,
                 )
             timing_stats['loss_computation'] += time.time() - start_loss
             
@@ -261,7 +264,8 @@ def validate(
     presence_threshold: float = 0.01,
     focal_loss_weight: float = 0.0,
     alpha_threshold: float = 1e-4,
-    log_vars: Dict = None
+    log_vars: Dict = None,
+    k: float = 0.1,
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
     model.eval()
 
@@ -319,7 +323,7 @@ def validate(
                 coverage = batch['coverage'].to(device)
                 y_true = batch['y'].to(device)
 
-                alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
+                alpha, reconstructed, valid_mask, presence_probs, presence_logits, x_nnls = model(fraction, coverage)
 
                 # Determine target cell indices for specialized datasets
                 target_cell_types = None
@@ -341,7 +345,9 @@ def validate(
                     presence_threshold=presence_threshold,
                     focal_loss_weight=focal_loss_weight,
                     target_cell_indices=target_cell_types,
-                    log_vars=log_vars
+                    log_vars=log_vars,
+                    x_nnls = x_nnls,
+                    k=k,
                 )
 
                 # Collect predictions for R² and MAE
@@ -549,7 +555,9 @@ def train_model(
     use_wandb: bool = True,
     wandb_project: str = "cfDNA-Deconvolution",
     wandb_entity: str = None,
-    device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+    A: np.ndarray = None, 
+    k: float = 0.1 
 ) -> Tuple[nn.Module, float]:
     model = model.to(device)
     
@@ -631,7 +639,9 @@ def train_model(
             epoch=epoch,
             focal_loss_weight=focal_loss_weight_train,
             presence_threshold=eval_presence_threshold,
-            log_vars=log_vars
+            log_vars=log_vars,
+            A=A,
+            k=k,
         )
         
         # Step the scheduler after each epoch

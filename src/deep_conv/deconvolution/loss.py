@@ -56,7 +56,9 @@ def loss_fn(
     compute_diagnostics: bool = True,
     corr_weight: float = 0.5,
     target_cell_indices=None,
-    log_vars=None
+    log_vars=None,
+    x_nnls=None, 
+    k: float = 0.1
 ):
     start_total = time.time()
     # Get or initialize learnable log-variances for dynamic weighting
@@ -307,6 +309,12 @@ def loss_fn(
         standard_time = time.time() - start_standard
 
     # Ensure total loss is non-negative
+    if x_nnls is not None:
+        c = coverage.mean(dim=1)
+        reg_loss = (c * (pred_props - x_nnls).pow(2).sum(dim=1)).mean()
+        total_loss += k * reg_loss
+        if compute_diagnostics:
+            details['reg_loss'] = reg_loss.item()
     total_loss = torch.clamp(total_loss, min=0.0)
 
     # Diagnostics - keep all original calculations 

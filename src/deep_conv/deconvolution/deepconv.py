@@ -421,6 +421,7 @@ def train_and_eval(
 
     atlas = pd.read_csv(atlas_path, sep="\t")
     names = set(atlas.name.unique())
+    A = atlas[atlas.columns[8:]].T.to_numpy()
 
     clinical_dist_params = {
         'low': {
@@ -556,20 +557,21 @@ def train_and_eval(
     model = CellTypeDeconvolutionModel(
         num_markers=len(atlas), num_cell_types=len(cell_types),
         target_ids=target_ids, presence_models_dir=presence_models_dir,
-        dropout_rate=0.1
+        dropout_rate=0.1, A=A, 
     )
 
     model, _ = train_model(
-        model=model,
-        train_loader=enhanced_train_dl,
-        val_loaders=(val_loaders_unaugmented, val_loaders_augmented),
-        model_path=output_path,
-        cell_types=cell_types,
-        num_epochs=1000,
-        patience=20, 
-        lr=5e-4, 
-        weight_decay=1e-3
-    )
+            model=model,
+            train_loader=enhanced_train_dl,
+            val_loaders=(val_loaders_unaugmented, val_loaders_augmented),
+            model_path=output_path,
+            cell_types=cell_types,
+            num_epochs=1000,
+            patience=10,
+            lr=5e-4,
+            weight_decay=1e-3,
+            k=0.1
+        )
 
     print("\nStandard Validation Sets:")
     for tier in val_loaders_unaugmented.keys():
