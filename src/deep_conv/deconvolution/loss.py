@@ -1,3 +1,4 @@
+from typing import List
 import torch 
 import torch.nn.functional as F
 
@@ -53,7 +54,8 @@ def loss_fn(
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
     focal_loss_weight: float = 0.01,
     compute_diagnostics: bool = True,
-    corr_weight: float = 0.3
+    corr_weight: float = 0.5,
+    target_cell_indices: List[int] = None,
 ):
     # Sanitize coverage
     if torch.isnan(coverage).any() or torch.isinf(coverage).any():
@@ -138,10 +140,12 @@ def loss_fn(
 
     # General Correlation Loss (average correlation across all cell types)
     corr_loss = 0.0
-    num_cell_types = pred_props.shape[1]
     total_corr = 0.0
     valid_cell_types = 0
-    for i in range(num_cell_types):
+    num_cell_types = pred_props.shape[1]
+    if target_cell_indices is None:
+        target_cell_indices = range(num_cell_types)
+    for i in target_cell_indices:
         true_vals = true_props[:, i]
         pred_vals = pred_props[:, i]
         true_mean = torch.mean(true_vals)

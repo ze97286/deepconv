@@ -95,7 +95,8 @@ def train_epoch(
                     presence_logits=presence_logits,
                     focal_loss_weight=focal_loss_weight,
                     presence_threshold=presence_threshold,
-                    compute_diagnostics=False
+                    compute_diagnostics=False,
+                    target_cell_indices=None,
                 )
             
             mae = torch.abs(alpha - y_true).mean()
@@ -200,6 +201,12 @@ def validate(
 
                 alpha, reconstructed, valid_mask, presence_probs, presence_logits = model(fraction, coverage)
 
+                target_cell_types = None
+                if "T-cells" in val_name:
+                    target_cell_types = [11]
+                elif "OAC" in val_name:
+                    target_cell_types = [9]
+
                 loss, details = loss_fn(
                     pred_props=alpha,
                     true_props=y_true,
@@ -210,7 +217,8 @@ def validate(
                     presence_probs=presence_probs,
                     presence_logits=presence_logits,
                     presence_threshold=presence_threshold,
-                    focal_loss_weight=focal_loss_weight
+                    focal_loss_weight=focal_loss_weight,
+                    target_cell_indices=target_cell_types,
                 )
 
                 # Collect predictions for R² and MAE
