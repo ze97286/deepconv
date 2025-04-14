@@ -58,13 +58,13 @@ def loss_fn(
     target_cell_indices=None,
     log_vars=None
 ):
-    # Get or initialiדe learnable log-variances for dynamic weighting
+    # Get or initialise learnable log-variances for dynamic weighting
     if log_vars is None:
         # These will be created but not persisted between calls
         log_var_mae = torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True)
         log_var_corr = torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True)
-        log_var_presence = torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True)
-        log_var_sparsity = torch.nn.Parameter(torch.tensor(0.0, device=device), requires_grad=True)
+        log_var_presence = torch.nn.Parameter(torch.tensor(1.0, device=device), requires_grad=True)
+        log_var_sparsity = torch.nn.Parameter(torch.tensor(1.0, device=device), requires_grad=True)
     else:
         # Use the passed log_vars
         log_var_mae = log_vars['mae']
@@ -104,10 +104,25 @@ def loss_fn(
     # Check if we have a specialized dataset (T-cells or OAC)
     is_specialized = target_cell_indices is not None and len(target_cell_indices) == 1
     
-    # Compute all basic components needed for both paths
+    # Calculate these values regardless of path to ensure they're available for diagnostics
     cell_errors = torch.abs(pred_props - true_props)
     underestimation = F.relu(true_props - pred_props)
     overestimation = F.relu(pred_props - true_props)
+    
+    # Define concentration masks needed for diagnostics
+    low_conc_mask = (true_props > 0.001) & (true_props <= 0.01)
+    med_conc_mask = (true_props > 0.01) & (true_props <= 0.05)
+    high_conc_mask = true_props > 0.05
+    
+    # Calculate importance weights regardless of path (used in both paths and diagnostics)
+    importance_weights = torch.ones_like(true_props)
+    importance_weights = torch.where(low_conc_mask, 2.0, importance_weights)
+    importance_weights = torch.where(med_conc_mask, 1.6, importance_weights)
+    importance_weights = torch.where(high_conc_mask, 1.2, importance_weights)
+    
+    # Always calculate low_snr_mask (used in diagnostics)
+    low_snr_mask = torch.zeros_like(true_props)
+    low_snr_mask[:, low_snr_indices] = 1.0
     
     # Focal Loss for Presence Detection - always compute this
     presence_probs_clipped = torch.clamp(presence_probs, 0.0, 1.0)
@@ -177,6 +192,24 @@ def loss_fn(
         non_target_mask[:, target_idx] = 0.0
         sparsity_penalty = torch.mean(torch.abs(pred_props * non_target_mask))
         
+        # Calculate weighted_errors for diagnostics
+        underestimation_penalty = 1.3 * underestimation
+        low_snr_under_penalty = low_snr_mask * underestimation * 1.2
+        weighted_errors = importance_weights * (cell_errors + underestimation_penalty + low_snr_under_penalty)
+        
+        # Define loss_props for diagnostics
+        loss_props = weighted_errors.mean()
+        
+        # Define recon_loss for diagnostics (not used in specialized mode)
+        errors = torch.abs(marker_values - reconstructed)
+        errors = torch.where(valid_mask, errors, torch.zeros_like(errors))
+        weighted_errors_recon = valid_mask * coverage * errors
+        denominator = torch.sum(valid_mask * coverage) + 1e-8
+        if denominator < 1e-7:
+            recon_loss = torch.tensor(0.0, device=device)
+        else:
+            recon_loss = torch.sum(weighted_errors_recon) / denominator
+        
         # Compute specialized loss with dynamic weighting
         total_loss = (
             task_uncertainty['mae'] * target_mae + 0.5 * log_var_mae +
@@ -193,14 +226,6 @@ def loss_fn(
             effective_gamma = gamma * 0.5
         
         # Proportion Error (loss_props)
-        importance_weights = torch.ones_like(true_props)
-        low_conc_mask = (true_props > 0.001) & (true_props <= 0.01)
-        med_conc_mask = (true_props > 0.01) & (true_props <= 0.05)
-        high_conc_mask = true_props > 0.05
-        importance_weights = torch.where(low_conc_mask, 2.0, importance_weights)
-        importance_weights = torch.where(med_conc_mask, 1.6, importance_weights)
-        importance_weights = torch.where(high_conc_mask, 1.2, importance_weights)
-
         # Increase importance for T-cells in low-coverage scenarios
         if avg_coverage < 10:
             importance_weights[:, low_snr_indices] *= 1.5
@@ -208,8 +233,6 @@ def loss_fn(
         capped_fraction = torch.clamp(true_props[:, low_snr_indices], max=0.10)
         importance_weights[:, low_snr_indices] *= (1.0 + 10.0 * capped_fraction)
         
-        low_snr_mask = torch.zeros_like(true_props)
-        low_snr_mask[:, low_snr_indices] = 1.0
         underestimation_penalty = 1.3 * underestimation
         low_snr_under_penalty = low_snr_mask * underestimation * 1.2
         weighted_errors = importance_weights * (cell_errors + underestimation_penalty + low_snr_under_penalty)
@@ -225,12 +248,12 @@ def loss_fn(
         # Reconstruction Loss
         errors = torch.abs(marker_values - reconstructed)
         errors = torch.where(valid_mask, errors, torch.zeros_like(errors))
-        weighted_errors = valid_mask * coverage * errors
+        weighted_errors_recon = valid_mask * coverage * errors
         denominator = torch.sum(valid_mask * coverage) + 1e-8
         if denominator < 1e-7:
             recon_loss = torch.tensor(0.0, device=device)
         else:
-            recon_loss = torch.sum(weighted_errors) / denominator
+            recon_loss = torch.sum(weighted_errors_recon) / denominator
 
         # Sparsity Regularization
         sparsity_penalty = torch.mean(torch.abs(pred_props))
@@ -302,8 +325,8 @@ def loss_fn(
         details = {
             "total_loss": total_loss.item(),
             "specialized_loss": is_specialized,
-            "loss_props": loss_props.item() if not is_specialized else weighted_errors.mean().item(),
-            "recon_loss": recon_loss.item() if not is_specialized else 0.0,
+            "loss_props": loss_props.item(),
+            "recon_loss": recon_loss.item(),
             "corr_loss": corr_loss.item(),
             "sparsity_loss": sparsity_penalty.item(),
             "presence_loss": presence_loss.item(),
