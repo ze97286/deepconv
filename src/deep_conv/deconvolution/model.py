@@ -197,10 +197,11 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
                  coverage, 
                  atlas, 
                  y=None, 
+                 x_nnls=None,
                  target_dist_params=None,
                  augmentation_probability=0.5,
                  enable_augmentation=True):
-        super().__init__(fraction, coverage, atlas, y)
+        super().__init__(fraction, coverage, atlas, y, x_nnls)
         self.target_dist_params = target_dist_params
         self.augmentation_probability = augmentation_probability
         self.enable_augmentation = enable_augmentation
@@ -237,14 +238,14 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
         self.training = training
 
 class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
-    def __init__(self, fraction, coverage, atlas, y=None):
-        super().__init__(fraction, coverage, atlas, y)
+    def __init__(self, fraction, coverage, atlas, y=None, x_nnls=None):
+        super().__init__(fraction, coverage, atlas, y, x_nnls)
 
     def __getitem__(self, idx):
         item = super().__getitem__(idx)
         item['is_augmented'] = idx >= len(self.fraction) // 2 
         return item
-
+    
 
 class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, presence_models_dir, feature_dim=128, dropout_rate=0.1):
