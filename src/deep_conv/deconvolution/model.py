@@ -1,3 +1,4 @@
+from deep_conv.benchmark.nnls import run_weighted_nnls
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -244,398 +245,121 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
         item['is_augmented'] = idx >= len(self.fraction) // 2 
         return item
 
-class ResidualBlock(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
-        self.fc1 = nn.Linear(in_dim, out_dim)
-        self.fc2 = nn.Linear(out_dim, out_dim)
-        self.relu = nn.LeakyReLU()
-        self.shortcut = nn.Linear(in_dim, out_dim) if in_dim != out_dim else nn.Identity()
-
-    def forward(self, x):
-        residual = self.shortcut(x)
-        out = self.fc1(x)
-        out = self.relu(out)
-        out = self.fc2(out)
-        out = out + residual
-        out = self.relu(out)
-        return out
 
 class CellTypeDeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=128, dropout_rate=0.1):
+    def __init__(self, num_markers, num_cell_types, presence_models_dir, feature_dim=128, dropout_rate=0.1):
+        """
+        Initialize the Cell Type Deconvolution Model.
+
+        Args:
+            num_markers (int): Number of marker genes.
+            num_cell_types (int): Number of cell types to deconvolve.
+            presence_models_dir (str): Directory containing pre-trained presence models.
+            feature_dim (int): Dimension of the feature extraction layer.
+            dropout_rate (float): Dropout rate for regularization.
+        """
         super().__init__()
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
 
-        # Store cell-type assignment for each marker
-        target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
-        self.register_buffer("target_ids", target_ids_t)
-
-        # Load separate presence models
+        # Load pre-trained presence models
         self.presence_models = nn.ModuleList()
-
         print("\nLoading Presence Models:")
         for cell_type_idx in range(num_cell_types):
             model_path = Path(presence_models_dir) / f"presence_model_{cell_type_idx}.pt"
-
             if not model_path.exists():
                 raise FileNotFoundError(f"Presence model not found at {model_path}")
             checkpoint = torch.load(model_path)
+            from deep_conv.presence.model import SingleCellTypePresenceModel
+            presence_model = SingleCellTypePresenceModel()
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                from deep_conv.presence.model import SingleCellTypePresenceModel
-                presence_model = SingleCellTypePresenceModel()
                 presence_model.load_state_dict(checkpoint['model_state_dict'])
                 presence_model.load_threshold(checkpoint)
-                print(f"Cell Type {cell_type_idx}: Loaded Specificity Threshold = {presence_model.specificity_threshold:.4f}")
             else:
                 presence_model = checkpoint
-                if not hasattr(presence_model, 'specificity_threshold'):
-                    presence_model.specificity_threshold = 0.5
-                print(f"Cell Type {cell_type_idx}: Loaded Specificity Threshold = {presence_model.specificity_threshold:.4f} (from model)")
             self.presence_models.append(presence_model)
 
-        # Marker Feature Extractor: Processes marker values and normalized log(coverage)
-        self.marker_feature_extractor = nn.Sequential(
-            nn.Linear(2, feature_dim),
-            nn.LeakyReLU(),
-            nn.LayerNorm(feature_dim),  
-            nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim, feature_dim),
-            nn.LeakyReLU(),
-            nn.LayerNorm(feature_dim),  
-            nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim, feature_dim)
+        # Feature extractor: process marker values and coverage
+        self.feature_extractor = nn.Sequential(
+            nn.Linear(num_markers * 2, feature_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate)
         )
 
+        # Encoder: predict proportions from features and presence probabilities
         self.encoder = nn.Sequential(
-            nn.Linear(num_cell_types * feature_dim + num_cell_types, 256),
-            nn.LeakyReLU(),
-            nn.LayerNorm(256), 
-            nn.Dropout(dropout_rate),
-            ResidualBlock(256, 256),
-            nn.LayerNorm(256), 
+            nn.Linear(feature_dim + num_cell_types, 256),
+            nn.ReLU(),
             nn.Dropout(dropout_rate),
             nn.Linear(256, num_cell_types)
         )
 
-        self.decoder = nn.Sequential(
-            nn.Linear(num_cell_types, 256),
-            nn.LeakyReLU(),
-            nn.LayerNorm(256),  
-            nn.Dropout(dropout_rate),
-            nn.Linear(256, 256),
-            nn.LeakyReLU(),
-            nn.LayerNorm(256),  
-            nn.Dropout(dropout_rate),
-            nn.Linear(256, num_markers)
-        )
-
-        # Apply Kaiming initialization to all linear layers
+        # Initialize weights
         self._initialize_weights()
 
-        # Initialise presence gating parameters
-        thresholds = torch.ones(num_cell_types) * 0.5
-        slopes = torch.ones(num_cell_types) * 10
-        oac_index = 9  
-        tcells_index = 11  
-        thresholds[oac_index] = 0.4  
-        thresholds[tcells_index] = 0.3
-        slopes[oac_index] = 15
-        slopes[tcells_index] = 10
-        self.register_buffer("presence_thresholds", thresholds)
-        self.register_buffer("presence_slopes", slopes)
-
-        # Maximum log(coverage + 1) for normalization (max coverage of 100)
-        self.register_buffer("max_log_coverage", torch.tensor(4.615))  # log(101)
-
-        # Maximum coverage for normalizing mean_coverage in apply_presence_gating
-        self.register_buffer("max_coverage", torch.tensor(100.0))
-
     def _initialize_weights(self):
+        """Initialize weights using Kaiming normalization."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='leaky_relu')
+                nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
-    def apply_presence_gating(self, props, probs, coverage):
-        mean_coverage = coverage.mean(dim=1)  # [B]
-        log_mean_coverage = torch.log(mean_coverage + 1)  # [B]
-        max_log_coverage = torch.log(self.max_coverage + 1)  # max_coverage=100
-        mean_coverage_normalized = log_mean_coverage / max_log_coverage  # [B]
-        coverage_adjustment = torch.clamp((0.5 - mean_coverage_normalized) * 0.4, -0.1, 0.2)  # [B]
-        adjusted_thresholds = self.presence_thresholds.unsqueeze(0) + coverage_adjustment.unsqueeze(1)  # [B, C]
-        scaling = torch.sigmoid(
-            self.presence_slopes.unsqueeze(0) * (probs - adjusted_thresholds)
-        )
-        scaled_props = props * scaling
-        sum_props = torch.sum(scaled_props, dim=1, keepdim=True) + 1e-8
-        gated_props = scaled_props / sum_props
-        return gated_props
-    
-    def predict_presence_with_separate_models(self, marker_values, coverage):
+    def predict_presence(self, marker_values, coverage):
+        """
+        Predict presence probabilities for each cell type.
+
+        Args:
+            marker_values (torch.Tensor): [B, M] tensor of marker expression values.
+            coverage (torch.Tensor): [B, M] tensor of coverage values.
+
+        Returns:
+            torch.Tensor: [B, C] tensor of presence probabilities.
+        """
         B = marker_values.shape[0]
         C = self.num_celltypes
-        M = self.num_markers
         device = marker_values.device
 
-        # Initialize output tensors
         presence_probs = torch.zeros(B, C, device=device)
-        presence_logits = torch.zeros(B, C, device=device)
-
-        # Create a mask for markers per cell type
-        cell_type_masks = torch.zeros(C, M, dtype=torch.bool, device=device)
-        for cell_type_idx in range(C):
-            cell_type_masks[cell_type_idx] = (self.target_ids == cell_type_idx)
-
-        # Stack markers for all cell types
-        # Shape: [B, C, M]
-        marker_values_expanded = marker_values.unsqueeze(1).expand(-1, C, -1)
-        coverage_expanded = coverage.unsqueeze(1).expand(-1, C, -1)
-        cell_type_masks_expanded = cell_type_masks.unsqueeze(0).expand(B, -1, -1)
-
-        # Mask markers not belonging to each cell type
-        marker_values_masked = torch.where(cell_type_masks_expanded, marker_values_expanded, torch.zeros_like(marker_values_expanded))
-        coverage_masked = torch.where(cell_type_masks_expanded, coverage_expanded, torch.zeros_like(coverage_expanded))
-
-        # Process each cell type in parallel
         for cell_type_idx, presence_model in enumerate(self.presence_models):
-            # Shape: [B, M_cell_type]
-            cell_type_marker_values = marker_values_masked[:, cell_type_idx, cell_type_masks[cell_type_idx]]
-            cell_type_coverage = coverage_masked[:, cell_type_idx, cell_type_masks[cell_type_idx]]
-
-            if cell_type_marker_values.shape[1] == 0:  # Skip if no markers
-                continue
-
-            logits, _, _ = presence_model(cell_type_marker_values, cell_type_coverage)
-            _, adaptive_probs, _ = presence_model.adaptive_predict(cell_type_marker_values, cell_type_coverage)
-            presence_logits[:, cell_type_idx] = logits.squeeze(-1)
+            logits, _, _ = presence_model(marker_values, coverage)
+            _, adaptive_probs, _ = presence_model.adaptive_predict(marker_values, coverage)
             presence_probs[:, cell_type_idx] = adaptive_probs.squeeze(-1)
+        return presence_probs
 
-        return presence_probs, presence_logits
-    
-    def forward(self, marker_values: torch.Tensor, coverage: torch.Tensor):
-        B, M = marker_values.shape
-        C = self.num_celltypes
+    def forward(self, marker_values, coverage, x_nnls):
+        """
+        Forward pass to predict cell type proportions.
 
-        # Debug: Check for nan in inputs
-        if torch.isnan(coverage).any() or torch.isinf(coverage).any():
-            print("Warning: coverage contains nan or inf values")
+        Args:
+            marker_values (torch.Tensor): [B, M] tensor of marker expression values.
+            coverage (torch.Tensor): [B, M] tensor of coverage values.
+            x_nnls (torch.Tensor): [B, C] tensor of NNLS-predicted proportions.
 
-        # Valid mask indicates coverage>0
-        valid_mask = (coverage > 0)
+        Returns:
+            tuple: (proportions, presence_probs, x_nnls)
+                - proportions: [B, C] predicted cell type proportions.
+                - presence_probs: [B, C] presence probabilities.
+                - x_nnls: [B, C] input NNLS proportions (passed through).
+        """
+        B = marker_values.shape[0]
 
-        # Compute log(coverage + 1) and normalize to [0, 1]
-        log_coverage = torch.log(coverage + 1)  # [B, M]
-        log_coverage_normalized = log_coverage / self.max_log_coverage  # [B, M]
+        # Normalize coverage
+        log_coverage = torch.log(coverage + 1) / 4.615  # max_coverage=100 assumption
 
-        if torch.isnan(log_coverage_normalized).any() or torch.isinf(log_coverage_normalized).any():
-            print("Warning: log_coverage_normalized contains nan or inf values")
+        # Compute presence probabilities
+        presence_probs = self.predict_presence(marker_values, coverage)
 
-        # Flatten coverage, marker_values, and log_coverage for efficient indexing
-        coverage_flat = coverage.view(-1)
-        marker_values_flat = marker_values.view(-1)
-        log_coverage_flat = log_coverage_normalized.view(-1)
+        # Flatten and extract features
+        features_input = torch.cat([marker_values, log_coverage], dim=1)  # [B, M*2]
+        features = self.feature_extractor(features_input)  # [B, feature_dim]
 
-        # Indices of non-zero coverage
-        valid_inds = torch.nonzero(coverage_flat, as_tuple=False).squeeze(1)
+        # Combine with presence probabilities
+        combined = torch.cat([features, presence_probs], dim=1)  # [B, feature_dim + C]
 
-        # Handle all-zero-coverage case
-        if valid_inds.numel() == 0:
-            celltype_props = coverage.new_zeros(B, C)
-            celltype_props[:, 0] = 1.0
-            reconstructed = coverage.new_zeros(B, M)
-            presence_probs = coverage.new_zeros(B, C)
-            presence_logits = coverage.new_zeros(B, C)
-            return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
+        # Predict proportions
+        logits = self.encoder(combined)
+        props = F.softmax(logits, dim=1)  # [B, C], sums to 1
 
-        # Extract coverage, marker_values, and log_coverage for valid coverage
-        coverage_valid = coverage_flat[valid_inds]
-        marker_values_valid = marker_values_flat[valid_inds]
-        log_coverage_valid = log_coverage_flat[valid_inds]
-
-        # Compute the batch index and marker index from flattened indices
-        batch_idx = valid_inds // M
-        marker_idx = valid_inds % M
-
-        # Each marker corresponds to a specific cell type (via self.target_ids)
-        celltype_idx = self.target_ids[marker_idx]
-
-        # ----- 1) Marker Feature Extraction -----
-        features_input = torch.stack([marker_values_valid, log_coverage_valid], dim=1)  # [N, 2]
-        features_valid = self.marker_feature_extractor(features_input)  # [N, feature_dim]
-
-        if torch.isnan(features_valid).any() or torch.isinf(features_valid).any():
-            print("Warning: features_valid contains nan or inf values")
-            print(f"features_input min/max: {features_input.min().item()}/{features_input.max().item()}")
-
-        # ----- 2) Aggregate features by cell type -----
-        aggregator = coverage.new_zeros(B, C, self.feature_dim)
-        coverage_sum = coverage.new_zeros(B, C)
-
-        aggregator_2d = aggregator.view(B*C, self.feature_dim)
-        coverage_sum_1d = coverage_sum.view(B*C)
-
-        bc_index = batch_idx * C + celltype_idx
-        weighted_feats = coverage_valid.unsqueeze(1) * features_valid
-
-        aggregator_2d.index_add_(0, bc_index, weighted_feats)
-        coverage_sum_1d.index_add_(0, bc_index, coverage_valid)
-
-        aggregator = aggregator_2d.view(B, C, self.feature_dim)
-        coverage_sum = coverage_sum_1d.view(B, C)
-
-        mask_cov = (coverage_sum == 0)
-        coverage_sum[mask_cov] = 1.0
-        aggregator = aggregator / coverage_sum.unsqueeze(-1)
-
-        agg_flat = aggregator.view(B, -1)
-
-        if torch.isnan(agg_flat).any() or torch.isinf(agg_flat).any():
-            print("Warning: agg_flat contains nan or inf values")
-            print(f"aggregator min/max: {aggregator.min().item()}/{aggregator.max().item()}")
-            print(f"coverage_sum min/max: {coverage_sum.min().item()}/{coverage_sum.max().item()}")
-
-        # ----- 3) Presence detection using separate models -----
-        presence_probs, presence_logits = self.predict_presence_with_separate_models(marker_values, coverage)
-
-        if torch.isnan(presence_probs).any() or torch.isinf(presence_probs).any():
-            print("Warning: presence_probs contains nan or inf values")
-
-        # ----- 4) Integrate presence information with aggregated features -----
-        combined_features = torch.cat([agg_flat, presence_probs], dim=1)
-
-        if torch.isnan(combined_features).any() or torch.isinf(combined_features).any():
-            print("Warning: combined_features contains nan or inf values")
-
-        # ----- 5) Proportion Prediction with integrated presence -----
-        logits = self.encoder(combined_features)
-        if torch.isnan(logits).any() or torch.isinf(logits).any():
-            print("Warning: logits contains nan or inf values")
-
-        celltype_props_raw = F.relu(logits)
-        if torch.isnan(celltype_props_raw).any() or torch.isinf(celltype_props_raw).any():
-            print("Warning: celltype_props_raw contains nan or inf values")
-
-        celltype_props_gated = self.apply_presence_gating(celltype_props_raw, presence_probs, coverage)
-        if torch.isnan(celltype_props_gated).any() or torch.isinf(celltype_props_gated).any():
-            print("Warning: celltype_props_gated contains nan or inf values")
-
-        sum_props = torch.sum(celltype_props_gated, dim=1, keepdim=True)
-        if torch.isnan(sum_props).any() or torch.isinf(sum_props).any():
-            print("Warning: sum_props contains nan or inf values")
-
-        celltype_props = celltype_props_gated / (sum_props + 1e-8)
-        if torch.isnan(celltype_props).any() or torch.isinf(celltype_props).any():
-            print("Warning: celltype_props contains nan or inf values")
-
-        # ----- 6) Marker reconstruction -----
-        reconstructed = self.decoder(celltype_props)
-        if torch.isnan(reconstructed).any() or torch.isinf(reconstructed).any():
-            print("Warning: reconstructed contains nan or inf values")
-
-        return celltype_props, reconstructed, valid_mask, presence_probs, presence_logits
-    
-    def predict_with_adaptive_threshold(self, marker_values, coverage, base_threshold=0.5):
-        logits, _ = self.forward(marker_values, coverage)
-        probabilities = torch.sigmoid(logits).squeeze(-1)
-        
-        mean_coverage = coverage.mean(dim=1)
-        coverage_adjustment = torch.clamp((20.0 - mean_coverage) / 40.0, -0.1, 0.2)
-        adjusted_thresholds = base_threshold + coverage_adjustment
-        
-        predictions = (probabilities >= adjusted_thresholds).float()
-        
-        return predictions, probabilities
-    
-    def predict(self, marker_values, coverage, batch_size=256, device=None):
-        import numpy as np
-        
-        if device is None:
-            device = next(self.parameters()).device
-        
-        if not isinstance(marker_values, torch.Tensor):
-            marker_values = torch.tensor(marker_values, dtype=torch.float32)
-        if not isinstance(coverage, torch.Tensor):
-            coverage = torch.tensor(coverage, dtype=torch.float32)
-        
-        if len(marker_values.shape) == 1:
-            marker_values = marker_values.unsqueeze(0)
-        if len(coverage.shape) == 1:
-            coverage = coverage.unsqueeze(0)
-        
-        self.eval()
-        predictions_list = []
-        
-        num_samples = marker_values.shape[0]
-        num_batches = (num_samples + batch_size - 1) // batch_size
-        
-        with torch.no_grad():
-            for i in range(num_batches):
-                start_idx = i * batch_size
-                end_idx = min((i + 1) * batch_size, num_samples)
-                
-                batch_X = marker_values[start_idx:end_idx].to(device)
-                batch_coverage = coverage[start_idx:end_idx].to(device)
-                
-                props, *_ = self.forward(batch_X, batch_coverage)
-                
-                predictions_list.append(props.cpu().numpy())
-                
-                if device.type == 'cuda':
-                    torch.cuda.empty_cache()
-        
-        if len(predictions_list) == 0:
-            return np.zeros((num_samples, self.num_celltypes))
-        
-        return np.vstack(predictions_list)
-    
-    def predict_with_details(self, marker_values, coverage, batch_size=256, device=None):
-        import numpy as np
-        
-        if device is None:
-            device = next(self.parameters()).device
-        
-        if not isinstance(marker_values, torch.Tensor):
-            marker_values = torch.tensor(marker_values, dtype=torch.float32)
-        if not isinstance(coverage, torch.Tensor):
-            coverage = torch.tensor(coverage, dtype=torch.float32)
-        
-        if len(marker_values.shape) == 1:
-            marker_values = marker_values.unsqueeze(0)
-        if len(coverage.shape) == 1:
-            coverage = coverage.unsqueeze(0)
-        
-        self.eval()
-        predictions_list = []
-        presence_probs_list = []
-        reconstructed_list = []
-        
-        num_samples = marker_values.shape[0]
-        num_batches = (num_samples + batch_size - 1) // batch_size
-        
-        with torch.no_grad():
-            for i in range(num_batches):
-                start_idx = i * batch_size
-                end_idx = min((i + 1) * batch_size, num_samples)
-                
-                batch_X = marker_values[start_idx:end_idx].to(device)
-                batch_coverage = coverage[start_idx:end_idx].to(device)
-                
-                props, reconstructed, _, presence_probs, _ = self.forward(batch_X, batch_coverage)
-                
-                predictions_list.append(props.cpu().numpy())
-                presence_probs_list.append(presence_probs.cpu().numpy())
-                reconstructed_list.append(reconstructed.cpu().numpy())
-        
-        if len(predictions_list) == 0:
-            return (np.zeros((num_samples, self.num_celltypes)), 
-                    np.zeros((num_samples, self.num_celltypes)),
-                    np.zeros((num_samples, self.num_markers)))
-        
-        return (
-            np.vstack(predictions_list),
-            np.vstack(presence_probs_list),
-            np.vstack(reconstructed_list)
-        )
+        return props, presence_probs, x_nnls
