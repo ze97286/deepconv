@@ -120,6 +120,12 @@ def train_epoch(
             
             # 3. Loss computation
             start_loss = time.time()
+            temp_log_vars = {
+                'mae': log_vars['mae'].detach().clone(),
+                'corr': log_vars['corr'].detach().clone(), 
+                'presence': log_vars['presence'].detach().clone(),
+                'sparsity': log_vars['sparsity'].detach().clone()
+            }
             with torch.profiler.record_function("loss_computation"):
                 loss, details, mae_var, corr_var, presence_var, sparsity_var = loss_fn(
                     pred_props=alpha,
@@ -134,7 +140,7 @@ def train_epoch(
                     presence_threshold=presence_threshold,
                     compute_diagnostics=False,
                     target_cell_indices=target_cell_types,
-                    log_vars=log_vars,
+                    log_vars=temp_log_vars,
                     x_nnls=x_nnls,
                     k=k,
                 )
