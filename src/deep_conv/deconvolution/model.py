@@ -588,11 +588,16 @@ class CellTypeDeconvolutionModel(nn.Module):
             props = weight * props + (1 - weight) * x_nnls
             
             # Ensure proportions sum to 1
-            row_sums = props.sum(dim=1, keepdim=True)
-            valid_rows = row_sums > 0
-            
+            row_sums = props.sum(dim=1, keepdim=True)  # Shape: [B, 1]
+            valid_rows = row_sums > 0  # Shape: [B, 1]
+
             if valid_rows.any():
-                props[valid_rows.squeeze(1)] = props[valid_rows.squeeze(1)] / row_sums[valid_rows]
+                normalization_factor = torch.where(
+                    valid_rows,  # Shape: [B, 1]
+                    1.0 / row_sums,  # Shape: [B, 1]
+                    torch.ones_like(row_sums)  # Shape: [B, 1]
+                )
+                props = props * normalization_factor  # Shape: [B, C] * [B, 1] -> [B, C]
         
         return props, presence_probs, x_nnls
 
