@@ -80,19 +80,22 @@ def train_epoch(
 
         # Forward pass
         start_forward = time.time()
-        props, batch_presence_probs, _ = model(fraction, coverage, x_nnls, presence_probs)
+        props, batch_presence_probs, _, dl_props = model(fraction, coverage, x_nnls, presence_probs)
         timing_stats['forward_pass'] += time.time() - start_forward
 
         # Loss computation
         start_loss = time.time()
         loss, details = loss_fn(
-            pred_props=props,
-            true_props=y_true,
-            presence_probs=batch_presence_probs,
-            coverage=coverage,
-            x_nnls=x_nnls,
-            presence_threshold=presence_threshold,
-            device=device
+            props,
+            y_true,
+            batch_presence_probs,
+            coverage,
+            x_nnls,
+            dl_props=dl_props,
+            combination_weight=model.combination_weight,
+            presence_threshold=0.01,
+            device=device,
+            weight_penalty_lambda=0.1
         )
         timing_stats['loss_computation'] += time.time() - start_loss
 
@@ -193,11 +196,11 @@ def train_epoch(
         epoch_stats[key] /= num_batches
     
     # Final epoch summary
+    weights = model.get_combination_weights()
     print(f"\n===== Epoch {epoch + 1} Summary =====")
     print(f"Average Loss: {epoch_stats['total_loss']:.8f}")
     print(f"MAE: {epoch_stats['mae']:.4f}, MSE: {epoch_stats['mse']:.4f}, Correlation: {epoch_stats['correlation']:.4f}")
-    print(f"Precision: {epoch_stats['precision']:.4f}, Recall: {epoch_stats['recall']:.4f}, F1: {epoch_stats['f1_score']:.4f}")
-    
+    print(f"Combination Weights: {weights}, Precision: {epoch_stats['precision']:.4f}, Recall: {epoch_stats['recall']:.4f}, F1: {epoch_stats['f1_score']:.4f}")
     return dict(epoch_stats)
 
 def validate(
@@ -249,7 +252,7 @@ def validate(
                 presence_probs = batch['presence_probs'].to(device) if 'presence_probs' in batch else None
                 
                 # Forward pass
-                props, batch_presence_probs, _ = model(fraction, coverage, x_nnls, presence_probs)
+                props, batch_presence_probs, _, dl_props = model(fraction, coverage, x_nnls, presence_probs)
                 
                 # Calculate loss
                 loss, details = loss_fn(
@@ -259,7 +262,10 @@ def validate(
                     coverage=coverage,
                     x_nnls=x_nnls,
                     presence_threshold=presence_threshold,
-                    device=device
+                    dl_props=dl_props,
+                    combination_weight=model.combination_weight,
+                    device=device,
+                    weight_penalty_lambda=0.1
                 )
                 
                 # Store predictions for comprehensive evaluation

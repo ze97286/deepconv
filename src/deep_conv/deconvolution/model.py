@@ -417,8 +417,8 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Initialize weights
         self._initialize_weights()
 
-        # Learnable weight for combining deep learning props and x_nnls
-        self.combination_weight = nn.Parameter(torch.tensor(0.5))
+        # Learnable weight for combining deep learning props and x_nnls, now per cell type
+        self.combination_weight = nn.Parameter(torch.full((num_cell_types,), 0.5))  # Shape: [num_cell_types]
 
     def _initialize_weights(self):
         """Initialize weights using Kaiming normalization."""
@@ -520,10 +520,11 @@ class CellTypeDeconvolutionModel(nn.Module):
             presence_probs: Optional [B, C] tensor of precomputed presence probabilities
             
         Returns:
-            tuple: (props, presence_probs, x_nnls)
-                - props: [B, C] tensor of predicted proportions
+            tuple: (props, presence_probs, x_nnls, dl_props)
+                - props: [B, C] tensor of predicted proportions (after ensembling)
                 - presence_probs: [B, C] tensor of presence probabilities
                 - x_nnls: Original NNLS predictions or None
+                - dl_props: [B, C] tensor of DeepConv predictions before ensembling
         """
         B = marker_values.shape[0]
         
@@ -567,7 +568,8 @@ class CellTypeDeconvolutionModel(nn.Module):
         
         # Predict proportions using the deep learning model
         logits = self.encoder(combined)
-        props = F.softmax(logits, dim=1)  # [B, C], deep learning proportions
+        dl_props = F.softmax(logits, dim=1)  # [B, C], deep learning proportions before ensembling
+        props = dl_props.clone()  # Clone to use as the final proportions after ensembling
         
         # Ensemble with x_nnls if provided
         if x_nnls is not None:
@@ -583,14 +585,14 @@ class CellTypeDeconvolutionModel(nn.Module):
                 if x_nnls.shape[1] != props.shape[1]:
                     raise ValueError(f"x_nnls has {x_nnls.shape[1]} features but props has {props.shape[1]} features")
             
-            # Use a bounded weight via sigmoid to ensure it's between 0 and 1
-            weight = torch.sigmoid(self.combination_weight)
-            props = weight * props + (1 - weight) * x_nnls
+            # Use per-cell-type weights for combining DeepConv and NNLS predictions
+            weight = torch.sigmoid(self.combination_weight)  # Shape: [C], values in [0, 1]
+            weight = weight.unsqueeze(0)  # Shape: [1, C] for broadcasting
+            props = weight * props + (1 - weight) * x_nnls  # Broadcasting: [B, C] * [1, C]
             
             # Ensure proportions sum to 1
             row_sums = props.sum(dim=1, keepdim=True)  # Shape: [B, 1]
             valid_rows = row_sums > 0  # Shape: [B, 1]
-
             if valid_rows.any():
                 normalization_factor = torch.where(
                     valid_rows,  # Shape: [B, 1]
@@ -599,7 +601,13 @@ class CellTypeDeconvolutionModel(nn.Module):
                 )
                 props = props * normalization_factor  # Shape: [B, C] * [B, 1] -> [B, C]
         
-        return props, presence_probs, x_nnls
+        return props, presence_probs, x_nnls, dl_props  # Return dl_props for loss computation
+
+    def get_combination_weights(self):
+        """
+        Return the current combination weights for monitoring.
+        """
+        return torch.sigmoid(self.combination_weight).detach().cpu().numpy()
 
     def predict(self, marker_values, coverage, batch_size=256, device=None, atlas=None):
         if device is None:
@@ -639,7 +647,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                     )
                     x_nnls = torch.tensor(x_nnls_np, dtype=torch.float32, device=device)
                 
-                props, _, _ = self.forward(batch_X, batch_coverage, x_nnls)
+                props, _, _, _ = self.forward(batch_X, batch_coverage, x_nnls)  # Ignore dl_props during inference
                 
                 predictions_list.append(props.cpu().numpy())
                 
