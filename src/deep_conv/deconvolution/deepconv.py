@@ -236,7 +236,7 @@ def load_training_with_augmentation(
     
 
     # TEMP TEMP TEMP
-    random_indices = np.random.choice(num_samples, size=1000, replace=False)
+    random_indices = np.random.choice(len(X_train), size=1000, replace=False)
     X_train = X_train[random_indices]
     coverage_train = coverage_train[random_indices]
     y_train = y_train[random_indices]
