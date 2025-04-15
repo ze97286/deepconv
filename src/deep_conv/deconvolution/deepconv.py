@@ -235,13 +235,12 @@ def load_training_with_augmentation(
     y_train = y.to_numpy()
     
 
-    # TEMP TEMP TEMP
-    random_indices = np.random.choice(len(X_train), size=1000, replace=False)
-    X_train = X_train[random_indices]
-    coverage_train = coverage_train[random_indices]
-    y_train = y_train[random_indices]
-    # TEMP TEMP TEMP
-
+    # # TEMP TEMP TEMP
+    # random_indices = np.random.choice(len(X_train), size=1000, replace=False)
+    # X_train = X_train[random_indices]
+    # coverage_train = coverage_train[random_indices]
+    # y_train = y_train[random_indices]
+    # # TEMP TEMP TEMP
 
 
     print("Original coverage statistics:")
@@ -534,7 +533,7 @@ def train_and_eval(
             block_size=50_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
-            target_size=100, #50_000, TEMP TEMP TEMP
+            target_size=50_000,
             presence_models=model.presence_models,
             target_ids=target_ids,
         )
@@ -568,7 +567,7 @@ def train_and_eval(
             block_size=50_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
-            target_size=100, #50_000, TEMP TEMP TEMP
+            target_size=50_000,
             presence_models=model.presence_models,
             target_ids=target_ids,     
         )
