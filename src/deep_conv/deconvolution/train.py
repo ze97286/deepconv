@@ -482,8 +482,8 @@ def train_model(
         scheduler.step()
 
         # Use unaugmented data for early epochs, augmented for later epochs
-        current_val_loaders = val_loaders_unaugmented if epoch < 10 else val_loaders_augmented
-        print(f"Validation with {'augmented' if epoch >= 10 else 'unaugmented'} data")
+        current_val_loaders = val_loaders_unaugmented if epoch < 30 else val_loaders_augmented
+        print(f"Validation with {'augmented' if epoch >= 30 else 'unaugmented'} data")
 
         avg_val_loss, val_stats = validate(
             model,
