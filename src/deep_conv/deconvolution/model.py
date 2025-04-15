@@ -10,6 +10,7 @@ from pathlib import Path
 from deep_conv.presence.model import SingleCellTypePresenceModel
 import logging
 from torch.utils.data import DataLoader, TensorDataset
+import tqdm
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -272,18 +273,15 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
             print("Computing presence probabilities in batches...")
             
             # Create a mask for markers per cell type if target_ids is provided
-            if target_ids is not None:
-                M = self.fraction.size(1)
-                C = num_cell_types
-                
-                cell_type_masks = torch.zeros(C, M, dtype=torch.bool, device=device)
-                for cell_type_idx in range(C):
-                    cell_type_masks[cell_type_idx] = (target_ids == cell_type_idx)
-            else:
-                cell_type_masks = None
-                print("Warning: No target_ids provided, all markers will be used for all cell types")
+            target_ids_tensor = torch.tensor(target_ids, dtype=torch.long, device=device)
+            M = self.fraction.size(1)
+            C = num_cell_types
+                    
+            cell_type_masks = torch.zeros(C, M, dtype=torch.bool, device=device)
+            for cell_type_idx in range(C):
+                cell_type_masks[cell_type_idx] = (target_ids_tensor == cell_type_idx)
             
-            for batch_idx, (batch_fraction, batch_coverage) in enumerate(tqdm(temp_loader, desc="Computing presence probabilities")):
+            for batch_idx, (batch_fraction, batch_coverage) in enumerate(tqdm.tqdm(temp_loader, desc="Computing presence probabilities")):
                 batch_fraction = batch_fraction.to(device)
                 batch_coverage = batch_coverage.to(device)
                 start_idx = batch_idx * batch_size
@@ -399,7 +397,8 @@ class CellTypeDeconvolutionModel(nn.Module):
                 presence_model = checkpoint
             self.presence_models.append(presence_model)
 
-        self.target_ids = target_ids
+        self.target_ids = torch.tensor(target_ids, dtype=torch.long)
+
         # Feature extractor: process marker values and coverage
         self.feature_extractor = nn.Sequential(
             nn.Linear(num_markers * 2, feature_dim),
