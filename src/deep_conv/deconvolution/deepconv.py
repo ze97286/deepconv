@@ -27,6 +27,7 @@ def get_validation_set_with_augmentation(
     atlas: pd.DataFrame, 
     names: set,
     block_size: int,
+    target_ids,
     target_dist_params=None,
     enable_augmentation=True,
     target_size: int = None,    
@@ -69,10 +70,10 @@ def get_validation_set_with_augmentation(
     print(f"Validation set {Path(eval_pat_dir).name} - Original coverage stats:")
     print("  Mean:", np.mean(coverage_val))
     print("  Median:", np.median(coverage_val))
-    
+
     # Convert label DataFrame to numpy
     y_val_np = y_val.to_numpy()
-    
+
     # Block-based subsampling
     dataset_size = len(y_val_np)
     if target_size is None:
@@ -83,7 +84,7 @@ def get_validation_set_with_augmentation(
         samples_per_block = target_size // num_blocks
         if samples_per_block == 0:
             samples_per_block = 1
-        
+
         indices = []
         for block_idx in range(num_blocks):
             start_idx = block_idx * block_size
@@ -92,24 +93,25 @@ def get_validation_set_with_augmentation(
             np.random.shuffle(block_indices)
             selected_indices = block_indices[:min(samples_per_block, len(block_indices))]
             indices.extend(selected_indices)
-        
+
         if len(indices) < target_size:
             remaining = target_size - len(indices)
             all_indices = np.arange(dataset_size)
             remaining_indices = np.setdiff1d(all_indices, indices)
             np.random.shuffle(remaining_indices)
             indices.extend(remaining_indices[:remaining])
-        
+
         indices = np.sort(indices)
-        
+
         X_val = X_val[indices]
         coverage_val = coverage_val[indices]
         y_val_np = y_val_np[indices]
-    
+
     # Compute x_nnls for original data
     atlas_np = atlas[atlas.columns[8:]].T.to_numpy()
     x_nnls_original = run_weighted_nnls(X_val, coverage_val, atlas_np)
-    
+    print("shape of x_nnls_original:", x_nnls_original.shape)
+
     # Apply augmentation if enabled
     if enable_augmentation:
         num_samples = len(y_val_np)
@@ -153,6 +155,7 @@ def get_validation_set_with_augmentation(
             combined_y,
             x_nnls=combined_x_nnls,
             presence_models=presence_models,
+            target_ids=target_ids
         )
     else:
         val_dataset = PreAugmentedTissueDataset(
@@ -162,8 +165,9 @@ def get_validation_set_with_augmentation(
             y_val_np,
             x_nnls=x_nnls_original,
             presence_models=presence_models,
+            target_ids=target_ids
         )
-    
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=1024,
@@ -172,16 +176,17 @@ def get_validation_set_with_augmentation(
         pin_memory=False,
         persistent_workers=False
     )
-    
+
     y_val_tensor = torch.tensor(y_val_np, dtype=torch.float32)
     y_val_tensor = y_val_tensor / y_val_tensor.sum(dim=1, keepdim=True)
-    
+
     return val_loader, y_val_tensor
 
 def load_training_with_augmentation(
     base_dir: str, 
     atlas: pd.DataFrame, 
     names: set, 
+    target_ids,
     num_files: int = 5,
     target_dist_params: dict = None,
     presence_models = None,
@@ -229,6 +234,16 @@ def load_training_with_augmentation(
     coverage_train = coverage_train.drop(columns=["name", "direction"]).T.to_numpy()
     y_train = y.to_numpy()
     
+
+    # TEMP TEMP TEMP
+    random_indices = np.random.choice(num_samples, size=1000, replace=False)
+    X_train = X_train[random_indices]
+    coverage_train = coverage_train[random_indices]
+    y_train = y_train[random_indices]
+    # TEMP TEMP TEMP
+
+
+
     print("Original coverage statistics:")
     print("  Mean:", np.mean(coverage_train))
     print("  Median:", np.median(coverage_train))
@@ -238,6 +253,7 @@ def load_training_with_augmentation(
     # Compute x_nnls for original data
     atlas_np = atlas[atlas.columns[8:]].T.to_numpy()
     x_nnls_original = run_weighted_nnls(X_train, coverage_train, atlas_np)
+    print("shape of x_nnls_original:", x_nnls_original.shape)
     
     # Augment 50% of the dataset
     num_samples = len(X_train)
@@ -286,6 +302,7 @@ def load_training_with_augmentation(
         combined_y,
         x_nnls=combined_x_nnls,
         presence_models=presence_models,
+        target_ids=target_ids,
     )
     print(f"Training dataset has {len(pre_augmented_dataset)} samples.")
 
@@ -304,6 +321,7 @@ def enhanced_negative_examples(
     train_dl: DataLoader,
     cell_types: list,
     atlas: pd.DataFrame,
+    target_ids,
     sample_fraction: float = 0.01,
     target_dist_params: dict = None,
     presence_models = None,
@@ -409,6 +427,7 @@ def enhanced_negative_examples(
         combined_negative_y,
         x_nnls=combined_negative_x_nnls,
         presence_models=presence_models,
+        target_ids=target_ids,
     )
 
     # Combine original dataset with negative examples
@@ -467,25 +486,31 @@ def train_and_eval(
     }
 
     cell_types = list(atlas.columns[8:]) 
+    target_ids = atlas['target'].map(lambda x: cell_types.index(x)).to_numpy()
+
     model = CellTypeDeconvolutionModel(
         num_markers=len(atlas), num_cell_types=len(cell_types),
         presence_models_dir=presence_models_dir,
-        dropout_rate=0.1
+        dropout_rate=0.1,
+        target_ids=target_ids
     )
     train_dl_low = load_training_with_augmentation(
         f"{train_pat_dir}_low", atlas, names, num_files=3,
         target_dist_params=clinical_dist_params['low'],
-        presence_models=model.presence_models
+        presence_models=model.presence_models,
+        target_ids=target_ids,
     )
     train_dl_med = load_training_with_augmentation(
         f"{train_pat_dir}_med", atlas, names, num_files=1,
         target_dist_params=clinical_dist_params['med'],
-        presence_models=model.presence_models
+        presence_models=model.presence_models,
+        target_ids=target_ids,
     )
     train_dl_high = load_training_with_augmentation(
         f"{train_pat_dir}_high", atlas, names, num_files=1,
         target_dist_params=clinical_dist_params['high'],
-        presence_models=model.presence_models
+        presence_models=model.presence_models,
+        target_ids=target_ids,
     )
 
     train_dataset = ConcatDataset([train_dl_low.dataset, train_dl_med.dataset, train_dl_high.dataset])
@@ -509,8 +534,9 @@ def train_and_eval(
             block_size=50_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
-            target_size=50_000,
+            target_size=100, #50_000, TEMP TEMP TEMP
             presence_models=model.presence_models,
+            target_ids=target_ids,
         )
         print(f"Validation set {cov} tier1 length (unaugmented)={len(t1_yval)}")
 
@@ -520,7 +546,8 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=None,    
-            presence_models=model.presence_models        
+            presence_models=model.presence_models,
+            target_ids=target_ids,        
         )
         print(f"Validation set {cov} tcells length (unaugmented)={len(tcells_yval)}")
 
@@ -530,7 +557,8 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=None,
-            presence_models=model.presence_models
+            presence_models=model.presence_models,
+            target_ids=target_ids,
         )
         print(f"Validation set {cov} oac length (unaugmented)={len(oac_yval)}")
 
@@ -540,8 +568,9 @@ def train_and_eval(
             block_size=50_000,
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
-            target_size=50_000,       
-            presence_models=model.presence_models     
+            target_size=100, #50_000, TEMP TEMP TEMP
+            presence_models=model.presence_models,
+            target_ids=target_ids,     
         )
         print(f"Validation set {cov} tier1 length (augmented)={len(t1_yval)}")
 
@@ -551,7 +580,8 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
             target_size=None,       
-            presence_models=model.presence_models     
+            presence_models=model.presence_models,
+            target_ids=target_ids,    
         )
         print(f"Validation set {cov} tcells length (augmented)={len(tcells_yval)}")
 
@@ -561,7 +591,8 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
             target_size=None,    
-            presence_models=model.presence_models       
+            presence_models=model.presence_models,
+            target_ids=target_ids,       
         )
         print(f"Validation set {cov} oac length (augmented)={len(oac_yval)}")
 
@@ -582,6 +613,7 @@ def train_and_eval(
         train_dl,
         cell_types,
         atlas,
+        target_ids=target_ids,
         sample_fraction=0.01,
         target_dist_params=clinical_dist_params['clinical'],
         presence_models=model.presence_models
