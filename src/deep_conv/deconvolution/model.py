@@ -363,7 +363,7 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
         return item
     
 class CellTypeDeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types, presence_models_dir, target_ids=None, feature_dim=128, dropout_rate=0.1):
+    def __init__(self, num_markers, num_cell_types, presence_models_dir, target_ids=None, feature_dim=128, dropout_rate=0.1, coverage_dropout_prob=0.3):
         """
         Initialize the Cell Type Deconvolution Model.
 
@@ -380,6 +380,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
+        self.coverage_dropout_prob = coverage_dropout_prob  # Probability of dropping low-coverage markers
 
         # Load pre-trained presence models
         self.presence_models = nn.ModuleList()
@@ -417,8 +418,8 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Initialize weights
         self._initialize_weights()
 
-        # Learnable weight for combining deep learning props and x_nnls, now per cell type
-        self.combination_weight = nn.Parameter(torch.full((num_cell_types,), 0.5))  # Shape: [num_cell_types]
+        # Learnable weight for combining deep learning props and x_nnls, per cell type
+        self.combination_weight = nn.Parameter(torch.full((num_cell_types,), 0.5))
 
     def _initialize_weights(self):
         """Initialize weights using Kaiming normalization."""
@@ -538,7 +539,19 @@ class CellTypeDeconvolutionModel(nn.Module):
             torch.zeros_like(marker_values)
         )
         
-        # Use precomputed presence probs if provided, otherwise compute them
+        # Weight marker values by coverage to downweight noisy, low-coverage markers
+        coverage_weights = torch.sigmoid(coverage / 5.0)  # Shape: [B, M], scales coverage to [0, 1]
+        marker_values_weighted = marker_values_clean * coverage_weights  # Shape: [B, M]
+
+        # Apply coverage-based dropout during training to force reliance on higher-coverage markers
+        if self.training:
+            dropout_mask = torch.rand_like(coverage) < self.coverage_dropout_prob
+            coverage_threshold = torch.quantile(coverage[valid_mask], 0.25)  # 25th percentile of non-zero coverage
+            low_coverage_mask = (coverage < coverage_threshold) & (coverage > 0)
+            dropout_mask = dropout_mask & low_coverage_mask  # Only drop low-coverage markers
+            marker_values_weighted = torch.where(dropout_mask, torch.zeros_like(marker_values_weighted), marker_values_weighted)
+        
+        # Use precomputed presence_probs if provided, otherwise compute them
         if presence_probs is None:
             # Call the predict_presence method which now returns a tuple
             presence_tuple = self.predict_presence(marker_values_clean, coverage)
@@ -546,7 +559,7 @@ class CellTypeDeconvolutionModel(nn.Module):
             presence_probs = presence_tuple[0] if isinstance(presence_tuple, tuple) else presence_tuple
         else:
             presence_probs = presence_probs.to(marker_values.device)
-            
+
             # Ensure presence_probs has the right shape
             if presence_probs.shape[0] != B:
                 if presence_probs.shape[0] == 1:
@@ -554,13 +567,13 @@ class CellTypeDeconvolutionModel(nn.Module):
                     presence_probs = presence_probs.expand(B, -1)
                 else:
                     # This is a more serious problem - raise an error
-                    raise ValueError(f"Precomputed presence_probs has batch size {presence_probs.shape[0]} but input has batch size {B}")
+                    raise ValueError(f"Precomputed presence probs has batch size {presence_probs.shape[0]} but input has batch size {B}")
         
         # Use log1p for coverage which is more stable for small values
         log_coverage = torch.log1p(coverage) / 4.615  # Assuming max_coverage=100
         
-        # Extract features using only valid marker values and coverage
-        features_input = torch.cat([marker_values_clean, log_coverage], dim=1)  # [B, M*2]
+        # Extract features using weighted marker values and coverage
+        features_input = torch.cat([marker_values_weighted, log_coverage], dim=1)  # [B, M*2]
         features = self.feature_extractor(features_input)  # [B, feature_dim]
         
         # Combine features with presence probabilities
@@ -569,7 +582,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Predict proportions using the deep learning model
         logits = self.encoder(combined)
         dl_props = F.softmax(logits, dim=1)  # [B, C], deep learning proportions before ensembling
-        props = dl_props.clone()  # Clone to use as the final proportions after ensembling
+        props = dl_props.clone()
         
         # Ensemble with x_nnls if provided
         if x_nnls is not None:
@@ -586,22 +599,21 @@ class CellTypeDeconvolutionModel(nn.Module):
                     raise ValueError(f"x_nnls has {x_nnls.shape[1]} features but props has {props.shape[1]} features")
             
             # Use per-cell-type weights for combining DeepConv and NNLS predictions
-            weight = torch.sigmoid(self.combination_weight)  # Shape: [C], values in [0, 1]
-            weight = weight.unsqueeze(0)  # Shape: [1, C] for broadcasting
-            props = weight * props + (1 - weight) * x_nnls  # Broadcasting: [B, C] * [1, C]
+            weight = torch.sigmoid(self.combination_weight).unsqueeze(0)
+            props = weight * props + (1 - weight) * x_nnls
             
             # Ensure proportions sum to 1
-            row_sums = props.sum(dim=1, keepdim=True)  # Shape: [B, 1]
-            valid_rows = row_sums > 0  # Shape: [B, 1]
+            row_sums = props.sum(dim=1, keepdim=True)
+            valid_rows = row_sums > 0
             if valid_rows.any():
                 normalization_factor = torch.where(
-                    valid_rows,  # Shape: [B, 1]
-                    1.0 / row_sums,  # Shape: [B, 1]
-                    torch.ones_like(row_sums)  # Shape: [B, 1]
+                    valid_rows,
+                    1.0 / row_sums,
+                    torch.ones_like(row_sums)
                 )
-                props = props * normalization_factor  # Shape: [B, C] * [B, 1] -> [B, C]
+                props = props * normalization_factor
         
-        return props, presence_probs, x_nnls, dl_props  # Return dl_props for loss computation
+        return props, presence_probs, x_nnls, dl_props
 
     def get_combination_weights(self):
         """
