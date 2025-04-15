@@ -164,7 +164,11 @@ def validate(
     model.eval()
     val_stats = {}
     thresholds = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
-    threshold_results = {t: {} for t in thresholds}
+    threshold_results = {}
+    for t in thresholds:
+        threshold_results[t] = {}
+        for val_name in val_loaders.keys():
+            threshold_results[t][val_name] = defaultdict(float)
     total_batches = 0
     weighted_loss_sum = 0.0
 

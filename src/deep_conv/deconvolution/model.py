@@ -338,55 +338,105 @@ class CellTypeDeconvolutionModel(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
-    def predict_presence(self, marker_values, coverage):
-        """
-        Predict presence probabilities for each cell type.
-
-        Args:
-            marker_values (torch.Tensor): [B, M] tensor of marker expression values.
-            coverage (torch.Tensor): [B, M] tensor of coverage values.
-
-        Returns:
-            torch.Tensor: [B, C] tensor of presence probabilities.
-        """
+    def predict_presence_with_separate_models(self, marker_values, coverage):
         B = marker_values.shape[0]
         C = self.num_celltypes
+        M = self.num_markers
         device = marker_values.device
 
+        # Initialize output tensors
         presence_probs = torch.zeros(B, C, device=device)
+        presence_logits = torch.zeros(B, C, device=device)
+
+        # Create a mask for markers per cell type
+        cell_type_masks = torch.zeros(C, M, dtype=torch.bool, device=device)
+        for cell_type_idx in range(C):
+            cell_type_masks[cell_type_idx] = (self.target_ids == cell_type_idx)
+
+        # Stack markers for all cell types
+        # Shape: [B, C, M]
+        marker_values_expanded = marker_values.unsqueeze(1).expand(-1, C, -1)
+        coverage_expanded = coverage.unsqueeze(1).expand(-1, C, -1)
+        cell_type_masks_expanded = cell_type_masks.unsqueeze(0).expand(B, -1, -1)
+
+        # Mask markers not belonging to each cell type
+        marker_values_masked = torch.where(cell_type_masks_expanded, marker_values_expanded, torch.zeros_like(marker_values_expanded))
+        coverage_masked = torch.where(cell_type_masks_expanded, coverage_expanded, torch.zeros_like(coverage_expanded))
+
+        # Process each cell type in parallel
         for cell_type_idx, presence_model in enumerate(self.presence_models):
-            logits, _, _ = presence_model(marker_values, coverage)
-            _, adaptive_probs, _ = presence_model.adaptive_predict(marker_values, coverage)
+            # Shape: [B, M_cell_type]
+            cell_type_marker_values = marker_values_masked[:, cell_type_idx, cell_type_masks[cell_type_idx]]
+            cell_type_coverage = coverage_masked[:, cell_type_idx, cell_type_masks[cell_type_idx]]
+
+            if cell_type_marker_values.shape[1] == 0: 
+                continue
+
+            logits, _, _ = presence_model(cell_type_marker_values, cell_type_coverage)
+            _, adaptive_probs, _ = presence_model.adaptive_predict(cell_type_marker_values, cell_type_coverage)
+            presence_logits[:, cell_type_idx] = logits.squeeze(-1)
             presence_probs[:, cell_type_idx] = adaptive_probs.squeeze(-1)
-        return presence_probs
+
+        return presence_probs, presence_logits
 
     def forward(self, marker_values, coverage, x_nnls=None, presence_probs=None):
+        """
+        Forward pass with proper handling of NaN values in marker_values.
+        NaN values are valid when coverage is zero - they should be ignored.
+        
+        Args:
+            marker_values: [B, M] tensor of marker values (can contain NaNs where coverage=0)
+            coverage: [B, M] tensor of coverage values
+            x_nnls: Optional [B, C] tensor of NNLS predictions
+            presence_probs: Optional [B, C] tensor of presence probabilities
+        """
         B = marker_values.shape[0]
-
+        
+        # Create a valid mask - markers with coverage > 0 should be considered
+        valid_mask = (coverage > 0)
+        
+        # Replace NaN values in marker_values with 0 where coverage = 0
+        # This is safe because these markers won't contribute to calculations
+        marker_values_clean = torch.where(
+            valid_mask,
+            marker_values,
+            torch.zeros_like(marker_values)
+        )
+        
         # Use precomputed presence probs if provided, otherwise compute them
         if presence_probs is None:
-            presence_probs = self.predict_presence(marker_values, coverage)
+            presence_probs = self.predict_presence(marker_values_clean, coverage)
         else:
             presence_probs = presence_probs.to(marker_values.device)
-
-        # Normalize coverage
-        log_coverage = torch.log(coverage + 1) / 4.615  # Assuming max_coverage=100
-
-        # Extract features
-        features_input = torch.cat([marker_values, log_coverage], dim=1)  # [B, M*2]
+        
+        # Use log1p for coverage which is more stable for small values
+        # log1p(x) = log(1+x) is numerically stable for small x
+        log_coverage = torch.log1p(coverage) / 4.615  # Assuming max_coverage=100
+        
+        # Extract features using only valid marker values and coverage
+        features_input = torch.cat([marker_values_clean, log_coverage], dim=1)  # [B, M*2]
         features = self.feature_extractor(features_input)  # [B, feature_dim]
-
+        
         # Combine features with presence probabilities
         combined = torch.cat([features, presence_probs], dim=1)  # [B, feature_dim + C]
-
+        
         # Predict proportions using the deep learning model
         logits = self.encoder(combined)
         props = F.softmax(logits, dim=1)  # [B, C], deep learning proportions
-
+        
         # Ensemble with x_nnls if provided
         if x_nnls is not None:
-            props = self.combination_weight * props + (1 - self.combination_weight) * x_nnls
-
+            # Use a bounded weight via sigmoid to ensure it's between 0 and 1
+            weight = torch.sigmoid(self.combination_weight)
+            props = weight * props + (1 - weight) * x_nnls
+            
+            # Ensure proportions sum to 1
+            row_sums = props.sum(dim=1, keepdim=True)
+            valid_rows = row_sums > 0
+            
+            if valid_rows.any():
+                props[valid_rows.squeeze(1)] = props[valid_rows.squeeze(1)] / row_sums[valid_rows]
+        
         return props, presence_probs, x_nnls
 
     def predict(self, marker_values, coverage, batch_size=256, device=None, atlas=None):
