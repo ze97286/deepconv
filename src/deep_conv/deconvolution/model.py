@@ -338,7 +338,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
-    def predict_presence_with_separate_models(self, marker_values, coverage):
+    def predict_presence(self, marker_values, coverage):
         B = marker_values.shape[0]
         C = self.num_celltypes
         M = self.num_markers
