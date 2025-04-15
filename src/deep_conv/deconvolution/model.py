@@ -255,6 +255,8 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
             temp_dataset = TensorDataset(self.fraction, self.coverage)
             temp_loader = DataLoader(temp_dataset, batch_size=batch_size, shuffle=False)
 
+            print("starting to compute presence probabilities")
+
             for batch_idx, (batch_fraction, batch_coverage) in enumerate(temp_loader):
                 batch_fraction = batch_fraction.to(device)
                 batch_coverage = batch_coverage.to(device)
@@ -267,6 +269,7 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
                         _, adaptive_probs, _ = presence_model.adaptive_predict(batch_fraction, batch_coverage)
                         presence_probs[start_idx:end_idx, cell_type_idx] = adaptive_probs.squeeze(-1)
 
+            print("finished computing presence probabilities")
             self.presence_probs = presence_probs
 
     def __getitem__(self, idx):
@@ -275,7 +278,7 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
         if self.presence_probs is not None:
             item['presence_probs'] = self.presence_probs[idx]
         return item
-    
+
 class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, presence_models_dir, feature_dim=128, dropout_rate=0.1):
         """
