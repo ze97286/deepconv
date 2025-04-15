@@ -73,22 +73,22 @@ def train_epoch(
         start_data = time.time()
         fraction = batch['X'].to(device)
         coverage = batch['coverage'].to(device)
-        x_nnls = batch['x_nnls'].to(device)
+        x_nnls = batch['x_nnls'].to(device) if 'x_nnls' in batch else None
         y_true = batch['y'].to(device)
-        presence_probs = batch['presence_probs'].to(device)
+        presence_probs = batch['presence_probs'].to(device) if 'presence_probs' in batch else None
         timing_stats['data_loading'] += time.time() - start_data
 
         # Forward pass
         start_forward = time.time()
-        props, presence_probs, _ = model(fraction, coverage, x_nnls, presence_probs)
+        props, batch_presence_probs, _ = model(fraction, coverage, x_nnls, presence_probs)
         timing_stats['forward_pass'] += time.time() - start_forward
 
         # Loss computation
         start_loss = time.time()
-        loss, _ = loss_fn(
+        loss, details = loss_fn(
             pred_props=props,
             true_props=y_true,
-            presence_probs=presence_probs,
+            presence_probs=batch_presence_probs,
             coverage=coverage,
             x_nnls=x_nnls,
             presence_threshold=presence_threshold,
@@ -100,8 +100,36 @@ def train_epoch(
         start_metrics = time.time()
         mae = torch.abs(props - y_true).mean()
         mse = F.mse_loss(props, y_true)
+        
+        # Calculate correlation
+        props_flat = props.reshape(-1)
+        y_true_flat = y_true.reshape(-1)
+        props_centered = props_flat - props_flat.mean()
+        y_true_centered = y_true_flat - y_true_flat.mean()
+        props_std = props_centered.std() + 1e-8
+        y_true_std = y_true_centered.std() + 1e-8
+        correlation = (props_centered * y_true_centered).mean() / (props_std * y_true_std)
+        
+        # Calculate presence detection metrics
+        true_present = (y_true > presence_threshold)
+        pred_present = (props > presence_threshold)
+        
+        true_positives = (pred_present & true_present).float().sum()
+        false_positives = (pred_present & ~true_present).float().sum()
+        false_negatives = (~pred_present & true_present).float().sum()
+        true_negatives = (~pred_present & ~true_present).float().sum()
+        
+        precision = true_positives / (true_positives + false_positives + 1e-8)
+        recall = true_positives / (true_positives + false_negatives + 1e-8)
+        f1_score = 2 * precision * recall / (precision + recall + 1e-8)
+        
         epoch_stats['mae'] += mae.item()
         epoch_stats['mse'] += mse.item()
+        epoch_stats['correlation'] += correlation.item()
+        epoch_stats['precision'] += precision.item()
+        epoch_stats['recall'] += recall.item()
+        epoch_stats['f1_score'] += f1_score.item()
+        
         timing_stats['metrics_calculation'] += time.time() - start_metrics
 
         # Backward pass
@@ -113,29 +141,47 @@ def train_epoch(
         # Optimizer step
         if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1 == len(loader)):
             start_optim = time.time()
+            
+            # Apply gradient clipping
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            epoch_stats['grad_norm'] += grad_norm.item()
+            
+            # Perform optimizer step
             optimiser.step()
             optimiser.zero_grad()
-            timing_stats['total_optimizer'] += time.time() - start_optim
-            epoch_stats['grad_norm'] += grad_norm.item()
+            
+            timing_stats['optimizer_step'] += time.time() - start_optim
 
-            # Logging to wandb
+            # WandB logging
             if wandb.run is not None and (batch_idx + 1) % (log_interval // 2) == 0:
                 start_wandb = time.time()
                 wandb_log = {
                     "batch/loss": loss.item(),
+                    "batch/mae": mae.item(),
+                    "batch/mse": mse.item(),
+                    "batch/correlation": correlation.item(),
+                    "batch/precision": precision.item(),
+                    "batch/recall": recall.item(),
+                    "batch/f1_score": f1_score.item(),
                     "batch/grad_norm": grad_norm.item(),
                     "batch/lr": optimiser.param_groups[0]['lr'],
                     "batch/step": batch_idx
                 }
+                
+                # Add loss components
+                for component, value in details.items():
+                    wandb_log[f"batch/component_{component}"] = value
+                
                 wandb.log(wandb_log)
                 timing_stats['wandb_logging'] += time.time() - start_wandb
 
-        # Printing
+        # Periodic logging
         if batch_idx % log_interval == 0:
             start_print = time.time()
-            print(f"\nBatch {batch_idx} | Loss: {loss.item():.8f}")
-            print(f"Batch {batch_idx} | Proportion Accuracy - MAE: {mae.item():.4f}, MSE: {mse.item():.4f}")
+            print(f"\nBatch {batch_idx}/{len(loader)} | Loss: {loss.item():.8f}")
+            print(f"MAE: {mae.item():.4f}, MSE: {mse.item():.4f}, Correlation: {correlation.item():.4f}")
+            print(f"Presence Detection - P: {precision.item():.4f}, R: {recall.item():.4f}, F1: {f1_score.item():.4f}")
+            print(f"Gradient Norm: {grad_norm.item() if 'grad_norm' in locals() else 0.0:.4f}")
             timing_stats['printing'] += time.time() - start_print
 
         epoch_stats['total_loss'] += scaled_loss.item() * accumulation_steps
@@ -145,12 +191,13 @@ def train_epoch(
     # Average stats
     for key in epoch_stats:
         epoch_stats[key] /= num_batches
-    for key in timing_stats:
-        epoch_stats[f'time_{key}'] = timing_stats[key] / num_batches
-
-    print(f"\nEpoch {epoch + 1} | Average Loss: {epoch_stats['total_loss']:.8f}")
-    print(f"Epoch {epoch + 1} | Average Proportion Accuracy - MAE: {epoch_stats['mae']:.4f}, MSE: {epoch_stats['mse']:.4f}")
-
+    
+    # Final epoch summary
+    print(f"\n===== Epoch {epoch + 1} Summary =====")
+    print(f"Average Loss: {epoch_stats['total_loss']:.8f}")
+    print(f"MAE: {epoch_stats['mae']:.4f}, MSE: {epoch_stats['mse']:.4f}, Correlation: {epoch_stats['correlation']:.4f}")
+    print(f"Precision: {epoch_stats['precision']:.4f}, Recall: {epoch_stats['recall']:.4f}, F1: {epoch_stats['f1_score']:.4f}")
+    
     return dict(epoch_stats)
 
 def validate(
@@ -163,108 +210,208 @@ def validate(
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
     model.eval()
     val_stats = {}
+    
+    # Initialize threshold results dictionary properly
     thresholds = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
     threshold_results = {}
     for t in thresholds:
         threshold_results[t] = {}
         for val_name in val_loaders.keys():
             threshold_results[t][val_name] = defaultdict(float)
+    
     total_batches = 0
     weighted_loss_sum = 0.0
 
     with torch.no_grad():
         for val_name, val_loader in val_loaders.items():
+            print(f"\n----- Validating {val_name} -----")
             loader_stats = defaultdict(float)
             num_batches = 0
+            
+            # Initialize confusion matrix aggregation
+            confusion_matrix = {
+                'tp': 0, 'fp': 0, 'fn': 0, 'tn': 0,
+                'by_cell_type': {}
+            }
+            for ct_idx, ct_name in enumerate(cell_types):
+                confusion_matrix['by_cell_type'][ct_name] = {'tp': 0, 'fp': 0, 'fn': 0, 'tn': 0}
+            
+            # Store all predictions and ground truth for comprehensive evaluation
             all_preds = []
             all_true = []
-
+            
             for batch in tqdm(val_loader, desc=f'Validating {val_name}'):
+                # Extract and transfer data
                 fraction = batch['X'].to(device)
                 coverage = batch['coverage'].to(device)
-                x_nnls = batch['x_nnls'].to(device)
+                x_nnls = batch['x_nnls'].to(device) if 'x_nnls' in batch else None
                 y_true = batch['y'].to(device)
-                presence_probs = batch['presence_probs'].to(device)
-
-                props, presence_probs, _ = model(fraction, coverage, x_nnls, presence_probs)
-
+                presence_probs = batch['presence_probs'].to(device) if 'presence_probs' in batch else None
+                
+                # Forward pass
+                props, batch_presence_probs, _ = model(fraction, coverage, x_nnls, presence_probs)
+                
+                # Calculate loss
                 loss, details = loss_fn(
                     pred_props=props,
                     true_props=y_true,
-                    presence_probs=presence_probs,
+                    presence_probs=batch_presence_probs,
                     coverage=coverage,
                     x_nnls=x_nnls,
                     presence_threshold=presence_threshold,
                     device=device
                 )
-
+                
+                # Store predictions for comprehensive evaluation
                 all_preds.append(props.cpu().numpy())
                 all_true.append(y_true.cpu().numpy())
-
+                
+                # Calculate basic metrics
+                batch_size = y_true.size(0)
                 mae = torch.abs(props - y_true).mean()
                 mse = F.mse_loss(props, y_true)
-                batch_size = y_true.size(0)
-                loader_stats['mae'] += mae.item() * batch_size
-                loader_stats['mse'] += mse.item() * batch_size
-
+                
+                # Calculate presence detection metrics
+                true_present = (y_true > presence_threshold)
+                pred_present = (props > presence_threshold)
+                
+                # Overall confusion matrix
+                tp = (pred_present & true_present).float().sum().item()
+                fp = (pred_present & ~true_present).float().sum().item()
+                fn = (~pred_present & true_present).float().sum().item()
+                tn = (~pred_present & ~true_present).float().sum().item()
+                
+                # Update confusion matrix
+                confusion_matrix['tp'] += tp
+                confusion_matrix['fp'] += fp
+                confusion_matrix['fn'] += fn
+                confusion_matrix['tn'] += tn
+                
+                # Per cell type confusion matrix
+                for ct_idx, ct_name in enumerate(cell_types):
+                    ct_tp = (pred_present[:, ct_idx] & true_present[:, ct_idx]).float().sum().item()
+                    ct_fp = (pred_present[:, ct_idx] & ~true_present[:, ct_idx]).float().sum().item()
+                    ct_fn = (~pred_present[:, ct_idx] & true_present[:, ct_idx]).float().sum().item()
+                    ct_tn = (~pred_present[:, ct_idx] & ~true_present[:, ct_idx]).float().sum().item()
+                    
+                    confusion_matrix['by_cell_type'][ct_name]['tp'] += ct_tp
+                    confusion_matrix['by_cell_type'][ct_name]['fp'] += ct_fp
+                    confusion_matrix['by_cell_type'][ct_name]['fn'] += ct_fn
+                    confusion_matrix['by_cell_type'][ct_name]['tn'] += ct_tn
+                
+                # Process different thresholds
                 for t in thresholds:
-                    if t not in threshold_results[t][val_name]:
-                        threshold_results[t][val_name] = defaultdict(float)
                     batch_results = threshold_results[t][val_name]
-
+                    
+                    # Apply threshold to proportions
                     thresholded_props = props.clone()
-                    thresholded_props[thresholded_props < 1e-4] = 0.0
+                    thresholded_props[thresholded_props < t] = 0.0
+                    
+                    # Normalize the non-zero rows
                     row_sums = thresholded_props.sum(dim=1, keepdim=True)
                     valid_rows = (row_sums > 0).squeeze(-1)
                     if valid_rows.any():
-                        thresholded_props[valid_rows] /= row_sums[valid_rows]
-
+                        thresholded_props[valid_rows] = thresholded_props[valid_rows] / row_sums[valid_rows]
+                    
+                    # Calculate metrics for this threshold
                     mse_t = F.mse_loss(thresholded_props, y_true)
                     mae_t = torch.abs(thresholded_props - y_true).mean()
+                    
                     pred_present_t = (thresholded_props > 0)
                     true_present_t = (y_true > presence_threshold)
-                    detection_accuracy = (pred_present_t == true_present_t).float().mean()
-
+                    detection_accuracy_t = (pred_present_t == true_present_t).float().mean()
+                    
+                    # Store these metrics
                     batch_results['mse'] += mse_t.item() * batch_size
                     batch_results['mae'] += mae_t.item() * batch_size
-                    batch_results['detection_accuracy'] += detection_accuracy.item() * batch_size
+                    batch_results['detection_accuracy'] += detection_accuracy_t.item() * batch_size
                     batch_results['count'] += batch_size
-
+                
+                # Update loader stats
+                loader_stats['mae_sum'] += mae.item() * batch_size
+                loader_stats['mse_sum'] += mse.item() * batch_size
                 loader_stats['loss'] += loss.item()
+                loader_stats['samples'] += batch_size
+                
                 for key, value in details.items():
-                    loader_stats[key] += value * batch_size
-
+                    loader_stats[key] += value
+                    
                 num_batches += 1
                 total_batches += 1
                 weighted_loss_sum += loss.item()
-
-            # Compute metrics
-            all_preds = np.concatenate(all_preds, axis=0)
-            all_true = np.concatenate(all_true, axis=0)
-            eval_metrics = evaluate_performance(all_true, all_preds, cell_types, alpha_threshold=alpha_threshold)
+            
+            # Skip if no batches were processed
+            if num_batches == 0 or not all_preds:
+                print(f"Warning: No valid batches in {val_name}")
+                val_stats[val_name] = {"error": "No valid batches"}
+                continue
+            
+            # Concatenate all predictions and ground truth
+            all_preds_np = np.concatenate(all_preds, axis=0)
+            all_true_np = np.concatenate(all_true, axis=0)
+            
+            # Get comprehensive evaluation metrics
+            eval_metrics = evaluate_performance(all_true_np, all_preds_np, cell_types, alpha_threshold=alpha_threshold)
+            
+            # Extract overall metrics
             r2 = eval_metrics["Overall"].get('Global R² (Flattened)', 0.0)
             overall_mae = eval_metrics["Overall"].get('Overall MAE', 0.0)
-            per_cell_r2 = {ct: eval_metrics["Per_Cell_Type"][ct].get("R²", 0.0) for ct in cell_types if ct in eval_metrics["Per_Cell_Type"]}
-
-            # Normalize stats
-            total_samples = num_batches * val_loader.batch_size
-            for key in loader_stats:
-                loader_stats[key] /= total_samples if key in ['mae', 'mse'] else num_batches
+            
+            # Extract per-cell-type metrics
+            per_cell_r2 = {ct: eval_metrics["Per_Cell_Type"][ct].get("R²", 0.0) 
+                          for ct in cell_types if ct in eval_metrics["Per_Cell_Type"]}
+            
+            # Calculate precision, recall, F1 from confusion matrix
+            precision = confusion_matrix['tp'] / (confusion_matrix['tp'] + confusion_matrix['fp'] + 1e-8)
+            recall = confusion_matrix['tp'] / (confusion_matrix['tp'] + confusion_matrix['fn'] + 1e-8)
+            f1 = 2 * precision * recall / (precision + recall + 1e-8)
+            
+            # Print overall metrics
+            print(f"\nOverall Metrics for {val_name}:")
+            print(f"Global R² (Flattened): {r2:.4f}")
+            print(f"Overall MAE: {overall_mae:.4f}")
+            print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}")
+            
+            # Print per-cell-type metrics for important cell types
+            print(f"\nPer-Cell-Type Metrics for {val_name}:")
+            for ct in cell_types:
+                if ct in ["T-cells", "OAC"] or "t-cells" in val_name.lower() or "oac" in val_name.lower():
+                    if ct in per_cell_r2:
+                        ct_metrics = eval_metrics["Per_Cell_Type"][ct]
+                        ct_cm = confusion_matrix['by_cell_type'][ct]
+                        ct_precision = ct_cm['tp'] / (ct_cm['tp'] + ct_cm['fp'] + 1e-8)
+                        ct_recall = ct_cm['tp'] / (ct_cm['tp'] + ct_cm['fn'] + 1e-8)
+                        ct_f1 = 2 * ct_precision * ct_recall / (ct_precision + ct_recall + 1e-8)
+                        
+                        print(f"{ct}:")
+                        print(f"  R²: {per_cell_r2[ct]:.4f}")
+                        print(f"  MAE: {ct_metrics.get('MAE', 0.0):.4f}")
+                        print(f"  Detection - P: {ct_precision:.4f}, R: {ct_recall:.4f}, F1: {ct_f1:.4f}")
+            
+            # Process threshold results
             for t in thresholds:
                 batch_results = threshold_results[t][val_name]
                 if batch_results['count'] > 0:
                     for key in ['mse', 'mae', 'detection_accuracy']:
                         batch_results[key] /= batch_results['count']
-                    for key, value in batch_results.items():
-                        if key != 'count':
-                            loader_stats[f'thresh_{t}_{key}'] = value
-
+                        loader_stats[f'thresh_{t}_{key}'] = batch_results[key]
+            
+            # Store key metrics in loader_stats
             loader_stats['r2'] = r2
             loader_stats['mae'] = overall_mae
+            loader_stats['precision'] = precision
+            loader_stats['recall'] = recall
+            loader_stats['f1'] = f1
             loader_stats['per_cell_r2'] = per_cell_r2
+            
+            # Store in val_stats
             val_stats[val_name] = dict(loader_stats)
-
-    avg_val_loss = weighted_loss_sum / total_batches if total_batches > 0 else 0.0
+    
+    # Calculate average validation loss
+    avg_val_loss = weighted_loss_sum / total_batches if total_batches > 0 else float('inf')
+    print(f"\n===== Validation Complete =====")
+    print(f"Average validation loss: {avg_val_loss:.6f}")
+    
     return avg_val_loss, val_stats
 
 
@@ -305,12 +452,19 @@ def train_model(
         wandb.watch(model, log="all", log_freq=100)
 
     best_val_loss = float('inf')
+    best_tcells_f1 = 0.0
+    best_tcells_r2 = -float('inf')
+    best_oac_r2 = -float('inf')
+    best_tier1_r2 = -float('inf')
+    best_mae = float('inf')
     patience_counter = 0
     history = defaultdict(list)
 
     val_loaders_unaugmented, val_loaders_augmented = val_loaders
     for epoch in range(num_epochs):
         print(f"\n🔹 Epoch {epoch + 1}/{num_epochs}")
+        print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+        
         train_stats = train_epoch(
             model,
             train_loader,
@@ -321,7 +475,10 @@ def train_model(
         )
         scheduler.step()
 
+        # Use unaugmented data for early epochs, augmented for later epochs
         current_val_loaders = val_loaders_unaugmented if epoch < 10 else val_loaders_augmented
+        print(f"Validation with {'augmented' if epoch >= 10 else 'unaugmented'} data")
+
         avg_val_loss, val_stats = validate(
             model,
             current_val_loaders,
@@ -331,55 +488,174 @@ def train_model(
             alpha_threshold=0.01
         )
 
+        # Update history
         for key, value in train_stats.items():
             history[key].append(value)
         for val_name, stats in val_stats.items():
             for k, v in stats.items():
-                history[f"{val_name}/{k}"].append(v)
+                if k != 'per_cell_r2':  # Skip dict fields
+                    history[f"{val_name}/{k}"].append(v)
+
+        # Calculate key performance metrics across datasets
+        tcells_r2_sum = 0.0
+        tcells_count = 0
+        tcells_f1_sum = 0.0
+        oac_r2_sum = 0.0
+        oac_count = 0
+        tier1_r2_sum = 0.0
+        tier1_count = 0
+        mae_sum = 0.0
+        mae_count = 0
+
+        for val_name, stats in val_stats.items():
+            # T-cells metrics
+            if 't-cells' in val_name.lower():
+                if 'per_cell_r2' in stats and 'T-cells' in stats['per_cell_r2']:
+                    tcells_r2_sum += stats['per_cell_r2']['T-cells']
+                    tcells_count += 1
+                if 'f1' in stats:
+                    tcells_f1_sum += stats['f1']
+            
+            # OAC metrics
+            elif 'oac' in val_name.lower():
+                if 'per_cell_r2' in stats and 'OAC' in stats['per_cell_r2']:
+                    oac_r2_sum += stats['per_cell_r2']['OAC']
+                    oac_count += 1
+            
+            # Tier1 metrics
+            elif 'tier1' in val_name.lower():
+                if 'r2' in stats:
+                    tier1_r2_sum += stats['r2']
+                    tier1_count += 1
+            
+            # MAE across all datasets
+            if 'mae' in stats:
+                mae_sum += stats['mae']
+                mae_count += 1
+
+        # Calculate averages
+        tcells_r2_avg = tcells_r2_sum / tcells_count if tcells_count > 0 else 0.0
+        tcells_f1_avg = tcells_f1_sum / tcells_count if tcells_count > 0 else 0.0
+        oac_r2_avg = oac_r2_sum / oac_count if oac_count > 0 else 0.0
+        tier1_r2_avg = tier1_r2_sum / tier1_count if tier1_count > 0 else 0.0
+        mae_avg = mae_sum / mae_count if mae_count > 0 else float('inf')
+
+        # Print performance summary
+        print(f"\n🔹 Performance Summary:")
+        print(f"Average MAE: {mae_avg:.4f}")
+        print(f"Average T-cells R²: {tcells_r2_avg:.4f}")
+        print(f"Average T-cells F1: {tcells_f1_avg:.4f}")
+        print(f"Average OAC R²: {oac_r2_avg:.4f}")
+        print(f"Average Tier1 R²: {tier1_r2_avg:.4f}")
 
         if use_wandb:
             wandb_logs = {
                 "epoch": epoch,
                 "train/loss": train_stats['total_loss'],
                 "val/avg_loss": avg_val_loss,
+                "val/tcells_r2_avg": tcells_r2_avg,
+                "val/tcells_f1_avg": tcells_f1_avg,
+                "val/oac_r2_avg": oac_r2_avg,
+                "val/tier1_r2_avg": tier1_r2_avg,
+                "val/mae_avg": mae_avg,
                 "lr": optimizer.param_groups[0]['lr']
             }
             for val_name, stats in val_stats.items():
                 for k, v in stats.items():
                     if k == 'per_cell_r2':
-                        for ct, r2 in v.items():
-                            wandb_logs[f"val/{val_name}/r2_{ct}"] = r2
-                    else:
+                        for cell_type, r2 in v.items():
+                            wandb_logs[f"val/{val_name}/r2_{cell_type}"] = r2
+                    elif isinstance(v, (int, float)):
                         wandb_logs[f"val/{val_name}/{k}"] = v
             wandb.log(wandb_logs)
 
+        # Check for improvement
+        improved = False
+        improvement_reason = []
+        
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
+            improved = True
+            improvement_reason.append(f"loss: {best_val_loss:.6f}")
+        
+        if tcells_f1_avg > best_tcells_f1:
+            best_tcells_f1 = tcells_f1_avg
+            improved = True
+            improvement_reason.append(f"T-cells F1: {best_tcells_f1:.4f}")
+        
+        if tcells_r2_avg > best_tcells_r2:
+            best_tcells_r2 = tcells_r2_avg
+            improved = True
+            improvement_reason.append(f"T-cells R²: {best_tcells_r2:.4f}")
+        
+        if oac_r2_avg > best_oac_r2:
+            best_oac_r2 = oac_r2_avg
+            improved = True
+            improvement_reason.append(f"OAC R²: {best_oac_r2:.4f}")
+            
+        if tier1_r2_avg > best_tier1_r2:
+            best_tier1_r2 = tier1_r2_avg
+            improved = True
+            improvement_reason.append(f"Tier1 R²: {best_tier1_r2:.4f}")
+            
+        if mae_avg < best_mae:
+            best_mae = mae_avg
+            improved = True
+            improvement_reason.append(f"MAE: {best_mae:.4f}")
+
+        if improved:
             patience_counter = 0
+            
+            # Save model
             checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'best_val_loss': best_val_loss,
+                'best_tcells_f1': best_tcells_f1,
+                'best_tcells_r2': best_tcells_r2,
+                'best_oac_r2': best_oac_r2,
+                'best_tier1_r2': best_tier1_r2,
+                'best_mae': best_mae,
                 'history': dict(history)
             }
             torch.save(checkpoint, os.path.join(model_path, "best_model.pt"))
+            
+            print(f"\n✅ Saved new best model with improvements in: {', '.join(improvement_reason)}")
+            
             if use_wandb:
                 wandb.save(os.path.join(model_path, "best_model.pt"))
         else:
             patience_counter += 1
+            print(f"\nNo improvement. Patience: {patience_counter}/{patience}")
 
         if patience_counter >= patience:
             print(f"\n⚠️ Early stopping triggered after {epoch + 1} epochs")
             break
 
+    # Load best model
+    print("\nLoading best model...")
     checkpoint = torch.load(os.path.join(model_path, "best_model.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
+    
+    print(f"\n🏆 Best Model Performance:")
+    print(f"Loss: {best_val_loss:.6f}")
+    print(f"T-cells F1: {best_tcells_f1:.4f}")
+    print(f"T-cells R²: {best_tcells_r2:.4f}")
+    print(f"OAC R²: {best_oac_r2:.4f}")
+    print(f"Tier1 R²: {best_tier1_r2:.4f}")
+    print(f"MAE: {best_mae:.4f}")
+
     if use_wandb:
+        wandb.run.summary["best_val_loss"] = best_val_loss
+        wandb.run.summary["best_tcells_f1"] = best_tcells_f1
+        wandb.run.summary["best_tcells_r2"] = best_tcells_r2
+        wandb.run.summary["best_oac_r2"] = best_oac_r2
+        wandb.run.summary["best_tier1_r2"] = best_tier1_r2
+        wandb.run.summary["best_mae"] = best_mae
         wandb.finish()
 
-    return model, 0.01  # Default threshold; adjust if needed
-
+    return model, 0.01  # Default threshold
 
 def plot_training_history(history: Dict[str, List[float]], save_path: str):
     """
