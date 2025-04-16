@@ -590,7 +590,7 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/best_model.pt")
         model.load_state_dict(checkpoint["model_state_dict"], strict=False)
         atlas_np = atlas[atlas.columns[8:]].T.to_numpy()
-        estimation = model.predict(X_val,coverage_val, atlas_np)
+        estimation = model.predict(X_val,coverage_val, atlas=atlas_np)
     else:
         estimation = run_weighted_nnls(X_val, coverage_val, atlas[atlas.columns[8:]].T.values)
     df = pd.DataFrame(estimation, columns=list(atlas.columns[8:]))
