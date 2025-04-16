@@ -80,7 +80,7 @@ def train_epoch(
 
         # Forward pass
         start_forward = time.time()
-        props, batch_presence_probs, _, dl_props = model(fraction, coverage, x_nnls, presence_probs)
+        props, batch_presence_probs, _, dl_props, _, _ = model(fraction, coverage, x_nnls, presence_probs)
         timing_stats['forward_pass'] += time.time() - start_forward
 
         # Loss computation
@@ -95,7 +95,6 @@ def train_epoch(
             combination_weight=model.combination_weight,
             presence_threshold=0.01,
             device=device,
-            weight_penalty_lambda=0.1
         )
         timing_stats['loss_computation'] += time.time() - start_loss
 
@@ -252,7 +251,7 @@ def validate(
                 presence_probs = batch['presence_probs'].to(device) if 'presence_probs' in batch else None
                 
                 # Forward pass
-                props, batch_presence_probs, _, dl_props = model(fraction, coverage, x_nnls, presence_probs)
+                props, batch_presence_probs, _, dl_props, _, _ = model(fraction, coverage, x_nnls, presence_probs)
                 
                 # Calculate loss
                 loss, details = loss_fn(
@@ -265,7 +264,6 @@ def validate(
                     dl_props=dl_props,
                     combination_weight=model.combination_weight,
                     device=device,
-                    weight_penalty_lambda=0.1
                 )
                 
                 # Store predictions for comprehensive evaluation
