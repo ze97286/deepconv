@@ -30,7 +30,7 @@ def loss_fn(
     dl_props: torch.Tensor,
     combination_weight: torch.Tensor,
     presence_threshold: float = 0.01,
-    low_snr_indices=[11],
+    low_snr_indices=[3, 4, 9, 11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ):
     """
@@ -107,7 +107,7 @@ def loss_fn(
         0.05 * weight_penalty     # Light weight penalty
     )
 
-    # Logging details
+    # Logging details (flattened)
     details = {
         'loss_props': loss_props.item(),
         'recon_loss': recon_loss.item(),
@@ -117,11 +117,9 @@ def loss_fn(
         'weight_penalty': weight_penalty.item(),
         'low_snr_under': underestimation[:, low_snr_indices].mean().item(),
         'low_snr_over': F.relu(pred_props - true_props)[:, low_snr_indices].mean().item(),
-        'concentration_errors': {
-            'low_conc': torch.mean(torch.masked_select(cell_errors, low_conc_mask)).item() if low_conc_mask.any() else 0.0,
-            'med_conc': torch.mean(torch.masked_select(cell_errors, med_conc_mask)).item() if med_conc_mask.any() else 0.0,
-            'high_conc': torch.mean(torch.masked_select(cell_errors, high_conc_mask)).item() if high_conc_mask.any() else 0.0
-        }
+        'concentration_low_conc': torch.mean(torch.masked_select(cell_errors, low_conc_mask)).item() if low_conc_mask.any() else 0.0,
+        'concentration_med_conc': torch.mean(torch.masked_select(cell_errors, med_conc_mask)).item() if med_conc_mask.any() else 0.0,
+        'concentration_high_conc': torch.mean(torch.masked_select(cell_errors, high_conc_mask)).item() if high_conc_mask.any() else 0.0
     }
 
     return total_loss, details
