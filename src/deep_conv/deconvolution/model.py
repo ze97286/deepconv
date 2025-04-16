@@ -176,11 +176,10 @@ class TissueDeconvolutionDataset(Dataset):
             self.y = torch.tensor(y, dtype=torch.float32)
         else:
             self.y = None
-        # if x_nnls is not None:
-        #     self.x_nnls = torch.tensor(x_nnls, dtype=torch.float32)
-        # else:
-        #     self.x_nnls = None
-        self.x_nnls = None
+        if x_nnls is not None:
+            self.x_nnls = torch.tensor(x_nnls, dtype=torch.float32)
+        else:
+            self.x_nnls = None
 
     def __len__(self):
         return self.fraction.size(0)
@@ -535,6 +534,9 @@ class CellTypeDeconvolutionModel(nn.Module):
                 - x_nnls: Original NNLS predictions or None
                 - dl_props: [B, C] tensor of DeepConv predictions before ensembling
         """
+        # TEMP TEMP TEMP
+        x_nnls = None
+        # TEMP TEMP TEMP
         B = marker_values.shape[0]
         
         # Create a valid mask - markers with coverage > 0 should be considered
