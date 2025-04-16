@@ -62,7 +62,7 @@ def train_epoch(
 
         # Forward pass
         start_forward = time.time()
-        props, batch_presence_probs, _, dl_props, reconstructed, valid_mask = model(
+        props, batch_presence_probs, x_nnls_out, dl_props, reconstructed, valid_mask = model(
             fraction, coverage, x_nnls, presence_probs
         )
         timing_stats['forward_pass'] += time.time() - start_forward
@@ -72,12 +72,13 @@ def train_epoch(
         loss, details = loss_fn(
             pred_props=props,
             true_props=y_true,
-            presence_probs=batch_presence_probs,
             reconstructed=reconstructed,
             marker_values=fraction,
             coverage=coverage,
             valid_mask=valid_mask,
-            x_nnls=x_nnls,
+            presence_probs=batch_presence_probs,
+            presence_logits=torch.log(batch_presence_probs / (1 - batch_presence_probs + 1e-8)),
+            x_nnls=x_nnls_out,
             dl_props=dl_props,
             combination_weight=model.combination_weight,
             presence_threshold=presence_threshold,
@@ -159,12 +160,12 @@ def train_epoch(
             print(f"MAE: {mae.item():.4f}, MSE: {mse.item():.4f}, Correlation: {correlation.item():.4f}")
             print(f"Presence Detection - P: {precision.item():.4f}, R: {recall.item():.4f}, F1: {f1_score.item():.4f}")
             print(f"Gradient Norm: {grad_norm.item() if 'grad_norm' in locals() else 0.0:.4f}")
-            print(f"Loss Details: {details}") 
-            print(f"Props range: {props.min().item():.4f} - {props.max().item():.4f}")  # NEW: Diagnostic
-            print(f"DL Props range: {dl_props.min().item():.4f} - {dl_props.max().item():.4f}")  # NEW: Diagnostic
-            print(f"Fraction range: {fraction.min().item():.4f} - {fraction.max().item():.4f}")  # NEW: Diagnostic
-            print(f"Coverage range: {coverage.min().item():.4f} - {coverage.max().item():.4f}")  # NEW: Diagnostic
-            print(f"Valid mask ratio: {valid_mask.float().mean().item():.4f}")  # NEW: Diagnostic
+            print(f"Loss Details: {details}")
+            print(f"Props range: {props.min().item():.4f} - {props.max().item():.4f}")
+            print(f"DL Props range: {dl_props.min().item():.4f} - {dl_props.max().item():.4f}")
+            print(f"Fraction range: {fraction.min().item():.4f} - {fraction.max().item():.4f}")
+            print(f"Coverage range: {coverage.min().item():.4f} - {coverage.max().item():.4f}")
+            print(f"Valid mask ratio: {valid_mask.float().mean().item():.4f}")
             timing_stats['printing'] += time.time() - start_print
 
         epoch_stats['total_loss'] += scaled_loss.item() * accumulation_steps
@@ -227,19 +228,21 @@ def validate(
                 y_true = batch['y'].to(device)
                 presence_probs = batch['presence_probs'].to(device) if 'presence_probs' in batch else None
                 
-                props, batch_presence_probs, _, dl_props, reconstructed, valid_mask = model(
+                props, batch_presence_probs, x_nnls_out, dl_props, reconstructed, valid_mask = model(
                     fraction, coverage, x_nnls, presence_probs
                 )
                 
+                # NEW: Updated loss_fn call for restored loss
                 loss, details = loss_fn(
                     pred_props=props,
                     true_props=y_true,
-                    presence_probs=batch_presence_probs,
                     reconstructed=reconstructed,
                     marker_values=fraction,
                     coverage=coverage,
                     valid_mask=valid_mask,
-                    x_nnls=x_nnls,
+                    presence_probs=batch_presence_probs,
+                    presence_logits=torch.log(batch_presence_probs / (1 - batch_presence_probs + 1e-8)),
+                    x_nnls=x_nnls_out,
                     dl_props=dl_props,
                     combination_weight=model.combination_weight,
                     presence_threshold=presence_threshold,
@@ -436,8 +439,8 @@ def train_model(
         scheduler.step()
 
         # Use unaugmented data for early epochs, augmented for later epochs
-        current_val_loaders = val_loaders_unaugmented if epoch < 30 else val_loaders_augmented
-        print(f"Validation with {'augmented' if epoch >= 30 else 'unaugmented'} data")
+        current_val_loaders = val_loaders_unaugmented if epoch < 100 else val_loaders_augmented  # NEW: Increased to 100 per user request
+        print(f"Validation with {'augmented' if epoch >= 100 else 'unaugmented'} data")
 
         avg_val_loss, val_stats = validate(
             model,
