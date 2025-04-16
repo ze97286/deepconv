@@ -536,7 +536,7 @@ def debug_model_predictions(model, X_val, coverage_val, y_true_df, threshold=0.0
         return props, presence_probs
 
 
-def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions):
+def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, atlas_np):
     """
     Consistent evaluation function that matches training behavior.
     
@@ -553,7 +553,7 @@ def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions):
     """
     # Prepare data
     X_val, coverage_val, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions)
-    predictions = model.predict(X_val, coverage_val)
+    predictions = model.predict(X_val, coverage_val, atlas=atlas_np)
     predictions_df = pd.DataFrame(predictions, columns=list(y_true_df.columns))
     
     # Log summary statistics
@@ -589,7 +589,8 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
         )
         checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/best_model.pt")
         model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        estimation = model.predict(X_val,coverage_val)
+        atlas_np = atlas[atlas.columns[8:]].T.to_numpy()
+        estimation = model.predict(X_val,coverage_val, atlas_np)
     else:
         estimation = run_weighted_nnls(X_val, coverage_val, atlas[atlas.columns[8:]].T.values)
     df = pd.DataFrame(estimation, columns=list(atlas.columns[8:]))
@@ -830,8 +831,9 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
 
     # Run evaluations
     print("\n===== EVALUATING T-CELLS =====")
+    atlas_np = deepconv_atlas[deepconv_atlas.columns[8:]].T.to_numpy()
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(
-        deepconv_atlas_path, deepconv_eval_pat_dir_tcells, model, tcell_dilutions
+        deepconv_atlas_path, deepconv_eval_pat_dir_tcells, model, tcell_dilutions, atlas_np
     )
     plot_deconvolution_evaluation(
         y_true_df, predictions_df, y_dilutions['dilution'], 
@@ -840,7 +842,7 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
 
     print("\n===== EVALUATING OAC =====")
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(
-        deepconv_atlas_path, deepconv_eval_pat_dir_oac, model, oac_dilutions
+        deepconv_atlas_path, deepconv_eval_pat_dir_oac, model, oac_dilutions, atlas_np
     )
     plot_deconvolution_evaluation(
         y_true_df, predictions_df, y_dilutions['dilution'], 
@@ -849,7 +851,7 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
 
     print("\n===== EVALUATING heart =====")
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(
-        deepconv_atlas_path, deepconv_eval_pat_dir_tcells_with_heart, model, tcell_dilutions
+        deepconv_atlas_path, deepconv_eval_pat_dir_tcells_with_heart, model, tcell_dilutions, atlas_np
     )
     plot_deconvolution_evaluation(
         y_true_df, predictions_df, y_dilutions['dilution'], 
