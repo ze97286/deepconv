@@ -743,7 +743,8 @@ class CellTypeDeconvolutionModel(nn.Module):
                 row_sums = props.sum(dim=1, keepdim=True)
                 valid_rows = row_sums > 0
                 if valid_rows.any():
-                    props[valid_rows] = props[valid_rows] / row_sums[valid_rows]
+                    valid_indices = valid_rows.squeeze(1)  # Convert from [B, 1] to [B]
+                    props[valid_indices] = props[valid_indices] / row_sums[valid_indices]
         
         return props, presence_probs, x_nnls, dl_props
 
