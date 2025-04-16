@@ -669,7 +669,8 @@ class CellTypeDeconvolutionModel(nn.Module):
             row_sums = dl_props.sum(dim=1, keepdim=True)
             valid_rows = row_sums > 0
             if valid_rows.any():
-                dl_props[valid_rows] = dl_props[valid_rows] / row_sums[valid_rows]
+                valid_indices = valid_rows.squeeze(1)  # Convert from [B, 1] to [B]
+                dl_props[valid_indices] = dl_props[valid_indices] / row_sums[valid_indices]
         
         # Clone for final output after potential ensemble
         props = dl_props.clone()
