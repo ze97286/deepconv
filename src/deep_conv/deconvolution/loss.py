@@ -30,7 +30,7 @@ def loss_fn(
     dl_props: torch.Tensor,
     combination_weight: torch.Tensor,
     presence_threshold: float = 0.01,
-    low_snr_indices=[3, 4, 9, 11],
+    low_snr_indices=[11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ):
     """
@@ -57,17 +57,11 @@ def loss_fn(
     low_conc_mask = (true_props > 0.001) & (true_props <= 0.01)
     med_conc_mask = (true_props > 0.01) & (true_props <= 0.05)
     high_conc_mask = true_props > 0.05
-    importance_weights = torch.where(low_conc_mask, 2.0, importance_weights)
-    importance_weights = torch.where(med_conc_mask, 1.5, importance_weights)
+    importance_weights = torch.where(low_conc_mask, 1.5, importance_weights) 
+    importance_weights = torch.where(med_conc_mask, 1.2, importance_weights)
     importance_weights = torch.where(high_conc_mask, 1.0, importance_weights)
     
-    low_snr_mask = torch.zeros_like(true_props)
-    low_snr_mask[:, low_snr_indices] = 1.0
-    underestimation = F.relu(true_props - pred_props)
-    underestimation_penalty = 1.3 * underestimation
-    low_snr_under_penalty = low_snr_mask * underestimation * 0.7
-    
-    weighted_errors = importance_weights * (cell_errors + underestimation_penalty + low_snr_under_penalty)
+    weighted_errors = importance_weights * cell_errors 
     loss_props = weighted_errors.mean()
 
     # Reconstruction loss
@@ -99,12 +93,12 @@ def loss_fn(
 
     # Combine losses
     total_loss = (
-        0.6 * loss_props +        # Emphasize proportion accuracy
-        0.2 * recon_loss +        # Regularize with reconstruction
-        0.1 * presence_loss +     # Maintain presence accuracy
-        0.05 * sparsity_penalty + # Encourage sparsity
-        0.01 * reg_loss +         # Light NNLS regularization
-        0.05 * weight_penalty     # Light weight penalty
+        0.799 * loss_props +    
+        0.001 * recon_loss +    
+        0.1 * presence_loss +   
+        0.05 * sparsity_penalty + 
+        0.0 * reg_loss +        
+        0.0 * weight_penalty    
     )
 
     # Logging details (flattened)
@@ -115,11 +109,9 @@ def loss_fn(
         'sparsity_loss': sparsity_penalty.item(),
         'reg_loss': reg_loss.item(),
         'weight_penalty': weight_penalty.item(),
-        'low_snr_under': underestimation[:, low_snr_indices].mean().item(),
-        'low_snr_over': F.relu(pred_props - true_props)[:, low_snr_indices].mean().item(),
-        'concentration_low_conc': torch.mean(torch.masked_select(cell_errors, low_conc_mask)).item() if low_conc_mask.any() else 0.0,
-        'concentration_med_conc': torch.mean(torch.masked_select(cell_errors, med_conc_mask)).item() if med_conc_mask.any() else 0.0,
-        'concentration_high_conc': torch.mean(torch.masked_select(cell_errors, high_conc_mask)).item() if high_conc_mask.any() else 0.0
+        'error_low_conc': torch.mean(torch.masked_select(cell_errors, low_conc_mask)).item() if low_conc_mask.any() else 0.0,
+        'error_med_conc': torch.mean(torch.masked_select(cell_errors, med_conc_mask)).item() if med_conc_mask.any() else 0.0,
+        'error_high_conc': torch.mean(torch.masked_select(cell_errors, high_conc_mask)).item() if high_conc_mask.any() else 0.0
     }
 
     return total_loss, details

@@ -364,7 +364,7 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
     
 class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, presence_models_dir, target_ids=None, 
-                 feature_dim=128, dropout_rate=0.1):
+                 feature_dim=32, dropout_rate=0.1):
         """
         Enhanced Cell Type Deconvolution Model with per-marker feature extraction,
         reconstruction, and optional NNLS ensembling.
@@ -374,7 +374,7 @@ class CellTypeDeconvolutionModel(nn.Module):
             num_cell_types (int): Number of cell types to deconvolve.
             presence_models_dir (str): Directory containing pre-trained presence models.
             target_ids (torch.Tensor, optional): Tensor mapping markers to cell types.
-            feature_dim (int): Dimension of per-marker feature extraction layer.
+            feature_dim (int): Dimension of per-marker feature extraction layer (reduced to 32 from 128).
             dropout_rate (float): Dropout rate for regularization.
         """
         super().__init__()
@@ -399,7 +399,7 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         self.target_ids = torch.tensor(target_ids, dtype=torch.long)
 
-        # Marker feature extractor (per marker)
+        # Marker feature extractor (per marker, simplified)
         self.marker_feature_extractor = nn.Sequential(
             nn.Linear(2, feature_dim),  # Input: marker value + log coverage
             nn.LeakyReLU(),
@@ -408,15 +408,15 @@ class CellTypeDeconvolutionModel(nn.Module):
             nn.Dropout(dropout_rate)
         )
 
-        # Encoder: predict proportions from aggregated features and presence probs
+        # Encoder: predict proportions (streamlined)
         self.encoder = nn.Sequential(
-            nn.Linear(num_cell_types * feature_dim + num_cell_types, 256),
+            nn.Linear(num_cell_types * feature_dim + num_cell_types, 128),
             nn.LeakyReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(256, 128),
+            nn.Linear(128, 64),
             nn.LeakyReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(128, num_cell_types)
+            nn.Linear(64, num_cell_types)
         )
 
         # Decoder: reconstruct marker values
@@ -429,9 +429,9 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Learnable marker quality weights
         self.marker_quality_weights = nn.Parameter(torch.ones(num_markers))
 
-        # Presence gating parameters
+        # Presence gating parameters (softer gating)
         self.presence_thresholds = nn.Parameter(torch.ones(num_cell_types) * 0.5)
-        self.presence_slopes = nn.Parameter(torch.ones(num_cell_types) * 10.0)
+        self.presence_slopes = nn.Parameter(torch.ones(num_cell_types) * 5.0)  # Changed from 10.0
 
         # Learnable weight for combining DL props and x_nnls
         self.combination_weight = nn.Parameter(torch.full((num_cell_types,), 0.5))
@@ -538,19 +538,23 @@ class CellTypeDeconvolutionModel(nn.Module):
         B, M = marker_values.shape
         C = self.num_celltypes
 
-        # Create valid mask
+        # Create valid mask and clean inputs
         valid_mask = (coverage > 0)
         marker_values_clean = torch.where(
             valid_mask, marker_values, torch.zeros_like(marker_values)
         )
+        marker_values_clean = torch.clamp(marker_values_clean, 0.0, 1.0)  # NEW: Ensure [0, 1]
 
         # Apply marker quality weights
         marker_quality = torch.sigmoid(self.marker_quality_weights).unsqueeze(0)
         marker_values_weighted = marker_values_clean * marker_quality
 
-        # Normalize inputs
-        marker_values_weighted = marker_values_weighted / (marker_values_weighted.max(dim=1, keepdim=True)[0] + 1e-8)
-        log_coverage = torch.log1p(coverage) / (torch.log1p(coverage.max(dim=1, keepdim=True)[0]) + 1e-8)
+        # Normalize inputs robustly
+        marker_max = marker_values_weighted.abs().max(dim=1, keepdim=True)[0] + 1e-8
+        marker_values_weighted = marker_values_weighted / marker_max  # NEW: Per-sample normalization
+        coverage_safe = torch.clamp(coverage, min=0.0)  # NEW: Prevent negative coverage
+        coverage_max = coverage_safe.max(dim=1, keepdim=True)[0] + 1e-8
+        log_coverage = torch.log1p(coverage_safe) / torch.log1p(coverage_max)  # NEW: Scaled log
 
         # Per-marker feature extraction
         marker_inputs = torch.stack([marker_values_weighted, log_coverage], dim=2)  # [B, M, 2]

@@ -492,7 +492,7 @@ def train_and_eval(
         presence_models_dir=presence_models_dir,
         dropout_rate=0.1,
         target_ids=target_ids,
-        feature_dim=128,
+        feature_dim=32,
 
     )
     train_dl_low = load_training_with_augmentation(
@@ -628,7 +628,7 @@ def train_and_eval(
         cell_types=cell_types,
         num_epochs=1000,
         patience=10, 
-        lr=1e-4, 
+        lr=5e-5, 
         weight_decay=1e-3
     )
 

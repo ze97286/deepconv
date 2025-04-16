@@ -3,7 +3,6 @@ from collections import defaultdict
 from pprint import pprint
 
 import wandb
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,32 +11,13 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
 from typing import Dict, Tuple, List
-from deep_conv.deconvolution.loss import loss_fn
+from deep_conv.deconvolution.loss_function import loss_fn  # NEW: Correct import
 from deep_conv.benchmark.benchmark_utils import evaluate_performance
-
 import time
 
 def init_wandb(config, project_name="cfDNA-Deconvolution", entity=None):
     """
     Initialise Weights & Biases (wandb) logging for experiment tracking.
-
-    This function:
-      1) Creates (or resumes) a wandb run with the given config and user/project info.
-      2) Automatically logs config details (hyperparams, etc.) to wandb.
-      3) Generates a run name based on the current datetime.
-
-    Args:
-        config (dict):
-            Dictionary containing experiment configurations (e.g., model hyperparams,
-            dataset paths, training flags).
-        project_name (str):
-            The wandb project in which this run will appear.
-        entity (str, optional):
-            The wandb entity (username or team name). If None, defaults to your wandb default.
-
-    Returns:
-        run (wandb.run):
-            The wandb run object, which allows further logging.
     """
     from datetime import datetime as dt
     run = wandb.init(
@@ -47,7 +27,6 @@ def init_wandb(config, project_name="cfDNA-Deconvolution", entity=None):
         name=f"run_{dt.now().strftime('%Y%m%d_%H%M%S')}"
     )
     return run
-
 
 def train_epoch(
     model: nn.Module,
@@ -59,6 +38,9 @@ def train_epoch(
     epoch: int = 0,
     presence_threshold: float = 0.01
 ) -> Dict[str, float]:
+    """
+    Train the model for one epoch with added diagnostics.
+    """
     model.train()
     epoch_stats = defaultdict(float)
     timing_stats = defaultdict(float)
@@ -170,13 +152,19 @@ def train_epoch(
                 wandb.log(wandb_log)
                 timing_stats['wandb_logging'] += time.time() - start_wandb
 
-        # Periodic logging
+        # Periodic logging with diagnostics
         if batch_idx % log_interval == 0:
             start_print = time.time()
             print(f"\nBatch {batch_idx}/{len(loader)} | Loss: {loss.item():.8f}")
             print(f"MAE: {mae.item():.4f}, MSE: {mse.item():.4f}, Correlation: {correlation.item():.4f}")
             print(f"Presence Detection - P: {precision.item():.4f}, R: {recall.item():.4f}, F1: {f1_score.item():.4f}")
             print(f"Gradient Norm: {grad_norm.item() if 'grad_norm' in locals() else 0.0:.4f}")
+            print(f"Loss Details: {details}") 
+            print(f"Props range: {props.min().item():.4f} - {props.max().item():.4f}")  # NEW: Diagnostic
+            print(f"DL Props range: {dl_props.min().item():.4f} - {dl_props.max().item():.4f}")  # NEW: Diagnostic
+            print(f"Fraction range: {fraction.min().item():.4f} - {fraction.max().item():.4f}")  # NEW: Diagnostic
+            print(f"Coverage range: {coverage.min().item():.4f} - {coverage.max().item():.4f}")  # NEW: Diagnostic
+            print(f"Valid mask ratio: {valid_mask.float().mean().item():.4f}")  # NEW: Diagnostic
             timing_stats['printing'] += time.time() - start_print
 
         epoch_stats['total_loss'] += scaled_loss.item() * accumulation_steps
@@ -200,6 +188,9 @@ def validate(
     presence_threshold: float = 0.01,
     alpha_threshold: float = 1e-4
 ) -> Tuple[float, Dict[str, Dict[str, float]]]:
+    """
+    Validate the model on multiple validation sets.
+    """
     model.eval()
     val_stats = {}
     
@@ -236,12 +227,10 @@ def validate(
                 y_true = batch['y'].to(device)
                 presence_probs = batch['presence_probs'].to(device) if 'presence_probs' in batch else None
                 
-                # Forward pass
                 props, batch_presence_probs, _, dl_props, reconstructed, valid_mask = model(
                     fraction, coverage, x_nnls, presence_probs
                 )
                 
-                # Calculate loss
                 loss, details = loss_fn(
                     pred_props=props,
                     true_props=y_true,
@@ -258,7 +247,6 @@ def validate(
                     device=device
                 )
                 
-                # Store predictions
                 all_preds.append(props.cpu().numpy())
                 all_true.append(y_true.cpu().numpy())
                 all_dl_props.append(dl_props.cpu().numpy())
@@ -311,12 +299,11 @@ def validate(
                 loader_stats['mse_sum'] += mse.item() * batch_size
                 loader_stats['loss'] += loss.item()
                 loader_stats['samples'] += batch_size
-                # Handle details robustly
                 for key, value in details.items():
                     if isinstance(value, (int, float)):
                         loader_stats[key] += value
                     else:
-                        print(f"Warning: Skipping non-numeric detail '{key}' with value {value}")
+                        print(f"Warning: Skipping non-numeric detail '{key}' in {val_name}: {value}")
                 
                 num_batches += 1
                 total_batches += 1
@@ -337,7 +324,6 @@ def validate(
             per_cell_r2 = {ct: eval_metrics["Per_Cell_Type"][ct].get("R²", 0.0) 
                           for ct in cell_types if ct in eval_metrics["Per_Cell_Type"]}
             
-            # Calculate R² for dl_props
             from sklearn.metrics import r2_score
             dl_r2 = r2_score(all_true_np, all_dl_props_np, multioutput='raw_values')
             mean_dl_r2 = np.mean(dl_r2)
@@ -394,13 +380,16 @@ def train_model(
     cell_types: List[str],
     num_epochs: int = 1000,
     patience: int = 20,
-    lr: float = 1e-4,
+    lr: float = 5e-5,
     weight_decay: float = 1e-3,
     use_wandb: bool = True,
     wandb_project: str = "cfDNA-Deconvolution",
     wandb_entity: str = None,
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ) -> Tuple[nn.Module, float]:
+    """
+    Train the model over multiple epochs with early stopping.
+    """
     model = model.to(device)
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
@@ -464,7 +453,7 @@ def train_model(
             history[key].append(value)
         for val_name, stats in val_stats.items():
             for k, v in stats.items():
-                if k != 'per_cell_r2':  # Skip dict fields
+                if k != 'per_cell_r2':
                     history[f"{val_name}/{k}"].append(v)
 
         # Calculate key performance metrics across datasets
@@ -479,39 +468,30 @@ def train_model(
         mae_count = 0
 
         for val_name, stats in val_stats.items():
-            # T-cells metrics
             if 't-cells' in val_name.lower():
                 if 'per_cell_r2' in stats and 'T-cells' in stats['per_cell_r2']:
                     tcells_r2_sum += stats['per_cell_r2']['T-cells']
                     tcells_count += 1
                 if 'f1' in stats:
                     tcells_f1_sum += stats['f1']
-            
-            # OAC metrics
             elif 'oac' in val_name.lower():
                 if 'per_cell_r2' in stats and 'OAC' in stats['per_cell_r2']:
                     oac_r2_sum += stats['per_cell_r2']['OAC']
                     oac_count += 1
-            
-            # Tier1 metrics
             elif 'tier1' in val_name.lower():
                 if 'r2' in stats:
                     tier1_r2_sum += stats['r2']
                     tier1_count += 1
-            
-            # MAE across all datasets
             if 'mae' in stats:
                 mae_sum += stats['mae']
                 mae_count += 1
 
-        # Calculate averages
         tcells_r2_avg = tcells_r2_sum / tcells_count if tcells_count > 0 else 0.0
         tcells_f1_avg = tcells_f1_sum / tcells_count if tcells_count > 0 else 0.0
         oac_r2_avg = oac_r2_sum / oac_count if oac_count > 0 else 0.0
         tier1_r2_avg = tier1_r2_sum / tier1_count if tier1_count > 0 else 0.0
         mae_avg = mae_sum / mae_count if mae_count > 0 else float('inf')
 
-        # Print performance summary
         print(f"\n🔹 Performance Summary:")
         print(f"Average MAE: {mae_avg:.4f}")
         print(f"Average T-cells R²: {tcells_r2_avg:.4f}")
@@ -540,7 +520,6 @@ def train_model(
                         wandb_logs[f"val/{val_name}/{k}"] = v
             wandb.log(wandb_logs)
 
-        # Check for improvement
         improved = False
         improvement_reason = []
         
@@ -577,7 +556,6 @@ def train_model(
         if improved:
             patience_counter = 0
             
-            # Save model
             checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -604,7 +582,6 @@ def train_model(
             print(f"\n⚠️ Early stopping triggered after {epoch + 1} epochs")
             break
 
-    # Load best model
     print("\nLoading best model...")
     checkpoint = torch.load(os.path.join(model_path, "best_model.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -626,7 +603,7 @@ def train_model(
         wandb.run.summary["best_mae"] = best_mae
         wandb.finish()
 
-    return model, 0.01  # Default threshold
+    return model, 0.01
 
 def plot_training_history(history: Dict[str, List[float]], save_path: str):
     """
