@@ -655,8 +655,8 @@ class CellTypeDeconvolutionModel(nn.Module):
             adjusted_thresholds = base_thresholds.unsqueeze(0) + coverage_uncertainty * 0.01
             
             # Special handling for problematic epithelial tissues (indices 3, 4, 5)
-            epithelial_indices = [3, 4, 5]  # Colon, Esophagus, Gastric
-            for idx in epithelial_indices:
+            tumour_indices = [3, 4, 5, 10]  # Colon, Esophagus, Gastric
+            for idx in tumour_indices:
                 if idx < self.num_celltypes:
                     # Use stricter threshold for epithelial tissues in low coverage
                     adjusted_thresholds[:, idx] = adjusted_thresholds[:, idx] * 2.0
@@ -699,21 +699,20 @@ class CellTypeDeconvolutionModel(nn.Module):
                 
                 if low_coverage_samples.any():
                     # Create a modified weight tensor for these samples
-                    modified_weight = weight.clone()
+                    modified_weight = weight.expand(B, -1)  # Expand to full batch size
                     
                     # For epithelial tissues, rely almost entirely on DL for low coverage
-                    for idx in epithelial_indices:
+                    for idx in tumour_indices:
                         if idx < self.num_celltypes:
-                            # Set weight nearly to 1.0 (pure DL) for epithelial tissues
+                            # Now the shapes match correctly
                             modified_weight[low_coverage_samples, idx] = 0.95
                     
-                    # Use modified weights for low coverage samples
-                    combined_weight = torch.where(
-                        low_coverage_samples.unsqueeze(1).expand(-1, weight.size(1)),
-                        modified_weight,
-                        weight
+                    # Use these modified weights with proper broadcasting
+                    props = torch.where(
+                        low_coverage_samples.unsqueeze(1),
+                        modified_weight * props + (1 - modified_weight) * x_nnls,
+                        weight * props + (1 - weight) * x_nnls
                     )
-                    props = combined_weight * props + (1 - combined_weight) * x_nnls
                 else:
                     # Regular ensemble
                     props = weight * props + (1 - weight) * x_nnls
@@ -726,12 +725,8 @@ class CellTypeDeconvolutionModel(nn.Module):
             valid_rows = row_sums > 0  # Shape: [B, 1]
             
             if valid_rows.any():
-                normalization_factor = torch.where(
-                    valid_rows,
-                    1.0 / row_sums,
-                    torch.ones_like(row_sums)
-                )
-                props = props * normalization_factor  # Shape: [B, C]
+                valid_indices = valid_rows.squeeze(1)  # Convert from [B, 1] to [B]
+                props[valid_indices] = props[valid_indices] / row_sums[valid_indices]
             
             # Apply a final presence-based gating if not training
             if not self.training:
@@ -747,7 +742,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                     props[valid_indices] = props[valid_indices] / row_sums[valid_indices]
         
         return props, presence_probs, x_nnls, dl_props
-
+    
     def get_combination_weights(self):
         """Return the current combination weights for monitoring."""
         return torch.sigmoid(self.combination_weight).detach().cpu().numpy()
