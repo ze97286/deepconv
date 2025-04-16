@@ -534,9 +534,6 @@ class CellTypeDeconvolutionModel(nn.Module):
                 - x_nnls: Original NNLS predictions or None
                 - dl_props: [B, C] tensor of DeepConv predictions before ensembling
         """
-        # TEMP TEMP TEMP
-        x_nnls = None
-        # TEMP TEMP TEMP
         B = marker_values.shape[0]
         
         # Create a valid mask - markers with coverage > 0 should be considered
