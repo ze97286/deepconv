@@ -491,7 +491,9 @@ def train_and_eval(
         num_markers=len(atlas), num_cell_types=len(cell_types),
         presence_models_dir=presence_models_dir,
         dropout_rate=0.1,
-        target_ids=target_ids
+        target_ids=target_ids,
+        feature_dim=128,
+
     )
     train_dl_low = load_training_with_augmentation(
         f"{train_pat_dir}_low", atlas, names, num_files=3,
@@ -626,7 +628,7 @@ def train_and_eval(
         cell_types=cell_types,
         num_epochs=1000,
         patience=10, 
-        lr=1e-3, 
+        lr=1e-4, 
         weight_decay=1e-3
     )
 

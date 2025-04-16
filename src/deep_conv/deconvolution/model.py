@@ -364,7 +364,7 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
     
 class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, presence_models_dir, target_ids=None, 
-                 feature_dim=64, dropout_rate=0.1):
+                 feature_dim=128, dropout_rate=0.1):
         """
         Enhanced Cell Type Deconvolution Model with per-marker feature extraction,
         reconstruction, and optional NNLS ensembling.

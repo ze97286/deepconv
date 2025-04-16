@@ -80,30 +80,34 @@ def train_epoch(
 
         # Forward pass
         start_forward = time.time()
-        props, batch_presence_probs, _, dl_props, _, _ = model(fraction, coverage, x_nnls, presence_probs)
+        props, batch_presence_probs, _, dl_props, reconstructed, valid_mask = model(
+            fraction, coverage, x_nnls, presence_probs
+        )
         timing_stats['forward_pass'] += time.time() - start_forward
 
         # Loss computation
         start_loss = time.time()
         loss, details = loss_fn(
-            props,
-            y_true,
-            batch_presence_probs,
-            coverage,
-            x_nnls,
+            pred_props=props,
+            true_props=y_true,
+            presence_probs=batch_presence_probs,
+            reconstructed=reconstructed,
+            marker_values=fraction,
+            coverage=coverage,
+            valid_mask=valid_mask,
+            x_nnls=x_nnls,
             dl_props=dl_props,
             combination_weight=model.combination_weight,
-            presence_threshold=0.01,
-            device=device,
+            presence_threshold=presence_threshold,
+            low_snr_indices=[11],
+            device=device
         )
         timing_stats['loss_computation'] += time.time() - start_loss
 
-        # Metrics calculation
+        # Metrics calculation (unchanged)
         start_metrics = time.time()
         mae = torch.abs(props - y_true).mean()
         mse = F.mse_loss(props, y_true)
-        
-        # Calculate correlation
         props_flat = props.reshape(-1)
         y_true_flat = y_true.reshape(-1)
         props_centered = props_flat - props_flat.mean()
@@ -112,10 +116,8 @@ def train_epoch(
         y_true_std = y_true_centered.std() + 1e-8
         correlation = (props_centered * y_true_centered).mean() / (props_std * y_true_std)
         
-        # Calculate presence detection metrics
         true_present = (y_true > presence_threshold)
         pred_present = (props > presence_threshold)
-        
         true_positives = (pred_present & true_present).float().sum()
         false_positives = (pred_present & ~true_present).float().sum()
         false_negatives = (~pred_present & true_present).float().sum()
@@ -131,27 +133,21 @@ def train_epoch(
         epoch_stats['precision'] += precision.item()
         epoch_stats['recall'] += recall.item()
         epoch_stats['f1_score'] += f1_score.item()
-        
         timing_stats['metrics_calculation'] += time.time() - start_metrics
 
-        # Backward pass
+        # Backward pass (unchanged)
         start_backward = time.time()
         scaled_loss = loss / accumulation_steps
         scaled_loss.backward()
         timing_stats['backward_pass'] += time.time() - start_backward
 
-        # Optimizer step
+        # Optimizer step (unchanged)
         if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1 == len(loader)):
             start_optim = time.time()
-            
-            # Apply gradient clipping
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             epoch_stats['grad_norm'] += grad_norm.item()
-            
-            # Perform optimizer step
             optimiser.step()
             optimiser.zero_grad()
-            
             timing_stats['optimizer_step'] += time.time() - start_optim
 
             # WandB logging
@@ -169,15 +165,12 @@ def train_epoch(
                     "batch/lr": optimiser.param_groups[0]['lr'],
                     "batch/step": batch_idx
                 }
-                
-                # Add loss components
                 for component, value in details.items():
                     wandb_log[f"batch/component_{component}"] = value
-                
                 wandb.log(wandb_log)
                 timing_stats['wandb_logging'] += time.time() - start_wandb
 
-        # Periodic logging
+        # Periodic logging (unchanged)
         if batch_idx % log_interval == 0:
             start_print = time.time()
             print(f"\nBatch {batch_idx}/{len(loader)} | Loss: {loss.item():.8f}")
@@ -190,17 +183,18 @@ def train_epoch(
         timing_stats['total_batch'] += time.time() - start_batch
         num_batches += 1
 
-    # Average stats
+    # Average stats (unchanged)
     for key in epoch_stats:
         epoch_stats[key] /= num_batches
     
-    # Final epoch summary
+    # Final epoch summary (unchanged)
     weights = model.get_combination_weights()
     print(f"\n===== Epoch {epoch + 1} Summary =====")
     print(f"Average Loss: {epoch_stats['total_loss']:.8f}")
     print(f"MAE: {epoch_stats['mae']:.4f}, MSE: {epoch_stats['mse']:.4f}, Correlation: {epoch_stats['correlation']:.4f}")
     print(f"Combination Weights: {weights}, Precision: {epoch_stats['precision']:.4f}, Recall: {epoch_stats['recall']:.4f}, F1: {epoch_stats['f1_score']:.4f}")
     return dict(epoch_stats)
+
 
 def validate(
     model: nn.Module,
@@ -213,7 +207,6 @@ def validate(
     model.eval()
     val_stats = {}
     
-    # Initialize threshold results dictionary properly
     thresholds = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2]
     threshold_results = {}
     for t in thresholds:
@@ -229,8 +222,6 @@ def validate(
             print(f"\n----- Validating {val_name} -----")
             loader_stats = defaultdict(float)
             num_batches = 0
-            
-            # Initialize confusion matrix aggregation
             confusion_matrix = {
                 'tp': 0, 'fp': 0, 'fn': 0, 'tn': 0,
                 'by_cell_type': {}
@@ -238,12 +229,11 @@ def validate(
             for ct_idx, ct_name in enumerate(cell_types):
                 confusion_matrix['by_cell_type'][ct_name] = {'tp': 0, 'fp': 0, 'fn': 0, 'tn': 0}
             
-            # Store all predictions and ground truth for comprehensive evaluation
             all_preds = []
             all_true = []
+            all_dl_props = []  # Store dl_props for R² evaluation
             
             for batch in tqdm(val_loader, desc=f'Validating {val_name}'):
-                # Extract and transfer data
                 fraction = batch['X'].to(device)
                 coverage = batch['coverage'].to(device)
                 x_nnls = batch['x_nnls'].to(device) if 'x_nnls' in batch else None
@@ -251,132 +241,115 @@ def validate(
                 presence_probs = batch['presence_probs'].to(device) if 'presence_probs' in batch else None
                 
                 # Forward pass
-                props, batch_presence_probs, _, dl_props, _, _ = model(fraction, coverage, x_nnls, presence_probs)
+                props, batch_presence_probs, _, dl_props, reconstructed, valid_mask = model(
+                    fraction, coverage, x_nnls, presence_probs
+                )
                 
                 # Calculate loss
                 loss, details = loss_fn(
                     pred_props=props,
                     true_props=y_true,
                     presence_probs=batch_presence_probs,
+                    reconstructed=reconstructed,
+                    marker_values=fraction,
                     coverage=coverage,
+                    valid_mask=valid_mask,
                     x_nnls=x_nnls,
-                    presence_threshold=presence_threshold,
                     dl_props=dl_props,
                     combination_weight=model.combination_weight,
-                    device=device,
+                    presence_threshold=presence_threshold,
+                    low_snr_indices=[11],
+                    device=device
                 )
                 
-                # Store predictions for comprehensive evaluation
+                # Store predictions
                 all_preds.append(props.cpu().numpy())
                 all_true.append(y_true.cpu().numpy())
+                all_dl_props.append(dl_props.cpu().numpy())
                 
-                # Calculate basic metrics
                 batch_size = y_true.size(0)
                 mae = torch.abs(props - y_true).mean()
                 mse = F.mse_loss(props, y_true)
                 
-                # Calculate presence detection metrics
                 true_present = (y_true > presence_threshold)
                 pred_present = (props > presence_threshold)
-                
-                # Overall confusion matrix
                 tp = (pred_present & true_present).float().sum().item()
                 fp = (pred_present & ~true_present).float().sum().item()
                 fn = (~pred_present & true_present).float().sum().item()
                 tn = (~pred_present & ~true_present).float().sum().item()
                 
-                # Update confusion matrix
                 confusion_matrix['tp'] += tp
                 confusion_matrix['fp'] += fp
                 confusion_matrix['fn'] += fn
                 confusion_matrix['tn'] += tn
                 
-                # Per cell type confusion matrix
                 for ct_idx, ct_name in enumerate(cell_types):
                     ct_tp = (pred_present[:, ct_idx] & true_present[:, ct_idx]).float().sum().item()
                     ct_fp = (pred_present[:, ct_idx] & ~true_present[:, ct_idx]).float().sum().item()
                     ct_fn = (~pred_present[:, ct_idx] & true_present[:, ct_idx]).float().sum().item()
                     ct_tn = (~pred_present[:, ct_idx] & ~true_present[:, ct_idx]).float().sum().item()
-                    
                     confusion_matrix['by_cell_type'][ct_name]['tp'] += ct_tp
                     confusion_matrix['by_cell_type'][ct_name]['fp'] += ct_fp
                     confusion_matrix['by_cell_type'][ct_name]['fn'] += ct_fn
                     confusion_matrix['by_cell_type'][ct_name]['tn'] += ct_tn
                 
-                # Process different thresholds
                 for t in thresholds:
                     batch_results = threshold_results[t][val_name]
-                    
-                    # Apply threshold to proportions
                     thresholded_props = props.clone()
                     thresholded_props[thresholded_props < t] = 0.0
-                    
-                    # Normalize the non-zero rows
                     row_sums = thresholded_props.sum(dim=1, keepdim=True)
                     valid_rows = (row_sums > 0).squeeze(-1)
                     if valid_rows.any():
                         thresholded_props[valid_rows] = thresholded_props[valid_rows] / row_sums[valid_rows]
-                    
-                    # Calculate metrics for this threshold
                     mse_t = F.mse_loss(thresholded_props, y_true)
                     mae_t = torch.abs(thresholded_props - y_true).mean()
-                    
                     pred_present_t = (thresholded_props > 0)
                     true_present_t = (y_true > presence_threshold)
                     detection_accuracy_t = (pred_present_t == true_present_t).float().mean()
-                    
-                    # Store these metrics
                     batch_results['mse'] += mse_t.item() * batch_size
                     batch_results['mae'] += mae_t.item() * batch_size
                     batch_results['detection_accuracy'] += detection_accuracy_t.item() * batch_size
                     batch_results['count'] += batch_size
                 
-                # Update loader stats
                 loader_stats['mae_sum'] += mae.item() * batch_size
                 loader_stats['mse_sum'] += mse.item() * batch_size
                 loader_stats['loss'] += loss.item()
                 loader_stats['samples'] += batch_size
-                
                 for key, value in details.items():
                     loader_stats[key] += value
-                    
                 num_batches += 1
                 total_batches += 1
                 weighted_loss_sum += loss.item()
             
-            # Skip if no batches were processed
             if num_batches == 0 or not all_preds:
                 print(f"Warning: No valid batches in {val_name}")
                 val_stats[val_name] = {"error": "No valid batches"}
                 continue
             
-            # Concatenate all predictions and ground truth
             all_preds_np = np.concatenate(all_preds, axis=0)
             all_true_np = np.concatenate(all_true, axis=0)
+            all_dl_props_np = np.concatenate(all_dl_props, axis=0)
             
-            # Get comprehensive evaluation metrics
             eval_metrics = evaluate_performance(all_true_np, all_preds_np, cell_types, alpha_threshold=alpha_threshold)
-            
-            # Extract overall metrics
             r2 = eval_metrics["Overall"].get('Global R² (Flattened)', 0.0)
             overall_mae = eval_metrics["Overall"].get('Overall MAE', 0.0)
-            
-            # Extract per-cell-type metrics
             per_cell_r2 = {ct: eval_metrics["Per_Cell_Type"][ct].get("R²", 0.0) 
                           for ct in cell_types if ct in eval_metrics["Per_Cell_Type"]}
             
-            # Calculate precision, recall, F1 from confusion matrix
+            # Calculate R² for dl_props
+            from sklearn.metrics import r2_score
+            dl_r2 = r2_score(all_true_np, all_dl_props_np, multioutput='raw_values')
+            print(f"\nDL Props R² for {val_name}: {dl_r2}")
+            
             precision = confusion_matrix['tp'] / (confusion_matrix['tp'] + confusion_matrix['fp'] + 1e-8)
             recall = confusion_matrix['tp'] / (confusion_matrix['tp'] + confusion_matrix['fn'] + 1e-8)
             f1 = 2 * precision * recall / (precision + recall + 1e-8)
             
-            # Print overall metrics
             print(f"\nOverall Metrics for {val_name}:")
             print(f"Global R² (Flattened): {r2:.4f}")
             print(f"Overall MAE: {overall_mae:.4f}")
             print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f}")
             
-            # Print per-cell-type metrics for important cell types
             print(f"\nPer-Cell-Type Metrics for {val_name}:")
             for ct in cell_types:
                 if ct in ["T-cells", "OAC"] or "t-cells" in val_name.lower() or "oac" in val_name.lower():
@@ -386,13 +359,11 @@ def validate(
                         ct_precision = ct_cm['tp'] / (ct_cm['tp'] + ct_cm['fp'] + 1e-8)
                         ct_recall = ct_cm['tp'] / (ct_cm['tp'] + ct_cm['fn'] + 1e-8)
                         ct_f1 = 2 * ct_precision * ct_recall / (ct_precision + ct_recall + 1e-8)
-                        
                         print(f"{ct}:")
                         print(f"  R²: {per_cell_r2[ct]:.4f}")
                         print(f"  MAE: {ct_metrics.get('MAE', 0.0):.4f}")
                         print(f"  Detection - P: {ct_precision:.4f}, R: {ct_recall:.4f}, F1: {ct_f1:.4f}")
             
-            # Process threshold results
             for t in thresholds:
                 batch_results = threshold_results[t][val_name]
                 if batch_results['count'] > 0:
@@ -400,24 +371,18 @@ def validate(
                         batch_results[key] /= batch_results['count']
                         loader_stats[f'thresh_{t}_{key}'] = batch_results[key]
             
-            # Store key metrics in loader_stats
             loader_stats['r2'] = r2
             loader_stats['mae'] = overall_mae
             loader_stats['precision'] = precision
             loader_stats['recall'] = recall
             loader_stats['f1'] = f1
             loader_stats['per_cell_r2'] = per_cell_r2
-            
-            # Store in val_stats
             val_stats[val_name] = dict(loader_stats)
     
-    # Calculate average validation loss
     avg_val_loss = weighted_loss_sum / total_batches if total_batches > 0 else float('inf')
     print(f"\n===== Validation Complete =====")
     print(f"Average validation loss: {avg_val_loss:.6f}")
-    
     return avg_val_loss, val_stats
-
 
 def train_model(
     model: nn.Module,
@@ -427,7 +392,7 @@ def train_model(
     cell_types: List[str],
     num_epochs: int = 1000,
     patience: int = 20,
-    lr: float = 2e-3,
+    lr: float = 1e-4,
     weight_decay: float = 1e-3,
     use_wandb: bool = True,
     wandb_project: str = "cfDNA-Deconvolution",
