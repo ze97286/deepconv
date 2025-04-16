@@ -366,7 +366,7 @@ class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, presence_models_dir, target_ids=None, 
                  feature_dim=128, dropout_rate=0.1, coverage_dropout_prob=0.3):
         """
-        Enhanced Cell Type Deconvolution Model with marker quality weighting and adaptive detection thresholds.
+        Enhanced Cell Type Deconvolution Model with stronger presence-based gating.
 
         Args:
             num_markers (int): Number of marker genes.
@@ -375,7 +375,7 @@ class CellTypeDeconvolutionModel(nn.Module):
             target_ids (torch.Tensor, optional): Tensor mapping markers to cell types.
             feature_dim (int): Dimension of the feature extraction layer.
             dropout_rate (float): Dropout rate for regularization.
-            coverage_dropout_prob (float): Probability of dropping low-coverage markers during training.
+            coverage_dropout_prob (float): Probability of dropping low-coverage markers.
         """
         super().__init__()
         self.num_markers = num_markers
@@ -402,11 +402,18 @@ class CellTypeDeconvolutionModel(nn.Module):
         self.target_ids = torch.tensor(target_ids, dtype=torch.long)
 
         # Add marker quality weights - learnable parameters
-        self.marker_quality_weights = nn.Parameter(torch.ones(num_markers))
+        self.marker_quality_weights = nn.Parameter(torch.zeros(num_markers))
         
         # Add cell type-specific detection thresholds
+        # Initialisation is critical - start with high thresholds for epithelial tissues
         self.detection_thresholds = nn.Parameter(torch.ones(num_cell_types) * -2.0)
+        
+        # Learnable weight for combining deep learning props and x_nnls, per cell type
+        self.combination_weight = nn.Parameter(torch.full((num_cell_types,), 0.5))
 
+        # Initialize with cell type-specific settings
+        self._initialise_cell_type_specific()
+        
         # Feature extractor: process marker values and coverage
         self.feature_extractor = nn.Sequential(
             nn.Linear(num_markers * 2, feature_dim),
@@ -422,13 +429,52 @@ class CellTypeDeconvolutionModel(nn.Module):
             nn.Linear(256, num_cell_types)
         )
 
-        # Learnable weight for combining deep learning props and x_nnls, per cell type
-        self.combination_weight = nn.Parameter(torch.full((num_cell_types,), 0.5))
-
         # Initialize weights
-        self._initialize_weights()
+        self._initialise_weights()
 
-    def _initialize_weights(self):
+    def _initialise_cell_type_specific(self):
+        """Initialize parameters based on cell type characteristics by index."""
+        # Map of cell type indices to settings
+        # This assumes a specific order of cell types in your dataset
+        # Adjust indices based on your actual ordering
+        snr_settings = [
+            # Format: [index, threshold, ensemble_weight, marker_weight]
+            # Problematic epithelial tissues - much stricter thresholds and mostly DL
+            [3, -0.5, 0.9, 0.5],   # Colon - strict threshold, mostly DL
+            [4, -0.5, 0.9, 0.5],   # Esophagus - strict threshold, mostly DL
+            [5, -0.5, 0.9, 0.5],   # Gastric - strict threshold, mostly DL
+            
+            # High SNR cell types
+            [9, -2.5, 0.8, 0.8],   # OAC - sensitive detection, mostly DL
+            [10, -2.3, 0.7, 0.7],  # Small-intestine - sensitive detection, balanced
+            
+            # Medium SNR cell types
+            [0, -2.0, 0.6, 0.5],   # B-cells - standard threshold, balanced
+            [8, -2.0, 0.6, 0.5],   # NK-cells - standard threshold, balanced
+            
+            # Low/Variable SNR cell types
+            [11, -1.8, 0.5, 0.3],  # T-cells - cautious threshold, balanced
+            [1, -1.5, 0.4, 0.0],   # CD34-erythroblasts - cautious threshold, more NNLS
+            [2, -1.5, 0.4, 0.0],   # CD34-megakaryocytes - cautious threshold, more NNLS
+            [7, -1.7, 0.5, 0.2],   # Monocytes - cautious threshold, balanced
+            [6, -1.7, 0.5, 0.2]    # Granulocytes - cautious threshold, balanced
+        ]
+        
+        # Apply settings for each cell type
+        for idx, threshold, ensemble_weight, marker_weight in snr_settings:
+            if idx < self.num_celltypes:  # Check if index is valid
+                # Set detection threshold
+                self.detection_thresholds.data[idx] = threshold
+                
+                # Set ensemble weight
+                self.combination_weight.data[idx] = ensemble_weight
+                
+                # Set marker weights
+                cell_markers = (self.target_ids == idx)
+                if cell_markers.any():  # Check if there are markers for this cell type
+                    self.marker_quality_weights.data[cell_markers] = marker_weight
+
+    def _initialise_weights(self):
         """Initialize weights using Kaiming normalization."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
@@ -519,7 +565,7 @@ class CellTypeDeconvolutionModel(nn.Module):
 
     def forward(self, marker_values, coverage, x_nnls=None, presence_probs=None):
         """
-        Forward pass with marker quality weighting and adaptive detection thresholds.
+        Forward pass with stronger presence-based gating for proportion estimation.
         
         Args:
             marker_values: [B, M] tensor of marker values (can contain NaNs where coverage=0)
@@ -594,20 +640,39 @@ class CellTypeDeconvolutionModel(nn.Module):
         logits = self.encoder(combined)
         dl_props = F.softmax(logits, dim=1)  # [B, C], deep learning proportions before ensembling
         
-        # Apply cell type-specific detection thresholds
-        detection_thresholds = torch.sigmoid(self.detection_thresholds) * 0.05  # Scale to 0-5% range
+        # Calculate coverage-based uncertainty
+        avg_coverage = coverage.mean(dim=1, keepdim=True)  # [B, 1]
+        coverage_uncertainty = torch.exp(-avg_coverage / 5.0)  # Higher for low coverage
         
-        # Create cleaner proportions by applying thresholds
-        if self.training:
-            # During training, keep original proportions for learning
-            dl_props_out = dl_props
-        else:
-            # During inference, apply thresholds for cleaner output
-            is_present = (dl_props > detection_thresholds.unsqueeze(0)).float()
-            dl_props_out = dl_props * is_present
+        # Apply cell type-specific detection thresholds with coverage-based adjustment
+        # More conservative thresholding for low-coverage samples
+        base_thresholds = torch.sigmoid(self.detection_thresholds) * 0.05  # Scale to 0-5% range
+        
+        # Only apply strict gating during inference
+        if not self.training:
+            # Add coverage-based adjustment to thresholds
+            # Low coverage samples get stricter thresholds
+            adjusted_thresholds = base_thresholds.unsqueeze(0) + coverage_uncertainty * 0.01
+            
+            # Special handling for problematic epithelial tissues (indices 3, 4, 5)
+            epithelial_indices = [3, 4, 5]  # Colon, Esophagus, Gastric
+            for idx in epithelial_indices:
+                if idx < self.num_celltypes:
+                    # Use stricter threshold for epithelial tissues in low coverage
+                    adjusted_thresholds[:, idx] = adjusted_thresholds[:, idx] * 2.0
+            
+            # Apply strict presence-based gating
+            is_present = (presence_probs > adjusted_thresholds).float()
+            dl_props = dl_props * is_present
+            
+            # Renormalize to ensure sum to 1
+            row_sums = dl_props.sum(dim=1, keepdim=True)
+            valid_rows = row_sums > 0
+            if valid_rows.any():
+                dl_props[valid_rows] = dl_props[valid_rows] / row_sums[valid_rows]
         
         # Clone for final output after potential ensemble
-        props = dl_props_out.clone()
+        props = dl_props.clone()
         
         # Ensemble with x_nnls if provided
         if x_nnls is not None:
@@ -625,7 +690,35 @@ class CellTypeDeconvolutionModel(nn.Module):
             
             # Use per-cell-type weights for combining DeepConv and NNLS predictions
             weight = torch.sigmoid(self.combination_weight).unsqueeze(0)  # Shape: [1, C]
-            props = weight * props + (1 - weight) * x_nnls  # Shape: [B, C]
+            
+            # For problematic epithelial tissues, rely even more on DL in low coverage
+            if not self.training:
+                # Identify low coverage samples
+                low_coverage_samples = (avg_coverage.squeeze(1) < 5.0)
+                
+                if low_coverage_samples.any():
+                    # Create a modified weight tensor for these samples
+                    modified_weight = weight.clone()
+                    
+                    # For epithelial tissues, rely almost entirely on DL for low coverage
+                    for idx in epithelial_indices:
+                        if idx < self.num_celltypes:
+                            # Set weight nearly to 1.0 (pure DL) for epithelial tissues
+                            modified_weight[low_coverage_samples, idx] = 0.95
+                    
+                    # Use modified weights for low coverage samples
+                    combined_weight = torch.where(
+                        low_coverage_samples.unsqueeze(1).expand(-1, weight.size(1)),
+                        modified_weight,
+                        weight
+                    )
+                    props = combined_weight * props + (1 - combined_weight) * x_nnls
+                else:
+                    # Regular ensemble
+                    props = weight * props + (1 - weight) * x_nnls
+            else:
+                # Regular ensemble during training
+                props = weight * props + (1 - weight) * x_nnls
             
             # Ensure proportions sum to 1
             row_sums = props.sum(dim=1, keepdim=True)  # Shape: [B, 1]
@@ -638,6 +731,18 @@ class CellTypeDeconvolutionModel(nn.Module):
                     torch.ones_like(row_sums)
                 )
                 props = props * normalization_factor  # Shape: [B, C]
+            
+            # Apply a final presence-based gating if not training
+            if not self.training:
+                # Use adjusted thresholds from earlier
+                is_present = (presence_probs > adjusted_thresholds).float()
+                props = props * is_present
+                
+                # Final renormalization
+                row_sums = props.sum(dim=1, keepdim=True)
+                valid_rows = row_sums > 0
+                if valid_rows.any():
+                    props[valid_rows] = props[valid_rows] / row_sums[valid_rows]
         
         return props, presence_probs, x_nnls, dl_props
 
@@ -717,4 +822,3 @@ class CellTypeDeconvolutionModel(nn.Module):
             return np.zeros((num_samples, self.num_celltypes))
         
         return np.vstack(predictions_list)
-    
