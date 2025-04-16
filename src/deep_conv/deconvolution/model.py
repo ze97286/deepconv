@@ -364,28 +364,26 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
     
 class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, presence_models_dir, target_ids=None, 
-                 feature_dim=128, dropout_rate=0.1, coverage_dropout_prob=0.3):
+                 feature_dim=64, dropout_rate=0.1):
         """
-        Enhanced Cell Type Deconvolution Model with marker quality weighting and adaptive detection thresholds.
+        Enhanced Cell Type Deconvolution Model with per-marker feature extraction,
+        reconstruction, and optional NNLS ensembling.
 
         Args:
             num_markers (int): Number of marker genes.
             num_cell_types (int): Number of cell types to deconvolve.
             presence_models_dir (str): Directory containing pre-trained presence models.
             target_ids (torch.Tensor, optional): Tensor mapping markers to cell types.
-            feature_dim (int): Dimension of the feature extraction layer.
+            feature_dim (int): Dimension of per-marker feature extraction layer.
             dropout_rate (float): Dropout rate for regularization.
-            coverage_dropout_prob (float): Probability of dropping low-coverage markers during training.
         """
         super().__init__()
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
-        self.coverage_dropout_prob = coverage_dropout_prob
 
         # Load pre-trained presence models
         self.presence_models = nn.ModuleList()
-        print("\nLoading Presence Models:")
         for cell_type_idx in range(num_cell_types):
             model_path = Path(presence_models_dir) / f"presence_model_{cell_type_idx}.pt"
             if not model_path.exists():
@@ -401,28 +399,41 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         self.target_ids = torch.tensor(target_ids, dtype=torch.long)
 
-        # Add marker quality weights - learnable parameters
-        self.marker_quality_weights = nn.Parameter(torch.ones(num_markers))
-        
-        # Add cell type-specific detection thresholds
-        self.detection_thresholds = nn.Parameter(torch.ones(num_cell_types) * -2.0)
-
-        # Feature extractor: process marker values and coverage
-        self.feature_extractor = nn.Sequential(
-            nn.Linear(num_markers * 2, feature_dim),
-            nn.ReLU(),
+        # Marker feature extractor (per marker)
+        self.marker_feature_extractor = nn.Sequential(
+            nn.Linear(2, feature_dim),  # Input: marker value + log coverage
+            nn.LeakyReLU(),
+            nn.Linear(feature_dim, feature_dim),
+            nn.LeakyReLU(),
             nn.Dropout(dropout_rate)
         )
 
-        # Encoder: predict proportions from features and presence probabilities
+        # Encoder: predict proportions from aggregated features and presence probs
         self.encoder = nn.Sequential(
-            nn.Linear(feature_dim + num_cell_types, 256),
-            nn.ReLU(),
+            nn.Linear(num_cell_types * feature_dim + num_cell_types, 256),
+            nn.LeakyReLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(256, num_cell_types)
+            nn.Linear(256, 128),
+            nn.LeakyReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(128, num_cell_types)
         )
 
-        # Learnable weight for combining deep learning props and x_nnls, per cell type
+        # Decoder: reconstruct marker values
+        self.decoder = nn.Sequential(
+            nn.Linear(num_cell_types, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, num_markers)
+        )
+
+        # Learnable marker quality weights
+        self.marker_quality_weights = nn.Parameter(torch.ones(num_markers))
+
+        # Presence gating parameters
+        self.presence_thresholds = nn.Parameter(torch.ones(num_cell_types) * 0.5)
+        self.presence_slopes = nn.Parameter(torch.ones(num_cell_types) * 10.0)
+
+        # Learnable weight for combining DL props and x_nnls
         self.combination_weight = nn.Parameter(torch.full((num_cell_types,), 0.5))
 
         # Initialize weights
@@ -432,78 +443,69 @@ class CellTypeDeconvolutionModel(nn.Module):
         """Initialize weights using Kaiming normalization."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+                nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='leaky_relu')
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+
+    def apply_presence_gating(self, props, probs):
+        """Apply cell-type-specific presence scaling."""
+        scaling = torch.sigmoid(
+            self.presence_slopes.unsqueeze(0) * (probs - self.presence_thresholds.unsqueeze(0))
+        )
+        scaled_props = props * scaling
+        sum_props = torch.sum(scaled_props, dim=1, keepdim=True) + 1e-8
+        return scaled_props / sum_props
 
     def predict_presence(self, marker_values, coverage):
         """
         Predict presence probabilities for each cell type using separate models.
-        Each model only receives the markers specific to that cell type.
-        
+
         Args:
             marker_values: [B, M] tensor of marker values
             coverage: [B, M] tensor of coverage values
-            
+
         Returns:
             tuple: (presence_probs, presence_logits)
-                - presence_probs: [B, C] tensor of presence probabilities
-                - presence_logits: [B, C] tensor of presence logits
         """
         B = marker_values.shape[0]
         C = self.num_celltypes
         M = self.num_markers
         device = marker_values.device
 
-        # Create a valid mask - markers with coverage > 0 should be considered
         valid_mask = (coverage > 0)
-        
-        # Replace NaN values in marker_values with 0 where coverage = 0
         marker_values_clean = torch.where(
-            valid_mask,
-            marker_values,
-            torch.zeros_like(marker_values)
+            valid_mask, marker_values, torch.zeros_like(marker_values)
         )
-        
-        # Initialize output tensors
+
         presence_probs = torch.zeros(B, C, device=device)
         presence_logits = torch.zeros(B, C, device=device)
 
-        # Create a mask for markers per cell type
         cell_type_masks = torch.zeros(C, M, dtype=torch.bool, device=device)
         for cell_type_idx in range(C):
             cell_type_masks[cell_type_idx] = (self.target_ids == cell_type_idx)
 
-        # Stack markers for all cell types
-        # Shape: [B, C, M]
         marker_values_expanded = marker_values_clean.unsqueeze(1).expand(-1, C, -1)
         coverage_expanded = coverage.unsqueeze(1).expand(-1, C, -1)
         cell_type_masks_expanded = cell_type_masks.unsqueeze(0).expand(B, -1, -1)
 
-        # Mask markers not belonging to each cell type
         marker_values_masked = torch.where(cell_type_masks_expanded, marker_values_expanded, torch.zeros_like(marker_values_expanded))
         coverage_masked = torch.where(cell_type_masks_expanded, coverage_expanded, torch.zeros_like(coverage_expanded))
 
-        # Process each cell type in parallel
         for cell_type_idx, presence_model in enumerate(self.presence_models):
-            # Extract only markers for this cell type
             cell_type_mask = cell_type_masks[cell_type_idx]
             if not cell_type_mask.any():
-                print(f"Warning: No markers assigned to cell type {cell_type_idx}")
                 presence_probs[:, cell_type_idx] = 0.5
                 presence_logits[:, cell_type_idx] = 0.0
                 continue
-                
-            # Shape: [B, M_cell_type]
+
             cell_type_marker_values = marker_values_masked[:, cell_type_idx, cell_type_mask]
             cell_type_coverage = coverage_masked[:, cell_type_idx, cell_type_mask]
 
-            if cell_type_marker_values.shape[1] == 0:  # Skip if no markers
+            if cell_type_marker_values.shape[1] == 0:
                 presence_probs[:, cell_type_idx] = 0.5
                 presence_logits[:, cell_type_idx] = 0.0
                 continue
 
-            # Predict presence using the cell type-specific model
             try:
                 logits, _, _ = presence_model(cell_type_marker_values, cell_type_coverage)
                 _, adaptive_probs, _ = presence_model.adaptive_predict(cell_type_marker_values, cell_type_coverage)
@@ -511,7 +513,6 @@ class CellTypeDeconvolutionModel(nn.Module):
                 presence_probs[:, cell_type_idx] = adaptive_probs.squeeze(-1)
             except Exception as e:
                 print(f"Error in presence model {cell_type_idx}: {e}")
-                # Use default value of 0.5 for this cell type
                 presence_probs[:, cell_type_idx] = 0.5
                 presence_logits[:, cell_type_idx] = 0.0
 
@@ -519,136 +520,123 @@ class CellTypeDeconvolutionModel(nn.Module):
 
     def forward(self, marker_values, coverage, x_nnls=None, presence_probs=None):
         """
-        Forward pass with marker quality weighting and adaptive detection thresholds.
-        
+        Forward pass with per-marker feature extraction, reconstruction, and optional NNLS ensembling.
+
         Args:
             marker_values: [B, M] tensor of marker values (can contain NaNs where coverage=0)
             coverage: [B, M] tensor of coverage values
             x_nnls: Optional [B, C] tensor of NNLS predictions
             presence_probs: Optional [B, C] tensor of precomputed presence probabilities
-            
+
         Returns:
-            tuple: (props, presence_probs, x_nnls, dl_props)
-                - props: [B, C] tensor of predicted proportions (after ensembling)
-                - presence_probs: [B, C] tensor of presence probabilities
-                - x_nnls: Original NNLS predictions or None
-                - dl_props: [B, C] tensor of DeepConv predictions before ensembling
+            tuple: (props, presence_probs, x_nnls, dl_props, reconstructed, valid_mask)
         """
-        B = marker_values.shape[0]
-        
-        # Create a valid mask - markers with coverage > 0 should be considered
+        # TEMP TEMP TEMP
+        x_nnls = None
+        # TEMP TEMP TEMP
+
+        B, M = marker_values.shape
+        C = self.num_celltypes
+
+        # Create valid mask
         valid_mask = (coverage > 0)
-        
-        # Replace NaN values in marker_values with 0 where coverage = 0
         marker_values_clean = torch.where(
-            valid_mask,
-            marker_values,
-            torch.zeros_like(marker_values)
+            valid_mask, marker_values, torch.zeros_like(marker_values)
         )
-        
-        # Weight marker values by coverage to downweight noisy, low-coverage markers
-        coverage_weights = torch.sigmoid(coverage / 5.0)  # Shape: [B, M], scales coverage to [0, 1]
-        marker_values_weighted = marker_values_clean * coverage_weights  # Shape: [B, M]
-        
-        # Apply learned marker quality weights - higher weight for more informative markers
-        marker_quality = torch.sigmoid(self.marker_quality_weights).unsqueeze(0)  # Shape: [1, M]
-        marker_values_weighted = marker_values_weighted * marker_quality  # Shape: [B, M]
 
-        # Apply coverage-based dropout during training to force reliance on higher-coverage markers
-        if self.training:
-            dropout_mask = torch.rand_like(coverage) < self.coverage_dropout_prob
-            coverage_threshold = torch.quantile(coverage[valid_mask], 0.25)  # 25th percentile of non-zero coverage
-            low_coverage_mask = (coverage < coverage_threshold) & (coverage > 0)
-            dropout_mask = dropout_mask & low_coverage_mask  # Only drop low-coverage markers
-            marker_values_weighted = torch.where(dropout_mask, torch.zeros_like(marker_values_weighted), marker_values_weighted)
+        # Apply marker quality weights
+        marker_quality = torch.sigmoid(self.marker_quality_weights).unsqueeze(0)
+        marker_values_weighted = marker_values_clean * marker_quality
+
+        # Normalize inputs
+        marker_values_weighted = marker_values_weighted / (marker_values_weighted.max(dim=1, keepdim=True)[0] + 1e-8)
+        log_coverage = torch.log1p(coverage) / (torch.log1p(coverage.max(dim=1, keepdim=True)[0]) + 1e-8)
+
+        # Per-marker feature extraction
+        marker_inputs = torch.stack([marker_values_weighted, log_coverage], dim=2)  # [B, M, 2]
+        marker_inputs_flat = marker_inputs.view(-1, 2)  # [B*M, 2]
+        valid_indices = valid_mask.view(-1).nonzero(as_tuple=False).squeeze(1)
         
-        # Use precomputed presence_probs if provided, otherwise compute them
+        if valid_indices.numel() == 0:
+            props = coverage.new_zeros(B, C)
+            props[:, 0] = 1.0
+            reconstructed = coverage.new_zeros(B, M)
+            return props, torch.zeros(B, C, device=coverage.device), x_nnls, props, reconstructed, valid_mask
+
+        marker_inputs_valid = marker_inputs_flat[valid_indices]  # [N, 2]
+        features_valid = self.marker_feature_extractor(marker_inputs_valid)  # [N, feature_dim]
+
+        # Aggregate features by cell type
+        batch_idx = valid_indices // M
+        marker_idx = valid_indices % M
+        celltype_idx = self.target_ids[marker_idx]
+        coverage_valid = coverage.view(-1)[valid_indices]
+
+        aggregator = coverage.new_zeros(B, C, self.feature_dim)
+        coverage_sum = coverage.new_zeros(B, C)
+        aggregator_2d = aggregator.view(B * C, self.feature_dim)
+        coverage_sum_1d = coverage_sum.view(B * C)
+        bc_index = batch_idx * C + celltype_idx
+        weighted_feats = coverage_valid.unsqueeze(1) * features_valid
+
+        aggregator_2d.index_add_(0, bc_index, weighted_feats)
+        coverage_sum_1d.index_add_(0, bc_index, coverage_valid)
+        aggregator = aggregator_2d.view(B, C, self.feature_dim)
+        coverage_sum = coverage_sum_1d.view(B, C)
+
+        mask_cov = (coverage_sum == 0)
+        coverage_sum[mask_cov] = 1.0
+        aggregator = aggregator / coverage_sum.unsqueeze(-1)
+        agg_flat = aggregator.view(B, -1)  # [B, C*feature_dim]
+
+        # Presence prediction
         if presence_probs is None:
-            # Call the predict_presence method which now returns a tuple
-            presence_tuple = self.predict_presence(marker_values_clean, coverage)
-            # Extract just the presence probabilities (first element of tuple)
-            presence_probs = presence_tuple[0] if isinstance(presence_tuple, tuple) else presence_tuple
+            presence_probs, _ = self.predict_presence(marker_values_clean, coverage)
         else:
-            presence_probs = presence_probs.to(marker_values.device)
-
-            # Ensure presence_probs has the right shape
             if presence_probs.shape[0] != B:
                 if presence_probs.shape[0] == 1:
-                    # Expand singleton batch dimension to match input batch size
                     presence_probs = presence_probs.expand(B, -1)
                 else:
-                    # This is a more serious problem - raise an error
-                    raise ValueError(f"Precomputed presence probs has batch size {presence_probs.shape[0]} but input has batch size {B}")
-        
-        # Use log1p for coverage which is more stable for small values
-        log_coverage = torch.log1p(coverage) / 4.615  # Assuming max_coverage=100
-        
-        # Extract features using weighted marker values and coverage
-        features_input = torch.cat([marker_values_weighted, log_coverage], dim=1)  # [B, M*2]
-        features = self.feature_extractor(features_input)  # [B, feature_dim]
-        
-        # Combine features with presence probabilities
-        combined = torch.cat([features, presence_probs], dim=1)  # [B, feature_dim + C]
-        
-        # Predict proportions using the deep learning model
+                    raise ValueError(f"Presence probs batch size {presence_probs.shape[0]} != input batch size {B}")
+
+        # Combine features and presence probs
+        combined = torch.cat([agg_flat, presence_probs], dim=1)  # [B, C*feature_dim + C]
         logits = self.encoder(combined)
-        dl_props = F.softmax(logits, dim=1)  # [B, C], deep learning proportions before ensembling
-        
-        # Apply cell type-specific detection thresholds
-        detection_thresholds = torch.sigmoid(self.detection_thresholds) * 0.05  # Scale to 0-5% range
-        
-        # Create cleaner proportions by applying thresholds
-        if self.training:
-            # During training, keep original proportions for learning
-            dl_props_out = dl_props
-        else:
-            # During inference, apply thresholds for cleaner output
-            is_present = (dl_props > detection_thresholds.unsqueeze(0)).float()
-            dl_props_out = dl_props * is_present
-        
-        # Clone for final output after potential ensemble
+        dl_props = F.relu(logits)
+
+        # Apply presence gating
+        dl_props_gated = self.apply_presence_gating(dl_props, presence_probs)
+        dl_props_out = dl_props_gated / (dl_props_gated.sum(dim=1, keepdim=True) + 1e-8)
+
+        # Reconstruction
+        reconstructed = self.decoder(dl_props_out)  # [B, M]
+
+        # Ensemble with x_nnls
         props = dl_props_out.clone()
-        
-        # Ensemble with x_nnls if provided
         if x_nnls is not None:
-            # Ensure x_nnls has compatible shape with props
             if x_nnls.shape != props.shape:
-                # If batch dimensions don't match but can be expanded
                 if x_nnls.shape[0] == 1 and props.shape[0] > 1:
                     x_nnls = x_nnls.expand(props.shape[0], -1)
                 elif props.shape[0] == 1 and x_nnls.shape[0] > 1:
                     props = props.expand(x_nnls.shape[0], -1)
-                
-                # If feature dimensions don't match, this is more serious
                 if x_nnls.shape[1] != props.shape[1]:
-                    raise ValueError(f"x_nnls has {x_nnls.shape[1]} features but props has {props.shape[1]} features")
-            
-            # Use per-cell-type weights for combining DeepConv and NNLS predictions
-            weight = torch.sigmoid(self.combination_weight).unsqueeze(0)  # Shape: [1, C]
-            props = weight * props + (1 - weight) * x_nnls  # Shape: [B, C]
-            
-            # Ensure proportions sum to 1
-            row_sums = props.sum(dim=1, keepdim=True)  # Shape: [B, 1]
-            valid_rows = row_sums > 0  # Shape: [B, 1]
-            
+                    raise ValueError(f"x_nnls has {x_nnls.shape[1]} features but props has {props.shape[1]}")
+            weight = torch.sigmoid(self.combination_weight).unsqueeze(0)
+            props = weight * props + (1 - weight) * x_nnls
+            row_sums = props.sum(dim=1, keepdim=True)
+            valid_rows = row_sums > 0
             if valid_rows.any():
                 normalization_factor = torch.where(
-                    valid_rows,
-                    1.0 / row_sums,
-                    torch.ones_like(row_sums)
+                    valid_rows, 1.0 / row_sums, torch.ones_like(row_sums)
                 )
-                props = props * normalization_factor  # Shape: [B, C]
-        
-        return props, presence_probs, x_nnls, dl_props
+                props = props * normalization_factor
+
+        return props, presence_probs, x_nnls, dl_props_out, reconstructed, valid_mask
 
     def get_combination_weights(self):
-        """Return the current combination weights for monitoring."""
+        """Return the current combination weights."""
         return torch.sigmoid(self.combination_weight).detach().cpu().numpy()
-    
-    def get_detection_thresholds(self):
-        """Return the current detection thresholds for monitoring."""
-        return (torch.sigmoid(self.detection_thresholds) * 0.05).detach().cpu().numpy()
-    
+
     def get_top_markers(self, top_k=20):
         """Return indices of the top k markers by learned quality weight."""
         weights = torch.sigmoid(self.marker_quality_weights).detach().cpu().numpy()
@@ -657,64 +645,56 @@ class CellTypeDeconvolutionModel(nn.Module):
 
     def predict(self, marker_values, coverage, batch_size=256, device=None, atlas=None):
         """
-        Predict cell type proportions from marker values and coverage.
-        
+        Predict cell type proportions.
+
         Args:
             marker_values: [N, M] tensor or array of marker values
             coverage: [N, M] tensor or array of coverage values
             batch_size: Batch size for processing
             device: Device to run predictions on
             atlas: Optional atlas for NNLS computation
-            
+
         Returns:
             numpy.ndarray: [N, C] array of predicted proportions
         """
         if device is None:
             device = next(self.parameters()).device
-        
+
         if not isinstance(marker_values, torch.Tensor):
             marker_values = torch.tensor(marker_values, dtype=torch.float32)
         if not isinstance(coverage, torch.Tensor):
             coverage = torch.tensor(coverage, dtype=torch.float32)
-        
+
         if len(marker_values.shape) == 1:
             marker_values = marker_values.unsqueeze(0)
         if len(coverage.shape) == 1:
             coverage = coverage.unsqueeze(0)
-        
+
         self.eval()
         predictions_list = []
-        
+
         num_samples = marker_values.shape[0]
         num_batches = (num_samples + batch_size - 1) // batch_size
-        
+
         with torch.no_grad():
             for i in range(num_batches):
                 start_idx = i * batch_size
                 end_idx = min((i + 1) * batch_size, num_samples)
-                
                 batch_X = marker_values[start_idx:end_idx].to(device)
                 batch_coverage = coverage[start_idx:end_idx].to(device)
-                
-                # Compute x_nnls if atlas is provided
+
                 x_nnls = None
                 if atlas is not None:
-                    x_nnls_np = run_weighted_nnls(
-                        batch_X.cpu().numpy(),
-                        batch_coverage.cpu().numpy(),
-                        atlas
-                    )
+                    x_nnls_np = run_weighted_nnls(batch_X.cpu().numpy(), batch_coverage.cpu().numpy(), atlas)
                     x_nnls = torch.tensor(x_nnls_np, dtype=torch.float32, device=device)
-                
-                props, _, _, _ = self.forward(batch_X, batch_coverage, x_nnls)
-                
+
+                props, _, _, _, _, _ = self.forward(batch_X, batch_coverage, x_nnls)
                 predictions_list.append(props.cpu().numpy())
-                
+
                 if device.type == 'cuda':
                     torch.cuda.empty_cache()
-        
+
         if len(predictions_list) == 0:
             return np.zeros((num_samples, self.num_celltypes))
-        
+
         return np.vstack(predictions_list)
-    
