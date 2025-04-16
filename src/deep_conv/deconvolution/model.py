@@ -363,7 +363,7 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
         return item
 
 class CellTypeDeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=32):
+    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=64):
         super().__init__()
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types

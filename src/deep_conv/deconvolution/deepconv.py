@@ -488,11 +488,11 @@ def train_and_eval(
     target_ids = atlas['target'].map(lambda x: cell_types.index(x)).to_numpy()
 
     model = CellTypeDeconvolutionModel(
-        num_markers=len(atlas), num_cell_types=len(cell_types),
+        num_markers=len(atlas), 
+        num_cell_types=len(cell_types),
         presence_models_dir=presence_models_dir,
-        dropout_rate=0.1,
         target_ids=target_ids,
-        feature_dim=32,
+        feature_dim=64,
 
     )
     train_dl_low = load_training_with_augmentation(
