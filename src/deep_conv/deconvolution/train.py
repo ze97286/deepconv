@@ -104,7 +104,7 @@ def train_epoch(
         )
         timing_stats['loss_computation'] += time.time() - start_loss
 
-        # Metrics calculation (unchanged)
+        # Metrics calculation
         start_metrics = time.time()
         mae = torch.abs(props - y_true).mean()
         mse = F.mse_loss(props, y_true)
@@ -135,13 +135,13 @@ def train_epoch(
         epoch_stats['f1_score'] += f1_score.item()
         timing_stats['metrics_calculation'] += time.time() - start_metrics
 
-        # Backward pass (unchanged)
+        # Backward pass
         start_backward = time.time()
         scaled_loss = loss / accumulation_steps
         scaled_loss.backward()
         timing_stats['backward_pass'] += time.time() - start_backward
 
-        # Optimizer step (unchanged)
+        # Optimizer step
         if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1 == len(loader)):
             start_optim = time.time()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -170,7 +170,7 @@ def train_epoch(
                 wandb.log(wandb_log)
                 timing_stats['wandb_logging'] += time.time() - start_wandb
 
-        # Periodic logging (unchanged)
+        # Periodic logging
         if batch_idx % log_interval == 0:
             start_print = time.time()
             print(f"\nBatch {batch_idx}/{len(loader)} | Loss: {loss.item():.8f}")
@@ -183,18 +183,14 @@ def train_epoch(
         timing_stats['total_batch'] += time.time() - start_batch
         num_batches += 1
 
-    # Average stats (unchanged)
     for key in epoch_stats:
         epoch_stats[key] /= num_batches
     
-    # Final epoch summary (unchanged)
-    weights = model.get_combination_weights()
     print(f"\n===== Epoch {epoch + 1} Summary =====")
     print(f"Average Loss: {epoch_stats['total_loss']:.8f}")
     print(f"MAE: {epoch_stats['mae']:.4f}, MSE: {epoch_stats['mse']:.4f}, Correlation: {epoch_stats['correlation']:.4f}")
-    print(f"Combination Weights: {weights}, Precision: {epoch_stats['precision']:.4f}, Recall: {epoch_stats['recall']:.4f}, F1: {epoch_stats['f1_score']:.4f}")
+    print(f"Combination Weights: {model.get_combination_weights()}, Precision: {epoch_stats['precision']:.4f}, Recall: {epoch_stats['recall']:.4f}, F1: {epoch_stats['f1_score']:.4f}")
     return dict(epoch_stats)
-
 
 def validate(
     model: nn.Module,
@@ -231,7 +227,7 @@ def validate(
             
             all_preds = []
             all_true = []
-            all_dl_props = []  # Store dl_props for R² evaluation
+            all_dl_props = []
             
             for batch in tqdm(val_loader, desc=f'Validating {val_name}'):
                 fraction = batch['X'].to(device)
@@ -315,8 +311,13 @@ def validate(
                 loader_stats['mse_sum'] += mse.item() * batch_size
                 loader_stats['loss'] += loss.item()
                 loader_stats['samples'] += batch_size
+                # Handle details robustly
                 for key, value in details.items():
-                    loader_stats[key] += value
+                    if isinstance(value, (int, float)):
+                        loader_stats[key] += value
+                    else:
+                        print(f"Warning: Skipping non-numeric detail '{key}' with value {value}")
+                
                 num_batches += 1
                 total_batches += 1
                 weighted_loss_sum += loss.item()
@@ -339,7 +340,8 @@ def validate(
             # Calculate R² for dl_props
             from sklearn.metrics import r2_score
             dl_r2 = r2_score(all_true_np, all_dl_props_np, multioutput='raw_values')
-            print(f"\nDL Props R² for {val_name}: {dl_r2}")
+            mean_dl_r2 = np.mean(dl_r2)
+            print(f"\nDL Props R² for {val_name}: Mean={mean_dl_r2:.4f}, Per-Cell={dl_r2}")
             
             precision = confusion_matrix['tp'] / (confusion_matrix['tp'] + confusion_matrix['fp'] + 1e-8)
             recall = confusion_matrix['tp'] / (confusion_matrix['tp'] + confusion_matrix['fn'] + 1e-8)
