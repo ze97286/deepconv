@@ -363,24 +363,25 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
         return item
     
 class CellTypeDeconvolutionModel(nn.Module):
-    def __init__(self, num_markers, num_cell_types, presence_models_dir, target_ids=None, feature_dim=128, dropout_rate=0.1, coverage_dropout_prob=0.3):
+    def __init__(self, num_markers, num_cell_types, presence_models_dir, target_ids=None, 
+                 feature_dim=128, dropout_rate=0.1, coverage_dropout_prob=0.3):
         """
-        Initialize the Cell Type Deconvolution Model.
+        Enhanced Cell Type Deconvolution Model with marker quality weighting and adaptive detection thresholds.
 
         Args:
             num_markers (int): Number of marker genes.
             num_cell_types (int): Number of cell types to deconvolve.
             presence_models_dir (str): Directory containing pre-trained presence models.
             target_ids (torch.Tensor, optional): Tensor mapping markers to cell types.
-                If None, will be inferred from presence models.
             feature_dim (int): Dimension of the feature extraction layer.
             dropout_rate (float): Dropout rate for regularization.
+            coverage_dropout_prob (float): Probability of dropping low-coverage markers during training.
         """
         super().__init__()
         self.num_markers = num_markers
         self.num_celltypes = num_cell_types
         self.feature_dim = feature_dim
-        self.coverage_dropout_prob = coverage_dropout_prob  # Probability of dropping low-coverage markers
+        self.coverage_dropout_prob = coverage_dropout_prob
 
         # Load pre-trained presence models
         self.presence_models = nn.ModuleList()
@@ -400,6 +401,12 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         self.target_ids = torch.tensor(target_ids, dtype=torch.long)
 
+        # Add marker quality weights - learnable parameters
+        self.marker_quality_weights = nn.Parameter(torch.ones(num_markers))
+        
+        # Add cell type-specific detection thresholds
+        self.detection_thresholds = nn.Parameter(torch.ones(num_cell_types) * -2.0)
+
         # Feature extractor: process marker values and coverage
         self.feature_extractor = nn.Sequential(
             nn.Linear(num_markers * 2, feature_dim),
@@ -415,11 +422,11 @@ class CellTypeDeconvolutionModel(nn.Module):
             nn.Linear(256, num_cell_types)
         )
 
-        # Initialize weights
-        self._initialize_weights()
-
         # Learnable weight for combining deep learning props and x_nnls, per cell type
         self.combination_weight = nn.Parameter(torch.full((num_cell_types,), 0.5))
+
+        # Initialize weights
+        self._initialize_weights()
 
     def _initialize_weights(self):
         """Initialize weights using Kaiming normalization."""
@@ -512,7 +519,7 @@ class CellTypeDeconvolutionModel(nn.Module):
 
     def forward(self, marker_values, coverage, x_nnls=None, presence_probs=None):
         """
-        Forward pass with proper handling of NaN values and cell type-specific presence prediction.
+        Forward pass with marker quality weighting and adaptive detection thresholds.
         
         Args:
             marker_values: [B, M] tensor of marker values (can contain NaNs where coverage=0)
@@ -542,6 +549,10 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Weight marker values by coverage to downweight noisy, low-coverage markers
         coverage_weights = torch.sigmoid(coverage / 5.0)  # Shape: [B, M], scales coverage to [0, 1]
         marker_values_weighted = marker_values_clean * coverage_weights  # Shape: [B, M]
+        
+        # Apply learned marker quality weights - higher weight for more informative markers
+        marker_quality = torch.sigmoid(self.marker_quality_weights).unsqueeze(0)  # Shape: [1, M]
+        marker_values_weighted = marker_values_weighted * marker_quality  # Shape: [B, M]
 
         # Apply coverage-based dropout during training to force reliance on higher-coverage markers
         if self.training:
@@ -582,7 +593,21 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Predict proportions using the deep learning model
         logits = self.encoder(combined)
         dl_props = F.softmax(logits, dim=1)  # [B, C], deep learning proportions before ensembling
-        props = dl_props.clone()
+        
+        # Apply cell type-specific detection thresholds
+        detection_thresholds = torch.sigmoid(self.detection_thresholds) * 0.05  # Scale to 0-5% range
+        
+        # Create cleaner proportions by applying thresholds
+        if self.training:
+            # During training, keep original proportions for learning
+            dl_props_out = dl_props
+        else:
+            # During inference, apply thresholds for cleaner output
+            is_present = (dl_props > detection_thresholds.unsqueeze(0)).float()
+            dl_props_out = dl_props * is_present
+        
+        # Clone for final output after potential ensemble
+        props = dl_props_out.clone()
         
         # Ensemble with x_nnls if provided
         if x_nnls is not None:
@@ -599,29 +624,51 @@ class CellTypeDeconvolutionModel(nn.Module):
                     raise ValueError(f"x_nnls has {x_nnls.shape[1]} features but props has {props.shape[1]} features")
             
             # Use per-cell-type weights for combining DeepConv and NNLS predictions
-            weight = torch.sigmoid(self.combination_weight).unsqueeze(0)
-            props = weight * props + (1 - weight) * x_nnls
+            weight = torch.sigmoid(self.combination_weight).unsqueeze(0)  # Shape: [1, C]
+            props = weight * props + (1 - weight) * x_nnls  # Shape: [B, C]
             
             # Ensure proportions sum to 1
-            row_sums = props.sum(dim=1, keepdim=True)
-            valid_rows = row_sums > 0
+            row_sums = props.sum(dim=1, keepdim=True)  # Shape: [B, 1]
+            valid_rows = row_sums > 0  # Shape: [B, 1]
+            
             if valid_rows.any():
                 normalization_factor = torch.where(
                     valid_rows,
                     1.0 / row_sums,
                     torch.ones_like(row_sums)
                 )
-                props = props * normalization_factor
+                props = props * normalization_factor  # Shape: [B, C]
         
         return props, presence_probs, x_nnls, dl_props
 
     def get_combination_weights(self):
-        """
-        Return the current combination weights for monitoring.
-        """
+        """Return the current combination weights for monitoring."""
         return torch.sigmoid(self.combination_weight).detach().cpu().numpy()
+    
+    def get_detection_thresholds(self):
+        """Return the current detection thresholds for monitoring."""
+        return (torch.sigmoid(self.detection_thresholds) * 0.05).detach().cpu().numpy()
+    
+    def get_top_markers(self, top_k=20):
+        """Return indices of the top k markers by learned quality weight."""
+        weights = torch.sigmoid(self.marker_quality_weights).detach().cpu().numpy()
+        top_indices = np.argsort(weights)[-top_k:][::-1]
+        return top_indices, weights[top_indices]
 
     def predict(self, marker_values, coverage, batch_size=256, device=None, atlas=None):
+        """
+        Predict cell type proportions from marker values and coverage.
+        
+        Args:
+            marker_values: [N, M] tensor or array of marker values
+            coverage: [N, M] tensor or array of coverage values
+            batch_size: Batch size for processing
+            device: Device to run predictions on
+            atlas: Optional atlas for NNLS computation
+            
+        Returns:
+            numpy.ndarray: [N, C] array of predicted proportions
+        """
         if device is None:
             device = next(self.parameters()).device
         
@@ -659,7 +706,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                     )
                     x_nnls = torch.tensor(x_nnls_np, dtype=torch.float32, device=device)
                 
-                props, _, _, _ = self.forward(batch_X, batch_coverage, x_nnls)  # Ignore dl_props during inference
+                props, _, _, _ = self.forward(batch_X, batch_coverage, x_nnls)
                 
                 predictions_list.append(props.cpu().numpy())
                 
@@ -670,3 +717,4 @@ class CellTypeDeconvolutionModel(nn.Module):
             return np.zeros((num_samples, self.num_celltypes))
         
         return np.vstack(predictions_list)
+    
