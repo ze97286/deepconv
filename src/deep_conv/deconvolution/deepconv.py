@@ -32,7 +32,6 @@ def get_validation_set_with_augmentation(
     target_dist_params=None,
     enable_augmentation=True,
     target_size: int = None,    
-    presence_models=None,
     model=None,
 ) -> tuple[DataLoader, torch.Tensor]:
     """
@@ -156,7 +155,6 @@ def get_validation_set_with_augmentation(
             atlas_np,
             combined_y,
             x_nnls=combined_x_nnls,
-            presence_models=presence_models,
             target_ids=target_ids,
             model=model,
         )
@@ -167,7 +165,6 @@ def get_validation_set_with_augmentation(
             atlas_np,
             y_val_np,
             x_nnls=x_nnls_original,
-            presence_models=presence_models,
             target_ids=target_ids,
             model=model,
         )
@@ -193,7 +190,6 @@ def load_training_with_augmentation(
     target_ids,
     num_files: int = 5,
     target_dist_params: dict = None,
-    presence_models = None,
     model=None,
 ) -> DataLoader:
     """
@@ -305,7 +301,6 @@ def load_training_with_augmentation(
         atlas_np,
         combined_y,
         x_nnls=combined_x_nnls,
-        presence_models=presence_models,
         target_ids=target_ids,
         model=model,
     )
@@ -329,7 +324,6 @@ def enhanced_negative_examples(
     target_ids,
     sample_fraction: float = 0.01,
     target_dist_params: dict = None,
-    presence_models = None,
     model=None,
 ) -> DataLoader:
     """
@@ -432,7 +426,6 @@ def enhanced_negative_examples(
         atlas_np,
         combined_negative_y,
         x_nnls=combined_negative_x_nnls,
-        presence_models=presence_models,
         target_ids=target_ids,
         model=model,
     )
@@ -508,21 +501,18 @@ def train_and_eval(
     train_dl_low = load_training_with_augmentation(
         f"{train_pat_dir}_low", atlas, names, num_files=3,
         target_dist_params=clinical_dist_params['low'],
-        presence_models=model.presence_models,
         target_ids=target_ids,
         model=model,
     )
     train_dl_med = load_training_with_augmentation(
         f"{train_pat_dir}_med", atlas, names, num_files=1,
         target_dist_params=clinical_dist_params['med'],
-        presence_models=model.presence_models,
         target_ids=target_ids,
         model=model,
     )
     train_dl_high = load_training_with_augmentation(
         f"{train_pat_dir}_high", atlas, names, num_files=1,
         target_dist_params=clinical_dist_params['high'],
-        presence_models=model.presence_models,
         target_ids=target_ids,
         model=model,
     )
@@ -552,7 +542,6 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=50_000,
-            presence_models=model.presence_models,
             target_ids=target_ids,
             model=model,
         )
@@ -564,7 +553,6 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=None,    
-            presence_models=model.presence_models,
             target_ids=target_ids,   
             model=model,     
         )
@@ -576,7 +564,6 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=None,
-            presence_models=model.presence_models,
             target_ids=target_ids,
             model=model,
         )
@@ -589,7 +576,6 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
             target_size=50_000,
-            presence_models=model.presence_models,
             target_ids=target_ids,  
             model=model,   
         )
@@ -601,7 +587,6 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
             target_size=None,       
-            presence_models=model.presence_models,
             target_ids=target_ids,   
             model=model, 
         )
@@ -613,7 +598,6 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
             target_size=None,    
-            presence_models=model.presence_models,
             target_ids=target_ids,
             model=model,      
         )
@@ -642,7 +626,6 @@ def train_and_eval(
         target_ids=target_ids,
         sample_fraction=0.01,
         target_dist_params=clinical_dist_params['clinical'],
-        presence_models=model.presence_models,
         model=model,
     )
     print(f"enhancing with negative samples preparation took {time.time() - enhancing_start_time:.2f} seconds")
