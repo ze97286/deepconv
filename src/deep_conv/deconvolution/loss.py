@@ -17,7 +17,7 @@ def loss_fn(
     beta: float = 0.07,         
     gamma: float = 0.01,        
     presence_threshold: float = 0.005,
-    low_snr_indices=[11],
+    low_snr_indices=[3,4,9,11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ):
     """

@@ -107,7 +107,6 @@ def train_epoch(
             dl_props=dl_props,
             combination_weight=model.combination_weight,
             presence_threshold=presence_threshold,
-            low_snr_indices=[11],
             device=device
         )
         timing_stats['loss_computation'] += time.time() - start_loss
@@ -271,7 +270,6 @@ def validate(
                     dl_props=dl_props,
                     combination_weight=model.combination_weight,
                     presence_threshold=presence_threshold,
-                    low_snr_indices=[11],
                     device=device
                 )
                 
