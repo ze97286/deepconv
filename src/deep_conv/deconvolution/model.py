@@ -426,6 +426,13 @@ class CellTypeDeconvolutionModel(nn.Module):
         sum_props = torch.sum(scaled_props, dim=1, keepdim=True) + 1e-8
         gated_props = scaled_props / sum_props
         
+        print(f"T-cells presence threshold: {self.presence_thresholds[11].item()}")
+        print(f"T-cells presence slope: {self.presence_slopes[11].item()}")
+        print(f"OAC presence threshold: {self.presence_thresholds[9].item()}")
+        print(f"OAC presence slope: {self.presence_slopes[9].item()}")
+        print(f"NK-cells presence threshold: {self.presence_thresholds[8].item()}")
+        print(f"NK-cells presence slope: {self.presence_slopes[8].item()}")
+
         return gated_props
 
     def predict_presence_with_separate_models(self, marker_values, coverage):
@@ -572,9 +579,16 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         # ----- 4) Integrate presence information with aggregated features -----
         combined_features = torch.cat([agg_flat, presence_probs], dim=1)
+        print(f"T-cells feature stats: mean={agg_flat[:, 11*self.feature_dim:(11+1)*self.feature_dim].mean().item():.4f}, std={agg_flat[:, 11*self.feature_dim:(11+1)*self.feature_dim].std().item():.4f}")
+
+
 
         # ----- 5) Proportion Prediction with integrated presence -----
         logits = self.encoder(combined_features)  # [B, C]
+        print(f"T-cells logits (first 5): {logits[:5, 11].tolist()}")
+        print(f"OAC logits (first 5): {logits[:5, 9].tolist()}")
+        print(f"Esophagus logits (first 5): {logits[:5, 4].tolist()}")
+
         dl_props = F.relu(logits)  # NEW: DL-only proportions (before gating)
         
         # Apply soft gating that preserves proportion relationships
