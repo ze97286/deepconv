@@ -15,6 +15,31 @@ from deep_conv.deconvolution.loss import loss_fn
 from deep_conv.benchmark.benchmark_utils import evaluate_performance
 import time
 
+def get_git_info() -> Dict[str, str]:
+    """Get git repository information"""
+    import subprocess
+
+    try:
+        commit_hash = subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD']
+        ).strip().decode('utf-8')
+        
+        branch = subprocess.check_output(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD']
+        ).strip().decode('utf-8')
+        
+        status = subprocess.check_output(
+            ['git', 'status', '--porcelain']
+        ).strip().decode('utf-8')
+        
+        return {
+            'commit': commit_hash,
+            'branch': branch,
+            'clean': len(status) == 0
+        }
+    except subprocess.CalledProcessError:
+        return {'commit': 'unknown', 'branch': 'unknown', 'clean': False}
+
 def init_wandb(config, project_name="cfDNA-Deconvolution", entity=None):
     """
     Initialise Weights & Biases (wandb) logging for experiment tracking.
@@ -398,6 +423,9 @@ def train_model(
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
     os.makedirs(model_path, exist_ok=True)
 
+    git_info = get_git_info()
+    git_commit = git_info['commit']
+
     if use_wandb:
         config = {
             "model_type": model.__class__.__name__,
@@ -569,7 +597,8 @@ def train_model(
                 'best_oac_r2': best_oac_r2,
                 'best_tier1_r2': best_tier1_r2,
                 'best_mae': best_mae,
-                'history': dict(history)
+                'history': dict(history),
+                'commit_hash': git_commit,
             }
             torch.save(checkpoint, os.path.join(model_path, "best_model.pt"))
             

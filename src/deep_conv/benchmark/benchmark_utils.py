@@ -807,7 +807,7 @@ def evaluate_cell_type_performance(y_true, predictions, intended_dilutions):
     return pd.DataFrame(metrics)
 
 
-def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions, output_path, samples_per_dilution=1000, alpha_threshold=1e-4):
+def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions, output_path, git_commit, samples_per_dilution=1000, alpha_threshold=1e-4):
     """
     Create comprehensive evaluation plots with advanced metrics for methylation deconvolution.
     
@@ -1359,7 +1359,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         fig.update_layout(
             height=3200,
             width=1600,
-            title=f"Cell Type Analysis: {cell_type} (R²={r2:.3f}, Pearson r={pearson_r:.3f})",
+            title=f"Cell Type Analysis: (using commit hash {git_commit}) {cell_type} (R²={r2:.3f}, Pearson r={pearson_r:.3f})",
             legend=dict(
                 y=0.99, x=1.15,
                 title="Main Legend",
