@@ -2,6 +2,7 @@ import random
 import pandas as pd
 import numpy as np
 import torch
+import time
 import torch.nn as nn
 from tqdm import tqdm
 from torch.utils.data import DataLoader, ConcatDataset
@@ -27,11 +28,10 @@ def get_validation_set_with_augmentation(
     atlas: pd.DataFrame, 
     names: set,
     block_size: int,
-    target_ids,
     target_dist_params=None,
     enable_augmentation=True,
     target_size: int = None,    
-    presence_models=None,
+    model=None,
 ) -> tuple[DataLoader, torch.Tensor]:
     """
     Validation set loader with optional pre-augmented data and block-based subsampling.
@@ -154,8 +154,7 @@ def get_validation_set_with_augmentation(
             atlas_np,
             combined_y,
             x_nnls=combined_x_nnls,
-            presence_models=presence_models,
-            target_ids=target_ids
+            model=model,
         )
     else:
         val_dataset = PreAugmentedTissueDataset(
@@ -164,13 +163,12 @@ def get_validation_set_with_augmentation(
             atlas_np,
             y_val_np,
             x_nnls=x_nnls_original,
-            presence_models=presence_models,
-            target_ids=target_ids
+            model=model,
         )
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1024,
+        batch_size=512,
         shuffle=False,
         num_workers=16,
         pin_memory=False,
@@ -186,10 +184,9 @@ def load_training_with_augmentation(
     base_dir: str, 
     atlas: pd.DataFrame, 
     names: set, 
-    target_ids,
     num_files: int = 5,
     target_dist_params: dict = None,
-    presence_models = None,
+    model=None,
 ) -> DataLoader:
     """
     Enhanced training data loader with pre-augmented data.
@@ -300,17 +297,16 @@ def load_training_with_augmentation(
         atlas_np,
         combined_y,
         x_nnls=combined_x_nnls,
-        presence_models=presence_models,
-        target_ids=target_ids,
+        model=model,
     )
     print(f"Training dataset has {len(pre_augmented_dataset)} samples.")
 
     # Create DataLoader with shuffling
     train_dl = DataLoader(
         pre_augmented_dataset,
-        batch_size=256,
+        batch_size=64,
         shuffle=True,
-        num_workers=16,
+        num_workers=24,
         pin_memory=False,
         persistent_workers=True
     )
@@ -320,10 +316,9 @@ def enhanced_negative_examples(
     train_dl: DataLoader,
     cell_types: list,
     atlas: pd.DataFrame,
-    target_ids,
     sample_fraction: float = 0.01,
     target_dist_params: dict = None,
-    presence_models = None,
+    model=None,
 ) -> DataLoader:
     """
     Enhance the training dataset by adding negative examples for each cell type.
@@ -425,8 +420,7 @@ def enhanced_negative_examples(
         atlas_np,
         combined_negative_y,
         x_nnls=combined_negative_x_nnls,
-        presence_models=presence_models,
-        target_ids=target_ids,
+        model=model,
     )
 
     # Combine original dataset with negative examples
@@ -485,43 +479,47 @@ def train_and_eval(
     }
 
     cell_types = list(atlas.columns[8:]) 
-    target_ids = atlas['target'].map(lambda x: cell_types.index(x)).to_numpy()
+    target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
 
     model = CellTypeDeconvolutionModel(
-        num_markers=len(atlas), num_cell_types=len(cell_types),
+        num_markers=len(atlas), 
+        num_cell_types=len(cell_types),
         presence_models_dir=presence_models_dir,
-        dropout_rate=0.1,
-        target_ids=target_ids
+        target_ids=target_ids,
+        feature_dim=64,
+
     )
+    start_data_prep_time = time.time()
+    start_train_time = time.time()
     train_dl_low = load_training_with_augmentation(
         f"{train_pat_dir}_low", atlas, names, num_files=3,
         target_dist_params=clinical_dist_params['low'],
-        presence_models=model.presence_models,
-        target_ids=target_ids,
+        model=model,
     )
     train_dl_med = load_training_with_augmentation(
         f"{train_pat_dir}_med", atlas, names, num_files=1,
         target_dist_params=clinical_dist_params['med'],
-        presence_models=model.presence_models,
-        target_ids=target_ids,
+        model=model,
     )
     train_dl_high = load_training_with_augmentation(
         f"{train_pat_dir}_high", atlas, names, num_files=1,
         target_dist_params=clinical_dist_params['high'],
-        presence_models=model.presence_models,
-        target_ids=target_ids,
+        model=model,
     )
 
     train_dataset = ConcatDataset([train_dl_low.dataset, train_dl_med.dataset, train_dl_high.dataset])
     train_dl = DataLoader(
         train_dataset,
-        batch_size=256,
+        batch_size=64,
         shuffle=True,
         num_workers=16,
         pin_memory=False,
         persistent_workers=True
     )
 
+    print(f"train preparation took {time.time() - start_train_time:.2f} seconds")
+
+    start_validation_time = time.time()
     # Create two versions of each validation dataset: unaugmented and augmented
     val_loaders_unaugmented = {}
     val_loaders_augmented = {}
@@ -534,8 +532,7 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=50_000,
-            presence_models=model.presence_models,
-            target_ids=target_ids,
+            model=model,
         )
         print(f"Validation set {cov} tier1 length (unaugmented)={len(t1_yval)}")
 
@@ -545,8 +542,7 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=None,    
-            presence_models=model.presence_models,
-            target_ids=target_ids,        
+            model=model,     
         )
         print(f"Validation set {cov} tcells length (unaugmented)={len(tcells_yval)}")
 
@@ -556,8 +552,7 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=None,
-            presence_models=model.presence_models,
-            target_ids=target_ids,
+            model=model,
         )
         print(f"Validation set {cov} oac length (unaugmented)={len(oac_yval)}")
 
@@ -568,8 +563,7 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
             target_size=50_000,
-            presence_models=model.presence_models,
-            target_ids=target_ids,     
+            model=model,   
         )
         print(f"Validation set {cov} tier1 length (augmented)={len(t1_yval)}")
 
@@ -579,8 +573,7 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
             target_size=None,       
-            presence_models=model.presence_models,
-            target_ids=target_ids,    
+            model=model, 
         )
         print(f"Validation set {cov} tcells length (augmented)={len(tcells_yval)}")
 
@@ -590,8 +583,7 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
             target_size=None,    
-            presence_models=model.presence_models,
-            target_ids=target_ids,       
+            model=model,      
         )
         print(f"Validation set {cov} oac length (augmented)={len(oac_yval)}")
 
@@ -608,15 +600,21 @@ def train_and_eval(
         y_vals[f"t-cells_{cov}"] = tcells_yval
         y_vals[f"oac_{cov}"] = oac_yval
 
+    print(f"validation preparation took {time.time() - start_validation_time:.2f} seconds")
+
+    enhancing_start_time = time.time()
     enhanced_train_dl = enhanced_negative_examples(
         train_dl,
         cell_types,
         atlas,
-        target_ids=target_ids,
         sample_fraction=0.01,
         target_dist_params=clinical_dist_params['clinical'],
-        presence_models=model.presence_models
+        model=model,
     )
+    print(f"enhancing with negative samples preparation took {time.time() - enhancing_start_time:.2f} seconds")
+    print("====================================================================")
+    print(f"total preparation time took {time.time() - start_data_prep_time:.2f} seconds")
+    print("====================================================================")
 
     model, _ = train_model(
         model=model,
@@ -627,7 +625,7 @@ def train_and_eval(
         num_epochs=1000,
         patience=10, 
         lr=1e-3, 
-        weight_decay=1e-3
+        weight_decay=1e-5
     )
 
     print("\nStandard Validation Sets:")

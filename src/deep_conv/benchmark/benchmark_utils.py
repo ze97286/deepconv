@@ -14,7 +14,6 @@ from sklearn.metrics import (mean_squared_error, mean_absolute_error, r2_score,
                              accuracy_score, precision_score, recall_score, f1_score)
 
 
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
 logger = logging.getLogger(__name__)
 
@@ -315,7 +314,6 @@ def analyse_proportion_ranges(pred: np.ndarray,
     return range_metrics
 
 
-
 def log_metrics(metrics: Dict[str, Dict[str, float]]):
     """
     Log the performance metrics.
@@ -352,7 +350,6 @@ def save_estimated_proportions(
     filepath = os.path.join(save_path, filename)
     np.savez_compressed(filepath, X_train=estimated_train, X_val=estimated_val)
     logger.info(f"Estimated proportions saved to {filepath}")
-
 
 
 def columns():
@@ -807,7 +804,7 @@ def evaluate_cell_type_performance(y_true, predictions, intended_dilutions):
     return pd.DataFrame(metrics)
 
 
-def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions, output_path, samples_per_dilution=1000, alpha_threshold=1e-4):
+def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions, output_path, git_commit, epoch=None,samples_per_dilution=1000, alpha_threshold=1e-4):
     """
     Create comprehensive evaluation plots with advanced metrics for methylation deconvolution.
     
@@ -827,14 +824,14 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
     import plotly.graph_objects as go
     import plotly.express as px
     from scipy.stats import pearsonr, spearmanr
-    
+
     os.makedirs(output_path, exist_ok=True)
-    
+
     significant_cell_types = []
     for cell_type in y_true_df.columns:
         if np.any(y_true_df[cell_type] > 0.001):
             significant_cell_types.append(cell_type)
-    
+
     # Sample for heatmap
     sampled_indices = []
     for dilution in sorted(intended_dilutions.unique()):
@@ -843,25 +840,25 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             sampled_indices.extend(np.random.choice(dilution_indices, samples_per_dilution, replace=False))
         else:
             sampled_indices.extend(dilution_indices)
-    
+
     results = {}
-    
+
     for cell_type in significant_cell_types:
         # Extract values
         y_true_vals = y_true_df[cell_type].values
         y_pred_vals = predictions_df[cell_type].values
-        
+
         # Apply model's thresholding behavior (alpha < threshold set to 0)
         y_pred_vals_thresholded = y_pred_vals.copy()
         y_pred_vals_thresholded[y_pred_vals_thresholded < alpha_threshold] = 0
-        
+
         # Calculate overall metrics
         r2 = r2_score(y_true_vals, y_pred_vals_thresholded)
         pearson_r = np.corrcoef(y_true_vals, y_pred_vals_thresholded)[0, 1]
         spearman_r = spearmanr(y_true_vals, y_pred_vals_thresholded)[0]
         mae = np.mean(np.abs(y_true_vals - y_pred_vals_thresholded))
         rmse = np.sqrt(np.mean(np.square(y_true_vals - y_pred_vals_thresholded)))
-        
+
         # Calculate concentration-stratified MAE
         conc_strata = [
             (0, 0.001, 'Low (<0.1%)'),
@@ -870,7 +867,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             (0.05, 0.1, 'High (5-10%)'),
             (0.1, 1.0, 'Very High (≥10%)')
         ]
-        
+
         cs_mae = {}
         for low, high, name in conc_strata:
             mask = (y_true_vals >= low) & (y_true_vals < high)
@@ -879,10 +876,10 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                     'mae': np.mean(np.abs(y_true_vals[mask] - y_pred_vals_thresholded[mask])),
                     'count': np.sum(mask)
                 }
-        
+
         # Calculate magnitude-sensitive metrics for different thresholds
         detection_thresholds = [0.001, 0.005, 0.01, 0.05, 0.10]
-        
+
         def calculate_magnitude_metrics(y_true_vals, y_pred_vals, thresholds):
             magnitude_metrics = {}
             for threshold in thresholds:
@@ -905,19 +902,19 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                     'n_samples': np.sum(mask)
                 }
             return magnitude_metrics
-        
+
         magnitude_metrics = calculate_magnitude_metrics(y_true_vals, y_pred_vals_thresholded, detection_thresholds)
-        
+
         # Create ROC curve for detection tasks
         detection_threshold = 0.005
         y_true_binary = y_true_vals >= detection_threshold
         fpr, tpr, _ = roc_curve(y_true_binary, y_pred_vals_thresholded)
         roc_auc = auc(fpr, tpr)
-        
+
         # Precision-Recall curve
         precision, recall, _ = precision_recall_curve(y_true_binary, y_pred_vals_thresholded)
         avg_precision = average_precision_score(y_true_binary, y_pred_vals_thresholded)
-        
+
         # Create extended subplot layout with more space for the summary table
         fig = make_subplots(
             rows=6, cols=2,
@@ -941,12 +938,12 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             horizontal_spacing=0.08,
             row_heights=[0.2, 0.15, 0.15, 0.15, 0.15, 0.4]
         )
-        
+
         # --------------------- Row 1, Col 1: Heatmap --------------------- #
         heatmap_data = predictions_df.loc[sampled_indices]
         cell_type_means = heatmap_data.mean(axis=0)
         sorted_cell_types = cell_type_means.sort_values(ascending=False).index.tolist()
-        
+
         fig.add_trace(
             go.Heatmap(
                 z=heatmap_data[sorted_cell_types].T.values,
@@ -964,18 +961,18 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=1, col=1
         )
-        
+
         # -------- Row 1, Col 2: Detection Performance Metrics --------- #
         threshold_values = []
         median_rel_error_values = []
         within_10pct_values = []
-        
+
         for threshold in detection_thresholds:
             metrics = magnitude_metrics[f'threshold_{threshold:.3f}']
             threshold_values.append(f"{threshold*100:.1f}%")
             median_rel_error_values.append(metrics['median_rel_error'])
             within_10pct_values.append(metrics['within_10pct'])
-        
+
         fig.add_trace(
             go.Bar(
                 x=threshold_values,
@@ -987,7 +984,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=1, col=2
         )
-        
+
         fig.add_trace(
             go.Bar(
                 x=threshold_values,
@@ -998,7 +995,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=1, col=2
         )
-        
+
         # ----------------- Row 2, Col 1: Predicted vs. True ---------------- #
         fig.add_trace(
             go.Scatter(
@@ -1024,7 +1021,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=2, col=1
         )
-        
+
         non_zero_vals = y_true_vals[y_true_vals > 0]
         min_val = max(non_zero_vals.min() * 100 if len(non_zero_vals) > 0 else 1e-6, 0.001)
         max_val = y_true_vals.max() * 100
@@ -1039,7 +1036,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=2, col=1
         )
-        
+
         fig.update_xaxes(
             title="True Value (%)", 
             type="log",
@@ -1054,17 +1051,17 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ticktext=[f"{x:.3g}%" for x in [0.001, 0.01, 0.1, 1, 10]],
             tickvals=[0.001, 0.01, 0.1, 1, 10]
         )
-        
+
         # ----------------- Row 2, Col 2: Concentration-Stratified MAE ---------------- #
         strata_names = []
         mae_values = []
         count_texts = []
-        
+
         for name, data in cs_mae.items():
             strata_names.append(name)
             mae_values.append(data['mae'])
             count_texts.append(f"n={data['count']}")
-        
+
         fig.add_trace(
             go.Bar(
                 x=strata_names,
@@ -1076,11 +1073,11 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=2, col=2
         )
-        
+
         # -------- Row 3, Col 1: Performance Metrics by Dilution --------- #
         metrics_df = calculate_metrics_by_dilution(y_true_vals, y_pred_vals_thresholded, intended_dilutions)
         metrics_df = metrics_df.sort_values('dilution', ascending=True)
-        
+
         fig.add_trace(
             go.Scatter(
                 x=metrics_df['dilution'] * 100,
@@ -1093,7 +1090,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=3, col=1
         )
-        
+
         fig.add_trace(
             go.Scatter(
                 x=metrics_df['dilution'] * 100,
@@ -1111,16 +1108,16 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=3, col=1
         )
-        
+
         # Dynamically set tickvals and ticktext based on intended_dilutions
         unique_dilutions = sorted(np.unique(intended_dilutions))
         tickvals = [dil * 100 for dil in unique_dilutions]
         ticktext = [f"{dil*100:.3g}%" for dil in unique_dilutions]
-        
+
         fig.add_hline(y=0, line_dash="dot", line_color="gray", row=3, col=1)
         fig.add_hline(y=20, line_dash="dot", line_color="gray", row=3, col=1)
         fig.add_hline(y=-20, line_dash="dot", line_color="gray", row=3, col=1)
-        
+
         # -------- Row 3, Col 2: ROC Curve --------- #
         fig.add_trace(
             go.Scatter(
@@ -1134,7 +1131,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=3, col=2
         )
-        
+
         fig.add_trace(
             go.Scatter(
                 x=[0, 1],
@@ -1145,7 +1142,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=3, col=2
         )
-        
+
         # --------- Row 4, Col 1: Error by Concentration Range ---------- #
         concentration_ranges = [
             ('Low (<0.1%)', y_true_vals < 0.001),
@@ -1154,7 +1151,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ('High (5-10%)', (y_true_vals >= 0.05) & (y_true_vals < 0.10)),
             ('Very High (≥10%)', y_true_vals >= 0.10)
         ]
-        
+
         for conc_type, mask in concentration_ranges:
             if np.any(mask):
                 fig.add_trace(
@@ -1166,7 +1163,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                     ),
                     row=4, col=1
                 )
-        
+
         # --------- Row 4, Col 2: Precision-Recall Curve ---------- #
         fig.add_trace(
             go.Scatter(
@@ -1179,11 +1176,11 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=4, col=2
         )
-        
+
         # --------- Row 5, Col 1: Bias-Variance Heatmap ---------- #
         conc_bins = np.logspace(-4, -1, 20)
         error_matrix = np.zeros((len(conc_bins)-1, 3))
-        
+
         for i in range(len(conc_bins)-1):
             mask = (y_true_vals >= conc_bins[i]) & (y_true_vals < conc_bins[i+1])
             if np.sum(mask) > 0:
@@ -1191,11 +1188,11 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 error_matrix[i, 0] = np.mean(errors)
                 error_matrix[i, 1] = np.mean(np.abs(errors))
                 error_matrix[i, 2] = np.var(errors)
-        
+
         for j in range(3):
             if np.std(error_matrix[:, j]) > 0:
                 error_matrix[:, j] = (error_matrix[:, j] - np.mean(error_matrix[:, j])) / np.std(error_matrix[:, j])
-            
+
         fig.add_trace(
             go.Heatmap(
                 z=error_matrix,
@@ -1214,10 +1211,10 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=5, col=1
         )
-        
+
         # --------- Row 5, Col 2: Error Distribution Histogram ---------- #
         errors = y_pred_vals_thresholded - y_true_vals
-        
+
         fig.add_trace(
             go.Histogram(
                 x=errors,
@@ -1227,9 +1224,9 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             ),
             row=5, col=2
         )
-        
+
         fig.add_vline(x=0, line_dash="dash", line_color="red", row=5, col=2)
-        
+
         # --------- Row 6: Clinical Relevance Score and Summary Metrics ---------- #
         if "T-cells" in cell_type:
             weights = {
@@ -1247,32 +1244,32 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 '>10%': 0.8,
                 'within_10pct': 2.0
             }
-        
+
         crs_components = []
-        
+
         for range_name, data in cs_mae.items():
             if range_name in weights:
                 norm_score = 1.0 / (1.0 + 10*data['mae'])
                 crs_components.append(weights[range_name] * norm_score)
-        
+
         within_10pct = magnitude_metrics['threshold_0.005']['within_10pct'] / 100
         crs_components.append(weights['within_10pct'] * within_10pct)
-        
+
         crs = 100 * sum(crs_components) / sum(weights.values())
-        
+
         summary_text = [
             f"<b>Summary Metrics for {cell_type}</b>",
             f"R²: {r2:.3f} | Pearson r: {pearson_r:.3f} | Spearman r: {spearman_r:.3f}",
             f"MAE: {mae:.5f} | RMSE: {rmse:.5f}",
             f"ROC-AUC: {roc_auc:.3f} | PR-AUC: {avg_precision:.3f}"
         ]
-        
+
         for threshold in detection_thresholds:
             metrics = magnitude_metrics[f'threshold_{threshold:.3f}']
             summary_text.append(
                 f"Error at {threshold*100:.1f}%: {metrics['median_rel_error']:.2f}% rel err, {metrics['within_10pct']:.1f}% within ±10%"
             )
-        
+
         dilution_metrics = calculate_metrics_by_dilution(y_true_vals, y_pred_vals_thresholded, intended_dilutions)
         key_dilutions = [0.0001, 0.001, 0.01, 0.1]
         for dilution in key_dilutions:
@@ -1283,9 +1280,9 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 summary_text.append(
                     f"MAE at {dilution*100:.2f}%: {mae_at_dilution:.5f} | Median Rel Error: {median_rel_error:.2f}%"
                 )
-        
+
         summary_text.append(f"<b>Clinical Relevance Score: {crs:.1f}/100</b>")
-        
+
         # Wrap long lines to make the table more compact
         summary_text_wrapped = []
         for line in summary_text:
@@ -1303,7 +1300,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 summary_text_wrapped.append(wrapped_line.strip())
             else:
                 summary_text_wrapped.append(line)
-        
+
         fig.add_annotation(
             x=0.5,
             y=0.5,
@@ -1319,16 +1316,16 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             xref="x6",
             yref="y6"
         )
-        
+
         # --------------------- Axis Updates ---------------------- #
         fig.update_xaxes(showticklabels=False, title="Samples", row=1, col=1)
         fig.update_yaxes(title="Cell Types", row=1, col=1)
         fig.update_xaxes(title="Detection Threshold", row=1, col=2)
         fig.update_yaxes(title="Error (%) / Proportion (%)", row=1, col=2)
-        
+
         fig.update_xaxes(title="Concentration Range", row=2, col=2)
         fig.update_yaxes(title="Mean Absolute Error", row=2, col=2)
-        
+
         fig.update_xaxes(
             title="Intended Dilution (%)", 
             type="log", 
@@ -1339,27 +1336,30 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
         fig.update_yaxes(title="Percentage / Error", row=3, col=1)
         fig.update_xaxes(title="False Positive Rate", range=[0, 1], row=3, col=2)
         fig.update_yaxes(title="True Positive Rate", range=[0, 1], row=3, col=2)
-        
+
         fig.update_xaxes(title="Concentration Range", row=4, col=1)
         fig.update_yaxes(title="Relative Error (%)", row=4, col=1)
         fig.update_xaxes(title="Recall", range=[0, 1], row=4, col=2)
         fig.update_yaxes(title="Precision", range=[0, 1], row=4, col=2)
-        
+
         fig.update_xaxes(title="Error Component", row=5, col=1)
         fig.update_yaxes(title="Concentration Range", row=5, col=1)
         fig.update_xaxes(title="Prediction Error", row=5, col=2)
         fig.update_yaxes(title="Count", row=5, col=2)
-        
+
         fig.update_xaxes(title="", showticklabels=False, row=6, col=1)
         fig.update_yaxes(title="", showticklabels=False, row=6, col=1)
         fig.update_xaxes(title="", showticklabels=False, row=6, col=2)
         fig.update_yaxes(title="", showticklabels=False, row=6, col=2)
-        
+
         # --------------------- Layout -------------------- #
+        training_info = ""
+        if epoch is not None:
+            training_info = f"/trained to epoch {epoch}"
         fig.update_layout(
             height=3200,
             width=1600,
-            title=f"Cell Type Analysis: {cell_type} (R²={r2:.3f}, Pearson r={pearson_r:.3f})",
+            title=f"Cell Type Analysis: (using commit hash {git_commit}{training_info}) {cell_type} (R²={r2:.3f}, Pearson r={pearson_r:.3f})",
             legend=dict(
                 y=0.99, x=1.15,
                 title="Main Legend",
@@ -1389,14 +1389,14 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
                 borderwidth=1
             )
         )
-        
+
         # Save results
         html_file = os.path.join(output_path, f"{cell_type}_evaluation.html")
         csv_file = os.path.join(output_path, f"{cell_type}_metrics.csv")
         print(f"Saving {html_file}")
         fig.write_html(html_file)
         metrics_df.to_csv(csv_file, index=False)
-        
+
         # Save detailed metrics dictionary
         results[cell_type] = {
             'overall_metrics': {
@@ -1413,7 +1413,7 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             'magnitude_metrics': magnitude_metrics,
             'metrics_by_dilution': metrics_df
         }
-    
+
     # Create summary CSV with key metrics for all cell types
     summary_rows = []
     for cell_type, metrics in results.items():
@@ -1427,18 +1427,18 @@ def plot_deconvolution_evaluation(y_true_df, predictions_df, intended_dilutions,
             'median_rel_error_0.5pct': metrics['magnitude_metrics']['threshold_0.005']['median_rel_error'],
             'clinical_relevance_score': metrics['overall_metrics']['clinical_relevance_score']
         }
-        
+
         for range_name in ['Low (<0.1%)', 'Med (0.1-1%)', 'Med-High (1-5%)', 'High (5-10%)', 'Very High (≥10%)']:
             if range_name in metrics['cs_mae']:
                 row[f'mae_{range_name.split()[0].lower()}'] = metrics['cs_mae'][range_name]['mae']
             else:
                 row[f'mae_{range_name.split()[0].lower()}'] = None
-                
+
         summary_rows.append(row)
-    
+
     summary_df = pd.DataFrame(summary_rows)
     summary_df.to_csv(os.path.join(output_path, "all_cell_types_summary.csv"), index=False)
-    
+
     return results
 
 
