@@ -433,7 +433,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         self.combination_weight = nn.Parameter(torch.full((num_cell_types,), 0.5))
 
         # Initialize weights
-        self._initialise_weights()
+        # self._initialise_weights()
 
     def _initialise_weights(self):
         """Initialise weights using Kaiming normalization."""
