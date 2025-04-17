@@ -1,53 +1,57 @@
-import argparse
 import random
-
 import pandas as pd
 import numpy as np
 import torch
+import time
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from tqdm import tqdm
+from torch.utils.data import DataLoader, ConcatDataset
 from pathlib import Path
-from typing import Tuple 
-
-from deep_conv.benchmark.benchmark_utils import *
-from deep_conv.deconvolution.model import CellTypeDeconvolutionModel, TissueDeconvolutionDataset
-from deep_conv.deconvolution.train import train_model
-from deep_conv.deconvolution.predict import predict_with_consensus
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')
+
+from deep_conv.benchmark.benchmark_utils import *
+from deep_conv.deconvolution.model import *
+from deep_conv.deconvolution.train import train_model
+from deep_conv.deconvolution.predict import *
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-
-def get_validation_set(eval_pat_dir: str, atlas: pd.DataFrame, names: set) -> Tuple[DataLoader, torch.Tensor]:
+def get_validation_set_with_augmentation(
+    eval_pat_dir: str, 
+    atlas: pd.DataFrame, 
+    names: set,
+    block_size: int,
+    target_dist_params=None,
+    enable_augmentation=True,
+    target_size: int = None,    
+    model=None,
+) -> tuple[DataLoader, torch.Tensor]:
     """
-    Reads marker coverage, methylation, and ground-truth label files from a validation set directory,
-    filters them down to the set of markers in 'names', and returns a DataLoader plus normalized labels.
-
+    Validation set loader with optional pre-augmented data and block-based subsampling.
+    
     Args:
-        eval_pat_dir (str):
-            Directory containing "marker_values.parquet", "coverage.parquet", and "ground_truth_y.parquet" 
-            for the validation data.
-        atlas (pd.DataFrame):
-            A DataFrame that includes marker metadata and cell-type columns. 
-            We use atlas.columns[8:] as the cell-type columns for the dataset constructor.
-        names (set):
-            The set of marker names (strings) to include, ensuring we only keep markers that appear
-            in both 'atlas' and the parquet files.
-
+        eval_pat_dir: Directory with validation data
+        atlas: DataFrame with marker metadata
+        names: Set of marker names to include
+        block_size: Size of each block for subsampling
+        target_dist_params: Target coverage distribution parameters
+        enable_augmentation: Whether to enable augmentation
+        target_size: Target number of samples (if None, set to 10% of dataset size)
+        cell_types: List of cell type names (to identify T-cells and OAC columns)
+        filter_tcells_below: Concentration threshold below which to filter T-cell samples
+        filter_oac_below: Concentration threshold below which to filter OAC samples
+        dilution_values: Ignored (subsampling based on blocks)
+        
     Returns:
-        val_loader (DataLoader):
-            A DataLoader wrapping the TissueDeconvolutionDataset for the validation set, 
-            with batch_size=512.
-        y_val (torch.Tensor):
-            A [N, C] Tensor of ground-truth cell-type proportions, normalized so each row sums to 1.
+        val_loader: DataLoader with data
+        y_val: Ground truth labels
     """
     # Load marker values, coverage, and labels from parquet
     X_val = pd.read_parquet(Path(eval_pat_dir) / "marker_values.parquet")
@@ -57,143 +61,384 @@ def get_validation_set(eval_pat_dir: str, atlas: pd.DataFrame, names: set) -> Tu
     # Filter to only include markers in 'names'
     X_val = X_val[X_val.name.isin(names)]
     coverage_val = coverage_val[coverage_val.name.isin(names)]
-    
+
     # Drop name/direction columns and transpose => shape [samples, markers]
     X_val = X_val.drop(columns=["name", "direction"]).T.to_numpy()
     coverage_val = coverage_val.drop(columns=["name", "direction"]).T.to_numpy()
 
-    # Print some coverage stats for debug/monitoring
-    print("median coverage", 
-          np.median(coverage_val, axis=1), 
-          "median of medians", 
-          np.median(np.median(coverage_val, axis=1)), 
-          "mean median", 
-          np.median(coverage_val, axis=1).mean())
-    
-    y_val = y_val.to_numpy()
-    
-    val_dataset = TissueDeconvolutionDataset(
-        X_val,
-        coverage_val,
-        atlas[atlas.columns[8:]].T.to_numpy(),
-        y_val
-    )
-    
+    # Print coverage stats for debug/monitoring
+    print(f"Validation set {Path(eval_pat_dir).name} - Original coverage stats:")
+    print("  Mean:", np.mean(coverage_val))
+    print("  Median:", np.median(coverage_val))
+
+    # Convert label DataFrame to numpy
+    y_val_np = y_val.to_numpy()
+
+    # Block-based subsampling
+    dataset_size = len(y_val_np)
+    if target_size is None:
+        target_size = max(dataset_size // 10, 1)
+
+    if target_size < dataset_size:
+        num_blocks = (dataset_size + block_size - 1) // block_size
+        samples_per_block = target_size // num_blocks
+        if samples_per_block == 0:
+            samples_per_block = 1
+
+        indices = []
+        for block_idx in range(num_blocks):
+            start_idx = block_idx * block_size
+            end_idx = min((block_idx + 1) * block_size, dataset_size)
+            block_indices = np.arange(start_idx, end_idx)
+            np.random.shuffle(block_indices)
+            selected_indices = block_indices[:min(samples_per_block, len(block_indices))]
+            indices.extend(selected_indices)
+
+        if len(indices) < target_size:
+            remaining = target_size - len(indices)
+            all_indices = np.arange(dataset_size)
+            remaining_indices = np.setdiff1d(all_indices, indices)
+            np.random.shuffle(remaining_indices)
+            indices.extend(remaining_indices[:remaining])
+
+        indices = np.sort(indices)
+
+        X_val = X_val[indices]
+        coverage_val = coverage_val[indices]
+        y_val_np = y_val_np[indices]
+
+    # Compute x_nnls for original data
+    atlas_np = atlas[atlas.columns[8:]].T.to_numpy()
+    x_nnls_original = run_weighted_nnls(X_val, coverage_val, atlas_np)
+    print("shape of x_nnls_original:", x_nnls_original.shape)
+
+    # Apply augmentation if enabled
+    if enable_augmentation:
+        num_samples = len(y_val_np)
+        num_to_augment = num_samples // 2
+        indices_to_augment = np.random.choice(num_samples, num_to_augment, replace=False)
+
+        temp_dataset = TissueDeconvolutionDataset(X_val, coverage_val, atlas_np, y_val_np)
+
+        augmented_fraction = []
+        augmented_coverage = []
+        for idx in indices_to_augment:
+            item = temp_dataset[idx]
+            fraction_np = item['X'].numpy().reshape(1, -1)
+            coverage_np = item['coverage'].numpy().reshape(1, -1)
+            aug_fraction, aug_coverage = coverage_matched_augmentation(
+                fraction_np,
+                coverage_np,
+                target_dist_params,
+                augmentation_prob=1.0
+            )
+            augmented_fraction.append(aug_fraction[0])
+            augmented_coverage.append(aug_coverage[0])
+
+        augmented_fraction = np.stack(augmented_fraction)
+        augmented_coverage = np.stack(augmented_coverage)
+        combined_fraction = np.concatenate([X_val[:num_to_augment], augmented_fraction])
+        combined_coverage = np.concatenate([coverage_val[:num_to_augment], augmented_coverage])
+        combined_y = np.concatenate([y_val_np[:num_to_augment], y_val_np[indices_to_augment]])
+        combined_x_nnls = np.concatenate([x_nnls_original[:num_to_augment], x_nnls_original[indices_to_augment]])
+
+        dataset_name = Path(eval_pat_dir).name
+        np.save(f"pre_augmented_fraction_{dataset_name}.npy", combined_fraction)
+        np.save(f"pre_augmented_coverage_{dataset_name}.npy", combined_coverage)
+        np.save(f"pre_augmented_y_{dataset_name}.npy", combined_y)
+        np.save(f"pre_augmented_x_nnls_{dataset_name}.npy", combined_x_nnls)
+
+        val_dataset = PreAugmentedTissueDataset(
+            combined_fraction,
+            combined_coverage,
+            atlas_np,
+            combined_y,
+            x_nnls=combined_x_nnls,
+            model=model,
+        )
+    else:
+        val_dataset = PreAugmentedTissueDataset(
+            X_val,
+            coverage_val,
+            atlas_np,
+            y_val_np,
+            x_nnls=x_nnls_original,
+            model=model,
+        )
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=512,
-        num_workers=2,
-        persistent_workers=True,
-        shuffle=False
+        shuffle=False,
+        num_workers=16,
+        pin_memory=False,
+        persistent_workers=False
     )
-    
-    # Convert y_val to a PyTorch tensor and normalize each row
-    y_val = torch.tensor(y_val, dtype=torch.float32)
-    y_val = y_val / y_val.sum(dim=1, keepdim=True)
-    
-    return val_loader, y_val
 
+    y_val_tensor = torch.tensor(y_val_np, dtype=torch.float32)
+    y_val_tensor = y_val_tensor / y_val_tensor.sum(dim=1, keepdim=True)
 
-def load_training(base_dir: str, atlas: pd.DataFrame, names: set, num_files: int = 5) -> DataLoader:
+    return val_loader, y_val_tensor
+
+def load_training_with_augmentation(
+    base_dir: str, 
+    atlas: pd.DataFrame, 
+    names: set, 
+    num_files: int = 5,
+    target_dist_params: dict = None,
+    model=None,
+) -> DataLoader:
     """
-    Loads and merges multiple parquet files containing training data (marker_values, coverage, ground_truth_y),
-    filters them to only include the markers in 'names', and returns a DataLoader for training.
-
+    Enhanced training data loader with pre-augmented data.
+    
     Args:
-        base_dir (str):
-            Path prefix for the training parquet files. We expect files named like:
-                base_dir + "1_marker_values.parquet",
-                base_dir + "1_coverage.parquet",
-                base_dir + "1_ground_truth_y.parquet",
-                and so on up to num_files.
-        atlas (pd.DataFrame):
-            DataFrame with marker metadata plus columns for each cell type (atlas.columns[8:] are cell types).
-        names (set):
-            The set of marker names to keep (usually matches the set in the atlas).
-        num_files (int):
-            Number of parquet file batches to merge. Defaults to 4.
-
+        base_dir: Path prefix for training parquet files
+        atlas: DataFrame with marker metadata
+        names: Set of marker names to keep
+        num_files: Number of parquet file batches to merge
+        target_dist_params: Parameters for target clinical coverage distribution
+        
     Returns:
-        DataLoader:
-            A DataLoader over the merged training dataset with batch_size=256, shuffle=True, etc.
+        DataLoader: DataLoader over the pre-augmented training data with shuffling.
     """
-    markers = []
-    coverage = []
-    y = []
-    
+    # Load data
+    markers, coverage, y = [], [], []
     print("loading training from", base_dir)
-    suffixes = [f"_batch{i}" for i in range(1, (num_files + 1)*3)]
+    for i in range(1, num_files + 1):
+        markers.append(pd.read_parquet(f"{base_dir}/{str(i)}_marker_values.parquet"))
+        coverage.append(pd.read_parquet(f"{base_dir}/{str(i)}_coverage.parquet"))
+        y.append(pd.read_parquet(f"{base_dir}/{str(i)}_ground_truth_y.parquet"))
     
-    # Read multiple parquet files and accumulate marker values, coverage, and ground-truth
-    for cov in ['high', 'med', 'low']:
-        for i in range(1, num_files + 1):
-            markers.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_marker_values.parquet"))
-            coverage.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_coverage.parquet"))
-            y.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_ground_truth_y.parquet"))
-    
-    # Merge all marker tables on ['name','direction']
     merged_markers = markers[0]
+    suffixes = [f"_batch{i}" for i in range(1, len(markers))]
     for i, m in enumerate(markers[1:]):
         merged_markers = merged_markers.merge(
-            m,
-            on=['name', 'direction'],
-            how='outer',
-            suffixes=('', suffixes[i])
+            m, on=['name', 'direction'], how='outer', suffixes=('', suffixes[i])
         )
     
-    # Merge all coverage tables on ['name','direction']
     merged_coverage = coverage[0]
     for i, c in enumerate(coverage[1:]):
         merged_coverage = merged_coverage.merge(
-            c,
-            on=['name', 'direction'],
-            how='outer',
-            suffixes=('', suffixes[i])
+            c, on=['name', 'direction'], how='outer', suffixes=('', suffixes[i])
         )
     
-    # Concatenate all label DataFrames
     y = pd.concat(y, ignore_index=True).fillna(0)
     
-    # Filter out any markers not in 'names'
     X_train = merged_markers[merged_markers.name.isin(names)]
     coverage_train = merged_coverage[merged_coverage.name.isin(names)]
     
-    # Drop unnecessary columns and transpose => shape [samples, markers]
     X_train = X_train.drop(columns=["name", "direction"]).T.to_numpy()
     coverage_train = coverage_train.drop(columns=["name", "direction"]).T.to_numpy()
-    
-    # Print coverage stats for debug
-    print("median coverage", 
-          np.median(coverage_train, axis=1), 
-          "median of medians", 
-          np.median(np.median(coverage_train, axis=1)), 
-          "mean median", 
-          np.median(coverage_train, axis=1).mean())
-    
-    # Convert the label DataFrame to numpy
     y_train = y.to_numpy()
     
-    # Build a TissueDeconvolutionDataset
-    train_dataset = TissueDeconvolutionDataset(
-        X_train,
-        coverage_train,
-        atlas[atlas.columns[8:]].T.to_numpy(),
-        y_train
+
+    # # TEMP TEMP TEMP
+    # random_indices = np.random.choice(len(X_train), size=1000, replace=False)
+    # X_train = X_train[random_indices]
+    # coverage_train = coverage_train[random_indices]
+    # y_train = y_train[random_indices]
+    # # TEMP TEMP TEMP
+
+
+    print("Original coverage statistics:")
+    print("  Mean:", np.mean(coverage_train))
+    print("  Median:", np.median(coverage_train))
+    print("  5th percentile:", np.percentile(coverage_train, 5))
+    print("  95th percentile:", np.percentile(coverage_train, 95))
+    
+    # Compute x_nnls for original data
+    atlas_np = atlas[atlas.columns[8:]].T.to_numpy()
+    x_nnls_original = run_weighted_nnls(X_train, coverage_train, atlas_np)
+    print("shape of x_nnls_original:", x_nnls_original.shape)
+    
+    # Augment 50% of the dataset
+    num_samples = len(X_train)
+    num_to_augment = num_samples // 2
+    indices_to_augment = np.random.choice(num_samples, num_to_augment, replace=False)
+
+    # Temporary dataset for augmentation
+    temp_dataset = TissueDeconvolutionDataset(X_train, coverage_train, atlas_np, y_train)
+
+    augmented_fraction = []
+    augmented_coverage = []
+    for idx in indices_to_augment:
+        item = temp_dataset[idx]
+        fraction_np = item['X'].numpy().reshape(1, -1)
+        coverage_np = item['coverage'].numpy().reshape(1, -1)
+        aug_fraction, aug_coverage = coverage_matched_augmentation(
+            fraction_np,
+            coverage_np,
+            target_dist_params,
+            augmentation_prob=1.0
+        )
+        augmented_fraction.append(aug_fraction[0])
+        augmented_coverage.append(aug_coverage[0])
+
+    # Combine original and augmented data
+    augmented_fraction = np.stack(augmented_fraction)
+    augmented_coverage = np.stack(augmented_coverage)
+    combined_fraction = np.concatenate([X_train[:num_to_augment], augmented_fraction])
+    combined_coverage = np.concatenate([coverage_train[:num_to_augment], augmented_coverage])
+    combined_y = np.concatenate([y_train[:num_to_augment], y_train[indices_to_augment]])
+    # Combine x_nnls: original samples use first num_to_augment, augmented use their original indices
+    combined_x_nnls = np.concatenate([x_nnls_original[:num_to_augment], x_nnls_original[indices_to_augment]])
+
+    # Save to disk with a unique name based on base_dir
+    dataset_name = Path(base_dir).name
+    np.save(f"pre_augmented_fraction_{dataset_name}.npy", combined_fraction)
+    np.save(f"pre_augmented_coverage_{dataset_name}.npy", combined_coverage)
+    np.save(f"pre_augmented_y_{dataset_name}.npy", combined_y)
+    np.save(f"pre_augmented_x_nnls_{dataset_name}.npy", combined_x_nnls)
+
+    # Load pre-augmented dataset with x_nnls
+    pre_augmented_dataset = PreAugmentedTissueDataset(
+        combined_fraction,
+        combined_coverage,
+        atlas_np,
+        combined_y,
+        x_nnls=combined_x_nnls,
+        model=model,
     )
-    
-    # Also create a normalized version of y for potential usage
-    y_train = torch.tensor(y_train, dtype=torch.float32)
-    y_train = y_train / y_train.sum(dim=1, keepdim=True)
-    
-    # Return a DataLoader for training
-    return DataLoader(
-        train_dataset,
-        batch_size=256,
+    print(f"Training dataset has {len(pre_augmented_dataset)} samples.")
+
+    # Create DataLoader with shuffling
+    train_dl = DataLoader(
+        pre_augmented_dataset,
+        batch_size=64,
         shuffle=True,
-        num_workers=4,
+        num_workers=24,
+        pin_memory=False,
         persistent_workers=True
     )
-   
+    return train_dl
+
+def enhanced_negative_examples(
+    train_dl: DataLoader,
+    cell_types: list,
+    atlas: pd.DataFrame,
+    sample_fraction: float = 0.01,
+    target_dist_params: dict = None,
+    model=None,
+) -> DataLoader:
+    """
+    Enhance the training dataset by adding negative examples for each cell type.
+    
+    Args:
+        train_dl: Original training DataLoader
+        cell_types: List of cell type names
+        atlas: DataFrame with marker metadata
+        sample_fraction: Fraction of samples to use as negative examples per cell type
+        target_dist_params: Target coverage distribution parameters
+        
+    Returns:
+        DataLoader: Enhanced DataLoader with negative examples
+    """
+    # Extract the original dataset
+    dataset = train_dl.dataset
+    fraction = np.concatenate([d.fraction.numpy() for d in dataset.datasets])
+    coverage = np.concatenate([d.coverage.numpy() for d in dataset.datasets])
+    y = np.concatenate([d.y.numpy() for d in dataset.datasets])
+
+    print("Original dataset size:", len(y), "samples")
+
+    # Prepare atlas for NNLS computation
+    atlas_np = atlas[atlas.columns[8:]].T.to_numpy()
+
+    # Create negative examples for each cell type
+    negative_fractions = []
+    negative_coverages = []
+    negative_ys = []
+    print("Creating negative examples for each cell type...")
+    for cell_idx, cell_type in enumerate(cell_types):
+        print(f"Processing {cell_type} (index {cell_idx})...")
+        # Find samples where this cell type is absent (proportion = 0)
+        absent_mask = y[:, cell_idx] == 0
+        absent_indices = np.where(absent_mask)[0]
+        print(f"  Found {len(absent_indices)} samples with {cell_type} absent")
+
+        # Select a fraction of these samples
+        num_samples = int(len(absent_indices) * sample_fraction)
+        selected_indices = np.random.choice(absent_indices, num_samples, replace=False)
+        print(f"  Selected {num_samples} samples to use as negative examples")
+
+        # Extract the selected samples
+        selected_fraction = fraction[selected_indices]
+        selected_coverage = coverage[selected_indices]
+        selected_y = y[selected_indices]
+
+        negative_fractions.append(selected_fraction)
+        negative_coverages.append(selected_coverage)
+        negative_ys.append(selected_y)
+
+    # Combine all negative examples (pre-augmentation)
+    negative_fraction = np.concatenate(negative_fractions)
+    negative_coverage = np.concatenate(negative_coverages)
+    negative_y = np.concatenate(negative_ys)
+
+    # Pre-augment 50% of the negative examples
+    num_negative_samples = len(negative_y)
+    num_to_augment = num_negative_samples // 2
+    indices_to_augment = np.random.choice(num_negative_samples, num_to_augment, replace=False)
+
+    # Augment selected samples
+    augmented_fraction = []
+    augmented_coverage = []
+    for idx in indices_to_augment:
+        fraction_np = negative_fraction[idx].reshape(1, -1)
+        coverage_np = negative_coverage[idx].reshape(1, -1)
+        aug_fraction, aug_coverage = coverage_matched_augmentation(
+            fraction_np,
+            coverage_np,
+            target_dist_params,
+            augmentation_prob=1.0
+        )
+        augmented_fraction.append(aug_fraction[0])
+        augmented_coverage.append(aug_coverage[0])
+
+    augmented_fraction = np.stack(augmented_fraction)
+    augmented_coverage = np.stack(augmented_coverage)
+
+    # Combine original and augmented negative examples
+    # Use the first half of original samples and all augmented samples
+    combined_negative_fraction = np.concatenate([negative_fraction[:num_to_augment], augmented_fraction])
+    combined_negative_coverage = np.concatenate([negative_coverage[:num_to_augment], augmented_coverage])
+    combined_negative_y = np.concatenate([negative_y[:num_to_augment], negative_y[indices_to_augment]])
+
+    # Recompute x_nnls for all combined negative examples
+    combined_negative_x_nnls = run_weighted_nnls(combined_negative_fraction, combined_negative_coverage, atlas_np)
+
+    # Save to disk
+    np.save("pre_augmented_negative_fraction.npy", combined_negative_fraction)
+    np.save("pre_augmented_negative_coverage.npy", combined_negative_coverage)
+    np.save("pre_augmented_negative_y.npy", combined_negative_y)
+    np.save("pre_augmented_negative_x_nnls.npy", combined_negative_x_nnls)
+
+    # Create pre-augmented dataset for negative examples
+    negative_dataset = PreAugmentedTissueDataset(
+        combined_negative_fraction,
+        combined_negative_coverage,
+        atlas_np,
+        combined_negative_y,
+        x_nnls=combined_negative_x_nnls,
+        model=model,
+    )
+
+    # Combine original dataset with negative examples
+    enhanced_dataset = ConcatDataset([train_dl.dataset, negative_dataset])
+    print(f"Adding {len(negative_dataset)} negative examples to the dataset")
+    print(f"Enhanced dataset created: {len(train_dl.dataset)} → {len(enhanced_dataset)} samples")
+
+    # Create new DataLoader
+    enhanced_train_dl = DataLoader(
+        enhanced_dataset,
+        batch_size=train_dl.batch_size,
+        shuffle=True,
+        num_workers=train_dl.num_workers,
+        pin_memory=train_dl.pin_memory,
+        persistent_workers=train_dl.persistent_workers
+    )
+
+    return enhanced_train_dl
 
 def train_and_eval(
     atlas_path: str,
@@ -201,138 +446,204 @@ def train_and_eval(
     eval_pat_dir: str,
     threads: int,
     output_path: str,
-    use_loyfer: bool,
     presence_models_dir: str,
 ) -> nn.Module:
-    """
-    Loads data, trains a CellTypeDeconvolutionModel, and evaluates it on multiple validation sets.
-
-    Steps:
-      1. Set random seeds and threads for reproducibility.
-      2. Read the atlas (marker metadata + cell types).
-      3. Build a training DataLoader from training parquet files in `train_pat_dir`.
-      4. Build validation DataLoaders for multiple subsets (e.g. tier1, CD4, CD8, OAC).
-      5. Construct the CellTypeDeconvolutionModel, mapping each marker to a specific cell type.
-      6. Train the model (train_model) with early stopping, saving best model checkpoints to `output_path`.
-      7. Retrieve the best threshold recommended by the training process.
-      8. Evaluate final model predictions on each validation subset and log performance metrics.
-      9. Return the trained model (with best checkpoint loaded).
-
-    Args:
-        atlas_path (str):
-            Path to a TSV (or CSV with sep="\t") containing at least columns 
-            ['name', 'target', ... plus cell type columns in columns[8:]].
-        train_pat_dir (str):
-            Directory containing training parquet files:
-               e.g. "1_marker_values.parquet", "1_coverage.parquet", 
-                    "1_ground_truth_y.parquet", etc.
-        eval_pat_dir (str):
-            Directory containing separate validation parquet files 
-            (subfolders for "tier1", "CD4", "CD8", "OAC", etc.).
-        threads (int):
-            Number of CPU threads to use for PyTorch operations and data loading.
-        output_path (str):
-            Where to save the final trained model checkpoints and any ancillary outputs.
-
-    Returns:
-        nn.Module:
-            The final trained model with the best checkpoint loaded.
-            (Primarily for additional inference in the calling scope.)
-    """
-    # Fix random seeds and threads for reproducibility
     set_seed()
     torch.set_num_threads(threads)
     torch.set_num_interop_threads(1)
 
-    # 1) Read the atlas of markers and cell types
     atlas = pd.read_csv(atlas_path, sep="\t")
-    
-    # The 'names' set ensures we only keep relevant markers
     names = set(atlas.name.unique())
 
-    # 2) Build the training DataLoader from parquet files in train_pat_dir
-    train_dl = load_training(train_pat_dir, atlas, names)
-
-    # 3) Build DataLoaders for each validation subset
-    
-    if use_loyfer:
-        validation_dls = {}
-        y_vals = {}
-        for cov in ['high','med','low']:
-            tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "tier1"), atlas, names)
-            tcells_dl, tcells_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "T-cells"), atlas, names)
-            oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir+"_"+cov) / "OAC"), atlas, names)
-
-            validation_dls[f"tier1_{cov}"] = tier1_dl
-            validation_dls[f"t-cells_{cov}"] = tcells_dl
-            validation_dls[f"oac_{cov}"] = oac_dl
-
-            y_vals[f"tier1_{cov}"] = t1_yval
-            y_vals[f"t-cells_{cov}"] = tcells_yval
-            y_vals[f"oac_{cov}"] = oac_yval
-    else:
-        tier1_dl, t1_yval = get_validation_set(str(Path(eval_pat_dir) / "tier1"), atlas, names)
-        cd4_dl, cd4_yval = get_validation_set(str(Path(eval_pat_dir) / "CD4"), atlas, names)
-        cd8_dl, cd8_yval = get_validation_set(str(Path(eval_pat_dir) / "CD8"), atlas, names)
-        oac_dl, oac_yval = get_validation_set(str(Path(eval_pat_dir) / "OAC"), atlas, names)
-
-        validation_dls = {
-            "tier1": tier1_dl,
-            "cd4": cd4_dl,
-            "cd8": cd8_dl,
-            "oac": oac_dl
+    clinical_dist_params = {
+        'low': {
+            'mean': 10.0, 'std': 6.0, 'log_params': {'mean': 2.08, 'std': 0.8},
+            'quantiles': {'5%': 1.0, '25%': 4.0, '50%': 8.0, '75%': 12.0, '95%': 20.0},
+            'zero_rate': 0.03
+        },
+        'med': {
+            'mean': 25.0, 'std': 10.0, 'log_params': {'mean': 3.0, 'std': 0.7},
+            'quantiles': {'5%': 5.0, '25%': 12.0, '50%': 20.0, '75%': 30.0, '95%': 50.0},
+            'zero_rate': 0.004
+        },
+        'high': {
+            'mean': 70.0, 'std': 20.0, 'log_params': {'mean': 4.2, 'std': 0.6},
+            'quantiles': {'5%': 30.0, '25%': 50.0, '50%': 67.0, '75%': 85.0, '95%': 120.0},
+            'zero_rate': 0.004
+        },
+        'clinical': {
+            'mean': 5.0, 'std': 4.0, 'log_params': {'mean': 1.4, 'std': 0.9},
+            'quantiles': {'5%': 0.5, '25%': 2.0, '50%': 4.0, '75%': 7.0, '95%': 12.0},
+            'zero_rate': 0.2
         }
+    }
 
-        y_vals = {
-            "tier1": t1_yval,
-            "cd4": cd4_yval,
-            "cd8": cd8_yval,
-            "oac": oac_yval
-        }
-
-
-    # 4) Identify all cell type columns (atlas.columns[8:])
-    cell_types = list(atlas.columns[8:])
-
-    # Build an array mapping each marker to its cell type index
+    cell_types = list(atlas.columns[8:]) 
     target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
 
-    # 5) Create the model
     model = CellTypeDeconvolutionModel(
-        num_markers=len(atlas),
+        num_markers=len(atlas), 
         num_cell_types=len(cell_types),
-        target_ids=target_ids,
         presence_models_dir=presence_models_dir,
-    )
+        target_ids=target_ids,
+        feature_dim=64,
 
-    # 6) Train the model, saving best checkpoint to `output_path`
-    model, best_threshold = train_model(
+    )
+    start_data_prep_time = time.time()
+    start_train_time = time.time()
+    train_dl_low = load_training_with_augmentation(
+        f"{train_pat_dir}_low", atlas, names, num_files=3,
+        target_dist_params=clinical_dist_params['low'],
         model=model,
-        train_loader=train_dl,
-        val_loaders=validation_dls,
-        model_path=output_path
     )
-    
-    # Print the threshold the training process found to be best
-    print("best_threshold", best_threshold)
+    train_dl_med = load_training_with_augmentation(
+        f"{train_pat_dir}_med", atlas, names, num_files=1,
+        target_dist_params=clinical_dist_params['med'],
+        model=model,
+    )
+    train_dl_high = load_training_with_augmentation(
+        f"{train_pat_dir}_high", atlas, names, num_files=1,
+        target_dist_params=clinical_dist_params['high'],
+        model=model,
+    )
 
-    # 7) Evaluate final model predictions on each validation set
-    for tier in validation_dls.keys():
-        tier_dl = validation_dls[tier]
+    train_dataset = ConcatDataset([train_dl_low.dataset, train_dl_med.dataset, train_dl_high.dataset])
+    train_dl = DataLoader(
+        train_dataset,
+        batch_size=64,
+        shuffle=True,
+        num_workers=16,
+        pin_memory=False,
+        persistent_workers=True
+    )
+
+    print(f"train preparation took {time.time() - start_train_time:.2f} seconds")
+
+    start_validation_time = time.time()
+    # Create two versions of each validation dataset: unaugmented and augmented
+    val_loaders_unaugmented = {}
+    val_loaders_augmented = {}
+    y_vals = {}
+    for cov in ['high', 'med', 'low', 'clinical']:
+        # Unaugmented version
+        tier1_dl_unaugmented, t1_yval = get_validation_set_with_augmentation(
+            str(Path(eval_pat_dir + "_" + cov) / "tier1"), atlas, names,
+            block_size=50_000,
+            target_dist_params=clinical_dist_params[cov],
+            enable_augmentation=False,
+            target_size=50_000,
+            model=model,
+        )
+        print(f"Validation set {cov} tier1 length (unaugmented)={len(t1_yval)}")
+
+        tcells_dl_unaugmented, tcells_yval = get_validation_set_with_augmentation(
+            str(Path(eval_pat_dir + "_" + cov) / "T-cells"), atlas, names,
+            block_size=10_000,
+            target_dist_params=clinical_dist_params[cov],
+            enable_augmentation=False,
+            target_size=None,    
+            model=model,     
+        )
+        print(f"Validation set {cov} tcells length (unaugmented)={len(tcells_yval)}")
+
+        oac_dl_unaugmented, oac_yval = get_validation_set_with_augmentation(
+            str(Path(eval_pat_dir + "_" + cov) / "OAC"), atlas, names,
+            block_size=1_000,
+            target_dist_params=clinical_dist_params[cov],
+            enable_augmentation=False,
+            target_size=None,
+            model=model,
+        )
+        print(f"Validation set {cov} oac length (unaugmented)={len(oac_yval)}")
+
+        # Augmented version
+        tier1_dl_augmented, _ = get_validation_set_with_augmentation(
+            str(Path(eval_pat_dir + "_" + cov) / "tier1"), atlas, names,
+            block_size=50_000,
+            target_dist_params=clinical_dist_params[cov],
+            enable_augmentation=True,
+            target_size=50_000,
+            model=model,   
+        )
+        print(f"Validation set {cov} tier1 length (augmented)={len(t1_yval)}")
+
+        tcells_dl_augmented, _ = get_validation_set_with_augmentation(
+            str(Path(eval_pat_dir + "_" + cov) / "T-cells"), atlas, names,
+            block_size=10_000,
+            target_dist_params=clinical_dist_params[cov],
+            enable_augmentation=True,
+            target_size=None,       
+            model=model, 
+        )
+        print(f"Validation set {cov} tcells length (augmented)={len(tcells_yval)}")
+
+        oac_dl_augmented, _ = get_validation_set_with_augmentation(
+            str(Path(eval_pat_dir + "_" + cov) / "OAC"), atlas, names,
+            block_size=1_000,
+            target_dist_params=clinical_dist_params[cov],
+            enable_augmentation=True,
+            target_size=None,    
+            model=model,      
+        )
+        print(f"Validation set {cov} oac length (augmented)={len(oac_yval)}")
+
+        # Store in dictionaries
+        val_loaders_unaugmented[f"tier1_{cov}"] = tier1_dl_unaugmented
+        val_loaders_unaugmented[f"t-cells_{cov}"] = tcells_dl_unaugmented
+        val_loaders_unaugmented[f"oac_{cov}"] = oac_dl_unaugmented
+
+        val_loaders_augmented[f"tier1_{cov}"] = tier1_dl_augmented
+        val_loaders_augmented[f"t-cells_{cov}"] = tcells_dl_augmented
+        val_loaders_augmented[f"oac_{cov}"] = oac_dl_augmented
+
+        y_vals[f"tier1_{cov}"] = t1_yval
+        y_vals[f"t-cells_{cov}"] = tcells_yval
+        y_vals[f"oac_{cov}"] = oac_yval
+
+    print(f"validation preparation took {time.time() - start_validation_time:.2f} seconds")
+
+    enhancing_start_time = time.time()
+    enhanced_train_dl = enhanced_negative_examples(
+        train_dl,
+        cell_types,
+        atlas,
+        sample_fraction=0.01,
+        target_dist_params=clinical_dist_params['clinical'],
+        model=model,
+    )
+    print(f"enhancing with negative samples preparation took {time.time() - enhancing_start_time:.2f} seconds")
+    print("====================================================================")
+    print(f"total preparation time took {time.time() - start_data_prep_time:.2f} seconds")
+    print("====================================================================")
+
+    model, _ = train_model(
+        model=model,
+        train_loader=enhanced_train_dl,
+        val_loaders=(val_loaders_unaugmented, val_loaders_augmented),
+        model_path=output_path,
+        cell_types=cell_types,
+        num_epochs=1000,
+        patience=10, 
+        lr=1e-3, 
+        weight_decay=1e-5
+    )
+
+    print("\nStandard Validation Sets:")
+    for tier in val_loaders_unaugmented.keys():
+        tier_dl = val_loaders_unaugmented[tier]
         y_val = y_vals[tier]
-
-        # Use the simple predict function to get proportions
-        deep_conv_estimation = predict_with_consensus(model, tier_dl.dataset.fraction, tier_dl.dataset.coverage)
-
-        # Evaluate with a custom evaluation function
+        deep_conv_estimations = []
+        for batch in tier_dl:
+            fraction = batch['X']
+            coverage = batch['coverage']
+            batch_estimation = predict_with_consensus(model, fraction, coverage)
+            deep_conv_estimations.append(batch_estimation)
+        deep_conv_estimation = np.concatenate(deep_conv_estimations, axis=0)
         deep_conv_eval_metrics = evaluate_performance(y_val.detach().numpy(), deep_conv_estimation, cell_types)
-
-        print(f"deepconv validation metrics for tier {tier}")
+        print(f"Standard validation metrics for tier {tier}")
         log_metrics(deep_conv_eval_metrics)
-    
-    # Return the trained model for downstream usage
-    return model    
 
+    return model
 
 def main():
     parser = argparse.ArgumentParser(description="Deep conv")
@@ -340,12 +651,23 @@ def main():
     parser.add_argument("--train_path", type=str, required=True)
     parser.add_argument("--eval_path", type=str, required=True)
     parser.add_argument("--output_path", type=str, required=True)
-    parser.add_argument("--num_threads",required=False, type=int, default=32)
+    parser.add_argument("--num_threads", required=False, type=int, default=32)
+    parser.add_argument("--presence_models_dir", type=str, required=True)
+    parser.add_argument("--detect_anomaly", action="store_true", default=False)
     
     args = parser.parse_args()
     
-    train_and_eval(args.atlas_path, args.train_path+"/train",args.eval_path+"/eval", args.num_threads, args.output_path)
+    if args.detect_anomaly:
+        torch.autograd.set_detect_anomaly(True)
     
+    train_and_eval(
+        args.atlas_path,
+        args.train_path + "/train",
+        args.eval_path + "/eval",
+        args.num_threads,
+        args.output_path,
+        args.presence_models_dir
+    )
 
 if __name__ == "__main__":    
     main()

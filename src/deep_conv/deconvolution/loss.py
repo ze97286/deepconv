@@ -1,4 +1,4 @@
-import torch 
+import torch
 import torch.nn.functional as F
 
 def loss_fn(
@@ -10,181 +10,167 @@ def loss_fn(
     valid_mask: torch.Tensor,
     presence_probs: torch.Tensor,
     presence_logits: torch.Tensor,
-    alpha: float = 0.92,        # Slightly reduced to better balance components
-    beta: float = 0.07,         # Slightly increased for reconstruction
-    gamma: float = 0.01,        # Increased to encourage sparsity  
+    x_nnls: torch.Tensor,
+    dl_props: torch.Tensor,
+    combination_weight: torch.Tensor,
+    alpha: float = 0.92,
+    beta: float = 0.07,
+    gamma: float = 0.01,
     presence_threshold: float = 0.005,
-    low_snr_indices=[3, 4, 9, 11],
+    low_snr_indices: list = [3, 4, 9, 11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-):
-    """
-    Loss function for deconvolution model with integrated presence models.
-    
-    This updated version focuses on proportion accuracy with presence models
-    treated as features rather than binary gates.
+) -> tuple[torch.Tensor, dict]:
+    """Calculate the loss for a cell-type deconvolution model with integrated presence models.
+
+    This loss function combines multiple components to train the model effectively:
+    1. Proportion error, penalising discrepancies between predicted and true cell-type proportions,
+       with enhanced weighting for low-concentration and low-signal-to-noise ratio (SNR) cell types.
+    2. Coverage-weighted reconstruction error, ensuring predicted proportions align with input
+       methylation data.
+    3. Sparsity penalty, encouraging fewer active cell types in predictions.
+    4. Optional regularisation terms for ensembling with non-negative least squares (NNLS)
+       predictions, though currently weighted to zero.
+
+    The function also computes detailed diagnostics for monitoring training, including presence
+    detection metrics and errors across concentration ranges.
 
     Args:
-        pred_props (FloatTensor): [B, C]
-            Model's predicted proportions per sample (B) for each cell type (C), summing to ~1.
-        true_props (FloatTensor): [B, C]
-            Ground-truth cell-type proportions.
-        reconstructed (FloatTensor): [B, M]
-            Model's reconstructed marker methylation values (decoder output).
-        marker_values (FloatTensor): [B, M]
-            True marker methylation values. Can contain invalid entries where coverage=0.
-        coverage (FloatTensor): [B, M]
-            Coverage (read depth) at each marker, used for weighting the reconstruction error.
-        valid_mask (BoolTensor): [B, M]
-            Indicates which (sample, marker) positions have coverage>0 (valid).
-        presence_probs (FloatTensor): [B, C]
-            Sigmoid probabilities from the pre-trained presence detection models.
-        presence_logits (FloatTensor): [B, C]
-            Logits (before sigmoid) from the pre-trained presence detection models.
-        alpha (float):
-            Weight for the proportion error term (often near 1.0).
-        beta (float):
-            Weight for the reconstruction term (marker-level error).
-        gamma (float):
-            Weight for the sparsity penalty (discourage spread-out predictions).
-        presence_threshold (float):
-            Threshold on true_props to determine presence (for evaluation metrics).
-        low_snr_indices (list[int]):
-            Indices of cell types considered "low SNR" or difficult to detect.
-        device (torch.device):
-            Computation device.
+        pred_props (torch.FloatTensor): Predicted cell-type proportions [B, C], ensembled if x_nnls is provided.
+        true_props (torch.FloatTensor): Ground-truth cell-type proportions [B, C].
+        reconstructed (torch.FloatTensor): Reconstructed marker methylation values [B, M].
+        marker_values (torch.FloatTensor): True marker methylation values [B, M], NaN where coverage=0.
+        coverage (torch.FloatTensor): Read coverage values [B, M].
+        valid_mask (torch.BoolTensor): Mask indicating valid markers (coverage > 0) [B, M].
+        presence_probs (torch.FloatTensor): Presence probabilities from pre-trained models [B, C].
+        presence_logits (torch.FloatTensor): Raw logits before sigmoid for presence probabilities [B, C].
+        x_nnls (torch.FloatTensor): NNLS predictions [B, C], or None if ensembling is disabled.
+        dl_props (torch.FloatTensor): Deep learning-only proportions before ensembling [B, C].
+        combination_weight (torch.FloatTensor): Ensembling weights for DL and NNLS predictions [C].
+        alpha (float, optional): Weight for proportion error term. Defaults to 0.92.
+        beta (float, optional): Weight for reconstruction error term. Defaults to 0.07.
+        gamma (float, optional): Weight for sparsity penalty term. Defaults to 0.01.
+        presence_threshold (float, optional): Threshold for defining cell-type presence. Defaults to 0.005.
+        low_snr_indices (list, optional): Indices of low-SNR cell types (e.g., T-cells, OAC). Defaults to [3, 4, 9, 11].
+        device (torch.device, optional): Device for computation. Defaults to CUDA if available, else CPU.
 
     Returns:
-        total_loss (Tensor):
-            A scalar tensor representing the combined loss.
-        details (dict):
-            A dictionary of intermediate scalars/statistics for monitoring.
+        tuple:
+            - torch.Tensor: Combined loss scalar.
+            - dict: Flattened dictionary of diagnostic statistics, including loss components and performance metrics.
     """
-    # -----------------------------
-    # (1) Proportion Error 
-    # -----------------------------
-    # Standard mean absolute error
+    # 1. Proportion Error: Penalise differences between predicted and true proportions
     cell_errors = torch.abs(pred_props - true_props)
-    
-    # Create importance weights for different concentration levels
+
+    # Initialise importance weights for different concentration ranges
     importance_weights = torch.ones_like(true_props)
-    
-    # Concentration-dependent masks for weighting
+
+    # Define concentration masks to prioritise low and medium concentrations
     low_conc_mask = (true_props > 0.001) & (true_props <= 0.01)
     med_conc_mask = (true_props > 0.01) & (true_props <= 0.05)
     high_conc_mask = true_props > 0.05
-    
-    # Scale importance by concentration range - gentler scaling
-    importance_weights = torch.where(low_conc_mask, 1.8, importance_weights)   # Lower weight than before
-    importance_weights = torch.where(med_conc_mask, 1.4, importance_weights)   # Lower weight than before
+
+    # Assign higher weights to lower concentrations to improve sensitivity
+    importance_weights = torch.where(low_conc_mask, 1.8, importance_weights)
+    importance_weights = torch.where(med_conc_mask, 1.4, importance_weights)
     importance_weights = torch.where(high_conc_mask, 1.0, importance_weights)
-    
-    # Special handling for low-SNR cell types - less aggressive
+
+    # Apply additional weighting for low-SNR cell types, capped to avoid overemphasis
     for idx in low_snr_indices:
         capped_fraction = torch.clamp(true_props[:, idx], max=0.10)
-        importance_weights[:, idx] *= (1.0 + 10.0 * capped_fraction)  # Reduced multiplier
-    
-    # Calculate underestimation/overestimation
-    underestimation = F.relu(true_props - pred_props)  # only positive if true>pred
-    overestimation = F.relu(pred_props - true_props)   # only positive if pred>true
-    
-    # Create low-SNR mask
+        importance_weights[:, idx] *= (1.0 + 10.0 * capped_fraction)
+
+    # Calculate underestimation and overestimation errors
+    underestimation = F.relu(true_props - pred_props)
+    overestimation = F.relu(pred_props - true_props)
+
+    # Create mask for low-SNR cell types
     low_snr_mask = torch.zeros_like(true_props)
     low_snr_mask[:, low_snr_indices] = 1.0
-    
-    # Apply moderate penalty for underestimation 
-    underestimation_penalty = 1.3 * underestimation  # Reduced from 1.5
-    
-    # Less aggressive special penalty for low-SNR underestimation
-    low_snr_under_penalty = low_snr_mask * underestimation * 0.7  # Reduced further
-    
-    # Combine into weighted errors
+
+    # Apply penalties for underestimation, with extra penalty for low-SNR cell types
+    underestimation_penalty = 1.3 * underestimation
+    low_snr_under_penalty = low_snr_mask * underestimation * 0.7
+
+    # Combine errors with weights to compute proportion loss
     weighted_errors = importance_weights * (cell_errors + underestimation_penalty + low_snr_under_penalty)
-    
-    # Mean across all cells in the batch
     loss_props = weighted_errors.mean()
-    
-    # -----------------------------
-    # (2) Coverage-Weighted Reconstruction Loss
-    # -----------------------------
-    # Replace NaN marker values with reconstructed values where invalid
+
+    # 2. Coverage-Weighted Reconstruction Loss: Ensure predicted proportions align with input data
     safe_marker_values = torch.where(valid_mask, marker_values, reconstructed)
-    
-    # Coverage-weighted L1 loss
     recon_loss = torch.sum(
         valid_mask * coverage * torch.abs(safe_marker_values - reconstructed)
     ) / (torch.sum(valid_mask * coverage) + 1e-8)
-    
-    # -----------------------------
-    # (3) Sparsity Regularisation (very low weight)
-    # -----------------------------
-    # Encourages the model to predict fewer cell types present
+
+    # 3. Sparsity Penalty: Encourage fewer active cell types
     sparsity_penalty = torch.mean(torch.sum(pred_props, dim=1))
-    
-    # -----------------------------
-    # Combine All Terms
-    # -----------------------------
-    total_loss = alpha * loss_props + beta * recon_loss + gamma * sparsity_penalty
-    
-    # -----------------------------
-    # (4) Detailed Monitoring / Diagnostics
-    # -----------------------------
+
+    # 4. NNLS Regularisation: Penalise deviation from NNLS predictions (currently disabled)
+    reg_loss = torch.tensor(0.0, device=device)
+    if x_nnls is not None:
+        c = coverage.mean(dim=1)
+        reg_loss = (c * (pred_props - x_nnls).pow(2).sum(dim=1)).mean()
+
+    # 5. Weight Penalty: Balance DL and NNLS contributions in ensembling (currently disabled)
+    weight_penalty = torch.tensor(0.0, device=device)
+    if x_nnls is not None:
+        nnls_cell_errors = torch.abs(x_nnls - true_props).detach()
+        dl_cell_errors = torch.abs(dl_props - true_props).detach()
+        weights = torch.sigmoid(combination_weight).unsqueeze(0)
+        weight_penalty = (weights * nnls_cell_errors + (1 - weights) * dl_cell_errors).mean()
+
+    # Combine all loss terms with specified weights
+    total_loss = (
+        alpha * loss_props +
+        beta * recon_loss +
+        gamma * sparsity_penalty +
+        0.0 * reg_loss +  # Disabled to match current model behaviour
+        0.0 * weight_penalty  # Disabled to match current model behaviour
+    )
+
+    # 6. Diagnostics: Compute detailed metrics for monitoring
     with torch.no_grad():
-        # Convert true_props to presence vs. absence based on threshold
+        # Convert true proportions to binary presence/absence
         presence_targets = (true_props > presence_threshold).float()
-        
-        # Use pre-trained presence probabilities for evaluation
         presence_preds = (presence_probs > 0.5).float()
-        
-        # Confusion counts
+
+        # Calculate confusion matrix components
         true_positives = torch.sum(presence_preds * presence_targets, dim=0)
         false_positives = torch.sum(presence_preds * (1 - presence_targets), dim=0)
         false_negatives = torch.sum((1 - presence_preds) * presence_targets, dim=0)
         true_negatives = torch.sum((1 - presence_preds) * (1 - presence_targets), dim=0)
-        
-        # Precision / Recall / F1 
+
+        # Compute presence detection metrics
         precision = true_positives / (true_positives + false_positives + 1e-8)
         recall = true_positives / (true_positives + false_negatives + 1e-8)
         f1 = 2.0 * precision * recall / (precision + recall + 1e-8)
-        
         avg_precision = torch.mean(precision)
         avg_recall = torch.mean(recall)
         avg_f1 = torch.mean(f1)
         accuracy = torch.mean((presence_preds == presence_targets).float())
-        
-        # Error in different concentration ranges
+
+        # Calculate errors for different concentration ranges
         low_conc_error = torch.mean(torch.masked_select(cell_errors, low_conc_mask))
         med_conc_error = torch.mean(torch.masked_select(cell_errors, med_conc_mask))
         high_conc_error = torch.mean(torch.masked_select(cell_errors, high_conc_mask))
-    
+
+    # Compile diagnostics into a flattened dictionary
     details = {
         'total_loss': total_loss.item(),
         'loss_props': loss_props.item(),
         'recon_loss': recon_loss.item(),
         'sparsity_loss': sparsity_penalty.item(),
+        'reg_loss': reg_loss.item(),
+        'weight_penalty': weight_penalty.item(),
         'low_snr_under': underestimation[:, low_snr_indices].mean().item(),
         'low_snr_over': overestimation[:, low_snr_indices].mean().item(),
-        'alpha_stats': {
-            'mean': torch.mean(pred_props).item(),
-            'std': torch.std(pred_props).item(),
-            'max': torch.max(pred_props).item(),
-            'min': torch.min(pred_props).item()
-        },
-        'concentration_errors': {
-            'low_conc': low_conc_error.item() if not torch.isnan(low_conc_error) else 0.0,
-            'med_conc': med_conc_error.item() if not torch.isnan(med_conc_error) else 0.0,
-            'high_conc': high_conc_error.item() if not torch.isnan(high_conc_error) else 0.0
-        },
-        'presence_stats': {
-            'accuracy': accuracy.item(),
-            'avg_precision': avg_precision.item(),
-            'avg_recall': avg_recall.item(),
-            'avg_f1': avg_f1.item(),
-            'true_positives': torch.sum(true_positives).item(),
-            'false_positives': torch.sum(false_positives).item(),
-            'false_negatives': torch.sum(false_negatives).item(),
-            'true_negatives': torch.sum(true_negatives).item()
-        },
+        'error_low_conc': low_conc_error.item() if not torch.isnan(low_conc_error) else 0.0,
+        'error_med_conc': med_conc_error.item() if not torch.isnan(med_conc_error) else 0.0,
+        'error_high_conc': high_conc_error.item() if not torch.isnan(high_conc_error) else 0.0,
+        'presence_accuracy': accuracy.item(),
+        'presence_precision': avg_precision.item(),
+        'presence_recall': avg_recall.item(),
+        'presence_f1': avg_f1.item(),
         'valid_ratio': torch.mean(valid_mask.float()).item()
     }
-    
+
     return total_loss, details

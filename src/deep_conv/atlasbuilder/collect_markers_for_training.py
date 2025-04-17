@@ -6,7 +6,6 @@ from pathlib import Path
 from deep_conv.atlasbuilder.find_marker_candidates import create_marker_matrices, get_ground_truth
 import plotly.graph_objects as go
 import plotly.subplots as sp
-import pandas as pd
 import math
 
 
@@ -140,15 +139,15 @@ def summarize_distribution(y_train, y_val, cell_types, out_dir):
     fig.write_image(out_dir+".png")    
 
 
-def merge(base_dir, num_files, prefix):
+def merge(base_dir, num_files, prefix, cov):
 	markers = []
 	coverage = []
 	y = []
 	suffixes = [f"_batch{i}" for i in range(1,num_files+1)]
 	for i in range(1,num_files+1):		
-		markers.append(pd.read_parquet(base_dir+str(i)+"/"+prefix+"/marker_values.parquet"))
-		coverage.append(pd.read_parquet(base_dir+str(i)+"/"+prefix+"/coverage.parquet"))
-		y.append(pd.read_parquet(base_dir+str(i)+"/"+prefix+"/ground_truth_y.parquet"))		
+		markers.append(pd.read_parquet(base_dir+str(i)+f"_{cov}/"+prefix+"/marker_values.parquet"))
+		coverage.append(pd.read_parquet(base_dir+str(i)+f"_{cov}/"+prefix+"/coverage.parquet"))
+		y.append(pd.read_parquet(base_dir+str(i)+f"_{cov}/"+prefix+"/ground_truth_y.parquet"))		
 	merged_markers = markers[0]
 	for i, m in enumerate(markers[1:]):
 		merged_markers = merged_markers.merge(m, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
@@ -156,23 +155,17 @@ def merge(base_dir, num_files, prefix):
 	for i, c in enumerate(coverage[1:]):
 		merged_coverage = merged_coverage.merge(c, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
 	y = pd.concat(y, ignore_index=True).fillna(0)
-	merged_markers.to_parquet(f"{base_dir}/{prefix}/marker_values.parquet", index=False)
-	merged_coverage.to_parquet(f"{base_dir}/{prefix}/coverage.parquet", index=False)
-	y.to_parquet(f"{base_dir}/{prefix}/ground_truth_y.parquet", index=False)
-	print(f"saved data to {base_dir}/{prefix}/")
+	merged_markers.to_parquet(f"{base_dir}/eval_{cov}/tier1/marker_values.parquet", index=False)
+	merged_coverage.to_parquet(f"{base_dir}/eval_{cov}/tier1/coverage.parquet", index=False)
+	y.to_parquet(f"{base_dir}/eval_{cov}/tier1/ground_truth_y.parquet", index=False)
+	print(f"saved data to {base_dir}/eval_{cov}/tier1/")
 
 
 def merge_all():
-    base_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/"
-    merge(base_dir, 5, "eval")
-
-
-
-
-    y_train = pd.read_parquet(base_dir+"train/ground_truth_y.parquet")
-    y_val = pd.read_parquet(base_dir+"eval/ground_truth_y.parquet")
-    cell_types = y_train.columns
-    summarize_distribution(y_train, y_val, cell_types, base_dir)
+    merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "high")
+    merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "med")
+    merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "low")
+    merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "clinical")
 
 
 def sample_to_dilution(sample):

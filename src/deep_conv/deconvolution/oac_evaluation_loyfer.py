@@ -536,7 +536,7 @@ def debug_model_predictions(model, X_val, coverage_val, y_true_df, threshold=0.0
         return props, presence_probs
 
 
-def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, min_cpgs=4, threads=10):
+def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, atlas_np):
     """
     Consistent evaluation function that matches training behavior.
     
@@ -553,12 +553,7 @@ def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, min_cpgs=4, th
     """
     # Prepare data
     X_val, coverage_val, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions)
-    
-    # First run the debug analysis to get insights
-    debug_props, debug_probs = debug_model_predictions(model, X_val, coverage_val, y_true_df, threshold=0.005)
-    
-    # Use the built-in prediction method that now properly integrates presence information
-    predictions = model.predict(X_val, coverage_val)
+    predictions = model.predict(X_val, coverage_val, atlas=atlas_np)
     predictions_df = pd.DataFrame(predictions, columns=list(y_true_df.columns))
     
     # Log summary statistics
@@ -591,10 +586,12 @@ def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type,
             num_cell_types=len(cell_types), 
             target_ids=target_ids, 
             presence_models_dir=f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{presence_model_name}",
+            feature_dim=64,
         )
         checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/best_model.pt")
         model.load_state_dict(checkpoint["model_state_dict"], strict=False)
-        estimation = model.predict(X_val,coverage_val)
+        atlas_np = atlas[atlas.columns[8:]].T.to_numpy()
+        estimation = model.predict(X_val,coverage_val, atlas=atlas_np)
     else:
         estimation = run_weighted_nnls(X_val, coverage_val, atlas[atlas.columns[8:]].T.values)
     df = pd.DataFrame(estimation, columns=list(atlas.columns[8:]))
@@ -759,7 +756,6 @@ def train_and_evaluate(model_name, presence_model_name):
                            eval_pat_dir=eval_pat_dir, 
                            threads=threads,
                            output_path=output_path, 
-                           use_loyfer=True,
                            presence_models_dir=presence_path)
 
 
@@ -773,16 +769,44 @@ def nnls_estimate(atlas_path, eval_pat_dir, dilutions):
     return y_true_df, predictions_df, y_dilutions
 
 
+def get_git_commit() -> Dict[str, str]:
+    """Get git repository information"""
+    import subprocess
+
+    try:
+        commit_hash = subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD']
+        ).strip().decode('utf-8')
+        
+        branch = subprocess.check_output(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD']
+        ).strip().decode('utf-8')
+        
+        status = subprocess.check_output(
+            ['git', 'status', '--porcelain']
+        ).strip().decode('utf-8')
+        
+       
+        return commit_hash
+    except subprocess.CalledProcessError:
+        return 'unknown'
+
+
 def eval_admixtures_nnls(atlas_path, size="low"):
     suffix = f"_{size}/"
+
+    commit_hash = get_git_commit()
     
     pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
+    pat_dir_tcells_with_heart = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}heart/"
     pat_dir_oac = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
 
     y_true_df, predictions_df, y_dilutions= nnls_estimate(atlas_path, pat_dir_tcells, tcell_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_tcells+"nnls/")
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_tcells+"nnls/", commit_hash)
     y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir_oac, oac_dilutions)
-    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_oac+"nnls/")
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_oac+"nnls/", commit_hash)
+    y_true_df, predictions_df, y_dilutions = nnls_estimate(atlas_path, pat_dir_tcells_with_heart, tcell_dilutions)
+    plot_deconvolution_evaluation(y_true_df, predictions_df, y_dilutions['dilution'], pat_dir_tcells_with_heart+"nnls/", commit_hash)
 
 
 def eval_admixtures(model_name,presence_model_name, size="low"):
@@ -803,52 +827,70 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
         use_low_depth: Whether to use low depth data
     """
     suffix = f"_{size}/"
-        
+
     deepconv_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
     deepconv_atlas = pd.read_csv(deepconv_atlas_path, sep="\t")
     cell_types = list(deepconv_atlas.columns[8:])
+
     target_ids = deepconv_atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
-    
     # Create model
     model = CellTypeDeconvolutionModel(
         num_markers=len(deepconv_atlas),
         num_cell_types=len(cell_types),
         target_ids=target_ids,
         presence_models_dir=f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{presence_model_name}",
+        feature_dim=64,
     )
-    
+
     # Load checkpoint
     best_model = "best_model.pt"
     checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/{best_model}")
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    
+    commit_hash = checkpoint["commit_hash"] if "commit_hash" in checkpoint else "unknown"
+    epoch = checkpoint["epoch"]
     # Print the 'best_threshold' if it exists in the checkpoint
     if 'best_threshold' in checkpoint:
         print(f"Model's best threshold from training: {checkpoint['best_threshold']}")
-    
+
     # Evaluation paths
     deepconv_eval_pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
     deepconv_eval_pat_dir_oac = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}OAC/"
-    
+    deepconv_eval_pat_dir_tcells_with_heart = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}heart/"
+
     # Run evaluations
     print("\n===== EVALUATING T-CELLS =====")
+    atlas_np = deepconv_atlas[deepconv_atlas.columns[8:]].T.to_numpy()
     y_true_df, predictions_df, y_dilutions = deepconv_estimate(
-        deepconv_atlas_path, deepconv_eval_pat_dir_tcells, model, tcell_dilutions
+        deepconv_atlas_path, deepconv_eval_pat_dir_tcells, model, tcell_dilutions, atlas_np
     )
     plot_deconvolution_evaluation(
         y_true_df, predictions_df, y_dilutions['dilution'], 
-        deepconv_eval_pat_dir_tcells+f"{model_name}/"
-    )
-    
-    print("\n===== EVALUATING OAC =====")
-    y_true_df, predictions_df, y_dilutions = deepconv_estimate(
-        deepconv_atlas_path, deepconv_eval_pat_dir_oac, model, oac_dilutions
-    )
-    plot_deconvolution_evaluation(
-        y_true_df, predictions_df, y_dilutions['dilution'], 
-        deepconv_eval_pat_dir_oac+f"{model_name}/"
+        deepconv_eval_pat_dir_tcells+f"{model_name}/",
+        commit_hash,
+        epoch=epoch,
     )
 
+    print("\n===== EVALUATING OAC =====")
+    y_true_df, predictions_df, y_dilutions = deepconv_estimate(
+        deepconv_atlas_path, deepconv_eval_pat_dir_oac, model, oac_dilutions, atlas_np
+    )
+    plot_deconvolution_evaluation(
+        y_true_df, predictions_df, y_dilutions['dilution'], 
+        deepconv_eval_pat_dir_oac+f"{model_name}/",
+        commit_hash,
+        epoch=epoch,
+    )
+
+    print("\n===== EVALUATING heart =====")
+    y_true_df, predictions_df, y_dilutions = deepconv_estimate(
+        deepconv_atlas_path, deepconv_eval_pat_dir_tcells_with_heart, model, tcell_dilutions, atlas_np
+    )
+    plot_deconvolution_evaluation(
+        y_true_df, predictions_df, y_dilutions['dilution'], 
+        deepconv_eval_pat_dir_tcells_with_heart+f"{model_name}/",
+        commit_hash,
+        epoch=epoch,
+    )
 
 # 3
 def run_oac_analysis(model_name, presence_model_name):

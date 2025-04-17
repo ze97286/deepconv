@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
-
 class BinaryCellTypeDataset(Dataset):
     """
     A PyTorch Dataset that treats cell type detection as a binary classification problem.
@@ -67,22 +66,24 @@ class BinaryCellTypeDataset(Dataset):
             
         return item
 
-
 class SingleCellTypePresenceModel(nn.Module):
     """
-    A binary classifier for detecting the presence of a specific cell type.
+    An enhanced binary classifier for cell type detection with improved handling of
+    low coverage and missing markers.
     
     Key features:
-    1. Uses only the markers relevant to the target cell type
-    2. Processes markers with varying coverage appropriately
-    3. Uses attention mechanism to focus on the most informative markers
-    4. Employs a deep architecture with residual connections for better feature extraction
-    5. Incorporates coverage information directly into feature extraction
-    6. Uses coverage-aware normalization for improved handling of low-coverage data
+    1. Multi-resolution analysis with pooling at different scales
+    2. Enhanced coverage-aware feature extraction
+    3. Explicit missing marker handling
+    4. Attention mechanism to focus on the most informative markers
+    5. Coverage-adaptive prediction threshold
+    6. Improved confidence factors for very low coverage
+    7. Single threshold loaded from checkpoint to achieve target specificity
     """
     def __init__(self, feature_dim=64, dropout_rate=0.3):
         super().__init__()
         self.feature_dim = feature_dim
+        self.specificity_threshold = 0.5
         
         # Input normalization
         self.input_norm = nn.BatchNorm1d(2)
@@ -90,6 +91,14 @@ class SingleCellTypePresenceModel(nn.Module):
         # Feature extraction with marker values and coverage
         self.feature_extractor = nn.Sequential(
             nn.Linear(2, feature_dim),
+            nn.BatchNorm1d(feature_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate)
+        )
+        
+        # Multi-resolution feature fusion
+        self.multi_res_fusion = nn.Sequential(
+            nn.Linear(feature_dim * 3, feature_dim),
             nn.BatchNorm1d(feature_dim),
             nn.ReLU(),
             nn.Dropout(dropout_rate)
@@ -109,9 +118,9 @@ class SingleCellTypePresenceModel(nn.Module):
             nn.Sigmoid()
         )
         
-        # Classification head
+        # Classification head with missing marker information
         self.classifier = nn.Sequential(
-            nn.Linear(feature_dim, 64),
+            nn.Linear(feature_dim + 1, 64),  # +1 for missing rate feature
             nn.ReLU(),
             nn.Dropout(dropout_rate),
             nn.Linear(64, 32),
@@ -131,13 +140,34 @@ class SingleCellTypePresenceModel(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
         
-        # Set a negative bias in the final layer to counter class imbalance
+        # Set a neutral bias in the final layer (no class bias)
         if hasattr(self.classifier[-1], 'bias'):
             self.classifier[-1].bias.data.fill_(0.0)
     
+    def _extract_features(self, markers, coverage):
+        """
+        Helper method to extract features from markers and coverage values.
+        
+        Args:
+            markers: [B*M, 1] Methylation values (flattened)
+            coverage: [B*M, 1] Coverage values (flattened)
+            
+        Returns:
+            features: [B*M, feature_dim] Extracted features
+        """
+        # Concatenate marker values and coverage
+        features_input = torch.cat([markers, coverage], dim=1)  # [B*M, 2]
+        
+        # Apply batch normalization to inputs
+        features_norm = self.input_norm(features_input)
+        
+        # Extract features
+        features = self.feature_extractor(features_norm)  # [B*M, feature_dim]
+        return features
+    
     def forward(self, marker_values, coverage):
         """
-        Forward pass of the binary classifier.
+        Forward pass of the enhanced binary classifier.
         
         Args:
             marker_values: [B, M] Methylation values
@@ -146,39 +176,85 @@ class SingleCellTypePresenceModel(nn.Module):
         Returns:
             logits: [B, 1] Logits for binary classification
             attention_weights: [B, M] Attention weights for each marker
+            missing_rate: [B, 1] Percentage of missing markers per sample
         """
         B, M = marker_values.shape
         
         # Create valid markers mask (coverage > 0)
         valid_mask = (coverage > 0)
         
+        # Calculate missing marker rate for each sample
+        missing_rate = (1.0 - valid_mask.float().mean(dim=1, keepdim=True))
+        
         # Replace NaNs with zeros (these will be masked out later)
         marker_values_safe = torch.where(valid_mask, marker_values, torch.zeros_like(marker_values))
         
-        # Coverage-aware normalization
-        # Reduce confidence for low coverage markers
+        # Coverage-aware normalization with enhanced confidence factor
         coverage_safe = coverage.clone() + 1e-10  # Add epsilon to avoid division by zero
         
-        # Create a confidence factor that scales with coverage
-        # For coverage=1, factor=0.2; for coverage=5, factor=0.5; for coverage=20, factor=0.8
-        confidence_factor = torch.clamp(coverage_safe / (coverage_safe + 10.0), 0.3, 1.0)
-
+        # Enhanced confidence factor - more conservative at very low coverage
+        confidence_factor = torch.clamp(
+            torch.where(
+                coverage_safe < 5.0,
+                coverage_safe / (coverage_safe + 15.0),  # More skeptical of very low coverage
+                coverage_safe / (coverage_safe + 10.0)   # Original scaling for higher coverage
+            ),
+            0.2, 1.0  # Lower minimum confidence for very low coverage
+        )
         
         # Apply the confidence factor to marker values
         normalised_markers = marker_values_safe * confidence_factor
         
-        # Process all markers through feature extraction
+        # ===== MULTI-RESOLUTION ANALYSIS =====
+        # 1. Original resolution
         marker_values_flat = normalised_markers.reshape(-1, 1)  # [B*M, 1]
-        coverage_flat = torch.log1p(coverage_safe).reshape(-1, 1)  # Log to compress the range
+        coverage_flat = torch.log1p(coverage_safe).reshape(-1, 1)  # [B*M, 1]
         
-        # Concatenate marker values and coverage
-        features_input = torch.cat([marker_values_flat, coverage_flat], dim=1)  # [B*M, 2]
+        # 2. Medium resolution (pooling with kernel size 3)
+        markers_med = F.avg_pool1d(
+            normalised_markers.view(B, 1, M), 
+            kernel_size=3, 
+            stride=1, 
+            padding=1
+        ).view(B, M)
         
-        # Apply batch normalization to inputs
-        features_norm = self.input_norm(features_input)
+        coverage_med = F.avg_pool1d(
+            coverage_safe.view(B, 1, M), 
+            kernel_size=3, 
+            stride=1, 
+            padding=1
+        ).view(B, M)
         
-        # Extract features
-        features = self.feature_extractor(features_norm)  # [B*M, feature_dim]
+        markers_med_flat = markers_med.reshape(-1, 1)  # [B*M, 1]
+        coverage_med_flat = torch.log1p(coverage_med).reshape(-1, 1)  # [B*M, 1]
+        
+        # 3. Low resolution (pooling with kernel size 7)
+        markers_low = F.avg_pool1d(
+            normalised_markers.view(B, 1, M), 
+            kernel_size=7, 
+            stride=1, 
+            padding=3
+        ).view(B, M)
+        
+        coverage_low = F.avg_pool1d(
+            coverage_safe.view(B, 1, M), 
+            kernel_size=7, 
+            stride=1, 
+            padding=3
+        ).view(B, M)
+        
+        markers_low_flat = markers_low.reshape(-1, 1)  # [B*M, 1]
+        coverage_low_flat = torch.log1p(coverage_low).reshape(-1, 1)  # [B*M, 1]
+        
+        # Extract features at each resolution
+        features_orig = self._extract_features(marker_values_flat, coverage_flat)
+        features_med = self._extract_features(markers_med_flat, coverage_med_flat)
+        features_low = self._extract_features(markers_low_flat, coverage_low_flat)
+        
+        # Combine multi-resolution features
+        multi_res_features = torch.cat([features_orig, features_med, features_low], dim=1)
+        features = self.multi_res_fusion(multi_res_features)
+        # ===== END MULTI-RESOLUTION ANALYSIS =====
         
         # Apply feature transformation with residual connection
         transformed_features = self.feature_transform(features)
@@ -187,7 +263,7 @@ class SingleCellTypePresenceModel(nn.Module):
         # Calculate attention weights
         attention_flat = self.attention(features).reshape(B, M)  # [B, M]
         
-        # Apply valid mask to attention and weight by coverage confidence
+        # Apply valid mask to attention and weight by confidence factor
         masked_attention = attention_flat * valid_mask.float() * confidence_factor
         
         # Normalize attention weights to sum to 1 for each sample
@@ -205,26 +281,79 @@ class SingleCellTypePresenceModel(nn.Module):
         # Aggregate features across markers
         aggregated_features = weighted_features.sum(dim=1)  # [B, feature_dim]
         
+        # Include missing marker rate as an additional feature
+        enhanced_features = torch.cat([aggregated_features, missing_rate], dim=1)
+        
         # Final classification
-        logits = self.classifier(aggregated_features)
+        logits = self.classifier(enhanced_features)
         
-        return logits, normalized_attention
+        return logits, normalized_attention, missing_rate
     
-    def predict(self, marker_values, coverage, threshold=0.5):
+    def load_threshold(self, checkpoint):
         """
-        Make binary predictions.
-        
+        Load the specificity threshold from the checkpoint.
+
+        Args:
+            checkpoint: Dictionary containing the checkpoint data
+        """
+        if 'specificity_threshold' in checkpoint:
+            self.specificity_threshold = checkpoint['specificity_threshold']
+            print(f"Loaded specificity_threshold: {self.specificity_threshold}")
+        else:
+            print("No specificity_threshold found in checkpoint. Using default threshold: 0.5")
+            self.specificity_threshold = 0.5
+    
+    def predict(self, marker_values, coverage, threshold=None):
+        """
+        Make binary predictions using the loaded specificity threshold.
+
         Args:
             marker_values: [B, M] Methylation values
             coverage: [B, M] Coverage values
-            threshold: Classification threshold
+            threshold: Optional override for the classification threshold
         
         Returns:
             predictions: [B] Binary predictions (0/1)
             probabilities: [B] Prediction probabilities
         """
-        logits, _ = self.forward(marker_values, coverage)
+        logits, _, _ = self.forward(marker_values, coverage)
         probabilities = torch.sigmoid(logits).squeeze(-1)
+        
+        # Use the loaded specificity threshold unless overridden
+        threshold = threshold if threshold is not None else self.specificity_threshold
         predictions = (probabilities >= threshold).float()
-        return predictions, probabilities   
+        
+        return predictions, probabilities
     
+    def adaptive_predict(self, marker_values, coverage):
+        """
+        Make predictions with coverage-adaptive threshold, using the loaded specificity threshold as the base.
+
+        Args:
+            marker_values: [B, M] Methylation values
+            coverage: [B, M] Coverage values
+        
+        Returns:
+            predictions: [B] Binary predictions (0/1)
+            probabilities: [B] Prediction probabilities
+            thresholds: [B] Coverage-adaptive thresholds used for each sample
+        """
+        logits, _, missing_rate = self.forward(marker_values, coverage)
+        probabilities = torch.sigmoid(logits).squeeze(-1)
+        
+        # Calculate mean coverage for each sample
+        mean_coverage = coverage.mean(dim=1)
+        
+        # Use the loaded specificity threshold as the base
+        base_threshold = self.specificity_threshold
+        
+        # Minimal adaptive adjustment to avoid overly increasing the threshold
+        coverage_adjustment = torch.clamp(0.02 - 0.001 * mean_coverage, 0.0, 0.02)  # Minimal adjustment
+        missing_adjustment = torch.clamp(0.02 * missing_rate.squeeze(), 0.0, 0.02)  # Minimal adjustment
+        total_adjustment = torch.clamp(coverage_adjustment + missing_adjustment, 0.0, 0.03)  # Minimal max adjustment
+        adaptive_threshold = base_threshold + total_adjustment
+        
+        # Make predictions
+        predictions = (probabilities >= adaptive_threshold).float()
+        
+        return predictions, probabilities, adaptive_threshold
