@@ -2,6 +2,7 @@ import random
 import pandas as pd
 import numpy as np
 import torch
+import time
 import torch.nn as nn
 from tqdm import tqdm
 from torch.utils.data import DataLoader, ConcatDataset
@@ -495,6 +496,8 @@ def train_and_eval(
         feature_dim=64,
 
     )
+    start_data_prep_time = time.time()
+    start_train_time = time.time()
     train_dl_low = load_training_with_augmentation(
         f"{train_pat_dir}_low", atlas, names, num_files=3,
         target_dist_params=clinical_dist_params['low'],
@@ -524,6 +527,9 @@ def train_and_eval(
         persistent_workers=True
     )
 
+    print(f"train preparation took {time.time() - start_train_time:.2f} seconds")
+
+    start_validation_time = time.time()
     # Create two versions of each validation dataset: unaugmented and augmented
     val_loaders_unaugmented = {}
     val_loaders_augmented = {}
@@ -610,6 +616,9 @@ def train_and_eval(
         y_vals[f"t-cells_{cov}"] = tcells_yval
         y_vals[f"oac_{cov}"] = oac_yval
 
+    print(f"validation preparation took {time.time() - start_validation_time:.2f} seconds")
+
+    enhancing_start_time = time.time()
     enhanced_train_dl = enhanced_negative_examples(
         train_dl,
         cell_types,
@@ -619,6 +628,10 @@ def train_and_eval(
         target_dist_params=clinical_dist_params['clinical'],
         presence_models=model.presence_models
     )
+    print(f"enhancing with negative samples preparation took {time.time() - enhancing_start_time:.2f} seconds")
+    print("====================================================================")
+    print(f"total preparation time took {time.time() - start_data_prep_time:.2f} seconds")
+    print("====================================================================")
 
     model, _ = train_model(
         model=model,

@@ -481,8 +481,7 @@ def train_model(
             epoch=epoch,
             presence_threshold=0.01
         )
-        scheduler.step()
-
+        
         # Use unaugmented data for early epochs, augmented for later epochs
         current_val_loaders = val_loaders_unaugmented if epoch < 100 else val_loaders_augmented  # NEW: Increased to 100 per user request
         print(f"Validation with {'augmented' if epoch >= 100 else 'unaugmented'} data")
@@ -495,6 +494,8 @@ def train_model(
             presence_threshold=0.01,
             alpha_threshold=0.01
         )
+
+        scheduler.step(avg_val_loss)
 
         # Update history
         for key, value in train_stats.items():
