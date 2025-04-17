@@ -408,8 +408,8 @@ def train_model(
     cell_types: List[str],
     num_epochs: int = 1000,
     patience: int = 20,
-    lr: float = 5e-5,
-    weight_decay: float = 1e-3,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-5,
     use_wandb: bool = True,
     wandb_project: str = "cfDNA-Deconvolution",
     wandb_entity: str = None,
@@ -419,8 +419,14 @@ def train_model(
     Train the model over multiple epochs with early stopping.
     """
     model = model.to(device)
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, 
+        mode='min', 
+        factor=0.5, 
+        patience=patience // 2,
+        verbose=True
+    )
     os.makedirs(model_path, exist_ok=True)
 
     git_info = get_git_info()
@@ -451,9 +457,20 @@ def train_model(
     patience_counter = 0
     history = defaultdict(list)
 
+    initial_lr = lr
+    warmup_epochs = 5  # # of epochs for linearly ramping LR from 0 to lr
+
     val_loaders_unaugmented, val_loaders_augmented = val_loaders
     for epoch in range(num_epochs):
         print(f"\n🔹 Epoch {epoch + 1}/{num_epochs}")
+        # LR Warmup
+        if epoch < warmup_epochs:
+            warmup_factor = (epoch + 1) / warmup_epochs
+            current_lr = initial_lr * warmup_factor
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = current_lr
+            print(f"LR Warmup: {current_lr:.1e}")
+
         print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
         
         train_stats = train_epoch(
