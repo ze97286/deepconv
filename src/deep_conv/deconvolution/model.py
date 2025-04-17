@@ -242,7 +242,7 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
         self.training = training
 
 class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
-    def __init__(self, fraction, coverage, atlas, y=None, x_nnls=None, presence_models=None, target_ids=None, batch_size=1024):
+    def __init__(self, fraction, coverage, atlas, y=None, x_nnls=None, model=None, batch_size=1024):
         """
         Dataset with precomputed augmentation and presence probabilities.
         
@@ -252,19 +252,19 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
             atlas: Reference atlas [M, C]
             y: Ground truth labels [N, C]
             x_nnls: NNLS predictions [N, C]
-            presence_models: List of presence models
-            target_ids: Tensor mapping markers to cell types
+            model: The entire deconvolution model (to use its presence prediction method)
             batch_size: Batch size for presence probability computation
         """
         super().__init__(fraction, coverage, atlas, y, x_nnls)
         
-        if presence_models is not None:
+        if model is not None:
             # Precompute presence probabilities in batches
             num_samples = self.fraction.size(0)
-            num_cell_types = len(presence_models)
-            device = next(presence_models[0].parameters()).device
+            num_cell_types = model.num_celltypes
+            device = next(model.parameters()).device
             
-            presence_probs = torch.zeros(num_samples, num_cell_types, device=device)
+            presence_probs = torch.zeros(num_samples, num_cell_types)
+            presence_logits = torch.zeros(num_samples, num_cell_types)
             
             # Create a temporary DataLoader for batching
             temp_dataset = TensorDataset(self.fraction, self.coverage)
@@ -272,96 +272,64 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
             
             print("Computing presence probabilities in batches...")
             
-            # Create a mask for markers per cell type if target_ids is provided
-            target_ids_tensor = torch.tensor(target_ids, dtype=torch.long, device=device)
-            M = self.fraction.size(1)
-            C = num_cell_types
-                    
-            cell_type_masks = torch.zeros(C, M, dtype=torch.bool, device=device)
-            for cell_type_idx in range(C):
-                cell_type_masks[cell_type_idx] = (target_ids_tensor == cell_type_idx)
+            model.eval()  # Ensure model is in evaluation mode
             
-            for batch_idx, (batch_fraction, batch_coverage) in enumerate(tqdm.tqdm(temp_loader, desc="Computing presence probabilities")):
-                batch_fraction = batch_fraction.to(device)
-                batch_coverage = batch_coverage.to(device)
-                start_idx = batch_idx * batch_size
-                end_idx = min(start_idx + batch_size, num_samples)
-                
-                # Create valid mask and clean marker values
-                valid_mask = (batch_coverage > 0)
-                batch_fraction_clean = torch.where(
-                    valid_mask, 
-                    batch_fraction, 
-                    torch.zeros_like(batch_fraction)
-                )
-                
-                if cell_type_masks is not None:
-                    # Process each cell type with cell-specific markers
-                    B = batch_fraction.size(0)
+            with torch.no_grad():
+                for batch_idx, (batch_fraction, batch_coverage) in enumerate(tqdm.tqdm(temp_loader, desc="Computing presence probabilities")):
+                    batch_fraction = batch_fraction.to(device)
+                    batch_coverage = batch_coverage.to(device)
+                    start_idx = batch_idx * batch_size
+                    end_idx = min(start_idx + batch_size, num_samples)
                     
-                    # Stack markers for all cell types
-                    marker_values_expanded = batch_fraction_clean.unsqueeze(1).expand(-1, C, -1)
-                    coverage_expanded = batch_coverage.unsqueeze(1).expand(-1, C, -1)
-                    cell_type_masks_expanded = cell_type_masks.unsqueeze(0).expand(B, -1, -1)
-                    
-                    # Mask markers not belonging to each cell type
-                    marker_values_masked = torch.where(
-                        cell_type_masks_expanded, 
-                        marker_values_expanded, 
-                        torch.zeros_like(marker_values_expanded)
-                    )
-                    coverage_masked = torch.where(
-                        cell_type_masks_expanded, 
-                        coverage_expanded, 
-                        torch.zeros_like(coverage_expanded)
+                    # Use the model's own method for presence prediction
+                    batch_presence_probs, batch_presence_logits = model.predict_presence_with_separate_models(
+                        batch_fraction, batch_coverage
                     )
                     
-                    # Process each cell type
-                    for cell_type_idx, presence_model in enumerate(presence_models):
-                        cell_type_mask = cell_type_masks[cell_type_idx]
-                        if not cell_type_mask.any():
-                            presence_probs[start_idx:end_idx, cell_type_idx] = 0.5
-                            continue
-                            
-                        # Extract only markers for this cell type
-                        cell_type_marker_values = marker_values_masked[:, cell_type_idx, cell_type_mask]
-                        cell_type_coverage = coverage_masked[:, cell_type_idx, cell_type_mask]
-                        
-                        if cell_type_marker_values.shape[1] == 0:
-                            presence_probs[start_idx:end_idx, cell_type_idx] = 0.5
-                            continue
-                        
-                        # Predict presence using cell type-specific model
-                        try:
-                            with torch.no_grad():
-                                _, adaptive_probs, _ = presence_model.adaptive_predict(
-                                    cell_type_marker_values, cell_type_coverage
-                                )
-                            presence_probs[start_idx:end_idx, cell_type_idx] = adaptive_probs.squeeze(-1)
-                        except Exception as e:
-                            print(f"Error in presence model {cell_type_idx}: {e}")
-                            presence_probs[start_idx:end_idx, cell_type_idx] = 0.5
-                else:
-                    # No target_ids, use all markers for each model
-                    for cell_type_idx, presence_model in enumerate(presence_models):
-                        with torch.no_grad():
-                            _, adaptive_probs, _ = presence_model.adaptive_predict(
-                                batch_fraction_clean, batch_coverage
-                            )
-                        presence_probs[start_idx:end_idx, cell_type_idx] = adaptive_probs.squeeze(-1)
+                    # Store the results
+                    presence_probs[start_idx:end_idx] = batch_presence_probs.cpu()
+                    presence_logits[start_idx:end_idx] = batch_presence_logits.cpu()
             
             print("Finished computing presence probabilities")
-            self.presence_probs = presence_probs.cpu()  # Move to CPU for storage
+            self.presence_probs = presence_probs
+            self.presence_logits = presence_logits
         else:
             self.presence_probs = None
+            self.presence_logits = None
 
     def __getitem__(self, idx):
+        """
+        Get a sample from the dataset with its precomputed values.
+        
+        Args:
+            idx: Index of the sample to retrieve
+            
+        Returns:
+            Dictionary containing:
+                - X: Marker methylation values
+                - coverage: Read coverage
+                - y: Ground truth labels (if available)
+                - x_nnls: NNLS predictions (if available)
+                - presence_probs: Precomputed presence probabilities (if available)
+                - presence_logits: Precomputed presence logits (if available)
+                - is_augmented: Flag indicating if the sample is augmented
+        """
         item = super().__getitem__(idx)
+        
+        # Flag to indicate if the sample is from the augmented part of the dataset
+        # Assuming the first half is original and second half is augmented
         item['is_augmented'] = idx >= len(self.fraction) // 2
+        
+        # Add precomputed presence probabilities if available
         if self.presence_probs is not None:
             item['presence_probs'] = self.presence_probs[idx]
+        
+        # Add precomputed presence logits if available
+        if self.presence_logits is not None:
+            item['presence_logits'] = self.presence_logits[idx]
+            
         return item
-
+    
 class CellTypeDeconvolutionModel(nn.Module):
     def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=64):
         super().__init__()

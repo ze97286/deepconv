@@ -33,6 +33,7 @@ def get_validation_set_with_augmentation(
     enable_augmentation=True,
     target_size: int = None,    
     presence_models=None,
+    model=None,
 ) -> tuple[DataLoader, torch.Tensor]:
     """
     Validation set loader with optional pre-augmented data and block-based subsampling.
@@ -156,7 +157,8 @@ def get_validation_set_with_augmentation(
             combined_y,
             x_nnls=combined_x_nnls,
             presence_models=presence_models,
-            target_ids=target_ids
+            target_ids=target_ids,
+            model=model,
         )
     else:
         val_dataset = PreAugmentedTissueDataset(
@@ -166,7 +168,8 @@ def get_validation_set_with_augmentation(
             y_val_np,
             x_nnls=x_nnls_original,
             presence_models=presence_models,
-            target_ids=target_ids
+            target_ids=target_ids,
+            model=model,
         )
 
     val_loader = DataLoader(
@@ -191,6 +194,7 @@ def load_training_with_augmentation(
     num_files: int = 5,
     target_dist_params: dict = None,
     presence_models = None,
+    model=None,
 ) -> DataLoader:
     """
     Enhanced training data loader with pre-augmented data.
@@ -303,6 +307,7 @@ def load_training_with_augmentation(
         x_nnls=combined_x_nnls,
         presence_models=presence_models,
         target_ids=target_ids,
+        model=model,
     )
     print(f"Training dataset has {len(pre_augmented_dataset)} samples.")
 
@@ -325,6 +330,7 @@ def enhanced_negative_examples(
     sample_fraction: float = 0.01,
     target_dist_params: dict = None,
     presence_models = None,
+    model=None,
 ) -> DataLoader:
     """
     Enhance the training dataset by adding negative examples for each cell type.
@@ -428,6 +434,7 @@ def enhanced_negative_examples(
         x_nnls=combined_negative_x_nnls,
         presence_models=presence_models,
         target_ids=target_ids,
+        model=model,
     )
 
     # Combine original dataset with negative examples
@@ -503,18 +510,21 @@ def train_and_eval(
         target_dist_params=clinical_dist_params['low'],
         presence_models=model.presence_models,
         target_ids=target_ids,
+        model=model,
     )
     train_dl_med = load_training_with_augmentation(
         f"{train_pat_dir}_med", atlas, names, num_files=1,
         target_dist_params=clinical_dist_params['med'],
         presence_models=model.presence_models,
         target_ids=target_ids,
+        model=model,
     )
     train_dl_high = load_training_with_augmentation(
         f"{train_pat_dir}_high", atlas, names, num_files=1,
         target_dist_params=clinical_dist_params['high'],
         presence_models=model.presence_models,
         target_ids=target_ids,
+        model=model,
     )
 
     train_dataset = ConcatDataset([train_dl_low.dataset, train_dl_med.dataset, train_dl_high.dataset])
@@ -544,6 +554,7 @@ def train_and_eval(
             target_size=50_000,
             presence_models=model.presence_models,
             target_ids=target_ids,
+            model=model,
         )
         print(f"Validation set {cov} tier1 length (unaugmented)={len(t1_yval)}")
 
@@ -554,7 +565,8 @@ def train_and_eval(
             enable_augmentation=False,
             target_size=None,    
             presence_models=model.presence_models,
-            target_ids=target_ids,        
+            target_ids=target_ids,   
+            model=model,     
         )
         print(f"Validation set {cov} tcells length (unaugmented)={len(tcells_yval)}")
 
@@ -566,6 +578,7 @@ def train_and_eval(
             target_size=None,
             presence_models=model.presence_models,
             target_ids=target_ids,
+            model=model,
         )
         print(f"Validation set {cov} oac length (unaugmented)={len(oac_yval)}")
 
@@ -577,7 +590,8 @@ def train_and_eval(
             enable_augmentation=True,
             target_size=50_000,
             presence_models=model.presence_models,
-            target_ids=target_ids,     
+            target_ids=target_ids,  
+            model=model,   
         )
         print(f"Validation set {cov} tier1 length (augmented)={len(t1_yval)}")
 
@@ -588,7 +602,8 @@ def train_and_eval(
             enable_augmentation=True,
             target_size=None,       
             presence_models=model.presence_models,
-            target_ids=target_ids,    
+            target_ids=target_ids,   
+            model=model, 
         )
         print(f"Validation set {cov} tcells length (augmented)={len(tcells_yval)}")
 
@@ -599,7 +614,8 @@ def train_and_eval(
             enable_augmentation=True,
             target_size=None,    
             presence_models=model.presence_models,
-            target_ids=target_ids,       
+            target_ids=target_ids,
+            model=model,      
         )
         print(f"Validation set {cov} oac length (augmented)={len(oac_yval)}")
 
@@ -626,7 +642,8 @@ def train_and_eval(
         target_ids=target_ids,
         sample_fraction=0.01,
         target_dist_params=clinical_dist_params['clinical'],
-        presence_models=model.presence_models
+        presence_models=model.presence_models,
+        model=model,
     )
     print(f"enhancing with negative samples preparation took {time.time() - enhancing_start_time:.2f} seconds")
     print("====================================================================")
