@@ -148,13 +148,6 @@ def train_epoch(
         scaled_loss.backward()
         timing_stats['backward_pass'] += time.time() - start_backward
 
-        t_cell_param_grads = []
-        for name, param in model.named_parameters():
-            if param.requires_grad and param.grad is not None:
-                if 'encoder' in name and '.2.' in name:  # Final encoder layer
-                    t_cell_param_grads.append((name, param.grad[11].abs().mean().item()))
-        print(f"T-cells encoder gradient stats: {t_cell_param_grads}")
-
         # Optimizer step
         if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1 == len(loader)):
             start_optim = time.time()
@@ -464,11 +457,6 @@ def train_model(
 
     initial_lr = lr
     warmup_epochs = 5  # # of epochs for linearly ramping LR from 0 to lr
-
-    encoder_final_layer = model.encoder[-1]
-    for i, ct in enumerate(cell_types):
-        print(f"Encoder final layer weights for {ct}: {encoder_final_layer.weight[i]}")
-        print(f"Encoder final layer bias for {ct}: {encoder_final_layer.bias[i]}")
 
     val_loaders_unaugmented, val_loaders_augmented = val_loaders
     for epoch in range(num_epochs):

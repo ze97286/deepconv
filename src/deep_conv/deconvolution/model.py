@@ -425,13 +425,6 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Normalise to ensure sum to 1
         sum_props = torch.sum(scaled_props, dim=1, keepdim=True) + 1e-8
         gated_props = scaled_props / sum_props
-        
-        print(f"T-cells presence threshold: {self.presence_thresholds[11].item()}")
-        print(f"T-cells presence slope: {self.presence_slopes[11].item()}")
-        print(f"OAC presence threshold: {self.presence_thresholds[9].item()}")
-        print(f"OAC presence slope: {self.presence_slopes[9].item()}")
-        print(f"NK-cells presence threshold: {self.presence_thresholds[8].item()}")
-        print(f"NK-cells presence slope: {self.presence_slopes[8].item()}")
 
         return gated_props
 
@@ -463,7 +456,6 @@ class CellTypeDeconvolutionModel(nn.Module):
                 
                 # Skip if no markers for this cell type
                 if not cell_type_marker_mask.any():
-                    print("======================================================>WE SHOULD NEVER BE HERE")
                     continue
                 
                 # Filter marker_values and coverage to only include markers for this cell type
@@ -579,16 +571,9 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         # ----- 4) Integrate presence information with aggregated features -----
         combined_features = torch.cat([agg_flat, presence_probs], dim=1)
-        print(f"T-cells feature stats: mean={agg_flat[:, 11*self.feature_dim:(11+1)*self.feature_dim].mean().item():.4f}, std={agg_flat[:, 11*self.feature_dim:(11+1)*self.feature_dim].std().item():.4f}")
-
-
 
         # ----- 5) Proportion Prediction with integrated presence -----
         logits = self.encoder(combined_features)  # [B, C]
-        print(f"T-cells logits (first 5): {logits[:5, 11].tolist()}")
-        print(f"OAC logits (first 5): {logits[:5, 9].tolist()}")
-        print(f"Esophagus logits (first 5): {logits[:5, 4].tolist()}")
-
         dl_props = F.relu(logits)  # NEW: DL-only proportions (before gating)
         
         # Apply soft gating that preserves proportion relationships
@@ -620,12 +605,6 @@ class CellTypeDeconvolutionModel(nn.Module):
                     valid_rows, 1.0 / row_sums, torch.ones_like(row_sums)
                 )
                 props = props * normalization_factor
-
-        t_cell_idx = 11
-        print(f"T-cells stats:")
-        print(f"  Props: {props[:, t_cell_idx].mean().item():.6f} ± {props[:, t_cell_idx].std().item():.6f}")
-        print(f"  DL props: {dl_props_out[:, t_cell_idx].mean().item():.6f} ± {dl_props_out[:, t_cell_idx].std().item():.6f}")
-        print(f"  Presence: {presence_probs[:, t_cell_idx].mean().item():.6f} ± {presence_probs[:, t_cell_idx].std().item():.6f}")
 
         return props, presence_probs, x_nnls, dl_props_out, reconstructed, valid_mask
 
