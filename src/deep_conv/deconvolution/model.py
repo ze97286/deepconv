@@ -523,6 +523,10 @@ class CellTypeDeconvolutionModel(nn.Module):
             reconstructed (FloatTensor): [B, M], reconstructed marker methylation.
             valid_mask (BoolTensor): [B, M], True where coverage>0.
         """
+        # TEMP TEMP TEMP
+        x_nnls = None
+        # TEMP TEMP TEMP
+
         B, M = marker_values.shape
         C = self.num_celltypes
 
