@@ -847,7 +847,7 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/{best_model}")
     model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     commit_hash = checkpoint["commit_hash"] if "commit_hash" in checkpoint else "unknown"
-
+    epoch = checkpoint["epoch"]
     # Print the 'best_threshold' if it exists in the checkpoint
     if 'best_threshold' in checkpoint:
         print(f"Model's best threshold from training: {checkpoint['best_threshold']}")
@@ -866,7 +866,8 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     plot_deconvolution_evaluation(
         y_true_df, predictions_df, y_dilutions['dilution'], 
         deepconv_eval_pat_dir_tcells+f"{model_name}/",
-        commit_hash
+        commit_hash,
+        epoch=epoch,
     )
 
     print("\n===== EVALUATING OAC =====")
@@ -876,7 +877,8 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     plot_deconvolution_evaluation(
         y_true_df, predictions_df, y_dilutions['dilution'], 
         deepconv_eval_pat_dir_oac+f"{model_name}/",
-        commit_hash
+        commit_hash,
+        epoch=epoch,
     )
 
     print("\n===== EVALUATING heart =====")
@@ -886,7 +888,8 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     plot_deconvolution_evaluation(
         y_true_df, predictions_df, y_dilutions['dilution'], 
         deepconv_eval_pat_dir_tcells_with_heart+f"{model_name}/",
-        commit_hash
+        commit_hash,
+        epoch=epoch,
     )
 
 # 3
