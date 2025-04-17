@@ -479,7 +479,7 @@ def train_and_eval(
     }
 
     cell_types = list(atlas.columns[8:]) 
-    target_ids = atlas['target'].map(lambda x: cell_types.index(x)).to_numpy()
+    target_ids = atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
 
     model = CellTypeDeconvolutionModel(
         num_markers=len(atlas), 

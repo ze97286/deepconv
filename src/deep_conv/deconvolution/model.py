@@ -444,7 +444,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         B = marker_values.shape[0]
         C = self.num_celltypes
         
-        # Initialize output tensors
+        # Initialise output tensors
         presence_probs = torch.zeros(B, C, device=marker_values.device)
         presence_logits = torch.zeros(B, C, device=marker_values.device)
         
@@ -456,8 +456,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                 
                 # Skip if no markers for this cell type
                 if not cell_type_marker_mask.any():
-                    presence_probs[:, cell_type_idx] = 0.5
-                    presence_logits[:, cell_type_idx] = 0.0
+                    print("======================================================>WE SHOULD NEVER BE HERE")
                     continue
                 
                 # Filter marker_values and coverage to only include markers for this cell type
@@ -607,6 +606,12 @@ class CellTypeDeconvolutionModel(nn.Module):
                     valid_rows, 1.0 / row_sums, torch.ones_like(row_sums)
                 )
                 props = props * normalization_factor
+
+        t_cell_idx = 11
+        print(f"T-cells stats:")
+        print(f"  Props: {props[:, t_cell_idx].mean().item():.6f} ± {props[:, t_cell_idx].std().item():.6f}")
+        print(f"  DL props: {dl_props_out[:, t_cell_idx].mean().item():.6f} ± {dl_props_out[:, t_cell_idx].std().item():.6f}")
+        print(f"  Presence: {presence_probs[:, t_cell_idx].mean().item():.6f} ± {presence_probs[:, t_cell_idx].std().item():.6f}")
 
         return props, presence_probs, x_nnls, dl_props_out, reconstructed, valid_mask
 
