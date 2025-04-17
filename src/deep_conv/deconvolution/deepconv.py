@@ -168,7 +168,7 @@ def get_validation_set_with_augmentation(
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=1024,
+        batch_size=512,
         shuffle=False,
         num_workers=16,
         pin_memory=False,
@@ -304,9 +304,9 @@ def load_training_with_augmentation(
     # Create DataLoader with shuffling
     train_dl = DataLoader(
         pre_augmented_dataset,
-        batch_size=256,
+        batch_size=64,
         shuffle=True,
-        num_workers=16,
+        num_workers=24,
         pin_memory=False,
         persistent_workers=True
     )
@@ -624,8 +624,8 @@ def train_and_eval(
         cell_types=cell_types,
         num_epochs=1000,
         patience=10, 
-        lr=5e-5, 
-        weight_decay=1e-3
+        lr=1e-3, 
+        weight_decay=1e-5
     )
 
     print("\nStandard Validation Sets:")
