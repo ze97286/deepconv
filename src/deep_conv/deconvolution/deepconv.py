@@ -510,7 +510,7 @@ def train_and_eval(
     train_dataset = ConcatDataset([train_dl_low.dataset, train_dl_med.dataset, train_dl_high.dataset])
     train_dl = DataLoader(
         train_dataset,
-        batch_size=256,
+        batch_size=64,
         shuffle=True,
         num_workers=16,
         pin_memory=False,

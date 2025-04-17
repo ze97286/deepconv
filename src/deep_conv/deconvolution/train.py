@@ -474,12 +474,12 @@ def train_model(
     for epoch in range(num_epochs):
         print(f"\n🔹 Epoch {epoch + 1}/{num_epochs}")
         # LR Warmup
-        if epoch < warmup_epochs:
-            warmup_factor = (epoch + 1) / warmup_epochs
-            current_lr = initial_lr * warmup_factor
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = current_lr
-            print(f"LR Warmup: {current_lr:.1e}")
+        # if epoch < warmup_epochs:
+        #     warmup_factor = (epoch + 1) / warmup_epochs
+        #     current_lr = initial_lr * warmup_factor
+        #     for param_group in optimizer.param_groups:
+        #         param_group['lr'] = current_lr
+        #     print(f"LR Warmup: {current_lr:.1e}")
 
         print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
         
