@@ -28,7 +28,6 @@ def get_validation_set_with_augmentation(
     atlas: pd.DataFrame, 
     names: set,
     block_size: int,
-    target_ids,
     target_dist_params=None,
     enable_augmentation=True,
     target_size: int = None,    
@@ -155,7 +154,6 @@ def get_validation_set_with_augmentation(
             atlas_np,
             combined_y,
             x_nnls=combined_x_nnls,
-            target_ids=target_ids,
             model=model,
         )
     else:
@@ -165,7 +163,6 @@ def get_validation_set_with_augmentation(
             atlas_np,
             y_val_np,
             x_nnls=x_nnls_original,
-            target_ids=target_ids,
             model=model,
         )
 
@@ -187,7 +184,6 @@ def load_training_with_augmentation(
     base_dir: str, 
     atlas: pd.DataFrame, 
     names: set, 
-    target_ids,
     num_files: int = 5,
     target_dist_params: dict = None,
     model=None,
@@ -301,7 +297,6 @@ def load_training_with_augmentation(
         atlas_np,
         combined_y,
         x_nnls=combined_x_nnls,
-        target_ids=target_ids,
         model=model,
     )
     print(f"Training dataset has {len(pre_augmented_dataset)} samples.")
@@ -321,7 +316,6 @@ def enhanced_negative_examples(
     train_dl: DataLoader,
     cell_types: list,
     atlas: pd.DataFrame,
-    target_ids,
     sample_fraction: float = 0.01,
     target_dist_params: dict = None,
     model=None,
@@ -426,7 +420,6 @@ def enhanced_negative_examples(
         atlas_np,
         combined_negative_y,
         x_nnls=combined_negative_x_nnls,
-        target_ids=target_ids,
         model=model,
     )
 
@@ -501,19 +494,16 @@ def train_and_eval(
     train_dl_low = load_training_with_augmentation(
         f"{train_pat_dir}_low", atlas, names, num_files=3,
         target_dist_params=clinical_dist_params['low'],
-        target_ids=target_ids,
         model=model,
     )
     train_dl_med = load_training_with_augmentation(
         f"{train_pat_dir}_med", atlas, names, num_files=1,
         target_dist_params=clinical_dist_params['med'],
-        target_ids=target_ids,
         model=model,
     )
     train_dl_high = load_training_with_augmentation(
         f"{train_pat_dir}_high", atlas, names, num_files=1,
         target_dist_params=clinical_dist_params['high'],
-        target_ids=target_ids,
         model=model,
     )
 
@@ -542,7 +532,6 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=50_000,
-            target_ids=target_ids,
             model=model,
         )
         print(f"Validation set {cov} tier1 length (unaugmented)={len(t1_yval)}")
@@ -553,7 +542,6 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=None,    
-            target_ids=target_ids,   
             model=model,     
         )
         print(f"Validation set {cov} tcells length (unaugmented)={len(tcells_yval)}")
@@ -564,7 +552,6 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=False,
             target_size=None,
-            target_ids=target_ids,
             model=model,
         )
         print(f"Validation set {cov} oac length (unaugmented)={len(oac_yval)}")
@@ -576,7 +563,6 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
             target_size=50_000,
-            target_ids=target_ids,  
             model=model,   
         )
         print(f"Validation set {cov} tier1 length (augmented)={len(t1_yval)}")
@@ -587,7 +573,6 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
             target_size=None,       
-            target_ids=target_ids,   
             model=model, 
         )
         print(f"Validation set {cov} tcells length (augmented)={len(tcells_yval)}")
@@ -598,7 +583,6 @@ def train_and_eval(
             target_dist_params=clinical_dist_params[cov],
             enable_augmentation=True,
             target_size=None,    
-            target_ids=target_ids,
             model=model,      
         )
         print(f"Validation set {cov} oac length (augmented)={len(oac_yval)}")
@@ -623,7 +607,6 @@ def train_and_eval(
         train_dl,
         cell_types,
         atlas,
-        target_ids=target_ids,
         sample_fraction=0.01,
         target_dist_params=clinical_dist_params['clinical'],
         model=model,
