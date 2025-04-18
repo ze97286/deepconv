@@ -571,7 +571,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         marker_values_weighted = marker_values_weighted * marker_scores_valid
 
         # Normalise coverage and weight valid markers to enhance robustness to low coverage
-        log_coverage = torch.log1p(coverage) / torch.log1p(1000)
+        log_coverage = torch.log1p(coverage) / torch.log1p(torch.tensor(1000.0, device=coverage.device))
         coverage_weights_valid = torch.sigmoid(log_coverage.view(-1)[valid_inds] / 10.0)
         marker_values_weighted = marker_values_weighted * coverage_weights_valid
 
