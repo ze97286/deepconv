@@ -121,7 +121,7 @@ def train_epoch(
 
         # Perform forward pass
         start_forward = time.time()
-        props, batch_presence_probs, x_nnls_out, dl_props, reconstructed, valid_mask = model(
+        props, batch_presence_probs, x_nnls_out, dl_props, reconstructed, valid_mask, marker_quality_weights, marker_selection = model(
             fraction, coverage, x_nnls, presence_probs
         )
         timing_stats['forward_pass'] += time.time() - start_forward
@@ -141,7 +141,9 @@ def train_epoch(
             dl_props=dl_props,
             combination_weight=model.combination_weight,
             presence_threshold=presence_threshold,
-            device=device
+            device=device,
+            marker_quality_weights=marker_quality_weights,
+            marker_selection=marker_selection,
         )
         timing_stats['loss_computation'] += time.time() - start_loss
 
@@ -301,7 +303,7 @@ def validate(
                 presence_probs = batch['presence_probs'].to(device) if 'presence_probs' in batch else None
                 
                 # Perform forward pass
-                props, batch_presence_probs, x_nnls_out, dl_props, reconstructed, valid_mask = model(
+                props, batch_presence_probs, x_nnls_out, dl_props, reconstructed, valid_mask, marker_quality_weights, marker_selection = model(
                     fraction, coverage, x_nnls, presence_probs
                 )
                 
@@ -319,7 +321,9 @@ def validate(
                     dl_props=dl_props,
                     combination_weight=model.combination_weight,
                     presence_threshold=presence_threshold,
-                    device=device
+                    device=device,
+                    marker_quality_weights=marker_quality_weights,
+                    marker_selection=marker_selection
                 )
                 
                 # Collect predictions for aggregate metrics

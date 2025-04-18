@@ -2,11 +2,11 @@ import torch
 import torch.nn.functional as F
 
 def focal_loss(pred, target, gamma=2.0, alpha=0.25):
-    """Compute focal loss for binary classification to enhance low-SNR cell type detection.
+    """Compute focal loss for binary classification to enhance presence detection.
 
     Args:
         pred (torch.Tensor): Predicted probabilities [B, C].
-        target (torch.Tensor): Binary target labels (0 or 1) [B, C].
+        target (torch.Tensor): Binary target labels [B, C].
         gamma (float, optional): Focusing parameter to reduce loss for easy examples. Defaults to 2.0.
         alpha (float, optional): Class balancing weight. Defaults to 0.25.
 
@@ -29,42 +29,46 @@ def loss_fn(
     x_nnls: torch.Tensor,
     dl_props: torch.Tensor,
     combination_weight: torch.Tensor,
-    alpha: float = 0.92,
+    marker_quality_weights: torch.Tensor,
+    marker_selection: torch.Tensor,
+    alpha: float = 0.85,
     beta: float = 0.07,
     gamma: float = 0.01,
     presence_threshold: float = 0.01,
-    low_snr_indices=[11],
+    low_snr_indices=[3, 4, 9, 11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ):
     """Compute the loss for cell-type deconvolution, optimising for low-SNR and low-coverage scenarios.
 
-    This loss function combines multiple terms to improve detection of low-SNR cell types (e.g., T-cells
-    at 1–2%), handle low-coverage markers, and refine NNLS ensembling:
-    - Proportion error: Weighted MAE with coverage-based and low-SNR penalties.
-    - Critical range loss: Targets specific concentration ranges (0.1–2%) for low-SNR types.
-    - Reconstruction loss: Coverage-weighted L1 loss to ensure accurate marker reconstruction.
-    - Presence loss: Focal loss to enhance binary presence detection.
-    - Sparsity penalty: Encourages sparse proportion predictions.
-    - NNLS regularisation and weight penalty: Aligns predictions with NNLS priors, prioritising DeepConv for low-SNR types.
+    This function combines multiple loss terms:
+    - Proportion error with coverage-based and low-SNR weighting to improve accuracy.
+    - Critical range loss targeting low concentrations (0.1–2%) for low-SNR cell types.
+    - Coverage-weighted reconstruction loss to ensure accurate marker reconstruction.
+    - Focal presence loss to enhance presence detection.
+    - Sparsity penalty to encourage sparse predictions.
+    - NNLS regularisation and weight penalty to align with NNLS predictions, prioritising DeepConv for low-SNR types.
+    - Marker weight regularisation to prevent collapse of marker quality and selection weights.
 
     Args:
         pred_props (torch.FloatTensor): Predicted proportions [B, C].
         true_props (torch.FloatTensor): Ground-truth proportions [B, C].
         reconstructed (torch.FloatTensor): Reconstructed marker values [B, M].
         marker_values (torch.FloatTensor): True marker values [B, M], NaN where coverage=0.
-        coverage (torch.FloatTensor): Read coverage values [B, M].
+        coverage (torch.FloatTensor): Coverage values [B, M].
         valid_mask (torch.BoolTensor): Mask indicating valid markers [B, M].
         presence_probs (torch.FloatTensor): Presence probabilities [B, C].
         presence_logits (torch.FloatTensor): Raw logits [B, C].
         x_nnls (torch.FloatTensor): NNLS predictions [B, C], or None.
         dl_props (torch.FloatTensor): Deep learning-only proportions [B, C].
         combination_weight (torch.FloatTensor): Ensembling weights [C].
-        alpha (float, optional): Weight for proportion error. Defaults to 0.92.
-        beta (float, optional): Weight for reconstruction loss. Defaults to 0.07.
-        gamma (float, optional): Weight for sparsity penalty. Defaults to 0.01.
-        presence_threshold (float, optional): Threshold for presence detection. Defaults to 0.01.
-        low_snr_indices (list[int], optional): Low-SNR cell type indices. Defaults to [3, 4, 9, 11].
-        device (torch.device, optional): Device for computation. Defaults to CUDA if available.
+        marker_quality_weights (torch.Tensor): Marker quality weights [M].
+        marker_selection (torch.Tensor): Marker selection weights [M].
+        alpha (float, optional): Proportion error weight. Defaults to 0.85.
+        beta (float, optional): Reconstruction loss weight. Defaults to 0.07.
+        gamma (float, optional): Sparsity penalty weight. Defaults to 0.01.
+        presence_threshold (float, optional): Presence threshold. Defaults to 0.01.
+        low_snr_indices (list[int], optional): Low-SNR indices. Defaults to [3, 4, 9, 11].
+        device (torch.device, optional): Device. Defaults to CUDA if available.
 
     Returns:
         tuple:
@@ -75,7 +79,7 @@ def loss_fn(
     errors = torch.abs(pred_props - true_props)
     importance_weights = torch.ones_like(true_props)
 
-    # Concentration-specific weighting
+    # Apply concentration-specific weighting
     low_conc_mask = (true_props > 0.001) & (true_props <= 0.01)
     med_conc_mask = (true_props > 0.01) & (true_props <= 0.05)
     high_conc_mask = true_props > 0.05
@@ -83,16 +87,16 @@ def loss_fn(
     importance_weights = torch.where(med_conc_mask, 1.4, importance_weights)
     importance_weights = torch.where(high_conc_mask, 1.0, importance_weights)
 
-    # Low-SNR cell type weighting
+    # Apply additional weighting for low-SNR cell types
     for idx in low_snr_indices:
         capped_fraction = torch.clamp(true_props[:, idx], max=0.10)
         importance_weights[:, idx] *= (1.0 + 10.0 * capped_fraction)
 
-    # Coverage-based weighting
-    coverage_weights = coverage.mean(dim=1, keepdim=True)  # [B, 1]
+    # Weight proportion errors by coverage to enhance low-coverage robustness
+    coverage_weights = torch.sigmoid(coverage / 10.0).mean(dim=1, keepdim=True)
     weighted_errors = errors * importance_weights * coverage_weights
 
-    # Underestimation and overestimation penalties
+    # Add underestimation and overestimation penalties
     underestimation = F.relu(true_props - pred_props)
     overestimation = F.relu(pred_props - true_props)
     low_snr_mask = torch.zeros_like(true_props)
@@ -101,10 +105,10 @@ def loss_fn(
     low_snr_under_penalty = low_snr_mask * underestimation * 0.7
     loss_props = (weighted_errors + underestimation_penalty + low_snr_under_penalty).mean()
 
-    # Critical Range Loss
+    # Apply critical range loss for low concentrations (0.1–2%)
     critical_ranges = [
         ((true_props >= 0.001) & (true_props < 0.005), 1.0),
-        ((true_props >= 0.005) & (true_props < 0.02), 2.0),  # Emphasise 0.5–2%
+        ((true_props >= 0.005) & (true_props < 0.02), 2.0),
         ((true_props >= 0.02) & (true_props < 0.05), 0.5),
     ]
     range_losses = []
@@ -114,26 +118,26 @@ def loss_fn(
             range_losses.append(weight * range_error)
     critical_range_loss = sum(range_losses) if range_losses else torch.tensor(0.0, device=device)
 
-    # Coverage-Weighted Reconstruction Loss
+    # Apply coverage-weighted reconstruction loss
     safe_marker_values = torch.where(valid_mask, marker_values, reconstructed)
     recon_loss = torch.sum(
         valid_mask * coverage * torch.abs(safe_marker_values - reconstructed)
     ) / (torch.sum(valid_mask * coverage) + 1e-8)
 
-    # Focal Presence Loss
+    # Apply focal loss for presence detection
     presence_targets = (true_props > presence_threshold).float()
     presence_loss = focal_loss(presence_probs, presence_targets)
 
-    # Sparsity Penalty
+    # Apply sparsity penalty to encourage sparse predictions
     sparsity_penalty = torch.mean(torch.sum(pred_props, dim=1))
 
-    # NNLS Regularisation
+    # Apply NNLS regularisation if provided
     reg_loss = torch.tensor(0.0, device=device)
     if x_nnls is not None:
-        c = coverage.mean(dim=1)
+        c = torch.sigmoid(coverage / 10.0).mean(dim=1)
         reg_loss = (c * (pred_props - x_nnls).pow(2).sum(dim=1)).mean()
 
-    # Per-Cell-Type Weight Penalty
+    # Apply weight penalty to prioritise DeepConv for low-SNR types
     weight_penalty = torch.tensor(0.0, device=device)
     if x_nnls is not None:
         nnls_errors = torch.abs(x_nnls - true_props).detach()
@@ -143,15 +147,18 @@ def loss_fn(
         low_snr_mask[:, low_snr_indices] = 1.0
         weight_penalty = (weights * nnls_errors * (1 - low_snr_mask) + (1 - weights) * dl_errors * low_snr_mask).mean()
 
-    # Combine Loss Terms
+    # Regularise marker weights to prevent collapse
+    marker_weight_reg = (torch.sigmoid(marker_quality_weights).mean() + torch.sigmoid(marker_selection).mean()) / 2.0
+
+    # Combine loss terms
     total_loss = (
         alpha * loss_props +
-        0.2 * critical_range_loss +
+        0.3 * critical_range_loss +
         beta * recon_loss +
-        0.1 * presence_loss +
+        0.15 * presence_loss +
         gamma * sparsity_penalty +
-        0.1 * reg_loss +
-        0.1 * weight_penalty
+        0.15 * weight_penalty +
+        0.01 * marker_weight_reg
     )
 
     # Diagnostics
@@ -180,6 +187,7 @@ def loss_fn(
         'sparsity_loss': sparsity_penalty.item(),
         'reg_loss': reg_loss.item(),
         'weight_penalty': weight_penalty.item(),
+        'marker_weight_reg': marker_weight_reg.item(),
         'low_snr_under': underestimation[:, low_snr_indices].mean().item(),
         'low_snr_over': overestimation[:, low_snr_indices].mean().item(),
         'error_low_conc': low_conc_error.item() if not torch.isnan(low_conc_error) else 0.0,
