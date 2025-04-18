@@ -48,29 +48,28 @@ def loss_fn(
     - NNLS regularisation and weight penalty: Aligns predictions with NNLS priors, prioritising DeepConv for low-SNR types.
 
     Args:
-        pred_props (torch.FloatTensor): Predicted proportions [B, C], ensembled if x_nnls provided.
+        pred_props (torch.FloatTensor): Predicted proportions [B, C].
         true_props (torch.FloatTensor): Ground-truth proportions [B, C].
-        reconstructed (torch.FloatTensor): Reconstructed marker methylation values [B, M].
-        marker_values (torch.FloatTensor): True marker methylation values [B, M], NaN where coverage=0.
+        reconstructed (torch.FloatTensor): Reconstructed marker values [B, M].
+        marker_values (torch.FloatTensor): True marker values [B, M], NaN where coverage=0.
         coverage (torch.FloatTensor): Read coverage values [B, M].
-        valid_mask (torch.BoolTensor): Mask indicating valid markers (coverage > 0) [B, M].
+        valid_mask (torch.BoolTensor): Mask indicating valid markers [B, M].
         presence_probs (torch.FloatTensor): Presence probabilities [B, C].
-        presence_logits (torch.FloatTensor): Raw logits before sigmoid [B, C].
-        x_nnls (torch.FloatTensor): NNLS predictions [B, C], or None if ensembling disabled.
-        dl_props (torch.FloatTensor): Deep learning-only proportions before ensembling [B, C].
-        combination_weight (torch.FloatTensor): Ensembling weights for DL and NNLS predictions [C].
-        alpha (float, optional): Weight for proportion error term. Defaults to 0.92.
-        beta (float, optional): Weight for reconstruction loss term. Defaults to 0.07.
-        gamma (float, optional): Weight for sparsity penalty term. Defaults to 0.01.
+        presence_logits (torch.FloatTensor): Raw logits [B, C].
+        x_nnls (torch.FloatTensor): NNLS predictions [B, C], or None.
+        dl_props (torch.FloatTensor): Deep learning-only proportions [B, C].
+        combination_weight (torch.FloatTensor): Ensembling weights [C].
+        alpha (float, optional): Weight for proportion error. Defaults to 0.92.
+        beta (float, optional): Weight for reconstruction loss. Defaults to 0.07.
+        gamma (float, optional): Weight for sparsity penalty. Defaults to 0.01.
         presence_threshold (float, optional): Threshold for presence detection. Defaults to 0.01.
-        low_snr_indices (list[int], optional): Indices of low-SNR cell types (e.g., colon, oesophagus, OAC, T-cells).
-            Defaults to [11] (T-cells).
-        device (torch.device, optional): Device for computation. Defaults to CUDA if available, else CPU.
+        low_snr_indices (list[int], optional): Low-SNR cell type indices. Defaults to [3, 4, 9, 11].
+        device (torch.device, optional): Device for computation. Defaults to CUDA if available.
 
     Returns:
         tuple:
             - torch.Tensor: Combined loss scalar.
-            - dict: Diagnostic statistics, including loss components and presence metrics.
+            - dict: Diagnostic statistics, including loss components and metrics.
     """
     # Proportion Error
     errors = torch.abs(pred_props - true_props)
@@ -95,14 +94,14 @@ def loss_fn(
 
     # Underestimation and overestimation penalties
     underestimation = F.relu(true_props - pred_props)
-    overestimation = F.relu(pred_props - true_props)  # Added to fix undefined variable
+    overestimation = F.relu(pred_props - true_props)
     low_snr_mask = torch.zeros_like(true_props)
     low_snr_mask[:, low_snr_indices] = 1.0
     underestimation_penalty = 1.3 * underestimation
     low_snr_under_penalty = low_snr_mask * underestimation * 0.7
     loss_props = (weighted_errors + underestimation_penalty + low_snr_under_penalty).mean()
 
-    # Critical Range Loss for low-SNR concentrations
+    # Critical Range Loss
     critical_ranges = [
         ((true_props >= 0.001) & (true_props < 0.005), 1.0),
         ((true_props >= 0.005) & (true_props < 0.02), 2.0),  # Emphasise 0.5–2%
@@ -134,7 +133,7 @@ def loss_fn(
         c = coverage.mean(dim=1)
         reg_loss = (c * (pred_props - x_nnls).pow(2).sum(dim=1)).mean()
 
-    # Weight Penalty for Ensembling
+    # Per-Cell-Type Weight Penalty
     weight_penalty = torch.tensor(0.0, device=device)
     if x_nnls is not None:
         nnls_errors = torch.abs(x_nnls - true_props).detach()
