@@ -535,6 +535,7 @@ def train_model(
     best_oac_r2 = -float('inf')
     best_tier1_r2 = -float('inf')
     best_mae = float('inf')
+    best_weighted_r2 = -float("inf")
     patience_counter = 0
     history = defaultdict(list)
 
@@ -542,7 +543,7 @@ def train_model(
     for epoch in range(num_epochs):
         print(f"\n🔹 Epoch {epoch + 1}/{num_epochs}")
         print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
-        
+
         # Run training epoch
         train_stats = train_epoch(
             model,
@@ -552,7 +553,7 @@ def train_model(
             epoch=epoch,
             presence_threshold=0.01
         )
-        
+
         # Select validation datasets (unaugmented for early epochs, augmented later)
         current_val_loaders = val_loaders_unaugmented if epoch < 100 else val_loaders_augmented
         print(f"Validation with {'augmented' if epoch >= 100 else 'unaugmented'} data")
@@ -646,32 +647,32 @@ def train_model(
         # Check for model improvement
         improved = False
         improvement_reason = []
-        
+
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             improved = True
             improvement_reason.append(f"loss: {best_val_loss:.6f}")
-        
+
         if tcells_f1_avg > best_tcells_f1:
             best_tcells_f1 = tcells_f1_avg
             improved = True
             improvement_reason.append(f"T-cells F1: {best_tcells_f1:.4f}")
-        
+
+        weighted_r2 = 0.55 * tcells_r2_avg + 0.4 * oac_r2_avg + 0.05 * tier1_r2_avg
         if tcells_r2_avg > best_tcells_r2:
             best_tcells_r2 = tcells_r2_avg
-            improved = True
-            improvement_reason.append(f"T-cells R²: {best_tcells_r2:.4f}")
         
         if oac_r2_avg > best_oac_r2:
             best_oac_r2 = oac_r2_avg
-            improved = True
-            improvement_reason.append(f"OAC R²: {best_oac_r2:.4f}")
-            
+
         if tier1_r2_avg > best_tier1_r2:
             best_tier1_r2 = tier1_r2_avg
+
+        if weighted_r2 > best_weighted_r2:
+            best_weighted_r2 = weighted_r2
             improved = True
-            improvement_reason.append(f"Tier1 R²: {best_tier1_r2:.4f}")
-            
+            improvement_reason.append(f"weighted R²: {best_weighted_r2:.4f} (T-cells R² {best_tcells_r2}, OAC R² {best_oac_r2}, tier1 R² {best_tier1_r2})")
+
         if mae_avg < best_mae:
             best_mae = mae_avg
             improved = True
@@ -681,21 +682,22 @@ def train_model(
         if improved:
             patience_counter = 0
             checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'best_val_loss': best_val_loss,
-                'best_tcells_f1': best_tcells_f1,
-                'best_tcells_r2': best_tcells_r2,
-                'best_oac_r2': best_oac_r2,
-                'best_tier1_r2': best_tier1_r2,
-                'best_mae': best_mae,
-                'history': dict(history),
-                'commit_hash': git_commit,
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "best_val_loss": best_val_loss,
+                "best_tcells_f1": best_tcells_f1,
+                "best_tcells_r2": best_tcells_r2,
+                "best_oac_r2": best_oac_r2,
+                "best_tier1_r2": best_tier1_r2,
+                "best_weighted_r2": best_weighted_r2,
+                "best_mae": best_mae,
+                "history": dict(history),
+                "commit_hash": git_commit,
             }
             torch.save(checkpoint, os.path.join(model_path, "best_model.pt"))
             print(f"\n✅ Saved new best model with improvements in: {', '.join(improvement_reason)}")
-            
+
             if use_wandb:
                 wandb.save(os.path.join(model_path, "best_model.pt"))
         else:
@@ -711,7 +713,7 @@ def train_model(
     print("\nLoading best model...")
     checkpoint = torch.load(os.path.join(model_path, "best_model.pt"))
     model.load_state_dict(checkpoint['model_state_dict'])
-    
+
     print(f"\n🏆 Best Model Performance:")
     print(f"Loss: {best_val_loss:.6f}")
     print(f"T-cells F1: {best_tcells_f1:.4f}")
