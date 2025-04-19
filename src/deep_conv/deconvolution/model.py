@@ -334,28 +334,31 @@ class CellTypeDeconvolutionModel(nn.Module):
     """A neural network model for deconvolving cell-type proportions from cfDNA methylation data.
 
     This model predicts cell-type proportions by integrating methylation marker values, read coverage,
-    and pre-trained presence probabilities. It employs a feature extractor, encoder, and decoder to
-    process input data, applies presence-based gating to refine predictions, and supports optional
-    ensembling with non-negative least squares (NNLS) predictions. The model is designed for use with
-    methylation data where coverage may be zero, and it handles such cases gracefully.
+    pre-trained presence probabilities, and optional non-negative least squares (NNLS) predictions.
+    It employs a per-marker feature extractor, an encoder with presence and NNLS inputs, and a decoder
+    to reconstruct marker values. Learnable weights prioritise informative markers, select sparse markers,
+    and weight coverage for robust low-coverage performance. Only markers with positive coverage contribute
+    to computations, handling NaN values appropriately.
 
     Attributes:
         num_markers (int): Number of methylation markers (M).
         num_celltypes (int): Number of cell types to predict (C).
         feature_dim (int): Dimensionality of marker feature embeddings.
-        use_x_nnls (bool): Whether to enable ensembling with NNLS predictions.
-        target_ids (torch.Tensor): Long tensor mapping each marker to a cell type index [M].
+        use_x_nnls (bool): Whether to enable NNLS ensembling.
+        target_ids (torch.Tensor): Long tensor mapping markers to cell type indices [M].
+        marker_quality_weights (torch.Tensor): Learnable weights for marker importance [M].
+        marker_selection (torch.Tensor): Learnable weights for sparse marker selection [M].
         presence_models (nn.ModuleList): Pre-trained models for predicting cell-type presence.
         marker_feature_extractor (nn.Sequential): Neural network to extract features from markers.
         encoder (nn.Sequential): Neural network to predict cell-type proportions.
         decoder (nn.Sequential): Neural network to reconstruct marker methylation values.
         presence_thresholds (torch.Tensor): Sigmoid thresholds for presence gating [C].
         presence_slopes (torch.Tensor): Sigmoid slopes for presence gating [C].
-        combination_weight (nn.Parameter): Learnable weights for ensembling DL and NNLS predictions [C].
+        combination_weight (nn.Parameter): Weights for ensembling DL and NNLS predictions [C].
     """
 
-    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=64, use_x_nnls=True, initialise_weights=True):
-        """Initialise the CellTypeDeconvolutionModel with specified parameters.
+    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=64, use_x_nnls=False, initialise_weights=False):
+        """Initialise the model with specified parameters.
 
         Args:
             num_markers (int): Number of methylation markers.
@@ -363,7 +366,8 @@ class CellTypeDeconvolutionModel(nn.Module):
             target_ids (array-like): Indices mapping markers to cell types.
             presence_models_dir (str): Directory containing pre-trained presence model files.
             feature_dim (int, optional): Dimensionality of marker feature embeddings. Defaults to 64.
-            use_x_nnls (bool, optional): Enable ensembling with NNLS predictions. Defaults to False.
+            use_x_nnls (bool, optional): Enable NNLS ensembling. Defaults to False.
+            initialise_weights (bool, optional): Use Kaiming initialisation if True. Defaults to False.
         """
         super().__init__()
         self.num_markers = num_markers
@@ -371,9 +375,15 @@ class CellTypeDeconvolutionModel(nn.Module):
         self.feature_dim = feature_dim
         self.use_x_nnls = use_x_nnls
 
-        # Store cell-type assignments for each marker as a buffer
+        # Store cell-type assignments as a buffer
         target_ids_t = torch.as_tensor(target_ids, dtype=torch.long)
         self.register_buffer("target_ids", target_ids_t)
+
+        # Initialise weights to prioritise informative markers
+        self.marker_quality_weights = nn.Parameter(torch.ones(num_markers) + 0.1 * torch.randn(num_markers))
+
+        # Initialise weights for sparse marker selection
+        self.marker_selection = nn.Parameter(torch.ones(num_markers) + 0.1 * torch.randn(num_markers))
 
         # Load pre-trained presence models for each cell type
         self.presence_models = nn.ModuleList()
@@ -381,7 +391,6 @@ class CellTypeDeconvolutionModel(nn.Module):
             model_path = Path(presence_models_dir) / f"presence_model_{cell_type_idx}.pt"
             if not model_path.exists():
                 raise FileNotFoundError(f"Presence model not found at {model_path}")
-            
             checkpoint = torch.load(model_path)
             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
                 presence_model = SingleCellTypePresenceModel()
@@ -392,40 +401,44 @@ class CellTypeDeconvolutionModel(nn.Module):
             presence_model.eval()
             self.presence_models.append(presence_model)
 
-        # Define marker feature extractor: transforms single marker values into feature vectors
+        # Define marker feature extractor to transform single marker values into feature vectors
         self.marker_feature_extractor = nn.Sequential(
             nn.Linear(1, feature_dim),
             nn.LeakyReLU(),
             nn.Linear(feature_dim, feature_dim)
         )
 
-        # Define encoder: predicts cell-type proportions from aggregated features and presence probs
+        # Define encoder to predict proportions from aggregated features, presence probabilities, and NNLS predictions
         self.encoder = nn.Sequential(
-            nn.Linear(num_cell_types * feature_dim + num_cell_types, 128),
+            nn.Linear(num_cell_types * feature_dim + num_cell_types * 2, 128),
             nn.LeakyReLU(),
             nn.Linear(128, 128),
             nn.LeakyReLU(),
             nn.Linear(128, num_cell_types)
         )
 
-        # Define decoder: reconstructs marker methylation values from predicted proportions
+        # Define decoder to reconstruct marker methylation values from predicted proportions
         self.decoder = nn.Sequential(
             nn.Linear(num_cell_types, 128),
             nn.LeakyReLU(),
             nn.Linear(128, num_markers)
         )
 
-        # Initialise presence gating parameters: thresholds and slopes for sigmoid scaling
+        # Initialise presence gating parameters for scaling proportions based on presence probabilities
         thresholds = torch.ones(num_cell_types) * 0.5
         slopes = torch.ones(num_cell_types) * 10
-        oac_index = 9  # Special handling for Oesophageal Adenocarcinoma (OAC)
-        thresholds[oac_index] = 0.3  # Lower threshold for OAC due to empirical sensitivity
-        slopes[oac_index] = 15      # Steeper slope for sharper OAC gating
+        oac_index = 9
+        thresholds[oac_index] = 0.3
+        slopes[oac_index] = 15
         self.register_buffer("presence_thresholds", thresholds)
         self.register_buffer("presence_slopes", slopes)
 
-        # Define learnable weights for ensembling deep learning (DL) and NNLS predictions
-        self.combination_weight = nn.Parameter(torch.full((num_cell_types,), 0.5))
+        # Initialise ensembling weights, biased toward DeepConv for low-SNR cell types
+        combination_weight = torch.full((num_cell_types,), 0.5)
+        for idx in [11]:
+            combination_weight[idx] = -0.5
+        self.combination_weight = nn.Parameter(combination_weight)
+
         if initialise_weights:
             self._initialise_weights()
 
@@ -440,10 +453,8 @@ class CellTypeDeconvolutionModel(nn.Module):
     def apply_presence_gating(self, props, probs):
         """Apply cell-type-specific scaling to proportions based on presence probabilities.
 
-        This method uses a sigmoid function to scale predicted proportions according to
-        pre-trained presence probabilities, enhancing predictions for cell types likely
-        to be present. The scaling is parameterised by cell-type-specific thresholds and
-        slopes, and the output is normalised to sum to 1.
+        Uses a sigmoid function parameterised by cell-type-specific thresholds and slopes to scale
+        predicted proportions, enhancing predictions for cell types likely to be present.
 
         Args:
             props (torch.FloatTensor): Predicted proportions [B, C].
@@ -463,8 +474,8 @@ class CellTypeDeconvolutionModel(nn.Module):
     def predict_presence_with_separate_models(self, marker_values, coverage):
         """Predict presence probabilities for each cell type using pre-trained models.
 
-        Each cell type has a dedicated presence model that processes only the markers
-        associated with that cell type, improving detection accuracy for low-signal cell types.
+        Each cell type has a dedicated presence model that processes only the markers associated
+        with that cell type, improving detection accuracy for low-SNR cell types.
 
         Args:
             marker_values (torch.FloatTensor): Fractional methylation values [B, M].
@@ -478,13 +489,14 @@ class CellTypeDeconvolutionModel(nn.Module):
         B, C = marker_values.shape[0], self.num_celltypes
         presence_probs = torch.zeros(B, C, device=marker_values.device)
         presence_logits = torch.zeros(B, C, device=marker_values.device)
+        valid_mask = coverage > 0
+        marker_values_clean = torch.where(valid_mask, marker_values, torch.zeros_like(marker_values))
 
         for cell_type_idx, presence_model in enumerate(self.presence_models):
             cell_type_marker_mask = (self.target_ids == cell_type_idx)
             if not cell_type_marker_mask.any():
                 continue
-
-            cell_type_marker_values = marker_values[:, cell_type_marker_mask]
+            cell_type_marker_values = marker_values_clean[:, cell_type_marker_mask]
             cell_type_coverage = coverage[:, cell_type_marker_mask]
             with torch.no_grad():
                 logits, _, _ = presence_model(cell_type_marker_values, cell_type_coverage)
@@ -497,13 +509,14 @@ class CellTypeDeconvolutionModel(nn.Module):
     def forward(self, marker_values, coverage, x_nnls=None, presence_probs=None):
         """Perform a forward pass to predict cell-type proportions and reconstruct marker values.
 
-        The forward pass:
-        1. Extracts features from valid methylation markers (coverage > 0).
-        2. Aggregates features by cell type, weighted by coverage.
-        3. Integrates presence probabilities (precomputed or computed).
-        4. Predicts proportions using the encoder, applying ReLU and presence gating.
-        5. Optionally ensembles with NNLS predictions if use_x_nnls is True.
-        6. Reconstructs marker methylation values using the decoder.
+        This method processes input methylation marker values and coverage to predict cell-type
+        proportions, integrating pre-trained presence probabilities and optional NNLS predictions.
+        It applies learnable weights to prioritise informative markers, select sparse markers, and
+        weight coverage for robust low-coverage performance. The encoder combines aggregated marker
+        features with presence probabilities and NNLS predictions to produce proportions, which are
+        scaled by presence probabilities and optionally ensembled with NNLS. A decoder reconstructs
+        marker values to ensure consistency with input data. Only markers with positive coverage
+        contribute to computations, handling NaN values appropriately.
 
         Args:
             marker_values (torch.FloatTensor): Fractional methylation values [B, M], NaN where coverage=0.
@@ -513,43 +526,57 @@ class CellTypeDeconvolutionModel(nn.Module):
 
         Returns:
             tuple:
-                - torch.FloatTensor: Final predicted proportions [B, C], ensembled if use_x_nnls and x_nnls provided.
+                - torch.FloatTensor: Final predicted proportions [B, C], ensembled if x_nnls provided.
                 - torch.FloatTensor: Presence probabilities [B, C].
                 - torch.FloatTensor: Input x_nnls [B, C], or None if not provided.
                 - torch.FloatTensor: Deep learning-only proportions before ensembling [B, C].
                 - torch.FloatTensor: Reconstructed marker methylation values [B, M].
                 - torch.BoolTensor: Mask indicating valid markers (coverage > 0) [B, M].
+                - torch.FloatTensor: Marker quality weights [M].
+                - torch.FloatTensor: Marker selection weights [M].
         """
-        # Disable x_nnls ensembling if use_x_nnls is False
         if not self.use_x_nnls:
             x_nnls = None
 
         B, M, C = marker_values.shape[0], marker_values.shape[1], self.num_celltypes
         valid_mask = coverage > 0
 
-        # Flatten inputs for efficient indexing
+        # Extract valid markers to exclude NaN values
         coverage_flat = coverage.view(-1)
         marker_values_flat = marker_values.view(-1)
         valid_inds = torch.nonzero(coverage_flat, as_tuple=False).squeeze(1)
 
-        # Handle all-zero-coverage case
         if valid_inds.numel() == 0:
             props = coverage.new_zeros(B, C)
             props[:, 0] = 1.0
             reconstructed = coverage.new_zeros(B, M)
             presence_probs_out = coverage.new_zeros(B, C)
             dl_props = props.clone()
-            return props, presence_probs_out, x_nnls, dl_props, reconstructed, valid_mask
+            return props, presence_probs_out, x_nnls, dl_props, reconstructed, valid_mask, self.marker_quality_weights, self.marker_selection
 
-        # Extract valid coverage and marker values
         coverage_valid = coverage_flat[valid_inds]
         marker_values_valid = marker_values_flat[valid_inds]
         batch_idx = valid_inds // M
         marker_idx = valid_inds % M
         celltype_idx = self.target_ids[marker_idx]
 
+        # Apply learnable weights to prioritise informative markers
+        marker_quality = torch.sigmoid(self.marker_quality_weights)
+        marker_quality_valid = marker_quality[marker_idx]
+        marker_values_weighted = marker_values_valid * marker_quality_valid
+
+        # Apply weights for sparse marker selection to handle low coverage
+        marker_scores = torch.sigmoid(self.marker_selection)
+        marker_scores_valid = marker_scores[marker_idx]
+        marker_values_weighted = marker_values_weighted * marker_scores_valid
+
+        # Normalise coverage and weight valid markers to enhance robustness to low coverage
+        log_coverage = torch.log1p(coverage) / torch.log1p(torch.tensor(1000.0, device=coverage.device))
+        coverage_weights_valid = torch.sigmoid(log_coverage.view(-1)[valid_inds] / 10.0)
+        marker_values_weighted = marker_values_weighted * coverage_weights_valid
+
         # Extract features from valid markers
-        marker_values_valid_2d = marker_values_valid.unsqueeze(1)
+        marker_values_valid_2d = marker_values_weighted.unsqueeze(1)
         features_valid = self.marker_feature_extractor(marker_values_valid_2d)
 
         # Aggregate features by cell type, weighted by coverage
@@ -578,8 +605,11 @@ class CellTypeDeconvolutionModel(nn.Module):
                 else:
                     raise ValueError(f"Presence probs batch size {presence_probs.shape[0]} != input batch size {B}")
 
-        # Combine aggregated features with presence probabilities
-        combined_features = torch.cat([agg_flat, presence_probs], dim=1)
+        # Combine aggregated features with presence probabilities and NNLS predictions
+        if x_nnls is not None:
+            combined_features = torch.cat([agg_flat, presence_probs, x_nnls], dim=1)
+        else:
+            combined_features = torch.cat([agg_flat, presence_probs, torch.zeros(B, C, device=marker_values.device)], dim=1)
 
         # Predict proportions
         logits = self.encoder(combined_features)
@@ -591,16 +621,9 @@ class CellTypeDeconvolutionModel(nn.Module):
         # Reconstruct marker values
         reconstructed = self.decoder(dl_props_out)
 
-        # Ensemble with NNLS predictions if provided and enabled
+        # Ensemble with NNLS predictions if provided
         props = dl_props_out.clone()
         if x_nnls is not None:
-            if x_nnls.shape != props.shape:
-                if x_nnls.shape[0] == 1 and props.shape[0] > 1:
-                    x_nnls = x_nnls.expand(props.shape[0], -1)
-                elif props.shape[0] == 1 and x_nnls.shape[0] > 1:
-                    props = props.expand(x_nnls.shape[0], -1)
-                if x_nnls.shape[1] != props.shape[1]:
-                    raise ValueError(f"x_nnls has {x_nnls.shape[1]} features but props has {props.shape[1]}")
             weight = torch.sigmoid(self.combination_weight).unsqueeze(0)
             props = weight * props + (1 - weight) * x_nnls
             row_sums = props.sum(dim=1, keepdim=True)
@@ -611,7 +634,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                 )
                 props = props * normalization_factor
 
-        return props, presence_probs, x_nnls, dl_props_out, reconstructed, valid_mask
+        return props, presence_probs, x_nnls, dl_props_out, reconstructed, valid_mask, self.marker_quality_weights, self.marker_selection
 
     def get_combination_weights(self):
         """Retrieve the current ensembling weights for combining DL and NNLS predictions.
@@ -623,10 +646,6 @@ class CellTypeDeconvolutionModel(nn.Module):
 
     def predict(self, marker_values, coverage, batch_size=256, device=None, atlas=None):
         """Generate cell-type proportion predictions in evaluation mode.
-
-        This method processes input data in batches, optionally incorporating NNLS predictions
-        if an atlas is provided and use_x_nnls is True. It ensures efficient memory usage and
-        supports both CPU and GPU.
 
         Args:
             marker_values (array-like): Marker methylation values [N, M].
@@ -663,7 +682,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                 if self.use_x_nnls and atlas is not None:
                     x_nnls_np = run_weighted_nnls(batch_X.cpu().numpy(), batch_coverage.cpu().numpy(), atlas)
                     x_nnls = torch.tensor(x_nnls_np, dtype=torch.float32, device=device)
-                props, _, _, _, _, _ = self.forward(batch_X, batch_coverage, x_nnls)
+                props, _, _, _, _, _, _, _ = self.forward(batch_X, batch_coverage, x_nnls)
                 predictions_list.append(props.cpu().numpy())
                 if device.type == 'cuda':
                     torch.cuda.empty_cache()
