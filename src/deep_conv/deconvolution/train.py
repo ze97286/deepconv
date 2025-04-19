@@ -473,7 +473,7 @@ def train_model(
     use_wandb: bool = True,
     wandb_project: str = "cfDNA-Deconvolution",
     wandb_entity: str = None,
-    num_epochs_without_augmentation: int = 100,
+    num_epochs_without_augmentation: int = 30,
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ) -> Tuple[nn.Module, float]:
     """Train the deconvolution model over multiple epochs with early stopping.

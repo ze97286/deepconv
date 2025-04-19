@@ -357,7 +357,16 @@ class CellTypeDeconvolutionModel(nn.Module):
         combination_weight (nn.Parameter): Weights for ensembling DL and NNLS predictions [C].
     """
 
-    def __init__(self, num_markers, num_cell_types, target_ids, presence_models_dir, feature_dim=64, use_x_nnls=True, initialise_weights=False):
+    def __init__(
+        self,
+        num_markers,
+        num_cell_types,
+        target_ids,
+        presence_models_dir,
+        feature_dim=64,
+        use_x_nnls=False,
+        initialise_weights=False,
+    ):
         """Initialise the model with specified parameters.
 
         Args:
