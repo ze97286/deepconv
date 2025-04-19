@@ -364,7 +364,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         target_ids,
         presence_models_dir,
         feature_dim=64,
-        use_x_nnls=False,
+        use_x_nnls=True,
         initialise_weights=False,
     ):
         """Initialise the model with specified parameters.
