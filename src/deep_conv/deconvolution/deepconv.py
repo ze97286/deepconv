@@ -651,7 +651,6 @@ def train_and_eval(
         patience=10, 
         lr=1e-3, 
         weight_decay=1e-5,
-        augmented_start_epoch=50
     )
 
     print("\nStandard Validation Sets:")
