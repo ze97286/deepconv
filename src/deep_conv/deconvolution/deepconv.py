@@ -9,11 +9,52 @@ from torch.utils.data import DataLoader, ConcatDataset
 from pathlib import Path
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')
+from torch.utils.data import Sampler
 
 from deep_conv.benchmark.benchmark_utils import *
 from deep_conv.deconvolution.model import *
 from deep_conv.deconvolution.train import train_model
 from deep_conv.deconvolution.predict import *
+
+class RandomSubsetSampler(Sampler[int]):
+    """Randomly sample a fixed subset_size of indices each epoch from a dataset of total length N."""
+    def __init__(self, data_source, subset_size: int):
+        self.data_source = data_source
+        self.subset_size = min(subset_size, len(data_source))
+
+    def __len__(self):
+        return self.subset_size
+
+    def __iter__(self):
+        all_indices = np.arange(len(self.data_source))
+        np.random.shuffle(all_indices)
+        chosen = all_indices[:self.subset_size]
+        return iter(chosen.tolist())
+
+class FixedBlockSampler(Sampler[int]):
+    """Samples a fixed number of items from each contiguous block in a dataset."""
+    def __init__(self, dataset_size: int, block_size: int, samples_per_block: int, shuffle_within_block: bool = False):
+        self.dataset_size = dataset_size
+        self.block_size = block_size
+        self.samples_per_block = samples_per_block
+        self.shuffle_within_block = shuffle_within_block
+        self.final_indices = []
+        start_idx = 0
+        while start_idx < dataset_size:
+            end_idx = min(start_idx + self.block_size, dataset_size)
+            block_indices = np.arange(start_idx, end_idx)
+            if self.shuffle_within_block:
+                np.random.shuffle(block_indices)
+            chosen = block_indices[:min(self.samples_per_block, len(block_indices))]
+            self.final_indices.extend(chosen)
+            start_idx += self.block_size
+        self.final_indices.sort()
+
+    def __iter__(self):
+        return iter(self.final_indices)
+
+    def __len__(self):
+        return len(self.final_indices)
 
 def set_seed(seed: int = 42):
     """Set all random seeds for reproducibility"""
@@ -28,29 +69,25 @@ def get_validation_set_with_augmentation(
     atlas: pd.DataFrame, 
     names: set,
     block_size: int,
-    target_dist_params=None,
     enable_augmentation=True,
     target_size: int = None,    
     model=None,
-) -> tuple[DataLoader, torch.Tensor]:
+) -> tuple[DataLoader, DataLoader, torch.Tensor]:
     """
-    Validation set loader with optional pre-augmented data and block-based subsampling.
+    Validation set loader with pre-augmented data, creating both regular and clinical-like sets.
     
     Args:
         eval_pat_dir: Directory with validation data
         atlas: DataFrame with marker metadata
         names: Set of marker names to include
         block_size: Size of each block for subsampling
-        target_dist_params: Target coverage distribution parameters
-        enable_augmentation: Whether to enable augmentation
+        enable_augmentation: Whether to enable augmentation for clinical-like set
         target_size: Target number of samples (if None, set to 10% of dataset size)
-        cell_types: List of cell type names (to identify T-cells and OAC columns)
-        filter_tcells_below: Concentration threshold below which to filter T-cell samples
-        filter_oac_below: Concentration threshold below which to filter OAC samples
-        dilution_values: Ignored (subsampling based on blocks)
+        model: Model instance for presence computation
         
     Returns:
-        val_loader: DataLoader with data
+        val_loader: DataLoader for regular (unaugmented) validation set
+        clinical_val_loader: DataLoader for clinical-like (augmented) validation set
         y_val: Ground truth labels
     """
     # Load marker values, coverage, and labels from parquet
@@ -80,29 +117,13 @@ def get_validation_set_with_augmentation(
         target_size = max(dataset_size // 10, 1)
 
     if target_size < dataset_size:
-        num_blocks = (dataset_size + block_size - 1) // block_size
-        samples_per_block = target_size // num_blocks
-        if samples_per_block == 0:
-            samples_per_block = 1
-
-        indices = []
-        for block_idx in range(num_blocks):
-            start_idx = block_idx * block_size
-            end_idx = min((block_idx + 1) * block_size, dataset_size)
-            block_indices = np.arange(start_idx, end_idx)
-            np.random.shuffle(block_indices)
-            selected_indices = block_indices[:min(samples_per_block, len(block_indices))]
-            indices.extend(selected_indices)
-
-        if len(indices) < target_size:
-            remaining = target_size - len(indices)
-            all_indices = np.arange(dataset_size)
-            remaining_indices = np.setdiff1d(all_indices, indices)
-            np.random.shuffle(remaining_indices)
-            indices.extend(remaining_indices[:remaining])
-
-        indices = np.sort(indices)
-
+        sampler = FixedBlockSampler(
+            dataset_size,
+            block_size,
+            int(block_size * 0.2),
+            shuffle_within_block=False
+        )
+        indices = list(sampler)
         X_val = X_val[indices]
         coverage_val = coverage_val[indices]
         y_val_np = y_val_np[indices]
@@ -112,7 +133,17 @@ def get_validation_set_with_augmentation(
     x_nnls_original = run_weighted_nnls(X_val, coverage_val, atlas_np)
     print("shape of x_nnls_original:", x_nnls_original.shape)
 
-    # Apply augmentation if enabled
+    # Create regular (unaugmented) validation set
+    regular_dataset = PreAugmentedTissueDataset(
+        X_val,
+        coverage_val,
+        atlas_np,
+        y_val_np,
+        x_nnls=x_nnls_original,
+        model=model,
+    )
+
+    # Create clinical-like (augmented) validation set
     if enable_augmentation:
         num_samples = len(y_val_np)
         num_to_augment = num_samples // 2
@@ -129,7 +160,6 @@ def get_validation_set_with_augmentation(
             aug_fraction, aug_coverage = coverage_matched_augmentation(
                 fraction_np,
                 coverage_np,
-                target_dist_params,
                 augmentation_prob=1.0
             )
             augmented_fraction.append(aug_fraction[0])
@@ -143,12 +173,12 @@ def get_validation_set_with_augmentation(
         combined_x_nnls = np.concatenate([x_nnls_original[:num_to_augment], x_nnls_original[indices_to_augment]])
 
         dataset_name = Path(eval_pat_dir).name
-        np.save(f"pre_augmented_fraction_{dataset_name}.npy", combined_fraction)
-        np.save(f"pre_augmented_coverage_{dataset_name}.npy", combined_coverage)
-        np.save(f"pre_augmented_y_{dataset_name}.npy", combined_y)
-        np.save(f"pre_augmented_x_nnls_{dataset_name}.npy", combined_x_nnls)
+        np.save(f"pre_augmented_clinical_fraction_{dataset_name}.npy", combined_fraction)
+        np.save(f"pre_augmented_clinical_coverage_{dataset_name}.npy", combined_coverage)
+        np.save(f"pre_augmented_clinical_y_{dataset_name}.npy", combined_y)
+        np.save(f"pre_augmented_clinical_x_nnls_{dataset_name}.npy", combined_x_nnls)
 
-        val_dataset = PreAugmentedTissueDataset(
+        clinical_dataset = PreAugmentedTissueDataset(
             combined_fraction,
             combined_coverage,
             atlas_np,
@@ -157,17 +187,20 @@ def get_validation_set_with_augmentation(
             model=model,
         )
     else:
-        val_dataset = PreAugmentedTissueDataset(
-            X_val,
-            coverage_val,
-            atlas_np,
-            y_val_np,
-            x_nnls=x_nnls_original,
-            model=model,
-        )
+        clinical_dataset = regular_dataset
 
+    # Create DataLoaders
     val_loader = DataLoader(
-        val_dataset,
+        regular_dataset,
+        batch_size=512,
+        shuffle=False,
+        num_workers=16,
+        pin_memory=False,
+        persistent_workers=False
+    )
+
+    clinical_val_loader = DataLoader(
+        clinical_dataset,
         batch_size=512,
         shuffle=False,
         num_workers=16,
@@ -178,7 +211,7 @@ def get_validation_set_with_augmentation(
     y_val_tensor = torch.tensor(y_val_np, dtype=torch.float32)
     y_val_tensor = y_val_tensor / y_val_tensor.sum(dim=1, keepdim=True)
 
-    return val_loader, y_val_tensor
+    return val_loader, clinical_val_loader, y_val_tensor
 
 def load_training_with_augmentation(
     base_dir: str, 
@@ -187,9 +220,10 @@ def load_training_with_augmentation(
     num_files: int = 5,
     target_dist_params: dict = None,
     model=None,
+    subset_size: int = 500_000
 ) -> DataLoader:
     """
-    Enhanced training data loader with pre-augmented data.
+    Enhanced training data loader with pre-augmented data and random subset sampling.
     
     Args:
         base_dir: Path prefix for training parquet files
@@ -197,17 +231,20 @@ def load_training_with_augmentation(
         names: Set of marker names to keep
         num_files: Number of parquet file batches to merge
         target_dist_params: Parameters for target clinical coverage distribution
+        model: Model instance for presence computation
+        subset_size: Number of samples to randomly draw each epoch
         
     Returns:
-        DataLoader: DataLoader over the pre-augmented training data with shuffling.
+        DataLoader: DataLoader over the pre-augmented training data with subset sampling.
     """
     # Load data
     markers, coverage, y = [], [], []
     print("loading training from", base_dir)
-    for i in range(1, num_files + 1):
-        markers.append(pd.read_parquet(f"{base_dir}/{str(i)}_marker_values.parquet"))
-        coverage.append(pd.read_parquet(f"{base_dir}/{str(i)}_coverage.parquet"))
-        y.append(pd.read_parquet(f"{base_dir}/{str(i)}_ground_truth_y.parquet"))
+    for cov in ['low', 'med', 'high']:
+        for i in range(1, num_files + 1):
+            markers.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_marker_values.parquet"))
+            coverage.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_coverage.parquet"))
+            y.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_ground_truth_y.parquet"))
     
     merged_markers = markers[0]
     suffixes = [f"_batch{i}" for i in range(1, len(markers))]
@@ -231,15 +268,6 @@ def load_training_with_augmentation(
     coverage_train = coverage_train.drop(columns=["name", "direction"]).T.to_numpy()
     y_train = y.to_numpy()
     
-
-    # # TEMP TEMP TEMP
-    # random_indices = np.random.choice(len(X_train), size=1000, replace=False)
-    # X_train = X_train[random_indices]
-    # coverage_train = coverage_train[random_indices]
-    # y_train = y_train[random_indices]
-    # # TEMP TEMP TEMP
-
-
     print("Original coverage statistics:")
     print("  Mean:", np.mean(coverage_train))
     print("  Median:", np.median(coverage_train))
@@ -268,7 +296,6 @@ def load_training_with_augmentation(
         aug_fraction, aug_coverage = coverage_matched_augmentation(
             fraction_np,
             coverage_np,
-            target_dist_params,
             augmentation_prob=1.0
         )
         augmented_fraction.append(aug_fraction[0])
@@ -280,7 +307,6 @@ def load_training_with_augmentation(
     combined_fraction = np.concatenate([X_train[:num_to_augment], augmented_fraction])
     combined_coverage = np.concatenate([coverage_train[:num_to_augment], augmented_coverage])
     combined_y = np.concatenate([y_train[:num_to_augment], y_train[indices_to_augment]])
-    # Combine x_nnls: original samples use first num_to_augment, augmented use their original indices
     combined_x_nnls = np.concatenate([x_nnls_original[:num_to_augment], x_nnls_original[indices_to_augment]])
 
     # Save to disk with a unique name based on base_dir
@@ -301,14 +327,16 @@ def load_training_with_augmentation(
     )
     print(f"Training dataset has {len(pre_augmented_dataset)} samples.")
 
-    # Create DataLoader with shuffling
+    # Create DataLoader with random subset sampling
+    subset_sampler = RandomSubsetSampler(pre_augmented_dataset, subset_size=subset_size)
     train_dl = DataLoader(
         pre_augmented_dataset,
         batch_size=64,
-        shuffle=True,
+        sampler=subset_sampler,
         num_workers=24,
         pin_memory=False,
-        persistent_workers=True
+        persistent_workers=True,
+        shuffle=False
     )
     return train_dl
 
@@ -316,43 +344,41 @@ def enhanced_negative_examples(
     train_dl: DataLoader,
     cell_types: list,
     atlas: pd.DataFrame,
-    sample_fraction: float = 0.01,
-    target_dist_params: dict = None,
+    sample_fraction: float = 0.15,
     model=None,
 ) -> DataLoader:
     """
-    Enhance the training dataset by adding negative examples for each cell type.
+    Enhance the training dataset by adding negative examples for each cell type with low/very low coverage variants.
     
     Args:
         train_dl: Original training DataLoader
         cell_types: List of cell type names
         atlas: DataFrame with marker metadata
         sample_fraction: Fraction of samples to use as negative examples per cell type
-        target_dist_params: Target coverage distribution parameters
+        model: Model instance for presence computation
         
     Returns:
         DataLoader: Enhanced DataLoader with negative examples
     """
     # Extract the original dataset
     dataset = train_dl.dataset
-    fraction = np.concatenate([d.fraction.numpy() for d in dataset.datasets])
-    coverage = np.concatenate([d.coverage.numpy() for d in dataset.datasets])
-    y = np.concatenate([d.y.numpy() for d in dataset.datasets])
+    fraction = dataset.fraction
+    coverage = dataset.coverage
+    y = dataset.y
+    x_nnls = dataset.x_nnls
 
     print("Original dataset size:", len(y), "samples")
-
-    # Prepare atlas for NNLS computation
-    atlas_np = atlas[atlas.columns[8:]].T.to_numpy()
 
     # Create negative examples for each cell type
     negative_fractions = []
     negative_coverages = []
     negative_ys = []
+    negative_x_nnls = []
     print("Creating negative examples for each cell type...")
     for cell_idx, cell_type in enumerate(cell_types):
         print(f"Processing {cell_type} (index {cell_idx})...")
         # Find samples where this cell type is absent (proportion = 0)
-        absent_mask = y[:, cell_idx] == 0
+        absent_mask = y[:, cell_idx] < 0.001
         absent_indices = np.where(absent_mask)[0]
         print(f"  Found {len(absent_indices)} samples with {cell_type} absent")
 
@@ -362,64 +388,79 @@ def enhanced_negative_examples(
         print(f"  Selected {num_samples} samples to use as negative examples")
 
         # Extract the selected samples
-        selected_fraction = fraction[selected_indices]
-        selected_coverage = coverage[selected_indices]
-        selected_y = y[selected_indices]
+        sel_fraction = fraction[selected_indices]
+        sel_coverage = coverage[selected_indices]
+        sel_y = y[selected_indices].copy()
+        sel_y[:, cell_idx] = 0.0
+        sel_x_nnls = x_nnls[selected_indices]
 
-        negative_fractions.append(selected_fraction)
-        negative_coverages.append(selected_coverage)
-        negative_ys.append(selected_y)
+        N_sel, M = sel_fraction.shape
 
-    # Combine all negative examples (pre-augmentation)
+        # Prepare vectorized operations
+        orig_reads = np.maximum(1, np.rint(sel_coverage)).astype(np.int32)
+
+        # Low Coverage Variant (50% reduction)
+        low_cov = sel_coverage * 0.5
+        target_reads_low = np.maximum(1, np.rint(low_cov)).astype(np.int32)
+        orig_methylated = np.rint(sel_fraction * orig_reads).astype(np.int32)
+        mask_low = (sel_coverage > 0) & (target_reads_low < orig_reads)
+        low_fraction = sel_fraction.copy()
+        if np.any(mask_low):
+            sampled_low = np.random.hypergeometric(
+                orig_methylated[mask_low],
+                (orig_reads - orig_methylated)[mask_low],
+                target_reads_low[mask_low]
+            )
+            low_fraction[mask_low] = sampled_low / target_reads_low[mask_low].astype(np.float32)
+
+        # Very Low Coverage Variant (80% reduction)
+        very_low_cov = sel_coverage * 0.2
+        target_reads_very = np.rint(very_low_cov).astype(np.int32)
+        very_low_fraction = np.zeros_like(sel_fraction)
+        mask_very = (sel_coverage > 0) & (target_reads_very > 0)
+        if np.any(mask_very):
+            sampled_very = np.random.hypergeometric(
+                orig_methylated[mask_very],
+                (orig_reads - orig_methylated)[mask_very],
+                target_reads_very[mask_very]
+            )
+            very_low_fraction[mask_very] = sampled_very / target_reads_very[mask_very].astype(np.float32)
+
+        # Append three variants per sample
+        negative_fractions.append(sel_fraction)
+        negative_coverages.append(sel_coverage)
+        negative_ys.append(sel_y)
+        negative_x_nnls.append(sel_x_nnls)
+
+        negative_fractions.append(low_fraction)
+        negative_coverages.append(low_cov)
+        negative_ys.append(sel_y)
+        negative_x_nnls.append(sel_x_nnls)
+
+        negative_fractions.append(very_low_fraction)
+        negative_coverages.append(very_low_cov)
+        negative_ys.append(sel_y)
+        negative_x_nnls.append(sel_x_nnls)
+
+    # Combine all negative examples
     negative_fraction = np.concatenate(negative_fractions)
     negative_coverage = np.concatenate(negative_coverages)
     negative_y = np.concatenate(negative_ys)
-
-    # Pre-augment 50% of the negative examples
-    num_negative_samples = len(negative_y)
-    num_to_augment = num_negative_samples // 2
-    indices_to_augment = np.random.choice(num_negative_samples, num_to_augment, replace=False)
-
-    # Augment selected samples
-    augmented_fraction = []
-    augmented_coverage = []
-    for idx in indices_to_augment:
-        fraction_np = negative_fraction[idx].reshape(1, -1)
-        coverage_np = negative_coverage[idx].reshape(1, -1)
-        aug_fraction, aug_coverage = coverage_matched_augmentation(
-            fraction_np,
-            coverage_np,
-            target_dist_params,
-            augmentation_prob=1.0
-        )
-        augmented_fraction.append(aug_fraction[0])
-        augmented_coverage.append(aug_coverage[0])
-
-    augmented_fraction = np.stack(augmented_fraction)
-    augmented_coverage = np.stack(augmented_coverage)
-
-    # Combine original and augmented negative examples
-    # Use the first half of original samples and all augmented samples
-    combined_negative_fraction = np.concatenate([negative_fraction[:num_to_augment], augmented_fraction])
-    combined_negative_coverage = np.concatenate([negative_coverage[:num_to_augment], augmented_coverage])
-    combined_negative_y = np.concatenate([negative_y[:num_to_augment], negative_y[indices_to_augment]])
-
-    # Recompute x_nnls for all combined negative examples
-    combined_negative_x_nnls = run_weighted_nnls(combined_negative_fraction, combined_negative_coverage, atlas_np)
+    negative_x_nnls = np.concatenate(negative_x_nnls)
 
     # Save to disk
-    np.save("pre_augmented_negative_fraction.npy", combined_negative_fraction)
-    np.save("pre_augmented_negative_coverage.npy", combined_negative_coverage)
-    np.save("pre_augmented_negative_y.npy", combined_negative_y)
-    np.save("pre_augmented_negative_x_nnls.npy", combined_negative_x_nnls)
+    np.save("pre_augmented_negative_fraction.npy", negative_fraction)
+    np.save("pre_augmented_negative_coverage.npy", negative_coverage)
+    np.save("pre_augmented_negative_y.npy", negative_y)
+    np.save("pre_augmented_negative_x_nnls.npy", negative_x_nnls)
 
     # Create pre-augmented dataset for negative examples
     negative_dataset = PreAugmentedTissueDataset(
-        combined_negative_fraction,
-        combined_negative_coverage,
+        negative_fraction,
+        negative_coverage,
         atlas_np,
-        combined_negative_y,
-        x_nnls=combined_negative_x_nnls,
+        negative_y,
+        x_nnls=negative_x_nnls,
         model=model,
     )
 
@@ -428,14 +469,16 @@ def enhanced_negative_examples(
     print(f"Adding {len(negative_dataset)} negative examples to the dataset")
     print(f"Enhanced dataset created: {len(train_dl.dataset)} → {len(enhanced_dataset)} samples")
 
-    # Create new DataLoader
+    # Create new DataLoader with subset sampling
+    subset_sampler = RandomSubsetSampler(enhanced_dataset, subset_size=500_000)
     enhanced_train_dl = DataLoader(
         enhanced_dataset,
         batch_size=train_dl.batch_size,
-        shuffle=True,
+        sampler=subset_sampler,
         num_workers=train_dl.num_workers,
         pin_memory=train_dl.pin_memory,
-        persistent_workers=train_dl.persistent_workers
+        persistent_workers=train_dl.persistent_workers,
+        shuffle=False
     )
 
     return enhanced_train_dl
@@ -487,10 +530,11 @@ def train_and_eval(
         presence_models_dir=presence_models_dir,
         target_ids=target_ids,
         feature_dim=64,
-
+        use_x_nnls=True,  # Enable NNLS priors
+        initialise_weights=False
     )
-    start_data_prep_time = time.time()
-    start_train_time = time.time()
+
+    # Load training data
     train_dl_low = load_training_with_augmentation(
         f"{train_pat_dir}_low", atlas, names, num_files=3,
         target_dist_params=clinical_dist_params['low'],
@@ -508,129 +552,92 @@ def train_and_eval(
     )
 
     train_dataset = ConcatDataset([train_dl_low.dataset, train_dl_med.dataset, train_dl_high.dataset])
+    subset_sampler = RandomSubsetSampler(train_dataset, subset_size=500_000)
     train_dl = DataLoader(
         train_dataset,
         batch_size=64,
-        shuffle=True,
+        sampler=subset_sampler,
         num_workers=16,
         pin_memory=False,
-        persistent_workers=True
+        persistent_workers=True,
+        shuffle=False
     )
 
-    print(f"train preparation took {time.time() - start_train_time:.2f} seconds")
-
-    start_validation_time = time.time()
-    # Create two versions of each validation dataset: unaugmented and augmented
-    val_loaders_unaugmented = {}
-    val_loaders_augmented = {}
+    # Load validation data with dual sets (regular and clinical-like)
+    val_loaders = {}
+    clinical_val_loaders = {}
     y_vals = {}
     for cov in ['high', 'med', 'low', 'clinical']:
-        # Unaugmented version
-        tier1_dl_unaugmented, t1_yval = get_validation_set_with_augmentation(
+        # Regular (unaugmented) and clinical-like (augmented) validation sets
+        tier1_dl, tier1_clinical_dl, t1_yval = get_validation_set_with_augmentation(
             str(Path(eval_pat_dir + "_" + cov) / "tier1"), atlas, names,
             block_size=50_000,
-            target_dist_params=clinical_dist_params[cov],
-            enable_augmentation=False,
+            enable_augmentation=True,
             target_size=50_000,
             model=model,
         )
-        print(f"Validation set {cov} tier1 length (unaugmented)={len(t1_yval)}")
-
-        tcells_dl_unaugmented, tcells_yval = get_validation_set_with_augmentation(
+        print(f"Validation set {cov} tier1 length={len(t1_yval)}")
+        
+        tcells_dl, tcells_clinical_dl, tcells_yval = get_validation_set_with_augmentation(
             str(Path(eval_pat_dir + "_" + cov) / "T-cells"), atlas, names,
             block_size=10_000,
-            target_dist_params=clinical_dist_params[cov],
-            enable_augmentation=False,
+            enable_augmentation=True,
             target_size=None,    
             model=model,     
         )
-        print(f"Validation set {cov} tcells length (unaugmented)={len(tcells_yval)}")
-
-        oac_dl_unaugmented, oac_yval = get_validation_set_with_augmentation(
+        print(f"Validation set {cov} tcells length={len(tcells_yval)}")
+        
+        oac_dl, oac_clinical_dl, oac_yval = get_validation_set_with_augmentation(
             str(Path(eval_pat_dir + "_" + cov) / "OAC"), atlas, names,
             block_size=1_000,
-            target_dist_params=clinical_dist_params[cov],
-            enable_augmentation=False,
+            enable_augmentation=True,
             target_size=None,
             model=model,
         )
-        print(f"Validation set {cov} oac length (unaugmented)={len(oac_yval)}")
-
-        # Augmented version
-        tier1_dl_augmented, _ = get_validation_set_with_augmentation(
-            str(Path(eval_pat_dir + "_" + cov) / "tier1"), atlas, names,
-            block_size=50_000,
-            target_dist_params=clinical_dist_params[cov],
-            enable_augmentation=True,
-            target_size=50_000,
-            model=model,   
-        )
-        print(f"Validation set {cov} tier1 length (augmented)={len(t1_yval)}")
-
-        tcells_dl_augmented, _ = get_validation_set_with_augmentation(
-            str(Path(eval_pat_dir + "_" + cov) / "T-cells"), atlas, names,
-            block_size=10_000,
-            target_dist_params=clinical_dist_params[cov],
-            enable_augmentation=True,
-            target_size=None,       
-            model=model, 
-        )
-        print(f"Validation set {cov} tcells length (augmented)={len(tcells_yval)}")
-
-        oac_dl_augmented, _ = get_validation_set_with_augmentation(
-            str(Path(eval_pat_dir + "_" + cov) / "OAC"), atlas, names,
-            block_size=1_000,
-            target_dist_params=clinical_dist_params[cov],
-            enable_augmentation=True,
-            target_size=None,    
-            model=model,      
-        )
-        print(f"Validation set {cov} oac length (augmented)={len(oac_yval)}")
+        print(f"Validation set {cov} oac length={len(oac_yval)}")
 
         # Store in dictionaries
-        val_loaders_unaugmented[f"tier1_{cov}"] = tier1_dl_unaugmented
-        val_loaders_unaugmented[f"t-cells_{cov}"] = tcells_dl_unaugmented
-        val_loaders_unaugmented[f"oac_{cov}"] = oac_dl_unaugmented
-
-        val_loaders_augmented[f"tier1_{cov}"] = tier1_dl_augmented
-        val_loaders_augmented[f"t-cells_{cov}"] = tcells_dl_augmented
-        val_loaders_augmented[f"oac_{cov}"] = oac_dl_augmented
+        val_loaders[f"tier1_{cov}"] = tier1_dl
+        val_loaders[f"t-cells_{cov}"] = tcells_dl
+        val_loaders[f"oac_{cov}"] = oac_dl
+        
+        clinical_val_loaders[f"tier1_{cov}_clinical"] = tier1_clinical_dl
+        clinical_val_loaders[f"t-cells_{cov}_clinical"] = tcells_clinical_dl
+        clinical_val_loaders[f"oac_{cov}_clinical"] = oac_clinical_dl
 
         y_vals[f"tier1_{cov}"] = t1_yval
         y_vals[f"t-cells_{cov}"] = tcells_yval
         y_vals[f"oac_{cov}"] = oac_yval
+        y_vals[f"tier1_{cov}_clinical"] = t1_yval
+        y_vals[f"t-cells_{cov}_clinical"] = tcells_yval
+        y_vals[f"oac_{cov}_clinical"] = oac_yval
 
-    print(f"validation preparation took {time.time() - start_validation_time:.2f} seconds")
-
-    enhancing_start_time = time.time()
+    # Enhance training data with negative examples
     enhanced_train_dl = enhanced_negative_examples(
         train_dl,
         cell_types,
         atlas,
-        sample_fraction=0.01,
-        target_dist_params=clinical_dist_params['clinical'],
+        sample_fraction=0.15,
         model=model,
     )
-    print(f"enhancing with negative samples preparation took {time.time() - enhancing_start_time:.2f} seconds")
-    print("====================================================================")
-    print(f"total preparation time took {time.time() - start_data_prep_time:.2f} seconds")
-    print("====================================================================")
 
+    # Train the model
     model, _ = train_model(
         model=model,
         train_loader=enhanced_train_dl,
-        val_loaders=(val_loaders_unaugmented, val_loaders_augmented),
+        val_loaders=(val_loaders, clinical_val_loaders),
         model_path=output_path,
         cell_types=cell_types,
-        num_epochs=1000,
+        num_epochs=100,
         patience=10, 
         lr=1e-3, 
-        weight_decay=1e-5
+        weight_decay=1e-5,
+        augmented_start_epoch=50
     )
 
     print("\nStandard Validation Sets:")
-    for tier in val_loaders_unaugmented.keys():
-        tier_dl = val_loaders_unaugmented[tier]
+    for tier in val_loaders.keys():
+        tier_dl = val_loaders[tier]
         y_val = y_vals[tier]
         deep_conv_estimations = []
         for batch in tier_dl:
@@ -643,9 +650,25 @@ def train_and_eval(
         print(f"Standard validation metrics for tier {tier}")
         log_metrics(deep_conv_eval_metrics)
 
+    print("\nClinical-Like Validation Sets:")
+    for tier in clinical_val_loaders.keys():
+        tier_dl = clinical_val_loaders[tier]
+        y_val = y_vals[tier]
+        deep_conv_estimations = []
+        for batch in tier_dl:
+            fraction = batch['X']
+            coverage = batch['coverage']
+            batch_estimation = predict_with_consensus(model, fraction, coverage)
+            deep_conv_estimations.append(batch_estimation)
+        deep_conv_estimation = np.concatenate(deep_conv_estimations, axis=0)
+        deep_conv_eval_metrics = evaluate_performance(y_val.detach().numpy(), deep_conv_estimation, cell_types)
+        print(f"Clinical-like validation metrics for tier {tier}")
+        log_metrics(deep_conv_eval_metrics)
+
     return model
 
 def main():
+    import argparse
     parser = argparse.ArgumentParser(description="Deep conv")
     parser.add_argument("--atlas_path", type=str, required=True)
     parser.add_argument("--train_path", type=str, required=True)

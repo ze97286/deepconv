@@ -33,7 +33,7 @@ def loss_fn(
     marker_selection: torch.Tensor,
     alpha: float = 0.85,
     beta: float = 0.07,
-    gamma: float = 0.01,
+    gamma: float = 0.05,  # Increased to enforce sparsity
     presence_threshold: float = 0.01,
     low_snr_indices=[3, 4, 9, 11],
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -45,7 +45,8 @@ def loss_fn(
     - Critical range loss targeting low concentrations (0.1–2%) for low-SNR cell types.
     - Coverage-weighted reconstruction loss to ensure accurate marker reconstruction.
     - Focal presence loss to enhance presence detection.
-    - Sparsity penalty to encourage sparse predictions.
+    - Sparsity penalty to encourage zero predictions for absent cell types.
+    - L1 penalty on low-SNR cell types to further enforce sparsity.
     - NNLS regularisation and weight penalty to align with NNLS predictions, prioritising DeepConv for low-SNR types.
     - Marker weight regularisation to prevent collapse of marker quality and selection weights.
 
@@ -65,7 +66,7 @@ def loss_fn(
         marker_selection (torch.Tensor): Marker selection weights [M].
         alpha (float, optional): Proportion error weight. Defaults to 0.85.
         beta (float, optional): Reconstruction loss weight. Defaults to 0.07.
-        gamma (float, optional): Sparsity penalty weight. Defaults to 0.01.
+        gamma (float, optional): Sparsity penalty weight. Defaults to 0.05.
         presence_threshold (float, optional): Presence threshold. Defaults to 0.01.
         low_snr_indices (list[int], optional): Low-SNR indices. Defaults to [3, 4, 9, 11].
         device (torch.device, optional): Device. Defaults to CUDA if available.
@@ -128,8 +129,11 @@ def loss_fn(
     presence_targets = (true_props > presence_threshold).float()
     presence_loss = focal_loss(presence_probs, presence_targets)
 
-    # Apply sparsity penalty to encourage sparse predictions
-    sparsity_penalty = torch.mean(torch.sum(pred_props, dim=1))
+    # Apply sparsity penalty to encourage zero predictions for absent cell types
+    sparsity_penalty = torch.mean(torch.abs(pred_props))
+
+    # Apply L1 penalty on low-SNR cell types to further enforce sparsity
+    l1_penalty = 0.01 * torch.mean(torch.abs(pred_props) * low_snr_mask)
 
     # Apply NNLS regularisation if provided
     reg_loss = torch.tensor(0.0, device=device)
@@ -157,6 +161,7 @@ def loss_fn(
         beta * recon_loss +
         0.15 * presence_loss +
         gamma * sparsity_penalty +
+        l1_penalty +
         0.15 * weight_penalty +
         0.01 * marker_weight_reg
     )
@@ -185,6 +190,7 @@ def loss_fn(
         'recon_loss': recon_loss.item(),
         'presence_loss': presence_loss.item(),
         'sparsity_loss': sparsity_penalty.item(),
+        'l1_penalty': l1_penalty.item(),
         'reg_loss': reg_loss.item(),
         'weight_penalty': weight_penalty.item(),
         'marker_weight_reg': marker_weight_reg.item(),
