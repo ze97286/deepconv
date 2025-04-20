@@ -240,12 +240,12 @@ def load_training_with_augmentation(
     # Load data
     markers, coverage, y = [], [], []
     print("loading training from", base_dir)
-    for cov in ['low', 'med', 'high']:
-        for i in range(1, num_files + 1):
-            markers.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_marker_values.parquet"))
-            coverage.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_coverage.parquet"))
-            y.append(pd.read_parquet(f"{base_dir}_{cov}/{str(i)}_ground_truth_y.parquet"))
-    
+
+    for i in range(1, num_files + 1):
+        markers.append(pd.read_parquet(f"{base_dir}/{str(i)}_marker_values.parquet"))
+        coverage.append(pd.read_parquet(f"{base_dir}/{str(i)}_coverage.parquet"))
+        y.append(pd.read_parquet(f"{base_dir}/{str(i)}_ground_truth_y.parquet"))
+
     merged_markers = markers[0]
     suffixes = [f"_batch{i}" for i in range(1, len(markers))]
     for i, m in enumerate(markers[1:]):
