@@ -362,10 +362,28 @@ def enhanced_negative_examples(
     """
     # Extract the original dataset
     dataset = train_dl.dataset
-    fraction = dataset.fraction
-    coverage = dataset.coverage
-    y = dataset.y
-    x_nnls = dataset.x_nnls
+
+    # Handle ConcatDataset by iterating over underlying datasets
+    if isinstance(dataset, ConcatDataset):
+        fractions = []
+        coverages = []
+        ys = []
+        x_nnls_list = []
+        for sub_dataset in dataset.datasets:
+            fractions.append(sub_dataset.fraction)
+            coverages.append(sub_dataset.coverage)
+            ys.append(sub_dataset.y)
+            x_nnls_list.append(sub_dataset.x_nnls)
+        fraction = np.concatenate(fractions, axis=0)
+        coverage = np.concatenate(coverages, axis=0)
+        y = np.concatenate(ys, axis=0)
+        x_nnls = np.concatenate(x_nnls_list, axis=0)
+    else:
+        # Single dataset case (e.g., PreAugmentedTissueDataset)
+        fraction = dataset.fraction
+        coverage = dataset.coverage
+        y = dataset.y
+        x_nnls = dataset.x_nnls
 
     print("Original dataset size:", len(y), "samples")
 
@@ -377,7 +395,7 @@ def enhanced_negative_examples(
     print("Creating negative examples for each cell type...")
     for cell_idx, cell_type in enumerate(cell_types):
         print(f"Processing {cell_type} (index {cell_idx})...")
-        # Find samples where this cell type is absent (proportion = 0)
+        # Find samples where this cell type is absent (proportion < 0.001)
         absent_mask = y[:, cell_idx] < 0.001
         absent_indices = np.where(absent_mask)[0]
         print(f"  Found {len(absent_indices)} samples with {cell_type} absent")
@@ -454,6 +472,7 @@ def enhanced_negative_examples(
     np.save("pre_augmented_negative_y.npy", negative_y)
     np.save("pre_augmented_negative_x_nnls.npy", negative_x_nnls)
 
+    atlas_np = atlas[atlas.columns[8:]].T.to_numpy()
     # Create pre-augmented dataset for negative examples
     negative_dataset = PreAugmentedTissueDataset(
         negative_fraction,
