@@ -103,22 +103,19 @@ class TissueDeconvolutionDataset(Dataset):
     Each sample in this dataset includes:
       - `fraction`: Methylation fractions across markers, in [0..1] (may contain NaNs if coverage=0).
       - `coverage`: Read coverage array of the same shape as `fraction`.
-      - `atlas`: Reference atlas or additional data, stored for convenience.
       - `y`: Ground-truth cell-type proportions for training/validation, if available.
       - `x_nnls`: Precomputed NNLS predictions, if available.
       
     Args:
         fraction (ndarray or Tensor): Shape [num_samples, num_markers].
         coverage (ndarray or Tensor): Shape [num_samples, num_markers].
-        atlas (ndarray or Tensor): Reference atlas data.
         y (ndarray or Tensor, optional): Shape [num_samples, num_cell_types].
         x_nnls (ndarray or Tensor, optional): Shape [num_samples, num_cell_types].
             Precomputed NNLS predictions for regularization.
     """
-    def __init__(self, fraction, coverage, atlas, y=None, x_nnls=None):
+    def __init__(self, fraction, coverage, y=None, x_nnls=None):
         self.fraction = torch.tensor(fraction, dtype=torch.float32)
         self.coverage = torch.tensor(coverage, dtype=torch.float32)
-        self.atlas = torch.tensor(atlas, dtype=torch.float32)
         if y is not None:
             self.y = torch.tensor(y, dtype=torch.float32)
         else:
@@ -146,13 +143,12 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
     def __init__(self, 
                  fraction, 
                  coverage, 
-                 atlas, 
                  y=None, 
                  x_nnls=None,
                  target_dist_params=None,
                  augmentation_probability=0.5,
                  enable_augmentation=True):
-        super().__init__(fraction, coverage, atlas, y, x_nnls)
+        super().__init__(fraction, coverage, y, x_nnls)
         self.target_dist_params = target_dist_params
         self.augmentation_probability = augmentation_probability
         self.enable_augmentation = enable_augmentation
@@ -188,14 +184,13 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
         self.training = training
 
 class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
-    def __init__(self, fraction, coverage, atlas, y=None, x_nnls=None, model=None, batch_size=1024, is_clinical_like=False, is_augmented=None):
+    def __init__(self, fraction, coverage, y=None, x_nnls=None, model=None, batch_size=1024, is_clinical_like=False, is_augmented=None):
         """
         Dataset with precomputed augmentation and presence probabilities.
         
         Args:
             fraction: Methylation fractions [N, M]
             coverage: Read coverage [N, M]
-            atlas: Reference atlas [M, C]
             y: Ground truth labels [N, C]
             x_nnls: NNLS predictions [N, C]
             model: The entire deconvolution model (to use its presence prediction method)
@@ -203,7 +198,7 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
             is_clinical_like: Flag indicating if the dataset is clinical-like (all samples augmented)
             is_augmented: Array of booleans [N] indicating which samples are augmented
         """
-        super().__init__(fraction, coverage, atlas, y, x_nnls)
+        super().__init__(fraction, coverage, y, x_nnls)
         self.is_clinical_like = is_clinical_like
         if is_augmented is not None:
             self.is_augmented = torch.tensor(is_augmented, dtype=torch.bool)
@@ -287,7 +282,7 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
         if self.presence_logits is not None:
             item['presence_logits'] = self.presence_logits[idx]
             
-        return item 
+        return item
 
 class CellTypeDeconvolutionModel(nn.Module):
     """A neural network model for deconvolving cell-type proportions from cfDNA methylation data.

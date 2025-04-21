@@ -78,7 +78,6 @@ def get_validation_set_with_augmentation(
     regular_dataset = PreAugmentedTissueDataset(
         X_val,
         coverage_val,
-        atlas_np,
         y_val_np,
         x_nnls=x_nnls_original,
         model=model,
@@ -91,7 +90,7 @@ def get_validation_set_with_augmentation(
         num_samples = len(y_val_np)
         indices_to_augment = np.random.choice(num_samples, num_samples, replace=False)
 
-        temp_dataset = TissueDeconvolutionDataset(X_val, coverage_val, atlas_np, y_val_np)
+        temp_dataset = TissueDeconvolutionDataset(X_val, coverage_val, y_val_np)
 
         augmented_fraction = []
         augmented_coverage = []
@@ -125,7 +124,6 @@ def get_validation_set_with_augmentation(
         clinical_dataset = PreAugmentedTissueDataset(
             combined_fraction,
             combined_coverage,
-            atlas_np,
             combined_y,
             x_nnls=combined_x_nnls,
             model=model,
@@ -232,7 +230,7 @@ def load_training_with_augmentation(
     indices_to_augment = np.random.choice(num_samples, num_to_augment, replace=False)
 
     # Temporary dataset for augmentation
-    temp_dataset = TissueDeconvolutionDataset(X_train, coverage_train, atlas_np, y_train)
+    temp_dataset = TissueDeconvolutionDataset(X_train, coverage_train, y_train)
 
     augmented_fraction = []
     augmented_coverage = []
@@ -270,7 +268,6 @@ def load_training_with_augmentation(
     pre_augmented_dataset = PreAugmentedTissueDataset(
         combined_fraction,
         combined_coverage,
-        atlas_np,
         combined_y,
         x_nnls=combined_x_nnls,
         model=model,
@@ -303,7 +300,6 @@ def enhanced_negative_examples(
     Args:
         train_dl: Original training DataLoader
         cell_types: List of cell type names
-        atlas: DataFrame with marker metadata
         sample_fraction: Fraction of samples to use as negative examples per cell type
         model: Model instance for presence computation
         
@@ -328,15 +324,12 @@ def enhanced_negative_examples(
         coverage = np.concatenate(coverages, axis=0)
         y = np.concatenate(ys, axis=0)
         x_nnls = np.concatenate(x_nnls_list, axis=0)
-        # Use atlas_np from the first sub-dataset
-        atlas_np = dataset.datasets[0].atlas_np
     else:
         # Single dataset case (e.g., PreAugmentedTissueDataset)
         fraction = dataset.fraction
         coverage = dataset.coverage
         y = dataset.y
         x_nnls = dataset.x_nnls
-        atlas_np = dataset.atlas_np
 
     print("Original dataset size:", len(y), "samples")
 
@@ -437,7 +430,6 @@ def enhanced_negative_examples(
     negative_dataset = PreAugmentedTissueDataset(
         negative_fraction,
         negative_coverage,
-        atlas_np,
         negative_y,
         x_nnls=negative_x_nnls,
         model=model,
