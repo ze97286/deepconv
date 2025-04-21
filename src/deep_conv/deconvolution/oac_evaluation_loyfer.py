@@ -599,7 +599,7 @@ def deepconv_estimate(atlas_path, eval_pat_dir, dilutions, presence_model_name, 
         print(f"Model's best threshold from training: {checkpoint['best_threshold']}")
 
     presence_probs_post = torch.zeros(num_samples, num_cell_types)
-    temp_dataset = TensorDataset(X_val, coverage_val)
+    temp_dataset = TensorDataset(X_val_tensor, coverage_val_tensor)
     temp_loader = DataLoader(temp_dataset, batch_size=batch_size, shuffle=False)
     with torch.no_grad():
         for batch_idx, (batch_fraction, batch_coverage) in enumerate(temp_loader):
