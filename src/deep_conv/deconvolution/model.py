@@ -598,7 +598,7 @@ class CellTypeDeconvolutionModel(nn.Module):
         """
         return torch.sigmoid(self.combination_weight).detach().cpu().numpy()
 
-    def predict(self, marker_values, coverage, batch_size=256, device=None, atlas=None, precompute_presence=True):
+    def predict(self, marker_values, coverage, batch_size=256, device=None, atlas=None, presence_probs=None):
         """
         Generate cell-type proportion predictions in evaluation mode.
 
@@ -626,23 +626,6 @@ class CellTypeDeconvolutionModel(nn.Module):
         self.eval()
         num_samples = marker_values.shape[0]
 
-        # Optionally precompute presence probabilities
-        presence_probs = None
-        if precompute_presence:
-            num_cell_types = self.num_celltypes
-            presence_probs = torch.zeros(num_samples, num_cell_types)
-            num_batches_presence = (num_samples + batch_size - 1) // batch_size
-            temp_dataset = TensorDataset(marker_values, coverage)
-            temp_loader = DataLoader(temp_dataset, batch_size=batch_size, shuffle=False)
-            with torch.no_grad():
-                for batch_idx, (batch_fraction, batch_coverage) in enumerate(temp_loader):
-                    batch_fraction = batch_fraction.to(device)
-                    batch_coverage = batch_coverage.to(device)
-                    start_idx = batch_idx * batch_size
-                    end_idx = min(start_idx + batch_size, num_samples)
-                    batch_presence_probs, _ = self.predict_presence_with_separate_models(batch_fraction, batch_coverage)
-                    presence_probs[start_idx:end_idx] = batch_presence_probs.cpu()
-
         predictions_list = []
         num_batches = (num_samples + batch_size - 1) // batch_size
 
@@ -656,7 +639,11 @@ class CellTypeDeconvolutionModel(nn.Module):
                 if self.use_x_nnls and atlas is not None:
                     x_nnls_np = run_weighted_nnls(batch_X.cpu().numpy(), batch_coverage.cpu().numpy(), atlas)
                     x_nnls = torch.tensor(x_nnls_np, dtype=torch.float32, device=device)
-                batch_presence_probs = presence_probs[start_idx:end_idx].to(device) if precompute_presence else None
+                batch_presence_probs = (
+                    presence_probs[start_idx:end_idx].to(device)
+                    if presence_probs is not None
+                    else None
+                )
                 props, _, _, _, _, _, _, _ = self.forward(batch_X, batch_coverage, x_nnls, batch_presence_probs)
                 predictions_list.append(props.cpu().numpy())
                 if device.type == 'cuda':

@@ -536,7 +536,7 @@ def debug_model_predictions(model, X_val, coverage_val, y_true_df, threshold=0.0
         return props, presence_probs
 
 
-def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, atlas_np):
+def deepconv_estimate(atlas_path, eval_pat_dir, dilutions, presence_model_name, model_name, batch_size=256, device=torch.device('cpu')):
     """
     Consistent evaluation function that matches training behavior.
     
@@ -551,18 +551,78 @@ def deepconv_estimate(atlas_path, eval_pat_dir, model, dilutions, atlas_np):
     Returns:
         y_true_df, predictions_df, y_dilutions: DataFrames with results
     """
-    # Prepare data
+    deepconv_atlas = pd.read_csv(atlas_path, sep="\t")
+    cell_types = list(deepconv_atlas.columns[8:])
+
+    target_ids = deepconv_atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
+    # Create model
+    model = CellTypeDeconvolutionModel(
+        num_markers=len(deepconv_atlas),
+        num_cell_types=len(cell_types),
+        target_ids=target_ids,
+        presence_models_dir=f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{presence_model_name}",
+        feature_dim=64,
+    )
+
+    atlas_np = deepconv_atlas[deepconv_atlas.columns[8:]].T.to_numpy()
     X_val, coverage_val, y_true_df, y_dilutions = prepare_deconv_input(atlas_path, eval_pat_dir, dilutions)
-    predictions = model.predict(X_val, coverage_val, atlas=atlas_np)
+
+    num_cell_types = len(cell_types)
+    num_samples = len(X_val)
+    presence_probs = torch.zeros(num_samples, num_cell_types)
+    temp_dataset = TensorDataset(X_val, coverage_val)
+    temp_loader = DataLoader(temp_dataset, batch_size=batch_size, shuffle=False)
+    with torch.no_grad():
+        for batch_idx, (batch_fraction, batch_coverage) in enumerate(temp_loader):
+            batch_fraction = batch_fraction.to(device)
+            batch_coverage = batch_coverage.to(device)
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, num_samples)
+            batch_presence_probs, _ = model.predict_presence_with_separate_models(batch_fraction, batch_coverage)
+            presence_probs[start_idx:end_idx] = batch_presence_probs.cpu()
+
+    presence_mean_before = presence_probs.mean().item()
+    presence_std_before = presence_probs.std().item()
+    print(f"Presence probs before loading checkpoint: mean={presence_mean_before:.6f}, std={presence_std_before:.6f}")
+
+
+    # Load checkpoint
+    best_model = "best_model.pt"
+    checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/{best_model}")
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    commit_hash = checkpoint["commit_hash"] if "commit_hash" in checkpoint else "unknown"
+    epoch = checkpoint["epoch"]
+    # Print the 'best_threshold' if it exists in the checkpoint
+    if 'best_threshold' in checkpoint:
+        print(f"Model's best threshold from training: {checkpoint['best_threshold']}")
+
+    presence_probs_post = torch.zeros(num_samples, num_cell_types)
+    temp_dataset = TensorDataset(X_val, coverage_val)
+    temp_loader = DataLoader(temp_dataset, batch_size=batch_size, shuffle=False)
+    with torch.no_grad():
+        for batch_idx, (batch_fraction, batch_coverage) in enumerate(temp_loader):
+            batch_fraction = batch_fraction.to(device)
+            batch_coverage = batch_coverage.to(device)
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, num_samples)
+            batch_presence_probs, _ = model.predict_presence_with_separate_models(batch_fraction, batch_coverage)
+            presence_probs_post[start_idx:end_idx] = batch_presence_probs.cpu()
+
+    presence_mean_after = presence_probs_post.mean().item()
+    presence_std_after = presence_probs_post.std().item()
+    print(f"Presence probs before loading checkpoint: mean={presence_mean_after:.6f}, std={presence_std_after:.6f}")
+
+    # Prepare data
+    predictions = model.predict(X_val, coverage_val, atlas=atlas_np, presence_probs=presence_probs)
     predictions_df = pd.DataFrame(predictions, columns=list(y_true_df.columns))
-    
+
     # Log summary statistics
     print("\n===== PREDICTION SUMMARY =====")
     print(f"Predictions mean: {predictions.mean():.6f}")
     print(f"Max prediction: {predictions.max():.6f}")
     print(f"Min prediction: {predictions.min():.6f}")
-    
-    return y_true_df, predictions_df, y_dilutions
+
+    return y_true_df, predictions_df, y_dilutions, commit_hash, epoch 
 
 
 def eval_OAC(atlas_path, pat_dir, title, prefix, atlas_name, batch, model, type, out_dir,cd_tissue_mapping, model_name=None,ichorCNA=None, clinical_benefit=None, cancer_type=None, presence_model_name=None, tcell_col="T-cells"):
@@ -829,28 +889,7 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     suffix = f"_{size}/"
 
     deepconv_atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
-    deepconv_atlas = pd.read_csv(deepconv_atlas_path, sep="\t")
-    cell_types = list(deepconv_atlas.columns[8:])
-
-    target_ids = deepconv_atlas["target"].map(lambda x: cell_types.index(x)).to_numpy()
-    # Create model
-    model = CellTypeDeconvolutionModel(
-        num_markers=len(deepconv_atlas),
-        num_cell_types=len(cell_types),
-        target_ids=target_ids,
-        presence_models_dir=f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{presence_model_name}",
-        feature_dim=64,
-    )
-
-    # Load checkpoint
-    best_model = "best_model.pt"
-    checkpoint = torch.load(f"/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/{model_name}/{best_model}")
-    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-    commit_hash = checkpoint["commit_hash"] if "commit_hash" in checkpoint else "unknown"
-    epoch = checkpoint["epoch"]
-    # Print the 'best_threshold' if it exists in the checkpoint
-    if 'best_threshold' in checkpoint:
-        print(f"Model's best threshold from training: {checkpoint['best_threshold']}")
+    
 
     # Evaluation paths
     deepconv_eval_pat_dir_tcells = f"/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval{suffix}T-cells/"
@@ -859,9 +898,8 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
 
     # Run evaluations
     print("\n===== EVALUATING T-CELLS =====")
-    atlas_np = deepconv_atlas[deepconv_atlas.columns[8:]].T.to_numpy()
-    y_true_df, predictions_df, y_dilutions = deepconv_estimate(
-        deepconv_atlas_path, deepconv_eval_pat_dir_tcells, model, tcell_dilutions, atlas_np
+    y_true_df, predictions_df, y_dilutions, commit_hash, epoch = deepconv_estimate(
+        deepconv_atlas_path, deepconv_eval_pat_dir_tcells, tcell_dilutions, presence_model_name, model_name
     )
     plot_deconvolution_evaluation(
         y_true_df, predictions_df, y_dilutions['dilution'], 
@@ -871,8 +909,8 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     )
 
     print("\n===== EVALUATING OAC =====")
-    y_true_df, predictions_df, y_dilutions = deepconv_estimate(
-        deepconv_atlas_path, deepconv_eval_pat_dir_oac, model, oac_dilutions, atlas_np
+    y_true_df, predictions_df, y_dilutions, commit_hash, epoch = deepconv_estimate(
+        deepconv_atlas_path, deepconv_eval_pat_dir_oac, oac_dilutions, presence_model_name, model_name
     )
     plot_deconvolution_evaluation(
         y_true_df, predictions_df, y_dilutions['dilution'], 
@@ -882,8 +920,8 @@ def eval_admixtures_deepconv(model_name, presence_model_name, size="low"):
     )
 
     print("\n===== EVALUATING heart =====")
-    y_true_df, predictions_df, y_dilutions = deepconv_estimate(
-        deepconv_atlas_path, deepconv_eval_pat_dir_tcells_with_heart, model, tcell_dilutions, atlas_np
+    y_true_df, predictions_df, y_dilutions, commit_hash, epoch = deepconv_estimate(
+        deepconv_atlas_path, deepconv_eval_pat_dir_tcells_with_heart, tcell_dilutions, presence_model_name, model_name
     )
     plot_deconvolution_evaluation(
         y_true_df, predictions_df, y_dilutions['dilution'], 
