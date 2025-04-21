@@ -16,7 +16,7 @@ import tqdm
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def coverage_matched_augmentation(marker_values, coverage, target_dist_params=None, augmentation_prob=0.7):
+def coverage_matched_augmentation(marker_values, coverage, clinical_coverage_params=None, augmentation_prob=1.0):
     """Enhanced augmentation focused on extreme low coverage simulation, adapted for pre-computation."""
     # Determine if input is NumPy or PyTorch
     is_torch = isinstance(marker_values, torch.Tensor)
@@ -48,38 +48,37 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params=No
     zero_coverage_mask = augmented_coverage == 0
     augmented_values[zero_coverage_mask] = zeros_fn(zero_coverage_mask.sum().item() if is_torch else zero_coverage_mask.sum())
     
-    # Generate augmentation mask for all samples
-    augment_mask = rand_fn((num_samples,)) < augmentation_prob
-    
-    # Process samples where augment_mask is True
+    # Process all samples
     for i in range(num_samples):
-        if not augment_mask[i]:
-            continue
-        
-        # Get current coverage
-        current_cov = augmented_coverage[i].mean()
-        if current_cov < 1.0:
-            continue
+        # Get current coverage per marker
+        current_cov = augmented_coverage[i]
             
-        # Aggressive scaling distribution
-        if rand_fn(()) < 0.8:  # 80% chance of extreme reduction
-            target_cov = normal_fn(1.5, 0.5, (1,)) if is_torch else np.random.exponential(1.5)
-            target_cov = clamp_fn(target_cov, 0.5, 5.0) if is_torch else min(max(target_cov, 0.5), 5.0)
+        # Use clinical_coverage_params for target coverage
+        if clinical_coverage_params:
+            target_mean = clinical_coverage_params['mean']
+            target_std = clinical_coverage_params['std']
+            target_cov = normal_fn(target_mean, target_std, (1,)) if is_torch else np.random.normal(target_mean, target_std)
+            target_cov = clamp_fn(target_cov, 0.5, target_mean + 2 * target_std) if is_torch else min(max(target_cov, 0.5), target_mean + 2 * target_std)
         else:
-            target_cov = torch.exp(normal_fn(1.0, 0.7, (1,))) if is_torch else np.exp(np.random.normal(1.0, 0.7))
+            # Fallback to previous behavior if params not provided
+            if rand_fn(()) < 0.8:
+                target_cov = normal_fn(1.5, 0.5, (1,)) if is_torch else np.random.exponential(1.5)
+                target_cov = clamp_fn(target_cov, 0.5, 5.0) if is_torch else min(max(target_cov, 0.5), 5.0)
+            else:
+                target_cov = torch.exp(normal_fn(1.0, 0.7, (1,))) if is_torch else np.exp(np.random.normal(1.0, 0.7))
         
-        # Calculate scaling and apply
-        scale = target_cov / current_cov
+        # Calculate scaling and apply per marker
+        scale = target_cov / (current_cov + 1e-8)  # Avoid division by zero
         augmented_coverage[i] = augmented_coverage[i] * scale
         
         # Add noise for very low coverage
-        if scale < 0.2:
+        if (scale < 0.2).any():
             noise_level = 0.3
             noise = normal_fn(0, noise_level, (num_markers,))
             augmented_values[i] = clamp_fn(augmented_values[i] + noise, 0, 1)
             
-            # Aggressive marker zeroing
-            missing_prob = 0.4
+            # Aggressive marker zeroing using zero_rate from clinical_coverage_params
+            missing_prob = clinical_coverage_params['zero_rate'] if clinical_coverage_params else 0.4
             missing_mask = rand_fn((num_markers,)) < missing_prob
             augmented_coverage[i][missing_mask] = zeros_fn((missing_mask.sum().item() if is_torch else missing_mask.sum(),))
             augmented_values[i][missing_mask] = zeros_fn((missing_mask.sum().item() if is_torch else missing_mask.sum(),))
@@ -96,7 +95,6 @@ def coverage_matched_augmentation(marker_values, coverage, target_dist_params=No
     augmented_values = where_fn(augmented_coverage == 0, zeros_fn(augmented_coverage.shape), augmented_values)
     
     return augmented_values, augmented_coverage
-
 
 class TissueDeconvolutionDataset(Dataset):
     """
@@ -178,7 +176,6 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
                 aug_fraction, aug_coverage = coverage_matched_augmentation(
                     fraction_np, 
                     coverage_np, 
-                    self.target_dist_params, 
                     augmentation_prob=1.0
                 )
                 item['X'] = torch.tensor(aug_fraction[0], dtype=torch.float32)
@@ -191,7 +188,7 @@ class AugmentedTissueDataset(TissueDeconvolutionDataset):
         self.training = training
 
 class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
-    def __init__(self, fraction, coverage, atlas, y=None, x_nnls=None, model=None, batch_size=1024):
+    def __init__(self, fraction, coverage, atlas, y=None, x_nnls=None, model=None, batch_size=1024, is_clinical_like=False, is_augmented=None):
         """
         Dataset with precomputed augmentation and presence probabilities.
         
@@ -203,13 +200,20 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
             x_nnls: NNLS predictions [N, C]
             model: The entire deconvolution model (to use its presence prediction method)
             batch_size: Batch size for presence probability computation
+            is_clinical_like: Flag indicating if the dataset is clinical-like (all samples augmented)
+            is_augmented: Array of booleans [N] indicating which samples are augmented
         """
         super().__init__(fraction, coverage, atlas, y, x_nnls)
+        self.is_clinical_like = is_clinical_like
+        if is_augmented is not None:
+            self.is_augmented = torch.tensor(is_augmented, dtype=torch.bool)
+        else:
+            self.is_augmented = None
         
         if model is not None:
             # Precompute presence probabilities in batches
             num_samples = self.fraction.size(0)
-            num_cell_types = model.num_celltypes
+            num_cell_types = model.num_cell_types
             device = next(model.parameters()).device
             
             presence_probs = torch.zeros(num_samples, num_cell_types)
@@ -220,11 +224,12 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
             temp_loader = DataLoader(temp_dataset, batch_size=batch_size, shuffle=False)
             
             print("Computing presence probabilities in batches...")
+            print("Warning: Presence probabilities are precomputed with model in eval mode; ensure model weights are stable.")
             
             model.eval()  # Ensure model is in evaluation mode
             
             with torch.no_grad():
-                for batch_idx, (batch_fraction, batch_coverage) in enumerate(tqdm.tqdm(temp_loader, desc="Computing presence probabilities")):
+                for batch_idx, (batch_fraction, batch_coverage) in enumerate(tqdm(temp_loader, desc="Computing presence probabilities")):
                     batch_fraction = batch_fraction.to(device)
                     batch_coverage = batch_coverage.to(device)
                     start_idx = batch_idx * batch_size
@@ -265,9 +270,14 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
         """
         item = super().__getitem__(idx)
         
-        # Flag to indicate if the sample is from the augmented part of the dataset
-        # Assuming the first half is original and second half is augmented
-        item['is_augmented'] = idx >= len(self.fraction) // 2
+        # Set is_augmented flag
+        if self.is_clinical_like:
+            item['is_augmented'] = True
+        elif self.is_augmented is not None:
+            item['is_augmented'] = self.is_augmented[idx].item()
+        else:
+            # Fallback if not provided
+            item['is_augmented'] = idx >= len(self.fraction) // 2
         
         # Add precomputed presence probabilities if available
         if self.presence_probs is not None:
@@ -278,7 +288,7 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
             item['presence_logits'] = self.presence_logits[idx]
             
         return item
-
+    
 class CellTypeDeconvolutionModel(nn.Module):
     """A neural network model for deconvolving cell-type proportions from cfDNA methylation data.
 
