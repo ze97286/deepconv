@@ -10,7 +10,7 @@ from pathlib import Path
 from deep_conv.presence.model import SingleCellTypePresenceModel
 import logging
 from torch.utils.data import DataLoader, TensorDataset
-import tqdm
+from tqdm import tqdm
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
