@@ -213,7 +213,7 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
         if model is not None:
             # Precompute presence probabilities in batches
             num_samples = self.fraction.size(0)
-            num_cell_types = model.num_cell_types
+            num_cell_types = model.num_celltypes
             device = next(model.parameters()).device
             
             presence_probs = torch.zeros(num_samples, num_cell_types)
@@ -287,8 +287,8 @@ class PreAugmentedTissueDataset(TissueDeconvolutionDataset):
         if self.presence_logits is not None:
             item['presence_logits'] = self.presence_logits[idx]
             
-        return item
-    
+        return item 
+
 class CellTypeDeconvolutionModel(nn.Module):
     """A neural network model for deconvolving cell-type proportions from cfDNA methylation data.
 
