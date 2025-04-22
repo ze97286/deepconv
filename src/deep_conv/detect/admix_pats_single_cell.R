@@ -33,6 +33,17 @@ option_list <- list(
 )
 
 # Helper functions
+make_target_table <- function(cell_type_order, concentrations, pat_dir=".", suffix=".pat.gz") {
+    # Create data table for a single mixture
+    conc_table <- data.table(
+        celltype = cell_type_order,
+        fraction = concentrations,
+        filename = paste0(pat_dir, '/', cell_type_order, suffix),
+        dilution = 1
+    )
+    return(conc_table)
+}
+
 read_count_table <- function(patdir, cell_type_order) {
     # Read total read counts from pat files for each cell type
     if (!dir.exists(patdir)) {
@@ -79,40 +90,59 @@ read_count_table <- function(patdir, cell_type_order) {
 }
 
 generate_mix_from_pat <- function(targets, target_dir, min_depth, max_depth, threads=1, tmp_dir=NULL, overwrite=FALSE, prefix="mix", sample_id=1, reads_by_celltype, current_depth) {
-    # Generate a single synthetic mixture pat file for a sample
     if (is.null(tmp_dir)) {
         tmp_dir <- paste0(target_dir, "/tmp")
     }
+    
+    print(targets)
+   
+    # Create main directories
     dir.create(target_dir, showWarnings = FALSE, recursive = TRUE, mode = "0755")
     dir.create(tmp_dir, showWarnings = FALSE, recursive = TRUE, mode = "0755")
+    
     setkey(targets, celltype)
+    setkey(reads_by_celltype, celltype)
+    
+    # Generate depths for all repeats upfront
     mix_prefix <- sprintf("%s_sample%d", prefix, sample_id)
+    
+    # Create a worker-specific temporary directory for this repeat
     worker_tmp_dir <- file.path(tmp_dir, paste0("worker_", sample_id))
     dir.create(worker_tmp_dir, showWarnings = FALSE, recursive = TRUE, mode = "0755")
+    
     for (ct in unique(targets$celltype)) {
         out_file <- paste0(target_dir, '/', mix_prefix, '.pat.gz')
         if (overwrite || !file.exists(out_file)) {
-            sub.dt <- targets[ct]
-            c_i <- sub.dt$fraction
-            R_i <- reads_by_celltype[ct]$fragments
-            if (is.null(R_i) || length(R_i) == 0 || R_i == 0) {
-                stop(sprintf("Cell type %s not found in reads_by_celltype or has zero reads", ct))
-            }
-            f_i <- c_i * current_depth / R_i
-            f_i <- min(f_i, 1)  # Ensure sampling fraction <= 1
+            sub.dt <- targets[list(celltype = ct)]
+            fraction <- sub.dt$fraction
             filename <- sub.dt$filename
+            
+            # Adjust fraction based on current_depth vs target_depth
+            reads <- reads_by_celltype[ct]$fragments
+            if (is.na(reads) || reads == 0) {
+                stop(sprintf("Cell type %s has no reads in reads_by_celltype", ct))
+            }
+            adjusted_fraction <- fraction * (current_depth / reads)
+            
+            # Generate sampled pat file in the worker-specific temporary directory
             tmp_file <- sprintf("%s/%s_%s.pat.gz", worker_tmp_dir, mix_prefix, ct)
             cmd <- sprintf('"/users/zetzioni/sharedscratch/pattools sample -s %.8f %s | bgzip -c > %s"', 
-                           f_i, filename, tmp_file)
+                        adjusted_fraction, filename, tmp_file)
             result <- system2("sh", c("-c", cmd))
             if (result != 0) {
-                stop(sprintf("Failed to sample reads for %s in sample %d", ct, sample_id))
+                stop(sprintf("Failed to sample reads for %s in mixture %d", ct, sample_id))
             }
-            if (!file.exists(tmp_file)) {
+            
+            # Verify the tmp file was created and has content
+            if (file.exists(tmp_file)) {
+                file_info <- file.info(tmp_file)
+            } else {
                 cat(sprintf("WARNING: tmp file not created: %s\n", tmp_file))
             }
         }
     }
+    
+    # Merge pat files from the worker-specific temporary directory
     out_file <- paste0(target_dir, '/', mix_prefix, '.pat.gz')
     if (!file.exists(out_file) || overwrite) {
         merge_cmd <- paste0(
@@ -123,28 +153,43 @@ generate_mix_from_pat <- function(targets, target_dir, min_depth, max_depth, thr
             '; tabix -s 1 -b 2 -e 2 -C ', out_file, '"'
         )
         system2("sh", c("-c", merge_cmd))
-        if (!file.exists(out_file)) {
+        
+        if (file.exists(out_file)) {
+            file_info <- file.info(out_file)
+        } else {
             cat(sprintf("WARNING: merged file not created: %s\n", out_file))
         }
     }
+    
+    # Calculate and save true concentrations (using the worker-specific temporary directory)
     calculate_true_concentrations(worker_tmp_dir, target_dir, mix_prefix, cell_type_order=targets$celltype)
-    tmp_files <- list.files(worker_tmp_dir, pattern=paste0(mix_prefix, "_.*\\.pat\\.gz$"), full.names=TRUE)
+    
+    # Cleanup worker-specific temporary files and directory
+    tmp_files <- list.files(worker_tmp_dir, 
+                            pattern = paste0(mix_prefix, "_.*\\.pat\\.gz$"), 
+                            full.names = TRUE)
     file.remove(tmp_files)
-    unlink(worker_tmp_dir, recursive=TRUE)
-    cat(sprintf("\nFinished processing sample: %d\n", sample_id))
+    unlink(worker_tmp_dir, recursive = TRUE)
+    
+    cat(sprintf("\nfinished processing sample: %d\n", sample_id))
 }
 
 calculate_true_concentrations <- function(tmp_dir, target_dir, mix_prefix, cell_type_order) {
-    # Calculate true concentrations based on sampled reads
+    # Create a named vector to store counts in the specified order
     counts <- numeric(length(cell_type_order))
     names(counts) <- cell_type_order
-    for (ct in cell_type_order) {
+
+    # Calculate counts for each cell type
+    for(ct in cell_type_order) {
+        # Construct exact filename instead of searching
         tmp_file <- file.path(tmp_dir, paste0(mix_prefix, "_", ct, ".pat.gz"))
-        if (file.exists(tmp_file)) {
+        
+        if(file.exists(tmp_file)) {
             counts[ct] <- tryCatch({
-                con <- gzfile(tmp_file, open="r")
-                lines <- readLines(con, warn=FALSE)
+                con <- gzfile(tmp_file, open = "r")
+                lines <- readLines(con, warn = FALSE)
                 close(con)
+                
                 data <- strsplit(lines, "\t")
                 total <- sum(sapply(data, function(row) {
                     if (length(row) >= 4 && grepl("^[0-9]+$", row[[4]])) {
@@ -152,22 +197,37 @@ calculate_true_concentrations <- function(tmp_dir, target_dir, mix_prefix, cell_
                     } else {
                         0
                     }
-                }), na.rm=TRUE)
+                }), na.rm = TRUE)
                 total
-            }, error=function(e) {
+            }, error = function(e) {
                 warning(sprintf("Error reading counts for %s: %s", ct, e$message))
                 0
             })
+        } else {
+            warning(sprintf("File not found: %s", tmp_file))
         }
     }
+
+    # Calculate proportions
     total_counts <- sum(counts)
-    concentrations <- if (total_counts > 0) counts / total_counts else counts
+    concentrations <- if(total_counts > 0) counts / total_counts else counts
+
+    # Create sorted output
     result <- data.frame(matrix(concentrations[sort(names(concentrations))], 
                                nrow=1,
                                dimnames=list(NULL, sort(names(concentrations)))),
                         check.names=FALSE)
-    out_file <- file.path(target_dir, paste0(mix_prefix, "_true_concentrations.csv"))
-    write.table(result, out_file, row.names=FALSE, sep=",", col.names=TRUE, quote=FALSE)
+    
+    out_file <- file.path(target_dir, 
+                         paste0(mix_prefix, "_true_concentrations.csv"))
+    
+    write.table(result, 
+                out_file, 
+                row.names=FALSE, 
+                sep=",", 
+                col.names=TRUE, 
+                quote=FALSE)
+                
     return(concentrations)
 }
 
@@ -239,10 +299,10 @@ main <- function() {
         concentrations <- mixture_spec$concentrations
         sample_id <- mixture_spec$sample_id
         # Create targets table
-        targets <- data.table(
-            celltype = cell_type_order,
-            fraction = concentrations,
-            filename = paste0(args$pat_dir, '/', cell_type_order, '.pat.gz')
+        targets <- make_target_table(
+            cell_type_order,
+            concentrations,
+            pat_dir=args$pat_dir
         )
         # Sample current_depth
         current_depth <- round(runif(1, args$min_depth, args$max_depth))
