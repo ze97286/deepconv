@@ -275,15 +275,27 @@ class EnsembleCancerDetectionModel(nn.Module):
     
     def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
         """
-        Get point estimate and confidence interval accounting for ensemble uncertainty
+        Get point estimate and confidence interval
         """
-        # Use the same approach as the base model
         alpha = mu * phi
         beta = (1 - mu) * phi
         
-        dist = Beta(alpha, beta)
-        lower = dist.icdf(torch.tensor((1 - ci_level) / 2))
-        upper = dist.icdf(torch.tensor(1 - (1 - ci_level) / 2))
+        # We can't use dist.icdf which is not implemented in PyTorch
+        # Instead, we'll use scipy.stats which has proper support for this
+        import scipy.stats as stats
+        
+        # Calculate confidence interval using scipy's beta distribution
+        lower = torch.zeros_like(mu)
+        upper = torch.zeros_like(mu)
+        
+        # Convert to numpy for scipy
+        alpha_np = alpha.detach().cpu().numpy()
+        beta_np = beta.detach().cpu().numpy()
+        
+        # Calculate lower and upper CI bounds
+        for i in range(len(alpha_np)):
+            lower[i] = torch.tensor(stats.beta.ppf((1 - ci_level) / 2, alpha_np[i], beta_np[i]))
+            upper[i] = torch.tensor(stats.beta.ppf(1 - (1 - ci_level) / 2, alpha_np[i], beta_np[i]))
         
         estimate = mu
         ci = torch.cat([lower, upper], dim=1)
