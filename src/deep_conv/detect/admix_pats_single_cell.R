@@ -2,19 +2,53 @@
 
 # Add a simple logging function
 log_info <- function(message) {
-  cat(sprintf("[INFO] %s\n", message))
+  cat(sprintf("[INFO] %s: %s\n", format(Sys.time(), "%H:%M:%S"), message))
 }
 
 log_debug <- function(message, debug_mode=FALSE) {
   if (debug_mode) {
-    cat(sprintf("[DEBUG] %s\n", message))
+    cat(sprintf("[DEBUG] %s: %s\n", format(Sys.time(), "%H:%M:%S"), message))
   }
 }
 
 print_debug <- function(label, obj, debug_mode=FALSE) {
   if (debug_mode) {
-    cat("DEBUG: ", label, " (", typeof(obj), "/", class(obj), ")\n")
+    cat(sprintf("[DEBUG] %s: ", format(Sys.time(), "%H:%M:%S")))
+    cat(label, " (", typeof(obj), "/", class(obj), ")\n")
     print(str(obj))
+  }
+}
+
+# Progress tracking variables
+progress_file <- NULL
+progress_total <- 0
+
+# Initialize progress tracking
+init_progress <- function(output_dir, total_samples) {
+  progress_file <<- file.path(output_dir, "progress.txt")
+  progress_total <<- total_samples
+  # Create initial progress file
+  cat(sprintf("Started processing at %s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S")), 
+      file=progress_file)
+  cat(sprintf("Total samples to process: %d\n", total_samples), 
+      file=progress_file, append=TRUE)
+  cat("0% complete (0 samples processed)\n", 
+      file=progress_file, append=TRUE)
+}
+
+# Update progress
+update_progress <- function(completed) {
+  if (!is.null(progress_file) && progress_total > 0) {
+    percent <- round(completed / progress_total * 100)
+    cat(sprintf("%d%% complete (%d samples processed) - %s\n", 
+               percent, completed, format(Sys.time(), "%H:%M:%S")), 
+        file=progress_file, append=TRUE)
+    
+    # Also log to console if it's a significant milestone
+    if (percent %% 10 == 0 || completed == progress_total) {
+      log_info(sprintf("%d%% complete (%d/%d samples processed)", 
+                       percent, completed, progress_total))
+    }
   }
 }
 
@@ -49,7 +83,9 @@ option_list <- list(
     make_option(c("--prefix"), type="character", default="mix",
                 help="Prefix for output files [default %default]"),
     make_option(c("--debug"), action="store_true", default=FALSE,
-                help="Run in debug mode [default %default]")
+                help="Run in debug mode [default %default]"),
+    make_option(c("--batch_size"), type="integer", default=500,
+                help="Batch size for progress reporting [default %default]")
 )
 
 # Helper functions
@@ -249,6 +285,34 @@ calculate_true_concentrations <- function(tmp_dir, target_dir, mix_prefix, cell_
     return(concentrations)
 }
 
+process_batch <- function(batch_indices, all_concentrations, args, cell_type_order, reads_by_celltype_df) {
+    # Process a batch of samples
+    registerDoParallel(cores=args$threads)
+    
+    results <- foreach(i=batch_indices, 
+                      .packages=c("data.table", "gtools"),
+                      .export=c("make_target_table", "calculate_true_concentrations", 
+                                "process_single_sample")) %dopar% {
+        # Process one sample
+        process_single_sample(
+            sample_id = i,
+            concentrations = all_concentrations[[i]],
+            pat_dir = args$pat_dir,
+            output_dir = args$output_dir,
+            tmp_dir = args$tmp_dir,
+            min_depth = args$min_depth,
+            max_depth = args$max_depth,
+            overwrite = args$overwrite,
+            prefix = args$prefix,
+            cell_type_order = cell_type_order,
+            reads_by_celltype_df = reads_by_celltype_df
+        )
+    }
+    
+    stopImplicitCluster()
+    return(results)
+}
+
 main <- function() {
     # Parse command-line arguments
     parser <- OptionParser(option_list=option_list)
@@ -369,6 +433,9 @@ main <- function() {
         }
     }
     
+    # Initialize progress tracking
+    init_progress(args$output_dir, args$num_samples)
+    
     # If in debug mode, just process the first sample
     if (debug_mode) {
         log_info("DEBUG mode: Processing only first sample")
@@ -389,38 +456,42 @@ main <- function() {
         )
         
         log_info("Debug sample processed successfully")
+        update_progress(1)
     } else {
-        # Set up parallel processing
-        log_info(sprintf("Setting up parallel processing with %d threads", args$threads))
-        registerDoParallel(cores=args$threads)
-        
         # Convert to data frame for easier parallel processing
         reads_by_celltype_df <- as.data.frame(reads_by_celltype)
         
-        # Generate mixtures in parallel
-        log_info("Starting parallel processing")
-        results <- foreach(i=1:args$num_samples, 
-                          .packages=c("data.table", "gtools"),
-                          .export=c("make_target_table", "calculate_true_concentrations", 
-                                    "process_single_sample")) %dopar% {
-            # Process one sample
-            process_single_sample(
-                sample_id = i,
-                concentrations = all_concentrations[[i]],
-                pat_dir = args$pat_dir,
-                output_dir = args$output_dir,
-                tmp_dir = args$tmp_dir,
-                min_depth = args$min_depth,
-                max_depth = args$max_depth,
-                overwrite = args$overwrite,
-                prefix = args$prefix,
-                cell_type_order = cell_type_order,
-                reads_by_celltype_df = reads_by_celltype_df
+        # Process in batches for better progress reporting
+        log_info(sprintf("Processing %d samples in batches of %d", args$num_samples, args$batch_size))
+        total_processed <- 0
+        
+        batch_size <- min(args$batch_size, args$num_samples)
+        num_batches <- ceiling(args$num_samples / batch_size)
+        
+        for (batch in 1:num_batches) {
+            start_idx <- (batch - 1) * batch_size + 1
+            end_idx <- min(batch * batch_size, args$num_samples)
+            batch_indices <- start_idx:end_idx
+            
+            log_info(sprintf("Processing batch %d/%d (samples %d-%d)", 
+                            batch, num_batches, start_idx, end_idx))
+            
+            # Process this batch
+            batch_results <- process_batch(
+                batch_indices, 
+                all_concentrations, 
+                args, 
+                cell_type_order, 
+                reads_by_celltype_df
             )
+            
+            # Update progress
+            total_processed <- total_processed + length(batch_results)
+            update_progress(total_processed)
         }
         
-        log_info(sprintf("Processed %d samples.", length(results)))
-        stopImplicitCluster()
+        log_info(sprintf("All batches complete. Processed %d/%d samples.", 
+                        total_processed, args$num_samples))
     }
     
     log_info("Script completed successfully")
