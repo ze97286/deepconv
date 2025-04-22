@@ -21,7 +21,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train cfDNA methylation cancer detection model')
     
     # Data parameters
-    parser.add_argument('--data_dir', type=str, required=True, default="/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/", help='Directory containing parquet files')
+    parser.add_argument('--data_dir', type=str, default="/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/", help='Directory containing parquet files')
     parser.add_argument('--atlas_path', type=str, default="/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed",help='Path to atlas file')
     parser.add_argument('--target_cell_type', type=str, default='OAC', help='Target cell type')
     parser.add_argument('--target_cell_idx', type=int, default=9, help='Target cell index in ground truth')
