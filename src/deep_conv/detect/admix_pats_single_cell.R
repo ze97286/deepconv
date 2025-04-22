@@ -34,8 +34,18 @@ option_list <- list(
     make_option(c("--overwrite"), action="store_true", default=FALSE,
                 help="Overwrite existing files [default %default]"),
     make_option(c("--prefix"), type="character", default="mix",
-                help="Prefix for output files [default %default]")
+                help="Prefix for output files [default %default]"),
+    make_option(c("--debug"), action="store_true", default=FALSE,
+                help="Run in debug mode [default %default]")
 )
+
+# Helper debug function
+print_debug <- function(label, obj) {
+  if (exists("args") && !is.null(args$debug) && args$debug) {
+    cat("DEBUG: ", label, " (", typeof(obj), "/", class(obj), ")\n")
+    print(str(obj))
+  }
+}
 
 # Helper functions
 make_target_table <- function(cell_type_order, concentrations, pat_dir=".", suffix=".pat.gz") {
@@ -237,7 +247,12 @@ calculate_true_concentrations <- function(tmp_dir, target_dir, mix_prefix, cell_
 main <- function() {
     # Parse command-line arguments
     parser <- OptionParser(option_list=option_list)
-    args <- parse_args(parser)
+    args <<- parse_args(parser)  # Make available globally for debug function
+    
+    if (args$debug) {
+        log_info("Running in DEBUG mode")
+    }
+    
     if (is.null(args$pat_dir) || is.null(args$output_dir) || is.null(args$concentrations)) {
         print_help(parser)
         stop("Missing required arguments")
@@ -254,6 +269,10 @@ main <- function() {
     # Parse JSON with simplifyVector=FALSE to prevent data.frame conversion
     json_data <- fromJSON(json_text, simplifyVector = FALSE)
     
+    if (args$debug) {
+        print_debug("json_data", json_data)
+    }
+    
     # Validate JSON structure
     if (is.null(json_data$cell_type_order) || is.null(json_data$target_cell_type) || 
         is.null(json_data$distribution)) {
@@ -261,13 +280,32 @@ main <- function() {
     }
     
     # Extract configuration
-    cell_type_order <- json_data$cell_type_order
+    cell_type_order <- unlist(json_data$cell_type_order)
     target_cell_type <- json_data$target_cell_type
     distribution <- json_data$distribution
     
+    if (args$debug) {
+        print_debug("cell_type_order", cell_type_order)
+        print_debug("target_cell_type", target_cell_type)
+        print_debug("distribution", distribution)
+    }
+    
     # Validate distribution probabilities
     log_info("Validating distribution probabilities")
-    probs <- sapply(distribution, function(b) b$probability)
+    
+    # Access probability values safely
+    probs <- numeric(length(distribution))
+    for (i in 1:length(distribution)) {
+        if (args$debug) {
+            print_debug(paste0("distribution[[", i, "]]"), distribution[[i]])
+        }
+        probs[i] <- distribution[[i]]$probability
+    }
+    
+    if (args$debug) {
+        print_debug("probs", probs)
+    }
+    
     if (abs(sum(probs) - 1) > 1e-6) {
         stop("Distribution probabilities must sum to 1")
     }
@@ -278,6 +316,7 @@ main <- function() {
     
     # Generate bin indices for all samples
     log_info(sprintf("Generating %d samples", args$num_samples))
+    set.seed(42)  # For reproducibility
     bin_indices <- sample(1:length(distribution), args$num_samples, replace=TRUE, prob=probs)
     
     # Create all sample concentration specs
@@ -288,11 +327,18 @@ main <- function() {
         # Get the selected distribution bin
         bin <- distribution[[bin_indices[i]]]
         
+        if (args$debug && i == 1) {
+            print_debug("selected bin", bin)
+            print_debug("bin$range", bin$range)
+        }
+        
         # Get the target concentration from the range
-        if (bin$range[[1]] == bin$range[[2]]) {
-            c <- bin$range[[1]]
+        range_values <- unlist(bin$range)
+        
+        if (range_values[1] == range_values[2]) {
+            c <- range_values[1]
         } else {
-            c <- runif(1, bin$range[[1]], bin$range[[2]])
+            c <- runif(1, range_values[1], range_values[2])
         }
         
         # Get other cell types
@@ -311,25 +357,20 @@ main <- function() {
         
         # Re-order to match cell_type_order
         all_concentrations[[i]] <- concentrations[cell_type_order]
+        
+        if (args$debug && i == 1) {
+            print_debug("concentrations for sample 1", all_concentrations[[i]])
+        }
     }
     
-    # Set up parallel processing
-    log_info(sprintf("Setting up parallel processing with %d threads", args$threads))
-    registerDoParallel(cores=args$threads)
-    
-    # Convert to data frame for easier parallel processing
-    reads_by_celltype_df <- as.data.frame(reads_by_celltype)
-    
-    # Generate mixtures in parallel
-    log_info("Starting parallel processing")
-    results <- foreach(i=1:args$num_samples, 
-                      .packages=c("data.table", "gtools"),
-                      .export=c("make_target_table", "calculate_true_concentrations", 
-                                "process_single_sample")) %dopar% {
-        # Process one sample
-        process_single_sample(
-            sample_id = i,
-            concentrations = all_concentrations[[i]],
+    # If in debug mode, just process the first sample
+    if (args$debug) {
+        log_info("DEBUG mode: Processing only first sample")
+        reads_by_celltype_df <- as.data.frame(reads_by_celltype)
+        
+        result <- process_single_sample(
+            sample_id = 1,
+            concentrations = all_concentrations[[1]],
             pat_dir = args$pat_dir,
             output_dir = args$output_dir,
             tmp_dir = args$tmp_dir,
@@ -340,10 +381,42 @@ main <- function() {
             cell_type_order = cell_type_order,
             reads_by_celltype_df = reads_by_celltype_df
         )
+        
+        log_info("Debug sample processed successfully")
+    } else {
+        # Set up parallel processing
+        log_info(sprintf("Setting up parallel processing with %d threads", args$threads))
+        registerDoParallel(cores=args$threads)
+        
+        # Convert to data frame for easier parallel processing
+        reads_by_celltype_df <- as.data.frame(reads_by_celltype)
+        
+        # Generate mixtures in parallel
+        log_info("Starting parallel processing")
+        results <- foreach(i=1:args$num_samples, 
+                          .packages=c("data.table", "gtools"),
+                          .export=c("make_target_table", "calculate_true_concentrations", 
+                                    "process_single_sample")) %dopar% {
+            # Process one sample
+            process_single_sample(
+                sample_id = i,
+                concentrations = all_concentrations[[i]],
+                pat_dir = args$pat_dir,
+                output_dir = args$output_dir,
+                tmp_dir = args$tmp_dir,
+                min_depth = args$min_depth,
+                max_depth = args$max_depth,
+                overwrite = args$overwrite,
+                prefix = args$prefix,
+                cell_type_order = cell_type_order,
+                reads_by_celltype_df = reads_by_celltype_df
+            )
+        }
+        
+        log_info(sprintf("Processed %d samples.", length(results)))
+        stopImplicitCluster()
     }
     
-    log_info(sprintf("Processed %d samples.", length(results)))
-    stopImplicitCluster()
     log_info("Script completed successfully")
 }
 
@@ -352,5 +425,11 @@ tryCatch({
     main()
 }, error = function(e) {
     cat(sprintf("ERROR: %s\n", e$message))
+    if (exists("args") && !is.null(args$debug) && args$debug) {
+        cat("Error call:\n")
+        print(e$call)
+        cat("Traceback:\n")
+        print(traceback())
+    }
     quit(status = 1)
 })
