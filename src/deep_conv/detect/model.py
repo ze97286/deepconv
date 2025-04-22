@@ -275,27 +275,33 @@ class EnsembleCancerDetectionModel(nn.Module):
     
     def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
         """
-        Get point estimate and confidence interval
+        Get point estimate and confidence interval using scipy instead of torch icdf
         """
+        import scipy.stats as stats
+        
         alpha = mu * phi
         beta = (1 - mu) * phi
         
-        # We can't use dist.icdf which is not implemented in PyTorch
-        # Instead, we'll use scipy.stats which has proper support for this
-        import scipy.stats as stats
-        
-        # Calculate confidence interval using scipy's beta distribution
-        lower = torch.zeros_like(mu)
-        upper = torch.zeros_like(mu)
-        
-        # Convert to numpy for scipy
+        # Move tensors to CPU and convert to numpy for scipy
         alpha_np = alpha.detach().cpu().numpy()
         beta_np = beta.detach().cpu().numpy()
         
-        # Calculate lower and upper CI bounds
+        # Initialize tensors for results
+        lower = torch.zeros_like(mu)
+        upper = torch.zeros_like(mu)
+        
+        # Calculate CI bounds for each sample
         for i in range(len(alpha_np)):
-            lower[i] = torch.tensor(stats.beta.ppf((1 - ci_level) / 2, alpha_np[i], beta_np[i]))
-            upper[i] = torch.tensor(stats.beta.ppf(1 - (1 - ci_level) / 2, alpha_np[i], beta_np[i]))
+            a_val = float(alpha_np[i])
+            b_val = float(beta_np[i])
+            
+            # Handle potential numerical issues
+            if a_val <= 0 or b_val <= 0:
+                lower[i] = 0.0
+                upper[i] = 1.0
+            else:
+                lower[i] = torch.tensor(stats.beta.ppf((1 - ci_level) / 2, a_val, b_val))
+                upper[i] = torch.tensor(stats.beta.ppf(1 - (1 - ci_level) / 2, a_val, b_val))
         
         estimate = mu
         ci = torch.cat([lower, upper], dim=1)
