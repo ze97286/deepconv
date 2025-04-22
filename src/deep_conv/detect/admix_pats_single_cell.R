@@ -22,9 +22,9 @@ option_list <- list(
                 help="JSON file specifying cell type of interest and concentration distribution [REQUIRED]"),
     make_option(c("--num_samples"), type="integer", default=50000,
                 help="Number of synthetic samples to generate [default %default]"),
-    make_option(c("--min_depth"), type="integer", default=5000,
+    make_option(c("--min_depth"), type="integer", default=40000,
                 help="Minimum total coverage [default %default]"),
-    make_option(c("--max_depth"), type="integer", default=20000,
+    make_option(c("--max_depth"), type="integer", default=100000,
                 help="Maximum total coverage [default %default]"),
     make_option(c("--overwrite"), action="store_true", default=FALSE,
                 help="Overwrite existing files [default %default]"),
@@ -85,7 +85,6 @@ read_count_table <- function(patdir, cell_type_order) {
         celltype = names(all_frags_list),
         fragments = unlist(all_frags_list)
     )
-    setkey(all_frags, celltype)
     return(all_frags)
 }
 
@@ -103,6 +102,9 @@ generate_mix_from_pat <- function(targets, target_dir, min_depth, max_depth, thr
     setkey(targets, celltype)
     setkey(reads_by_celltype, celltype)
     
+    # Merge targets with reads_by_celltype to ensure proper column access
+    merged_table <- merge(targets, reads_by_celltype, by="celltype")
+    
     # Generate depths for all repeats upfront
     mix_prefix <- sprintf("%s_sample%d", prefix, sample_id)
     
@@ -110,19 +112,15 @@ generate_mix_from_pat <- function(targets, target_dir, min_depth, max_depth, thr
     worker_tmp_dir <- file.path(tmp_dir, paste0("worker_", sample_id))
     dir.create(worker_tmp_dir, showWarnings = FALSE, recursive = TRUE, mode = "0755")
     
-    for (ct in unique(targets$celltype)) {
+    for (ct in unique(merged_table$celltype)) {
         out_file <- paste0(target_dir, '/', mix_prefix, '.pat.gz')
         if (overwrite || !file.exists(out_file)) {
-            sub.dt <- targets[list(celltype = ct)]
+            sub.dt <- merged_table[celltype == ct]
             fraction <- sub.dt$fraction
             filename <- sub.dt$filename
             
-            # Adjust fraction based on current_depth vs target_depth
-            reads <- reads_by_celltype[ct]$fragments
-            if (is.na(reads) || reads == 0) {
-                stop(sprintf("Cell type %s has no reads in reads_by_celltype", ct))
-            }
-            adjusted_fraction <- fraction * (current_depth / reads)
+            # Adjust fraction based on current_depth vs total fragments
+            adjusted_fraction <- fraction * (current_depth / sub.dt$fragments)
             
             # Generate sampled pat file in the worker-specific temporary directory
             tmp_file <- sprintf("%s/%s_%s.pat.gz", worker_tmp_dir, mix_prefix, ct)
