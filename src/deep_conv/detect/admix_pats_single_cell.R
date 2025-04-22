@@ -88,33 +88,28 @@ read_count_table <- function(patdir, cell_type_order) {
     return(all_frags)
 }
 
-generate_mix_from_pat <- function(targets, target_dir, min_depth, max_depth, tmp_dir=NULL, 
-                                  overwrite=FALSE, prefix="mix", sample_id=1, reads_by_celltype, 
-                                  current_depth) {
+process_single_sample <- function(sample_id, concentrations, pat_dir, output_dir, tmp_dir, min_depth, max_depth,
+                                 overwrite, prefix, cell_type_order, reads_by_celltype_dt) {
+    # Function to process a single sample (to be run in parallel)
+    
+    # Create targets table
+    targets <- make_target_table(
+        cell_type_order = cell_type_order,
+        concentrations = concentrations,
+        pat_dir = pat_dir
+    )
+    
+    # Sample current_depth
+    current_depth <- round(runif(1, min_depth, max_depth))
+    
+    # Setup directories
     if (is.null(tmp_dir)) {
-        tmp_dir <- paste0(target_dir, "/tmp")
+        tmp_dir <- paste0(output_dir, "/tmp")
     }
     
-    print(targets)
-   
     # Create main directories
-    dir.create(target_dir, showWarnings = FALSE, recursive = TRUE, mode = "0755")
+    dir.create(output_dir, showWarnings = FALSE, recursive = TRUE, mode = "0755")
     dir.create(tmp_dir, showWarnings = FALSE, recursive = TRUE, mode = "0755")
-    
-    # Ensure targets is a data.table
-    if (!is.data.table(targets)) {
-        targets <- as.data.table(targets)
-    }
-    setkey(targets, celltype)
-    
-    # Ensure reads_by_celltype is a data.table
-    if (!is.data.table(reads_by_celltype)) {
-        reads_by_celltype <- as.data.table(reads_by_celltype)
-    }
-    setkey(reads_by_celltype, celltype)
-    
-    # Merge targets with reads_by_celltype to ensure proper column access
-    merged_table <- merge(targets, reads_by_celltype, by="celltype")
     
     # Generate mix prefix
     mix_prefix <- sprintf("%s_sample%d", prefix, sample_id)
@@ -124,15 +119,23 @@ generate_mix_from_pat <- function(targets, target_dir, min_depth, max_depth, tmp
     dir.create(worker_tmp_dir, showWarnings = FALSE, recursive = TRUE, mode = "0755")
     
     # Process each cell type
-    for (ct in unique(merged_table$celltype)) {
-        out_file <- paste0(target_dir, '/', mix_prefix, '.pat.gz')
+    for (ct in cell_type_order) {
+        out_file <- paste0(output_dir, '/', mix_prefix, '.pat.gz')
         if (overwrite || !file.exists(out_file)) {
-            sub.dt <- merged_table[celltype == ct]
-            fraction <- sub.dt$fraction
-            filename <- sub.dt$filename
+            # Get the reads data for this cell type
+            ct_row_idx <- which(reads_by_celltype_dt[["celltype"]] == ct)
+            if (length(ct_row_idx) == 0) {
+                warning(sprintf("No data found for cell type: %s", ct))
+                next
+            }
+            
+            # Get necessary values
+            fraction <- concentrations[ct]
+            filename <- paste0(pat_dir, '/', ct, '.pat.gz')
+            fragments <- reads_by_celltype_dt[ct_row_idx, "fragments"][[1]]
             
             # Adjust fraction based on current_depth vs total fragments
-            adjusted_fraction <- fraction * (current_depth / sub.dt$fragments)
+            adjusted_fraction <- fraction * (current_depth / fragments)
             
             # Generate sampled pat file in the worker-specific temporary directory
             tmp_file <- sprintf("%s/%s_%s.pat.gz", worker_tmp_dir, mix_prefix, ct)
@@ -140,7 +143,7 @@ generate_mix_from_pat <- function(targets, target_dir, min_depth, max_depth, tmp
                         adjusted_fraction, filename, tmp_file)
             result <- system2("sh", c("-c", cmd))
             if (result != 0) {
-                stop(sprintf("Failed to sample reads for %s in sample %d", ct, sample_id))
+                warning(sprintf("Failed to sample reads for %s in sample %d", ct, sample_id))
             }
             
             # Verify the tmp file was created and has content
@@ -156,7 +159,7 @@ generate_mix_from_pat <- function(targets, target_dir, min_depth, max_depth, tmp
     }
     
     # Merge pat files from the worker-specific temporary directory
-    out_file <- paste0(target_dir, '/', mix_prefix, '.pat.gz')
+    out_file <- paste0(output_dir, '/', mix_prefix, '.pat.gz')
     if (!file.exists(out_file) || overwrite) {
         merge_cmd <- paste0(
             '"zcat ', worker_tmp_dir, '/', mix_prefix, '_*.pat.gz | ',
@@ -180,18 +183,18 @@ generate_mix_from_pat <- function(targets, target_dir, min_depth, max_depth, tmp
         }
     }
     
-    # Calculate and save true concentrations (using the worker-specific temporary directory)
-    cell_types <- targets$celltype
-    calculate_true_concentrations(worker_tmp_dir, target_dir, mix_prefix, cell_type_order=cell_types)
+    # Calculate and save true concentrations
+    calculate_true_concentrations(worker_tmp_dir, output_dir, mix_prefix, cell_type_order)
     
     # Cleanup worker-specific temporary files and directory
     tmp_files <- list.files(worker_tmp_dir, 
-                            pattern = paste0(mix_prefix, "_.*\\.pat\\.gz$"), 
-                            full.names = TRUE)
+                           pattern = paste0(mix_prefix, "_.*\\.pat\\.gz$"), 
+                           full.names = TRUE)
     file.remove(tmp_files)
     unlink(worker_tmp_dir, recursive = TRUE)
     
     cat(sprintf("\nFinished processing sample: %d\n", sample_id))
+    return(sample_id)
 }
 
 calculate_true_concentrations <- function(tmp_dir, target_dir, mix_prefix, cell_type_order) {
@@ -293,16 +296,12 @@ main <- function() {
     
     # Read total read counts for each cell type
     reads_by_celltype <- read_count_table(args$pat_dir, cell_type_order)
-    setkey(reads_by_celltype, celltype)
     
     # Generate concentration list for all samples
     bin_indices <- sample(1:length(distribution), args$num_samples, replace=TRUE, prob=probs)
     
-    # Set up parallel processing
-    registerDoParallel(cores=args$threads)
-    
-    # Create temporary list to store all concentration specifications
-    all_specs <- list()
+    # Create all sample concentration specs
+    all_concentrations <- list()
     for (i in 1:args$num_samples) {
         bin <- distribution[[bin_indices[i]]]
         if (bin$range[1] == bin$range[2]) {
@@ -325,52 +324,37 @@ main <- function() {
         }
         
         # Re-order to match cell_type_order
-        concentrations <- concentrations[cell_type_order]
-        
-        # Store in list
-        all_specs[[i]] <- list(
-            concentrations = concentrations,
-            sample_id = i
-        )
+        all_concentrations[[i]] <- concentrations[cell_type_order]
     }
     
+    # Set up parallel processing
+    registerDoParallel(cores=args$threads)
+    
+    # Export reads_by_celltype as a data structure that can be used directly
+    reads_by_celltype_list <- list(
+        celltype = reads_by_celltype$celltype,
+        fragments = reads_by_celltype$fragments
+    )
+    
     # Generate mixtures in parallel
-    # Copy complete data structures for each worker
-    # Export everything needed by each worker
     results <- foreach(i=1:args$num_samples, 
-            .packages=c("data.table", "gtools"),
-            .export=c("generate_mix_from_pat", "calculate_true_concentrations", "make_target_table")) %dopar% {
-        
-        # Extract this sample's spec
-        spec <- all_specs[[i]]
-        concentrations <- spec$concentrations
-        sample_id <- spec$sample_id
-        
-        # Create targets table
-        targets <- make_target_table(
-            cell_type_order = cell_type_order,
-            concentrations = concentrations,
-            pat_dir = args$pat_dir
-        )
-        
-        # Sample current_depth
-        current_depth <- round(runif(1, args$min_depth, args$max_depth))
-        
-        # Generate mixture
-        generate_mix_from_pat(
-            targets = targets,
-            target_dir = args$output_dir,
+                      .packages=c("data.table", "gtools"),
+                      .export=c("make_target_table", "calculate_true_concentrations", 
+                                "process_single_sample")) %dopar% {
+        # Process one sample
+        process_single_sample(
+            sample_id = i,
+            concentrations = all_concentrations[[i]],
+            pat_dir = args$pat_dir,
+            output_dir = args$output_dir,
+            tmp_dir = args$tmp_dir,
             min_depth = args$min_depth,
             max_depth = args$max_depth,
-            tmp_dir = args$tmp_dir,
             overwrite = args$overwrite,
             prefix = args$prefix,
-            sample_id = sample_id,
-            reads_by_celltype = reads_by_celltype,
-            current_depth = current_depth
+            cell_type_order = cell_type_order,
+            reads_by_celltype_dt = reads_by_celltype
         )
-        
-        return(sample_id)  # Return ID to indicate completion
     }
     
     cat(sprintf("Successfully processed %d samples.\n", length(results)))
