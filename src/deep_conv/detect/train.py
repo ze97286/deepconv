@@ -288,7 +288,10 @@ def train(model, train_loader, val_loader, args, device):
     # Save training history
     history_path = os.path.join(args.output_dir, 'training_history.json')
     with open(history_path, 'w') as f:
-        json.dump(history, f)
+        serializable_history = {}
+        for key, values in history.items():
+            serializable_history[key] = [float(v) for v in values]
+        json.dump(serializable_history, f)
     logger.info(f"Training history saved to {history_path}")
     
     # Plot training history
@@ -403,7 +406,7 @@ def plot_training_history(history, output_dir):
 
 
 def evaluate(model, test_loader, args, device):
-    """Evaluate the model on the test set with progress bar"""
+    """Evaluate the model on the test set with visualization"""
     logger = logging.getLogger('cancer_detection')
     logger.info("Starting model evaluation on test set...")
     
@@ -468,20 +471,20 @@ def evaluate(model, test_loader, args, device):
         'lower_ci': all_lower_ci.flatten().tolist(),
         'upper_ci': all_upper_ci.flatten().tolist(),
         'metrics': {
-            'r2': r2,
-            'mae': mae,
-            'in_ci_percentage': in_ci * 100,
-            'ci_width': ci_width
+            'r2': float(r2),
+            'mae': float(mae),
+            'in_ci_percentage': float(in_ci * 100),
+            'ci_width': float(ci_width)
         }
     }
     
     results_file = os.path.join(args.output_dir, 'test_results.json')
     with open(results_file, 'w') as f:
-        json.dump(results, f)
+        json.dump(results, f, indent=2)
     logger.info(f"Test results saved to {results_file}")
     
-    # Plot predictions vs targets
-    logger.info("Creating prediction visualizations...")
+    # Create standard plots with matplotlib
+    logger.info("Creating basic prediction visualizations...")
     plot_predictions(all_preds, all_targets, all_lower_ci, all_upper_ci, args.output_dir)
     
     # Analyze marker importance
@@ -491,27 +494,79 @@ def evaluate(model, test_loader, args, device):
     np.save(marker_importance_file, all_marker_attentions.mean(axis=0))
     logger.info(f"Marker importance saved to {marker_importance_file}")
     
-    # Calculate additional metrics for deeper analysis
-    mse = np.mean((all_preds - all_targets)**2)
-    rmse = np.sqrt(mse)
-    within_10pct = np.mean(np.abs(all_preds - all_targets) <= 0.1)
-    within_5pct = np.mean(np.abs(all_preds - all_targets) <= 0.05)
-    
-    logger.info("\nAdditional Metrics:")
-    logger.info(f"Root Mean Squared Error: {rmse:.6f}")
-    logger.info(f"Predictions within 5% of true value: {within_5pct * 100:.2f}%")
-    logger.info(f"Predictions within 10% of true value: {within_10pct * 100:.2f}%")
-    
-    # Add these metrics to the results
-    results['metrics']['rmse'] = rmse
-    results['metrics']['within_5pct'] = within_5pct * 100
-    results['metrics']['within_10pct'] = within_10pct * 100
-    
-    # Update the results file with additional metrics
-    with open(results_file, 'w') as f:
-        json.dump(results, f, indent=2)
+    # Create advanced visualizations with Plotly
+    try:
+        from deep_conv.detect.visualise import create_visualizations
+        
+        logger.info("Creating advanced visualizations with Plotly...")
+        # Create visualization directories
+        viz_dir = os.path.join(args.output_dir, 'visualizations')
+        test_viz_dir = os.path.join(viz_dir, 'test')
+        os.makedirs(test_viz_dir, exist_ok=True)
+        
+        # Generate visualizations for test data
+        metrics = create_visualizations(
+            predictions=all_preds.flatten(), 
+            ground_truth=all_targets.flatten(),
+            output_dir=test_viz_dir
+        )
+        
+        logger.info(f"Advanced visualizations saved to {test_viz_dir}")
+    except ImportError:
+        logger.warning("Plotly visualization module not found. Skipping advanced visualizations.")
+    except Exception as e:
+        logger.error(f"Error creating advanced visualizations: {str(e)}")
     
     return results
+
+
+def run_final_validation(model, val_loader, args, device):
+    """Run a final validation pass with visualizations"""
+    logger = logging.getLogger('cancer_detection')
+    logger.info("Running final validation with visualizations...")
+    
+    model = model.to(device)
+    model.eval()
+    
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for marker_values, coverage, y_true in tqdm(val_loader, desc="Final Validation"):
+            marker_values = marker_values.to(device)
+            coverage = coverage.to(device)
+            y_true = y_true.to(device)
+            
+            mu, phi, _ = model(marker_values, coverage)
+            
+            all_preds.append(mu.cpu().numpy())
+            all_targets.append(y_true.cpu().numpy())
+    
+    # Concatenate results
+    all_preds = np.concatenate(all_preds)
+    all_targets = np.concatenate(all_targets)
+    
+    # Create visualization directories
+    viz_dir = os.path.join(args.output_dir, 'visualizations')
+    val_viz_dir = os.path.join(viz_dir, 'validation')
+    os.makedirs(val_viz_dir, exist_ok=True)
+    
+    # Try to create advanced visualizations
+    try:
+        from visualize import create_visualizations
+        
+        # Generate visualizations for validation data
+        metrics = create_visualizations(
+            predictions=all_preds.flatten(), 
+            ground_truth=all_targets.flatten(),
+            output_dir=val_viz_dir
+        )
+        
+        logger.info(f"Validation visualizations saved to {val_viz_dir}")
+    except ImportError:
+        logger.warning("Plotly visualization module not found. Skipping advanced visualizations.")
+    except Exception as e:
+        logger.error(f"Error creating validation visualizations: {str(e)}")
 
 
 def plot_predictions(predictions, targets, lower_ci, upper_ci, output_dir):
@@ -768,6 +823,7 @@ def main():
             atlas_path=args.atlas_path,
             target_cell_type=args.target_cell_type,
             target_cell_idx=args.target_cell_idx,
+            batch_size=args.batch_size
         )
         logger.info(f"✓ Data preparation complete")
     except Exception as e:
@@ -809,6 +865,15 @@ def main():
         logger.error(f"× Error during training: {str(e)}")
         raise
     
+    # Run final validation with visualizations
+    logger.info("Running final validation with visualizations...")
+    try:
+        run_final_validation(model, val_loader, args, device)
+        logger.info("✓ Final validation completed successfully")
+    except Exception as e:
+        logger.error(f"× Error during final validation: {str(e)}")
+        logger.exception(e)
+    
     # Evaluate model
     logger.info("Evaluating model on test set...")
     try:
@@ -816,7 +881,7 @@ def main():
         logger.info(f"✓ Evaluation completed successfully")
     except Exception as e:
         logger.error(f"× Error during evaluation: {str(e)}")
-        raise
+        logger.exception(e)
     
     # Print summary
     logger.info("\n" + "="*60)
