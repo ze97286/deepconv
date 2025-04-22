@@ -251,6 +251,7 @@ class CellTypeDeconvolutionModel(nn.Module):
                 from deep_conv.presence.model import SingleCellTypePresenceModel
                 presence_model = SingleCellTypePresenceModel()
                 presence_model.load_state_dict(checkpoint['model_state_dict'])
+                presence_model.load_threshold(checkpoint)
             else:
                 presence_model = checkpoint
             
