@@ -77,10 +77,9 @@ def load_and_preprocess_data(
     print(f"Found {len(target_marker_indices)} markers for {target_cell_type}")
     
     # Extract relevant markers from data
-    # Note: assuming marker_values_df and coverage_df have markers as rows and samples as columns
-    marker_values = marker_values_df.iloc[target_marker_indices].values.T  # Shape: [num_samples, num_markers]
-    coverage = coverage_df.iloc[target_marker_indices].values.T  # Shape: [num_samples, num_markers]
-    
+    marker_values = marker_values_df.iloc[target_marker_indices][marker_values_df.columns[2:]].values.T
+    coverage = coverage_df.iloc[target_marker_indices][coverage_df.columns[2:]].values.T  
+
     # Data summary
     print(f"Marker values shape: {marker_values.shape}")
     print(f"Coverage shape: {coverage.shape}")
