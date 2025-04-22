@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Beta
 import math
+import scipy.stats as stats
 
 
 class PositionalEncoding(nn.Module):
@@ -151,14 +152,31 @@ class EnhancedCancerDetectionModel(nn.Module):
     
     def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
         """
-        Get point estimate and confidence interval
+        Get point estimate and confidence interval using scipy instead of torch icdf
         """
         alpha = mu * phi
         beta = (1 - mu) * phi
         
-        dist = Beta(alpha, beta)
-        lower = dist.icdf(torch.tensor((1 - ci_level) / 2))
-        upper = dist.icdf(torch.tensor(1 - (1 - ci_level) / 2))
+        # Move tensors to CPU and convert to numpy for scipy
+        alpha_np = alpha.detach().cpu().numpy()
+        beta_np = beta.detach().cpu().numpy()
+        
+        # Initialize tensors for results
+        lower = torch.zeros_like(mu)
+        upper = torch.zeros_like(mu)
+        
+        # Calculate CI bounds for each sample
+        for i in range(len(alpha_np)):
+            a_val = float(alpha_np[i])
+            b_val = float(beta_np[i])
+            
+            # Handle potential numerical issues
+            if a_val <= 0 or b_val <= 0:
+                lower[i] = 0.0
+                upper[i] = 1.0
+            else:
+                lower[i] = torch.tensor(stats.beta.ppf((1 - ci_level) / 2, a_val, b_val))
+                upper[i] = torch.tensor(stats.beta.ppf(1 - (1 - ci_level) / 2, a_val, b_val))
         
         estimate = mu
         ci = torch.cat([lower, upper], dim=1)
@@ -221,92 +239,3 @@ class MarkerImportanceAnalyzer:
         uncertainty_values = np.concatenate(uncertainty_values)
         
         return coverage_values, uncertainty_values
-
-
-# Extension: Ensemble model for improved robustness
-class EnsembleCancerDetectionModel(nn.Module):
-    """
-    Ensemble of multiple cancer detection models for improved robustness
-    """
-    def __init__(self, num_markers, num_models=5, **model_kwargs):
-        super().__init__()
-        self.models = nn.ModuleList([
-            EnhancedCancerDetectionModel(num_markers, **model_kwargs)
-            for _ in range(num_models)
-        ])
-    
-    def forward(self, marker_values, coverage, y_true=None):
-        all_mu = []
-        all_phi = []
-        all_losses = []
-        all_attentions = []
-        
-        for model in self.models:
-            if y_true is not None:
-                mu, phi, loss, attention_weights = model(marker_values, coverage, y_true)
-                all_losses.append(loss)
-            else:
-                mu, phi, attention_weights = model(marker_values, coverage)
-                
-            all_mu.append(mu)
-            all_phi.append(phi)
-            all_attentions.append(attention_weights)
-        
-        # Average predictions
-        mu = torch.stack(all_mu).mean(dim=0)
-        
-        # For uncertainty, we want to account for both aleatoric (data) and epistemic (model) uncertainty
-        # We use a combination of the average phi and the variance of mu across models
-        phi_avg = torch.stack(all_phi).mean(dim=0)
-        mu_var = torch.stack(all_mu).var(dim=0)
-        
-        # Adjusted phi to account for model disagreement
-        phi = phi_avg * (1 + mu_var * 10)  # Scale factor to make epistemic uncertainty meaningful
-        
-        # Average attention weights
-        attention_weights = torch.stack(all_attentions).mean(dim=0)
-        
-        if y_true is not None:
-            # Use average loss
-            loss = torch.stack(all_losses).mean()
-            return mu, phi, loss, attention_weights
-            
-        return mu, phi, attention_weights
-    
-    def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
-        """
-        Get point estimate and confidence interval using scipy instead of torch icdf
-        """
-        import scipy.stats as stats
-        
-        alpha = mu * phi
-        beta = (1 - mu) * phi
-        
-        # Move tensors to CPU and convert to numpy for scipy
-        alpha_np = alpha.detach().cpu().numpy()
-        beta_np = beta.detach().cpu().numpy()
-        
-        # Initialize tensors for results
-        lower = torch.zeros_like(mu)
-        upper = torch.zeros_like(mu)
-        
-        # Calculate CI bounds for each sample
-        for i in range(len(alpha_np)):
-            a_val = float(alpha_np[i])
-            b_val = float(beta_np[i])
-            
-            # Handle potential numerical issues
-            if a_val <= 0 or b_val <= 0:
-                lower[i] = 0.0
-                upper[i] = 1.0
-            else:
-                lower[i] = torch.tensor(stats.beta.ppf((1 - ci_level) / 2, a_val, b_val))
-                upper[i] = torch.tensor(stats.beta.ppf(1 - (1 - ci_level) / 2, a_val, b_val))
-        
-        estimate = mu
-        ci = torch.cat([lower, upper], dim=1)
-        
-        # Calculate uncertainty (width of CI)
-        uncertainty = upper - lower
-        
-        return estimate, ci, uncertainty
