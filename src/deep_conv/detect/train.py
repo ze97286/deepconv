@@ -39,7 +39,7 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=1000, help='Number of epochs')
     parser.add_argument('--grad_accum_steps', type=int, default=4, help='Gradient accumulation steps')
     parser.add_argument('--early_stopping', type=int, default=10, help='Early stopping patience')
-    parser.add_argument('--output_dir', type=str, default='outputs', default="/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell_oac", help='Output directory')
+    parser.add_argument('--output_dir', type=str, default="/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell_oac", help='Output directory')
     
     # Misc parameters
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
