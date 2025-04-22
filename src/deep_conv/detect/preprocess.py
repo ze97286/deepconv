@@ -234,7 +234,7 @@ def prepare_data_for_training(
     # Define file paths
     marker_values_path = os.path.join(data_dir, "marker_values.parquet")
     coverage_path = os.path.join(data_dir, "coverage.parquet")
-    ground_truth_path = os.path.join(data_dir, "ground_truth.parquet")
+    ground_truth_path = os.path.join(data_dir, "ground_truth_y.parquet")
     
     # Load and preprocess data
     train_loader, val_loader, test_loader, num_markers = load_and_preprocess_data(
@@ -258,7 +258,7 @@ def prepare_data_for_training(
 if __name__ == "__main__":
     data_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/"
     atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
-    
+
     train_loader, val_loader, test_loader, num_markers, data_stats = prepare_data_for_training(
         data_dir=data_dir,
         atlas_path=atlas_path,
