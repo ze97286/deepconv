@@ -768,7 +768,6 @@ def main():
             atlas_path=args.atlas_path,
             target_cell_type=args.target_cell_type,
             target_cell_idx=args.target_cell_idx,
-            batch_size=args.batch_size
         )
         logger.info(f"✓ Data preparation complete")
     except Exception as e:
