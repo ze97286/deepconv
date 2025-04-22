@@ -5,6 +5,19 @@ log_info <- function(message) {
   cat(sprintf("[INFO] %s\n", message))
 }
 
+log_debug <- function(message, debug_mode=FALSE) {
+  if (debug_mode) {
+    cat(sprintf("[DEBUG] %s\n", message))
+  }
+}
+
+print_debug <- function(label, obj, debug_mode=FALSE) {
+  if (debug_mode) {
+    cat("DEBUG: ", label, " (", typeof(obj), "/", class(obj), ")\n")
+    print(str(obj))
+  }
+}
+
 suppressPackageStartupMessages({
     library(data.table)
     library(optparse)
@@ -38,14 +51,6 @@ option_list <- list(
     make_option(c("--debug"), action="store_true", default=FALSE,
                 help="Run in debug mode [default %default]")
 )
-
-# Helper debug function
-print_debug <- function(label, obj) {
-  if (exists("args") && !is.null(args$debug) && args$debug) {
-    cat("DEBUG: ", label, " (", typeof(obj), "/", class(obj), ")\n")
-    print(str(obj))
-  }
-}
 
 # Helper functions
 make_target_table <- function(cell_type_order, concentrations, pat_dir=".", suffix=".pat.gz") {
@@ -247,9 +252,10 @@ calculate_true_concentrations <- function(tmp_dir, target_dir, mix_prefix, cell_
 main <- function() {
     # Parse command-line arguments
     parser <- OptionParser(option_list=option_list)
-    args <<- parse_args(parser)  # Make available globally for debug function
+    args <- parse_args(parser)
+    debug_mode <- !is.null(args$debug) && args$debug
     
-    if (args$debug) {
+    if (debug_mode) {
         log_info("Running in DEBUG mode")
     }
     
@@ -269,8 +275,8 @@ main <- function() {
     # Parse JSON with simplifyVector=FALSE to prevent data.frame conversion
     json_data <- fromJSON(json_text, simplifyVector = FALSE)
     
-    if (args$debug) {
-        print_debug("json_data", json_data)
+    if (debug_mode) {
+        print_debug("json_data", json_data, debug_mode)
     }
     
     # Validate JSON structure
@@ -284,10 +290,10 @@ main <- function() {
     target_cell_type <- json_data$target_cell_type
     distribution <- json_data$distribution
     
-    if (args$debug) {
-        print_debug("cell_type_order", cell_type_order)
-        print_debug("target_cell_type", target_cell_type)
-        print_debug("distribution", distribution)
+    if (debug_mode) {
+        print_debug("cell_type_order", cell_type_order, debug_mode)
+        print_debug("target_cell_type", target_cell_type, debug_mode)
+        print_debug("distribution", distribution, debug_mode)
     }
     
     # Validate distribution probabilities
@@ -296,14 +302,14 @@ main <- function() {
     # Access probability values safely
     probs <- numeric(length(distribution))
     for (i in 1:length(distribution)) {
-        if (args$debug) {
-            print_debug(paste0("distribution[[", i, "]]"), distribution[[i]])
+        if (debug_mode) {
+            print_debug(paste0("distribution[[", i, "]]"), distribution[[i]], debug_mode)
         }
         probs[i] <- distribution[[i]]$probability
     }
     
-    if (args$debug) {
-        print_debug("probs", probs)
+    if (debug_mode) {
+        print_debug("probs", probs, debug_mode)
     }
     
     if (abs(sum(probs) - 1) > 1e-6) {
@@ -327,9 +333,9 @@ main <- function() {
         # Get the selected distribution bin
         bin <- distribution[[bin_indices[i]]]
         
-        if (args$debug && i == 1) {
-            print_debug("selected bin", bin)
-            print_debug("bin$range", bin$range)
+        if (debug_mode && i == 1) {
+            print_debug("selected bin", bin, debug_mode)
+            print_debug("bin$range", bin$range, debug_mode)
         }
         
         # Get the target concentration from the range
@@ -338,7 +344,7 @@ main <- function() {
         if (range_values[1] == range_values[2]) {
             c <- range_values[1]
         } else {
-            c <- runif(1, range_values[1], range_values[2])
+            c <- runif(1, min(range_values), max(range_values))
         }
         
         # Get other cell types
@@ -358,13 +364,13 @@ main <- function() {
         # Re-order to match cell_type_order
         all_concentrations[[i]] <- concentrations[cell_type_order]
         
-        if (args$debug && i == 1) {
-            print_debug("concentrations for sample 1", all_concentrations[[i]])
+        if (debug_mode && i == 1) {
+            print_debug("concentrations for sample 1", all_concentrations[[i]], debug_mode)
         }
     }
     
     # If in debug mode, just process the first sample
-    if (args$debug) {
+    if (debug_mode) {
         log_info("DEBUG mode: Processing only first sample")
         reads_by_celltype_df <- as.data.frame(reads_by_celltype)
         
@@ -425,11 +431,9 @@ tryCatch({
     main()
 }, error = function(e) {
     cat(sprintf("ERROR: %s\n", e$message))
-    if (exists("args") && !is.null(args$debug) && args$debug) {
-        cat("Error call:\n")
-        print(e$call)
-        cat("Traceback:\n")
-        print(traceback())
-    }
+    cat("Error call:\n")
+    print(e$call)
+    cat("Traceback:\n")
+    print(traceback())
     quit(status = 1)
 })
