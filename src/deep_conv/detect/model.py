@@ -29,9 +29,16 @@ class EnhancedCancerDetectionModel(nn.Module):
     and improved detection capabilities.
     """
     def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
-                 dropout_rate=0.2, use_pos_encoding=True, detection_thresholds=(0.001, 0.01, 0.05)):
+             dropout_rate=0.2, use_pos_encoding=True, detection_thresholds=(0.001, 0.01, 0.05),
+             focal_weight_factor=100, low_concentration_threshold=0.01):
         super().__init__()
         
+        # Store configuration
+        self.detection_thresholds = detection_thresholds
+        self.num_markers = num_markers
+        self.focal_weight_factor = focal_weight_factor
+        self.low_concentration_threshold = low_concentration_threshold
+            
         # Store configuration
         self.detection_thresholds = detection_thresholds
         self.num_markers = num_markers
@@ -198,28 +205,11 @@ class EnhancedCancerDetectionModel(nn.Module):
         detection_probs = [head(detection_features) for head in self.detection_heads]
         
         if y_true is not None:
-            # Compute concentration loss
-            loss = self.compute_loss(blended_mu, blended_phi, y_true)
-            
-            # Add detection losses for each threshold
-            detection_losses = []
-            for i, threshold in enumerate(self.detection_thresholds):
-                # Convert continuous concentration to binary label
-                binary_y = (y_true >= threshold).float()
-                # Binary cross-entropy loss
-                det_loss = F.binary_cross_entropy(detection_probs[i], binary_y)
-                detection_losses.append(det_loss)
-            
-            # Combine losses - concentration loss + weighted sum of detection losses
-            detection_loss_weight = 0.2  # How much to weight detection vs concentration
-            combined_detection_loss = sum(detection_losses) / len(detection_losses)
-            total_loss = loss + detection_loss_weight * combined_detection_loss
-            
-            return blended_mu, blended_phi, detection_probs, total_loss, attention_weights
+            return blended_mu, blended_phi, detection_probs, attention_weights, y_true
             
         return blended_mu, blended_phi, detection_probs, attention_weights
     
-    def compute_loss(self, mu, phi, y_true, epsilon=1e-6, gamma=2.0):
+    def compute_loss(self, mu, phi, y_true, epsilon=1e-6):
         """
         Compute enhanced focal Beta negative log likelihood loss with threshold emphasis
         """
@@ -235,24 +225,29 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Negative log likelihood
         nll_loss = -dist.log_prob(y_clipped)
         
-        # Enhanced focal weighting that emphasizes both low concentrations
-        # and samples near critical thresholds
-        thresholds = torch.tensor(self.detection_thresholds).to(y_true.device)
+        # Get focal weighting factor from args
+        focal_factor = self.focal_weight_factor if hasattr(self, 'focal_weight_factor') else 100
+        low_conc_threshold = self.low_concentration_threshold if hasattr(self, 'low_concentration_threshold') else 0.01
         
-        # Basic weight for low concentrations
-        base_weight = torch.exp(-y_true * 100) + 1.0
+        # Enhanced focal weighting with configurable factor
+        base_weight = torch.exp(-y_true * focal_factor) + 1.0
         
         # Additional weight for samples near thresholds
         threshold_weight = torch.zeros_like(y_true)
-        for threshold in thresholds:
-            # Samples within 20% of threshold get extra weight
-            # Handle threshold=0 case
+        for threshold in self.detection_thresholds:
             if threshold > 0:
                 relative_distance = torch.abs(y_true - threshold) / threshold
                 threshold_weight += torch.exp(-relative_distance * 5) * 2.0
         
+        # Special handling for values below the low concentration threshold
+        is_low_conc = (y_true <= low_conc_threshold).float()
+        is_zero = (y_true < epsilon).float()
+        
+        # Extra weight for low but non-zero concentrations
+        low_conc_weight = is_low_conc * (1 - is_zero) * 2.0
+        
         # Combine weights (cap at 5x to prevent extreme values)
-        focal_weight = torch.clamp(base_weight + threshold_weight, 1.0, 5.0)
+        focal_weight = torch.clamp(base_weight + threshold_weight + low_conc_weight, 1.0, 5.0)
         
         # Apply focal weighting
         focal_loss = nll_loss * focal_weight

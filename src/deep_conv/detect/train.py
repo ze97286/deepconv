@@ -32,6 +32,17 @@ def parse_args():
     parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate')
     parser.add_argument('--use_pos_encoding', action='store_true', help='Use positional encoding')
     
+    parser.add_argument('--cell_profile', type=str, default=None, 
+                       choices=['default', 'high_snr', 'low_snr', 'ultra_low_snr'],
+                       help='Predefined optimization profile for different cell types')
+    parser.add_argument('--detection_loss_weight', type=float, default=None, 
+                       help='Weight of detection loss relative to concentration loss')
+    parser.add_argument('--focal_weight_factor', type=float, default=None,
+                       help='Factor for focal weighting of low concentration samples')
+    parser.add_argument('--low_concentration_threshold', type=float, default=None,
+                       help='Threshold defining low concentration samples for special handling')
+
+
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
@@ -52,7 +63,7 @@ def parse_args():
     # Misc parameters
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--device', type=str, default='', help='Device to use (empty for auto)')
-    parser.add_argument('--save_interval', type=int, default=10, help='Save checkpoint every N epochs')
+    parser.add_argument('--save_interval', type=int, default=1000, help='Save checkpoint every N epochs')
     
     args = parser.parse_args()
     
@@ -75,8 +86,46 @@ def parse_args():
         base_seed = args.seed
         args.ensemble_seeds = [base_seed + i for i in range(args.ensemble_size)]
     
+    if args.cell_profile:
+        apply_cell_profile(args)
+
     return args
 
+
+def apply_cell_profile(args):
+    """Apply predefined parameter sets optimized for different cell types"""
+    profiles = {
+        'default': {
+            # Default parameters, good for most cell types
+            'detection_loss_weight': 0.2,
+            'focal_weight_factor': 100,
+            'low_concentration_threshold': 0.01
+        },
+        'high_snr': {  # For cells like OAC with good SNR
+            'detection_loss_weight': 0.2,
+            'focal_weight_factor': 100, 
+            'low_concentration_threshold': 0.01
+        },
+        'low_snr': {  # For cells with moderate SNR issues
+            'detection_loss_weight': 0.4,
+            'focal_weight_factor': 150,
+            'low_concentration_threshold': 0.02
+        },
+        'ultra_low_snr': {  # For T-cells and other very low SNR cases
+            'detection_loss_weight': 0.6,
+            'focal_weight_factor': 200,
+            'low_concentration_threshold': 0.03
+        }
+    }
+    profile = profiles[args.cell_profile]
+    
+    # Only override if not explicitly provided in command line
+    if args.detection_loss_weight is None:
+        args.detection_loss_weight = profile['detection_loss_weight']
+    if args.focal_weight_factor is None:
+        args.focal_weight_factor = profile['focal_weight_factor']
+    if args.low_concentration_threshold is None:
+        args.low_concentration_threshold = profile['low_concentration_threshold']
 
 def set_seed(seed):
     """Set seed for reproducibility"""
@@ -118,15 +167,48 @@ def setup_logging(output_dir):
     return logger
 
 
+def calculate_loss(model, mu, phi, detection_probs, y_true, args):
+    """Calculate combined loss using configurable parameters"""
+    # Get concentration loss
+    concentration_loss = model.compute_loss(mu, phi, y_true)
+    
+    # Calculate detection losses for each threshold
+    detection_losses = []
+    for i, threshold in enumerate(args.detection_thresholds):
+        # Convert continuous concentration to binary label
+        binary_y = (y_true >= threshold).float()
+        # Binary cross-entropy loss
+        det_loss = F.binary_cross_entropy(detection_probs[i], binary_y)
+        detection_losses.append(det_loss)
+    
+    # Use configurable detection loss weight
+    detection_loss_weight = args.detection_loss_weight
+    combined_detection_loss = sum(detection_losses) / len(detection_losses)
+    
+    # Calculate total loss
+    total_loss = concentration_loss + detection_loss_weight * combined_detection_loss
+    
+    return total_loss, concentration_loss, combined_detection_loss
+
+
 def train(model, train_loader, val_loader, args, device):
     """Train the model with progress bars and enhanced logging"""
     os.makedirs(args.output_dir, exist_ok=True)
     logger = logging.getLogger('cancer_detection')
     
+    git_info = get_git_info()
+    git_commit = git_info['commit']
+
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = torch.cuda.amp.GradScaler() 
+    
+    # Apply cell-specific parameters to model if provided
+    if hasattr(args, 'focal_weight_factor'):
+        model.focal_weight_factor = args.focal_weight_factor
+    if hasattr(args, 'low_concentration_threshold'):
+        model.low_concentration_threshold = args.low_concentration_threshold
     
     logger.info(f"Starting training with configuration:")
     for arg, value in vars(args).items():
@@ -142,6 +224,8 @@ def train(model, train_loader, val_loader, args, device):
     history = {
         'train_loss': [],
         'val_loss': [],
+        'concentration_loss': [],
+        'detection_loss': [],
         'calibration_error': [],
         'r2_score': [],
         'mean_absolute_error': [],
@@ -154,6 +238,8 @@ def train(model, train_loader, val_loader, args, device):
         # Training phase
         model.train()
         train_loss = 0
+        train_conc_loss = 0
+        train_det_loss = 0
         optimizer.zero_grad()
         
         batch_bar = tqdm(enumerate(train_loader), 
@@ -169,12 +255,20 @@ def train(model, train_loader, val_loader, args, device):
             
             # Mixed precision forward pass
             with torch.cuda.amp.autocast():
-                # Handle different model return signatures
+                # Use updated forward pass that returns components instead of loss
                 output = model(marker_values, coverage, y_true)
+                
                 if len(output) == 5:  # Enhanced model returns 5 values
-                    _, _, _, loss, _ = output
+                    mu, phi, detection_probs, attention_weights, _ = output
+                    # Calculate loss with parameter-based function
+                    loss, conc_loss, det_loss = calculate_loss(
+                        model, mu, phi, detection_probs, y_true, args
+                    )
                 else:  # Standard model returns 4 values
-                    _, _, loss, _ = output
+                    # Fallback for backward compatibility
+                    mu, phi, loss, attention_weights = output
+                    conc_loss = loss
+                    det_loss = 0.0
                 
                 loss = loss / args.grad_accum_steps
             
@@ -182,6 +276,8 @@ def train(model, train_loader, val_loader, args, device):
             scaler.scale(loss).backward()
             batch_loss = loss.item() * args.grad_accum_steps
             train_loss += batch_loss
+            train_conc_loss += conc_loss.item() / args.grad_accum_steps
+            train_det_loss += det_loss.item() / args.grad_accum_steps
             
             batch_bar.set_postfix({"loss": f"{batch_loss:.4f}"})
             
@@ -194,6 +290,8 @@ def train(model, train_loader, val_loader, args, device):
         # Validation phase
         model.eval()
         val_loss = 0
+        val_conc_loss = 0
+        val_det_loss = 0
         calibration_error = 0
         all_preds = []
         all_targets = []
@@ -212,12 +310,22 @@ def train(model, train_loader, val_loader, args, device):
                 
                 # Handle different model return signatures
                 output = model(marker_values, coverage, y_true)
+                
                 if len(output) == 5:  # Enhanced model returns 5 values
-                    mu, phi, _, loss, _ = output
+                    mu, phi, detection_probs, attention_weights, _ = output
+                    # Calculate loss with parameter-based function
+                    loss, conc_loss, det_loss = calculate_loss(
+                        model, mu, phi, detection_probs, y_true, args
+                    )
                 else:  # Standard model returns 4 values
-                    mu, phi, loss, _ = output
+                    # Fallback for backward compatibility
+                    mu, phi, loss, attention_weights = output
+                    conc_loss = loss
+                    det_loss = 0.0
                 
                 val_loss += loss.item()
+                val_conc_loss += conc_loss.item()
+                val_det_loss += det_loss.item()
                 
                 # Store predictions and targets for metrics
                 all_preds.append(mu.cpu().numpy())
@@ -233,8 +341,12 @@ def train(model, train_loader, val_loader, args, device):
         
         # Calculate metrics
         val_loss /= len(val_loader)
+        val_conc_loss /= len(val_loader)
+        val_det_loss /= len(val_loader)
         calibration_error /= len(val_loader)
         train_loss /= len(train_loader)
+        train_conc_loss /= len(train_loader)
+        train_det_loss /= len(train_loader)
         
         all_preds = np.concatenate(all_preds)
         all_targets = np.concatenate(all_targets)
@@ -254,6 +366,8 @@ def train(model, train_loader, val_loader, args, device):
         # Update history
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
+        history['concentration_loss'].append(val_conc_loss)
+        history['detection_loss'].append(val_det_loss)
         history['calibration_error'].append(calibration_error)
         history['r2_score'].append(r2)
         history['mean_absolute_error'].append(mae)
@@ -272,6 +386,8 @@ def train(model, train_loader, val_loader, args, device):
             f"Epoch {epoch+1}/{args.epochs} - "
             f"Train Loss: {train_loss:.6f}, "
             f"Val Loss: {val_loss:.6f}, "
+            f"Conc Loss: {val_conc_loss:.6f}, "
+            f"Det Loss: {val_det_loss:.6f}, "
             f"Calibration Error: {calibration_error:.4f}, "
             f"R² Score: {r2:.4f}, "
             f"MAE: {mae:.6f}, "
@@ -296,10 +412,13 @@ def train(model, train_loader, val_loader, args, device):
                 'model': model.state_dict(),
                 'epoch': epoch,
                 'val_loss': val_loss,
+                'concentration_loss': val_conc_loss,
+                'detection_loss': val_det_loss,
                 'r2_score': r2,
                 'mae': mae,
                 'calibration_error': calibration_error,
-                'detection_metrics': detection_metrics
+                'detection_metrics': detection_metrics,
+                'commit-hash': git_commit,
             }
             torch.save(best_model_state, os.path.join(args.output_dir, 'best_model.pt'))
             patience_counter = 0
@@ -322,7 +441,8 @@ def train(model, train_loader, val_loader, args, device):
                 'epoch': epoch,
                 'best_val_loss': best_val_loss,
                 'history': history,
-                'args': vars(args)
+                'args': vars(args),
+                'commit-hash': git_commit,
             }
             checkpoint_path = os.path.join(args.output_dir, f'checkpoint_epoch_{epoch+1}.pt')
             torch.save(checkpoint, checkpoint_path)
@@ -334,12 +454,16 @@ def train(model, train_loader, val_loader, args, device):
         'model': model.state_dict(),
         'epoch': epoch,
         'val_loss': val_loss,
+        'concentration_loss': val_conc_loss,
+        'detection_loss': val_det_loss,
         'r2_score': r2,
         'mae': mae,
-        'calibration_error': calibration_error
+        'calibration_error': calibration_error,
+        'commit-hash': git_commit
     }, final_model_path)
     logger.info(f"Final model saved to {final_model_path}")
     
+    # Save training history with improved error handling
     history_path = os.path.join(args.output_dir, 'training_history.json')
     with open(history_path, 'w') as f:
         serializable_history = {}
@@ -354,7 +478,6 @@ def train(model, train_loader, val_loader, args, device):
                     for thresh, metrics in epoch_metrics.items():
                         if isinstance(thresh, dict):
                             # If thresh is already a dict, something is wrong with the data structure
-                            # Log this issue and continue
                             print(f"Warning: Unexpected dict as threshold key: {thresh}")
                             # Use a string representation as a fallback
                             thresh_key = str(thresh)
@@ -392,7 +515,6 @@ def train(model, train_loader, val_loader, args, device):
     # Load best model
     model.load_state_dict(best_model_state['model'])
     return model, best_model_state
-
 
 def plot_training_history(history, output_dir):
     """
@@ -1017,7 +1139,42 @@ def train_ensemble(args, train_loader, val_loader, test_loader, num_markers, dev
     return ensemble, ensemble_state
 
 
-# python -m deep_conv.detect.train --detection_thresholds=0.001,0.01,0.05 --name CpGenie 
+def get_git_info():
+    """Retrieve information about the current Git repository state.
+
+    This function extracts the commit hash, branch name, and repository cleanliness status
+    using Git commands. It is used to track the codebase version during training for
+    reproducibility and debugging.
+
+    Returns:
+        dict: Dictionary containing:
+            - commit (str): Short hash of the current commit.
+            - branch (str): Name of the current branch.
+            - clean (bool): True if the repository has no uncommitted changes, False otherwise.
+    """
+    import subprocess
+
+    try:
+        commit_hash = subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD']
+        ).strip().decode('utf-8')
+        branch = subprocess.check_output(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD']
+        ).strip().decode('utf-8')
+        status = subprocess.check_output(
+            ['git', 'status', '--porcelain']
+        ).strip().decode('utf-8')
+        return {
+            'commit': commit_hash,
+            'branch': branch,
+            'clean': len(status) == 0
+        }
+    except subprocess.CalledProcessError:
+        return {'commit': 'unknown', 'branch': 'unknown', 'clean': False}
+
+
+# python -m deep_conv.detect.train --name CpGenie --focal_weight_factor 200 --detection_loss_weight 0.6 --low_concentration_threshold 0.03 --detection_thresholds=0.001,0.01,0.05 --name CpGenie --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/T-cells/ --target_cell_type T-cells --target_cell_idx 11 --grad_accum_steps 8
+# python -m deep_conv.detect.train --name CpGenie --focal_weight_factor 100 --detection_loss_weight 0.2 --low_concentration_threshold 0.01 
 # python -m deep_conv.detect.train --ensemble --ensemble_size=3 --detection_thresholds=0.001,0.01,0.05 --name CpGenie_ensemble 
 def main():
     """Main function with enhanced logging and progress tracking"""
@@ -1026,6 +1183,7 @@ def main():
     
     # Set seed for reproducibility
     set_seed(args.seed)
+    
     
     # Determine device
     if args.device:
