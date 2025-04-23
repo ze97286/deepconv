@@ -340,10 +340,8 @@ def train(model, train_loader, val_loader, args, device):
     }, final_model_path)
     logger.info(f"Final model saved to {final_model_path}")
     
-    # Save training history
     history_path = os.path.join(args.output_dir, 'training_history.json')
     with open(history_path, 'w') as f:
-        # Convert to serializable format
         serializable_history = {}
         for key, values in history.items():
             if key != 'detection_metrics':
@@ -354,10 +352,27 @@ def train(model, train_loader, val_loader, args, device):
                 for epoch_metrics in values:
                     serializable_epoch_metrics = {}
                     for thresh, metrics in epoch_metrics.items():
-                        serializable_epoch_metrics[str(float(thresh))] = {k: float(v) for k, v in metrics.items()}
+                        if isinstance(thresh, dict):
+                            # If thresh is already a dict, something is wrong with the data structure
+                            # Log this issue and continue
+                            print(f"Warning: Unexpected dict as threshold key: {thresh}")
+                            # Use a string representation as a fallback
+                            thresh_key = str(thresh)
+                        else:
+                            # Normal case: thresh should be a number
+                            thresh_key = str(float(thresh))
+                        
+                        # Similar safeguard for metrics
+                        if isinstance(metrics, dict):
+                            # Convert all metric values to float
+                            serializable_metrics = {k: float(v) if not isinstance(v, dict) else str(v) for k, v in metrics.items()}
+                        else:
+                            # If metrics is not a dict (unexpected), store as string
+                            serializable_metrics = {"value": str(metrics)}
+                        
+                        serializable_epoch_metrics[thresh_key] = serializable_metrics
                     serializable_detection_metrics.append(serializable_epoch_metrics)
                 serializable_history[key] = serializable_detection_metrics
-        
         json.dump(serializable_history, f)
     
     logger.info(f"Training history saved to {history_path}")
@@ -1018,9 +1033,7 @@ def main():
     else:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    # Create timestamped output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    args.output_dir = os.path.join(args.output_dir, f"run_{timestamp}")
+    # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Setup logging
