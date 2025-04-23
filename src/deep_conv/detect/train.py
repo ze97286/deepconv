@@ -312,74 +312,171 @@ def train(model, train_loader, val_loader, args, device):
 
 
 def plot_training_history(history, output_dir):
-    """Plot and save training history with enhanced visualizations"""
-    # Set style for better visualizations
-    plt.style.use('seaborn-v0_8-darkgrid')
+    """
+    Plot and save training history with enhanced visualizations using Plotly
+    """
+    import os
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
     
-    # Create main figure with multiple subplots
-    fig, axs = plt.subplots(3, 2, figsize=(16, 18))
+    # Create plots directory
+    plots_dir = os.path.join(output_dir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
     
-    # Plot train and validation loss
-    epochs = range(1, len(history['train_loss']) + 1)
+    # Create figure with subplots
+    fig = make_subplots(
+        rows=3, cols=2,
+        subplot_titles=(
+            'Training & Validation Loss', 
+            'Calibration Error', 
+            'R² Score', 
+            'Mean Absolute Error', 
+            'Learning Rate', 
+            'R² vs Validation Loss'
+        )
+    )
     
-    axs[0, 0].plot(epochs, history['train_loss'], 'b-', linewidth=2, label='Train Loss')
-    axs[0, 0].plot(epochs, history['val_loss'], 'r-', linewidth=2, label='Val Loss')
-    axs[0, 0].set_title('Training & Validation Loss', fontsize=14)
-    axs[0, 0].set_xlabel('Epoch', fontsize=12)
-    axs[0, 0].set_ylabel('Loss', fontsize=12)
-    axs[0, 0].legend(fontsize=12)
-    axs[0, 0].grid(True, alpha=0.3)
+    # Get epochs
+    epochs = list(range(1, len(history['train_loss']) + 1))
     
-    # Plot calibration error
-    axs[0, 1].plot(epochs, history['calibration_error'], 'g-', linewidth=2)
-    axs[0, 1].set_title('Calibration Error', fontsize=14)
-    axs[0, 1].set_xlabel('Epoch', fontsize=12)
-    axs[0, 1].set_ylabel('Error', fontsize=12)
-    axs[0, 1].grid(True, alpha=0.3)
+    # 1. Training and validation loss
+    fig.add_trace(
+        go.Scatter(
+            x=epochs, 
+            y=history['train_loss'], 
+            mode='lines', 
+            name='Train Loss',
+            line=dict(color='blue', width=2)
+        ),
+        row=1, col=1
+    )
     
-    # Plot R² score
-    axs[1, 0].plot(epochs, history['r2_score'], 'purple', linewidth=2)
-    axs[1, 0].set_title('R² Score', fontsize=14)
-    axs[1, 0].set_xlabel('Epoch', fontsize=12)
-    axs[1, 0].set_ylabel('R²', fontsize=12)
-    axs[1, 0].grid(True, alpha=0.3)
+    fig.add_trace(
+        go.Scatter(
+            x=epochs, 
+            y=history['val_loss'], 
+            mode='lines', 
+            name='Validation Loss',
+            line=dict(color='red', width=2)
+        ),
+        row=1, col=1
+    )
     
-    # Plot MAE
-    axs[1, 1].plot(epochs, history['mean_absolute_error'], 'orange', linewidth=2)
-    axs[1, 1].set_title('Mean Absolute Error', fontsize=14)
-    axs[1, 1].set_xlabel('Epoch', fontsize=12)
-    axs[1, 1].set_ylabel('MAE', fontsize=12)
-    axs[1, 1].grid(True, alpha=0.3)
+    # 2. Calibration error
+    fig.add_trace(
+        go.Scatter(
+            x=epochs, 
+            y=history['calibration_error'], 
+            mode='lines', 
+            name='Calibration Error',
+            line=dict(color='green', width=2),
+            showlegend=False
+        ),
+        row=1, col=2
+    )
     
-    # Plot learning rate
-    axs[2, 0].plot(epochs, history['lr'], 'c-', linewidth=2)
-    axs[2, 0].set_title('Learning Rate', fontsize=14)
-    axs[2, 0].set_xlabel('Epoch', fontsize=12)
-    axs[2, 0].set_ylabel('Learning Rate', fontsize=12)
-    axs[2, 0].set_yscale('log')  # Log scale for better visualization of LR decay
-    axs[2, 0].grid(True, alpha=0.3)
+    # 3. R² score
+    fig.add_trace(
+        go.Scatter(
+            x=epochs, 
+            y=history['r2_score'], 
+            mode='lines', 
+            name='R² Score',
+            line=dict(color='purple', width=2),
+            showlegend=False
+        ),
+        row=2, col=1
+    )
     
-    # Plot correlation between metrics (R² vs Loss)
-    axs[2, 1].scatter(history['val_loss'], history['r2_score'], alpha=0.7, c=epochs, cmap='viridis')
-    axs[2, 1].set_title('R² vs Validation Loss', fontsize=14)
-    axs[2, 1].set_xlabel('Validation Loss', fontsize=12)
-    axs[2, 1].set_ylabel('R² Score', fontsize=12)
-    axs[2, 1].grid(True, alpha=0.3)
+    # 4. Mean absolute error
+    fig.add_trace(
+        go.Scatter(
+            x=epochs, 
+            y=history['mean_absolute_error'], 
+            mode='lines', 
+            name='MAE',
+            line=dict(color='orange', width=2),
+            showlegend=False
+        ),
+        row=2, col=2
+    )
     
+    # 5. Learning rate
+    if 'lr' in history:
+        fig.add_trace(
+            go.Scatter(
+                x=epochs, 
+                y=history['lr'], 
+                mode='lines', 
+                name='Learning Rate',
+                line=dict(color='cyan', width=2),
+                showlegend=False
+            ),
+            row=3, col=1
+        )
+        
+        # Set log scale for learning rate
+        fig.update_yaxes(type='log', row=3, col=1)
+    
+    # 6. R² vs Validation Loss
+    fig.add_trace(
+        go.Scatter(
+            x=history['val_loss'],
+            y=history['r2_score'],
+            mode='markers',
+            marker=dict(
+                size=8,
+                color=epochs,
+                colorscale='Viridis',
+                showscale=True,
+                colorbar=dict(title='Epoch')
+            ),
+            showlegend=False
+        ),
+        row=3, col=2
+    )
+    
+    # Label selected epochs on the scatter plot
     for i, epoch in enumerate(epochs):
         if i % 5 == 0 or i == len(epochs) - 1:  # Label every 5th epoch and the last one
-            axs[2, 1].annotate(
-                f"{epoch}", 
-                (history['val_loss'][i], history['r2_score'][i]),
-                fontsize=9,
-                alpha=0.8
+            fig.add_annotation(
+                x=history['val_loss'][i],
+                y=history['r2_score'][i],
+                text=str(epoch),
+                showarrow=False,
+                font=dict(size=8),
+                row=3, col=2
             )
     
-    # Adjust layout and save
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'training_history.png'), dpi=300)
+    # Update layout
+    fig.update_layout(
+        height=1000,
+        width=1000,
+        title_text='Training History',
+        template='plotly_white',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+    )
     
-    # Create individual plots for better detail
+    # Update axes titles
+    fig.update_xaxes(title_text='Epoch', row=1, col=1)
+    fig.update_xaxes(title_text='Epoch', row=1, col=2)
+    fig.update_xaxes(title_text='Epoch', row=2, col=1)
+    fig.update_xaxes(title_text='Epoch', row=2, col=2)
+    fig.update_xaxes(title_text='Epoch', row=3, col=1)
+    fig.update_xaxes(title_text='Validation Loss', row=3, col=2)
+    
+    fig.update_yaxes(title_text='Loss', row=1, col=1)
+    fig.update_yaxes(title_text='Error', row=1, col=2)
+    fig.update_yaxes(title_text='R²', row=2, col=1)
+    fig.update_yaxes(title_text='MAE', row=2, col=2)
+    fig.update_yaxes(title_text='Learning Rate', row=3, col=1)
+    fig.update_yaxes(title_text='R² Score', row=3, col=2)
+    
+    # Save main figure
+    fig.write_html(os.path.join(plots_dir, 'training_history.html'))
+    fig.write_image(os.path.join(plots_dir, 'training_history.png'), scale=2)
+    
+    # Also create individual plots for better detail
     metrics = [
         ('loss', ['train_loss', 'val_loss'], ['Train Loss', 'Validation Loss'], ['blue', 'red']),
         ('r2_score', ['r2_score'], ['R² Score'], ['purple']),
@@ -388,23 +485,33 @@ def plot_training_history(history, output_dir):
     ]
     
     for name, keys, labels, colors in metrics:
-        plt.figure(figsize=(10, 6))
+        fig = go.Figure()
+        
         for key, label, color in zip(keys, labels, colors):
-            plt.plot(epochs, history[key], color=color, linewidth=2, label=label)
-        plt.title(f'{labels[0]}' if len(labels) == 1 else 'Loss Curves', fontsize=14)
-        plt.xlabel('Epoch', fontsize=12)
-        plt.ylabel(name.replace('_', ' ').title(), fontsize=12)
-        plt.grid(True, alpha=0.3)
-        if len(keys) > 1:
-            plt.legend(fontsize=12)
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, f'{name}_history.png'), dpi=300)
-        plt.close()
-    
-    # Close the main figure
-    plt.close(fig)
-
-
+            fig.add_trace(
+                go.Scatter(
+                    x=epochs,
+                    y=history[key],
+                    mode='lines',
+                    name=label,
+                    line=dict(color=color, width=2)
+                )
+            )
+        
+        fig.update_layout(
+            title=f'{labels[0]}' if len(labels) == 1 else 'Loss Curves',
+            xaxis_title='Epoch',
+            yaxis_title=name.replace('_', ' ').title(),
+            template='plotly_white',
+            width=800,
+            height=500,
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+        )
+        
+        # Save individual figure
+        fig.write_html(os.path.join(plots_dir, f'{name}_history.html'))
+        fig.write_image(os.path.join(plots_dir, f'{name}_history.png'), scale=2)
+        
 def evaluate(model, test_loader, args, device):
     """Evaluate the model on the test set with visualization"""
     logger = logging.getLogger('cancer_detection')
@@ -570,13 +677,16 @@ def run_final_validation(model, val_loader, args, device):
 
 
 def plot_predictions(predictions, targets, lower_ci, upper_ci, output_dir):
-    """Plot predictions vs targets with confidence intervals and enhanced visualizations"""
-    # Create directory for plots
+    """
+    Plot predictions vs targets with confidence intervals using Plotly
+    """
+    import os
+    import numpy as np
+    import plotly.graph_objects as go
+    
+    # Create plots directory
     plots_dir = os.path.join(output_dir, 'plots')
     os.makedirs(plots_dir, exist_ok=True)
-    
-    # Set style for better visualizations
-    plt.style.use('seaborn-v0_8-darkgrid')
     
     # Sort by targets for clearer visualization
     sorted_indices = np.argsort(targets.flatten())
@@ -585,203 +695,187 @@ def plot_predictions(predictions, targets, lower_ci, upper_ci, output_dir):
     sorted_lower = lower_ci.flatten()[sorted_indices]
     sorted_upper = upper_ci.flatten()[sorted_indices]
     
-    # 1. Plot predictions with CI (sorted)
-    plt.figure(figsize=(12, 8))
+    # 1. Plot predictions with CI (sorted by true value)
+    fig = go.Figure()
     
-    # Plot confidence intervals as a shaded region
-    plt.fill_between(
-        np.arange(len(sorted_targets)),
-        sorted_lower,
-        sorted_upper,
-        alpha=0.3,
-        color='blue',
-        label='95% Confidence Interval'
+    # Add confidence interval
+    fig.add_trace(
+        go.Scatter(
+            x=np.arange(len(sorted_targets)),
+            y=sorted_upper,
+            mode='lines',
+            line=dict(width=0),
+            showlegend=False,
+            hoverinfo='skip'
+        )
     )
     
-    # Plot predictions
-    plt.plot(
-        np.arange(len(sorted_targets)),
-        sorted_preds,
-        'bo-',
-        alpha=0.7,
-        markersize=4,
-        label='Predictions'
+    fig.add_trace(
+        go.Scatter(
+            x=np.arange(len(sorted_targets)),
+            y=sorted_lower,
+            mode='lines',
+            line=dict(width=0),
+            fillcolor='rgba(0, 176, 246, 0.2)',
+            fill='tonexty',
+            showlegend=True,
+            name='95% CI'
+        )
     )
     
-    # Plot targets
-    plt.plot(
-        np.arange(len(sorted_targets)),
-        sorted_targets,
-        'ro-',
-        alpha=0.7,
-        markersize=4,
-        label='True Values'
+    # Add predictions
+    fig.add_trace(
+        go.Scatter(
+            x=np.arange(len(sorted_targets)),
+            y=sorted_preds,
+            mode='lines',
+            line=dict(color='blue', width=2),
+            name='Predictions'
+        )
     )
     
-    # Calculate and show R²
+    # Add targets
+    fig.add_trace(
+        go.Scatter(
+            x=np.arange(len(sorted_targets)),
+            y=sorted_targets,
+            mode='lines',
+            line=dict(color='red', width=2),
+            name='True Values'
+        )
+    )
+    
+    # Calculate metrics
+    from sklearn.metrics import r2_score, mean_absolute_error
     r2 = r2_score(targets, predictions)
     mae = mean_absolute_error(targets, predictions)
     
-    plt.title(f'Predictions vs Targets (Sorted) (R² = {r2:.4f}, MAE = {mae:.4f})', fontsize=14)
-    plt.xlabel('Sample Index (sorted by true value)', fontsize=12)
-    plt.ylabel('Cancer Concentration', fontsize=12)
-    plt.legend(fontsize=12)
-    plt.grid(True, alpha=0.3)
+    # Update layout
+    fig.update_layout(
+        title=f'Predictions vs Targets (sorted) (R² = {r2:.4f}, MAE = {mae:.4f})',
+        xaxis_title='Sample Index (sorted by true value)',
+        yaxis_title='Cancer Concentration',
+        template='plotly_white',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+        width=900,
+        height=600
+    )
     
     # Save figure
-    plt.tight_layout()
-    plt.savefig(os.path.join(plots_dir, 'predictions_sorted.png'), dpi=300)
-    plt.close()
+    fig.write_html(os.path.join(plots_dir, 'predictions_vs_targets.html'))
+    fig.write_image(os.path.join(plots_dir, 'predictions_vs_targets.png'), scale=2)
     
-    # 2. Create scatter plot of predictions vs targets
-    plt.figure(figsize=(10, 10))
+    # 2. Create scatter plot
+    fig = go.Figure()
     
-    # Plot points with error bars for CI
-    plt.errorbar(
-        targets.flatten(),
-        predictions.flatten(),
-        yerr=[predictions.flatten() - lower_ci.flatten(), upper_ci.flatten() - predictions.flatten()],
-        fmt='o',
-        alpha=0.5,
-        ecolor='lightgray',
-        capsize=0,
-        markersize=6,
-        label='Predictions with 95% CI'
+    # Add error bars
+    fig.add_trace(
+        go.Scatter(
+            x=targets.flatten(),
+            y=predictions.flatten(),
+            mode='markers',
+            marker=dict(
+                size=8,
+                color='blue',
+                opacity=0.6
+            ),
+            error_y=dict(
+                type='data',
+                symmetric=False,
+                array=upper_ci.flatten() - predictions.flatten(),
+                arrayminus=predictions.flatten() - lower_ci.flatten(),
+                thickness=1.5,
+                width=3
+            ),
+            name='Predictions with 95% CI'
+        )
     )
     
     # Add identity line
     min_val = min(targets.min(), predictions.min())
     max_val = max(targets.max(), predictions.max())
-    buffer = (max_val - min_val) * 0.05  # 5% buffer
-    plt.plot(
-        [min_val - buffer, max_val + buffer],
-        [min_val - buffer, max_val + buffer],
-        'r--',
-        linewidth=2,
-        label='Perfect Prediction'
+    fig.add_trace(
+        go.Scatter(
+            x=[min_val, max_val],
+            y=[min_val, max_val],
+            mode='lines',
+            line=dict(color='red', dash='dash', width=2),
+            name='Perfect Prediction'
+        )
     )
     
-    plt.xlabel('True Cancer Concentration', fontsize=14)
-    plt.ylabel('Predicted Cancer Concentration', fontsize=14)
-    plt.title(f'True vs Predicted (R² = {r2:.4f}, MAE = {mae:.4f})', fontsize=16)
-    plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=12)
-    
-    # Make square plot and set equal axis limits
-    plt.axis('square')
-    limit = [min_val - buffer, max_val + buffer]
-    plt.xlim(limit)
-    plt.ylim(limit)
-    
-    # Save figure
-    plt.tight_layout()
-    plt.savefig(os.path.join(plots_dir, 'true_vs_predicted.png'), dpi=300)
-    plt.close()
-    
-    # 3. Create histogram of errors
-    errors = predictions.flatten() - targets.flatten()
-    
-    plt.figure(figsize=(10, 6))
-    plt.hist(errors, bins=30, alpha=0.7, color='blue', edgecolor='black')
-    plt.axvline(x=0, color='red', linestyle='--', linewidth=2)
-    
-    plt.title('Prediction Error Distribution', fontsize=14)
-    plt.xlabel('Prediction Error (Predicted - True)', fontsize=12)
-    plt.ylabel('Frequency', fontsize=12)
-    plt.grid(True, alpha=0.3)
-    
-    # Add statistics annotations
-    plt.annotate(
-        f'Mean Error: {np.mean(errors):.4f}\n'
-        f'Std Dev: {np.std(errors):.4f}\n'
-        f'Median Error: {np.median(errors):.4f}',
-        xy=(0.05, 0.95),
-        xycoords='axes fraction',
-        fontsize=12,
-        bbox=dict(boxstyle="round,pad=0.5", facecolor='white', alpha=0.8)
+    # Update layout
+    fig.update_layout(
+        title=f'True vs Predicted (R² = {r2:.4f}, MAE = {mae:.4f})',
+        xaxis_title='True Cancer Concentration',
+        yaxis_title='Predicted Cancer Concentration',
+        template='plotly_white',
+        width=800,
+        height=800,
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
     )
-    
-    # Save figure
-    plt.tight_layout()
-    plt.savefig(os.path.join(plots_dir, 'error_distribution.png'), dpi=300)
-    plt.close()
-    
-    # 4. Create heatmap of predictions vs targets
-    plt.figure(figsize=(10, 8))
-    
-    # Create 2D histogram
-    heatmap, xedges, yedges = np.histogram2d(
-        targets.flatten(),
-        predictions.flatten(),
-        bins=20,
-        range=[[min_val - buffer, max_val + buffer], [min_val - buffer, max_val + buffer]]
-    )
-    
-    # Plot heatmap
-    plt.imshow(
-        heatmap.T,
-        origin='lower',
-        aspect='auto',
-        extent=[xedges[0], xedges[-1], yedges[0], yedges[-1]],
-        cmap='viridis'
-    )
-    
-    # Add identity line
-    plt.plot(
-        [min_val - buffer, max_val + buffer],
-        [min_val - buffer, max_val + buffer],
-        'r--',
-        linewidth=2
-    )
-    
-    plt.colorbar(label='Count')
-    plt.title('Density of Predictions vs True Values', fontsize=14)
-    plt.xlabel('True Cancer Concentration', fontsize=12)
-    plt.ylabel('Predicted Cancer Concentration', fontsize=12)
-    plt.grid(False)
     
     # Make square plot
-    plt.axis('square')
+    fig.update_layout(yaxis=dict(scaleanchor='x', scaleratio=1))
     
     # Save figure
-    plt.tight_layout()
-    plt.savefig(os.path.join(plots_dir, 'prediction_density.png'), dpi=300)
-    plt.close()
+    fig.write_html(os.path.join(plots_dir, 'true_vs_predicted.html'))
+    fig.write_image(os.path.join(plots_dir, 'true_vs_predicted.png'), scale=2)
     
-    # 5. CI width vs prediction value
-    plt.figure(figsize=(10, 6))
-    ci_widths = upper_ci.flatten() - lower_ci.flatten()
+    # 3. Create error histogram
+    errors = predictions.flatten() - targets.flatten()
     
-    plt.scatter(
-        predictions.flatten(),
-        ci_widths,
-        alpha=0.5,
-        c=np.abs(errors),  # Color by error magnitude
-        cmap='coolwarm'
+    fig = go.Figure()
+    fig.add_trace(
+        go.Histogram(
+            x=errors,
+            nbinsx=30,
+            marker_color='blue',
+            opacity=0.7
+        )
     )
     
-    plt.colorbar(label='|Error|')
-    plt.title('Uncertainty vs Predicted Value', fontsize=14)
-    plt.xlabel('Predicted Cancer Concentration', fontsize=12)
-    plt.ylabel('Width of 95% Confidence Interval', fontsize=12)
-    plt.grid(True, alpha=0.3)
-    
-    # Add trend line
-    z = np.polyfit(predictions.flatten(), ci_widths, 1)
-    p = np.poly1d(z)
-    plt.plot(
-        sorted(predictions.flatten()),
-        p(sorted(predictions.flatten())),
-        "r--",
-        linewidth=2,
-        label=f'Trend: y={z[0]:.4f}x+{z[1]:.4f}'
+    # Add vertical line at zero
+    fig.add_shape(
+        type="line",
+        x0=0, y0=0,
+        x1=0, y1=1,
+        yref="paper",
+        line=dict(color="red", width=2, dash="dash")
     )
-    plt.legend(fontsize=10)
+    
+    # Calculate error statistics
+    mean_error = np.mean(errors)
+    std_error = np.std(errors)
+    median_error = np.median(errors)
+    
+    # Add annotation
+    fig.add_annotation(
+        x=0.05,
+        y=0.9,
+        xref="paper",
+        yref="paper",
+        text=f"Mean: {mean_error:.4f}<br>Std Dev: {std_error:.4f}<br>Median: {median_error:.4f}",
+        showarrow=False,
+        font=dict(size=12),
+        bgcolor="white",
+        bordercolor="black",
+        borderwidth=1
+    )
+    
+    # Update layout
+    fig.update_layout(
+        title='Prediction Error Distribution',
+        xaxis_title='Error (Predicted - True)',
+        yaxis_title='Count',
+        template='plotly_white',
+        width=800,
+        height=600
+    )
     
     # Save figure
-    plt.tight_layout()
-    plt.savefig(os.path.join(plots_dir, 'uncertainty_analysis.png'), dpi=300)
-    plt.close()
+    fig.write_html(os.path.join(plots_dir, 'error_distribution.html'))
+    fig.write_image(os.path.join(plots_dir, 'error_distribution.png'), scale=2)
 
 
 def main():
