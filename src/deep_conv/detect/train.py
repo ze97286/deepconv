@@ -8,6 +8,7 @@ import logging
 from datetime import datetime
 from tqdm import tqdm
 from sklearn.metrics import r2_score, mean_absolute_error
+import torch.nn.functional as F
 
 from deep_conv.detect.preprocess import prepare_data_for_training
 from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyzer, CancerDetectionEnsemble
@@ -1173,7 +1174,7 @@ def get_git_info():
         return {'commit': 'unknown', 'branch': 'unknown', 'clean': False}
 
 
-# python -m deep_conv.detect.train --name CpGenie --focal_weight_factor 200 --detection_loss_weight 0.6 --low_concentration_threshold 0.03 --detection_thresholds=0.001,0.01,0.05 --name CpGenie --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/T-cells/ --target_cell_type T-cells --target_cell_idx 11 --grad_accum_steps 8
+# python -m deep_conv.detect.train --name CpGenie --focal_weight_factor 200 --detection_loss_weight 0.6 --low_concentration_threshold 0.03 --name CpGenie --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/T-cells/ --target_cell_type T-cells --target_cell_idx 11 --grad_accum_steps 8
 # python -m deep_conv.detect.train --name CpGenie --focal_weight_factor 100 --detection_loss_weight 0.2 --low_concentration_threshold 0.01 
 # python -m deep_conv.detect.train --ensemble --ensemble_size=3 --detection_thresholds=0.001,0.01,0.05 --name CpGenie_ensemble 
 def main():
