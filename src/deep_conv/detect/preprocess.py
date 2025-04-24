@@ -195,7 +195,7 @@ def analyse_data_characteristics(train_loader, val_loader):
     print(f"Zero coverage percentage: {zero_cov_count / total_elements * 100:.2f}%")
     print(f"Marker value - Mean: {marker_value_mean:.4f}, Std: {marker_value_std:.4f}")
     print(f"Coverage - Mean: {coverage_mean:.4f}, Std: {coverage_std:.4f}")
-    print(f"Cancer concentration - Mean: {y_true_mean:.4f}, Std: {y_true_std:.4f}")
+    print(f"Cell type concentration - Mean: {y_true_mean:.4f}, Std: {y_true_std:.4f}")
     
     return {
         "marker_value_mean": marker_value_mean,

@@ -84,10 +84,10 @@ class PoolingByMultiheadAttention(nn.Module):
 
 class SetTransformerCancerDetection(nn.Module):
     """
-    Set Transformer model for cancer detection from cfDNA methylation data
+    Set Transformer model cell type concentration estimation from cfDNA methylation data
     
     Provides permutation-invariant processing of marker data with specialized
-    components for accurate cancer concentration estimation and detection.
+    components for accurate concentration estimation and detection.
     """
     def __init__(self, num_markers, feature_dim=128, num_heads=8, num_inds=8, 
                  num_encoder_blocks=2, dropout_rate=0.2, 
@@ -183,10 +183,10 @@ class SetTransformerCancerDetection(nn.Module):
         Args:
             marker_values: Marker methylation values [batch_size, num_markers]
             coverage: Coverage values for each marker [batch_size, num_markers]
-            y_true: Ground truth cancer concentration (optional) [batch_size, 1]
+            y_true: Ground truth concentration (optional) [batch_size, 1]
                 
         Returns:
-            mu: Estimated cancer concentration [batch_size, 1]
+            mu: Estimated concentration [batch_size, 1]
             phi: Concentration parameter for Beta distribution [batch_size, 1]
             detection_probs: List of detection probabilities for each threshold [batch_size, 1]
             attention_weights: Attention weights for markers [batch_size, num_markers]

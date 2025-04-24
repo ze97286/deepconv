@@ -10,8 +10,8 @@ def create_visualisations(predictions, ground_truth, output_dir, threshold=0.5):
     Create comprehensive visualisations for model performance analysis
     
     Args:
-        predictions: Array of predicted cancer concentrations
-        ground_truth: Array of true cancer concentrations
+        predictions: Array of predicted cell type concentrations
+        ground_truth: Array of true cell type concentrations
         output_dir: Directory to save visualisations
         threshold: Classification threshold for binary metrics
     """

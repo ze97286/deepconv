@@ -747,8 +747,8 @@ def visualise_results(predictions, ground_truth, output_subdir, ci_data=None, ma
     Unified visualisation function for both validation and test results
     
     Args:
-        predictions: Array of predicted cancer concentrations
-        ground_truth: Array of true cancer concentrations
+        predictions: Array of predicted cell type concentrations
+        ground_truth: Array of true cell type concentrations
         output_subdir: Directory to save visualisations (relative to output_dir)
         ci_data: Optional tuple of (lower_ci, upper_ci) for confidence interval visualisation
         marker_importance: Optional marker importance data
@@ -885,7 +885,7 @@ def plot_predictions(predictions, targets, lower_ci, upper_ci, output_dir):
     fig.update_layout(
         title=f'Predictions vs Targets (sorted) (R² = {r2:.4f}, MAE = {mae:.4f})',
         xaxis_title='Sample Index (sorted by true value)',
-        yaxis_title='Cancer Concentration',
+        yaxis_title='Cell type Concentration',
         template='plotly_white',
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
         width=900,
