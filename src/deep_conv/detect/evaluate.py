@@ -180,22 +180,8 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
             marker_values = marker_values.to(device)
             coverage = coverage.to(device)
             y_true = y_true.to(device)
-            
-            # Handle different model types
-            if isinstance(model, CancerDetectionEnsemble):
-                # Ensemble model
-                mu, phi, det_probs = model(marker_values, coverage)
-                estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
-            else:
-                # Single model
-                if hasattr(model, 'forward_with_detection'):
-                    # Enhanced model with detection
-                    mu, phi, det_probs, _ = model.forward_with_detection(marker_values, coverage)
-                else:
-                    # Standard model
-                    mu, phi, det_probs, _ = model(marker_values, coverage)
-                
-                estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
+            mu, phi, det_probs, _ = model(marker_values, coverage)
+            estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
             
             # Store predictions
             all_preds.append(estimate.cpu().numpy())

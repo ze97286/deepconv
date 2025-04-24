@@ -548,11 +548,7 @@ class MarkerImportanceAnalyser:
         
         with torch.no_grad():
             for marker_values, coverage, _ in dataloader:
-                if isinstance(self.model, CancerDetectionEnsemble):
-                    # For ensemble, use the first model for attention
-                    _, _, _, attention_weights = self.model.models[0](marker_values, coverage)
-                else:
-                    _, _, _, attention_weights = self.model(marker_values, coverage)
+                _, _, _, attention_weights = self.model(marker_values, coverage)
                 all_attentions.append(attention_weights)
         
         # Average attention weights across batches
@@ -568,10 +564,8 @@ class MarkerImportanceAnalyser:
         """
         Analyse detection performance at different concentration thresholds
         """
-        if isinstance(self.model, CancerDetectionEnsemble):
-            model_thresholds = self.model.models[0].detection_thresholds
-        else:
-            model_thresholds = self.model.detection_thresholds
+        
+        model_thresholds = self.model.detection_thresholds
             
         if thresholds is None:
             thresholds = model_thresholds
@@ -583,11 +577,7 @@ class MarkerImportanceAnalyser:
         
         with torch.no_grad():
             for marker_values, coverage, y_true in dataloader:
-                if isinstance(self.model, CancerDetectionEnsemble):
-                    mu, _, det_probs = self.model.forward(marker_values, coverage)
-                else:
-                    mu, _, det_probs, _ = self.model(marker_values, coverage)
-                
+                mu, _, det_probs, _ = self.model(marker_values, coverage)
                 predictions.append(mu.cpu().numpy())
                 ground_truth.append(y_true.cpu().numpy())
                 detection_probs.append([dp.cpu().numpy() for dp in det_probs])
