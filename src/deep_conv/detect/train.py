@@ -170,19 +170,29 @@ def calculate_loss(model, mu, phi, detection_probs, y_true, args):
     for i, threshold in enumerate(args.detection_thresholds):
         # Convert continuous concentration to binary label
         binary_y = (y_true >= threshold).float()
+        
+        # Print diagnostic info for the first occurrence of an error
+        if len(detection_losses) == 0:
+            prob_min = detection_probs[i].min().item()
+            prob_max = detection_probs[i].max().item()
+            if prob_min < 0 or prob_max > 1:
+                print(f"Warning: detection probability outside [0,1] range: min={prob_min}, max={prob_max}")
+        
+        # Simply clamp the values to valid range
+        det_probs = torch.clamp(detection_probs[i], 0.0, 1.0)
+        
         # Binary cross-entropy loss
-        det_loss = F.binary_cross_entropy(detection_probs[i], binary_y)
+        det_loss = F.binary_cross_entropy(det_probs, binary_y)
         detection_losses.append(det_loss)
     
     # Use configurable detection loss weight
-    detection_loss_weight = args.detection_loss_weight
+    detection_loss_weight = args.detection_loss_weight if hasattr(args, 'detection_loss_weight') else 1.0
     combined_detection_loss = sum(detection_losses) / len(detection_losses)
     
     # Calculate total loss
     total_loss = concentration_loss + detection_loss_weight * combined_detection_loss
     
     return total_loss, concentration_loss, combined_detection_loss
-
 
 def train(model, train_loader, val_loader, args, device):
     """Train the model with progress bars and enhanced logging"""
