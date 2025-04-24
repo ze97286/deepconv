@@ -1,9 +1,15 @@
+"""
+Set Transformer implementation for cfDNA cancer detection
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Beta
 import numpy as np
 from scipy import stats
+import math
+
 
 class MultiheadAttentionBlock(nn.Module):
     """
@@ -37,6 +43,7 @@ class MultiheadAttentionBlock(nn.Module):
         x = x + self.dropout(self.ff(self.ln2(x)))
         return x, attention_weights
 
+
 class SetAttentionBlock(nn.Module):
     """
     Set Attention Block (SAB) for Set Transformer
@@ -52,6 +59,7 @@ class SetAttentionBlock(nn.Module):
             mask: Boolean mask [B, seq_len]
         """
         return self.mab(x, x, mask)
+
 
 class PoolingByMultiheadAttention(nn.Module):
     """
@@ -72,6 +80,7 @@ class PoolingByMultiheadAttention(nn.Module):
         inds = self.inds.repeat(batch_size, 1, 1)
         pooled, attention_weights = self.mab(inds, x, mask)
         return pooled, attention_weights
+
 
 class SetTransformerCancerDetection(nn.Module):
     """
@@ -184,6 +193,8 @@ class SetTransformerCancerDetection(nn.Module):
             
             If y_true is provided, also returns y_true for loss calculation
         """
+        B, M = marker_values.shape
+        
         # Create mask for missing values (where coverage = 0)
         mask = (coverage == 0)  # [B, M]
         
@@ -232,6 +243,10 @@ class SetTransformerCancerDetection(nn.Module):
         low_mu = self.low_mu_head(low_features)  # [B, 1]
         low_phi = self.low_phi_head(low_features) * self.low_calibration  # [B, 1]
         
+        # Add safeguards for phi
+        phi = torch.clamp(phi, min=1.0)  # Ensure phi is at least 1.0
+        low_phi = torch.clamp(low_phi, min=1.0)  # Ensure low_phi is at least 1.0
+        
         # Blend predictions based on predicted concentration
         # More weight to low_mu for low concentrations
         with torch.no_grad():
@@ -243,10 +258,9 @@ class SetTransformerCancerDetection(nn.Module):
         # Calculate uncertainty for detection heads
         _, _, uncertainty = self.get_estimate_and_ci(blended_mu, blended_phi)
         
-        # Extract marker-level attention weights (average across heads)
+        # Extract marker-level attention weights (average across heads and inducing points)
         # For visualization/interpretation of which markers are important
-        # Since we're using inducing points, we'll use the attention from the pooling layer
-        # Shape of main_attention_weights: [batch, num_inds, num_markers]
+        # Shape of main_attention_weights from self.attention: [batch, num_inds, num_markers]
         marker_attention = main_attention_weights.mean(dim=1)  # [B, num_markers]
         
         # Enhanced features for detection heads (including uncertainty)
@@ -275,15 +289,30 @@ class SetTransformerCancerDetection(nn.Module):
         """
         y_clipped = torch.clamp(y_true, epsilon, 1 - epsilon)
         
-        # Calculate Beta distribution parameters
+        # Add safeguards for phi to ensure it's positive and not too small
+        phi = torch.clamp(phi, min=1.0)  # Ensure phi is at least 1.0
+        
+        # Replace any NaN values in mu or phi
+        mu = torch.nan_to_num(mu, nan=0.5)
+        phi = torch.nan_to_num(phi, nan=1.0)
+        
+        # Calculate Beta distribution parameters with safeguards
         alpha = mu * phi  # [B, 1]
         beta = (1 - mu) * phi  # [B, 1]
         
-        # Create Beta distribution
-        dist = Beta(alpha, beta)
+        # Add safety margin to ensure alpha and beta are positive
+        alpha = torch.clamp(alpha, min=epsilon)
+        beta = torch.clamp(beta, min=epsilon)
         
-        # Negative log likelihood
-        nll_loss = -dist.log_prob(y_clipped)
+        # Create Beta distribution with safety checks
+        try:
+            dist = Beta(alpha, beta)
+            nll_loss = -dist.log_prob(y_clipped)
+        except ValueError as e:
+            # Fallback to MSE loss if Beta distribution fails
+            print(f"Warning: Beta distribution failed, falling back to MSE loss. Error: {e}")
+            print(f"mu range: {mu.min().item():.4f}-{mu.max().item():.4f}, phi range: {phi.min().item():.4f}-{phi.max().item():.4f}")
+            nll_loss = F.mse_loss(mu, y_clipped, reduction='none')
         
         # Get focal weighting factor from args
         focal_factor = self.focal_weight_factor if hasattr(self, 'focal_weight_factor') else 100
@@ -296,7 +325,7 @@ class SetTransformerCancerDetection(nn.Module):
         threshold_weight = torch.zeros_like(y_true)
         for threshold in self.detection_thresholds:
             if threshold > 0:
-                relative_distance = torch.abs(y_true - threshold) / threshold
+                relative_distance = torch.abs(y_true - threshold) / max(threshold, epsilon)
                 threshold_weight += torch.exp(-relative_distance * 5) * 2.0
         
         # Special handling for values below the low concentration threshold
@@ -313,37 +342,62 @@ class SetTransformerCancerDetection(nn.Module):
         focal_loss = nll_loss * focal_weight
         
         # Add regularization to prevent extremely confident predictions
-        reg_loss = 0.01 * torch.abs(torch.log(phi)).mean()
+        reg_loss = 0.01 * torch.abs(torch.log(torch.clamp(phi, min=epsilon))).mean()
         
         return focal_loss.mean() + reg_loss
     
     def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
         """
-        Get point estimate and confidence interval using scipy
+        Get point estimate and confidence interval
+        
+        Args:
+            mu: Predicted mean [batch_size, 1]
+            phi: Precision parameter [batch_size, 1]
+            ci_level: Confidence interval level (default: 0.95 for 95% CI)
+            
+        Returns:
+            estimate: Point estimate [batch_size, 1]
+            ci: Confidence interval bounds [batch_size, 2]
+            uncertainty: Width of confidence interval [batch_size, 1]
         """
+        # Add safeguards for phi
+        phi = torch.clamp(phi, min=1.0)
+        
+        # Handle NaN values
+        mu = torch.nan_to_num(mu, nan=0.5)
+        phi = torch.nan_to_num(phi, nan=1.0)
+        
+        # Calculate parameters
         alpha = mu * phi
         beta = (1 - mu) * phi
         
-        # Move tensors to CPU and convert to numpy for scipy
-        alpha_np = alpha.detach().cpu().numpy()
-        beta_np = beta.detach().cpu().numpy()
+        # Add safety margin
+        alpha = torch.clamp(alpha, min=0.01)
+        beta = torch.clamp(beta, min=0.01)
         
-        # Initialise tensors for results
-        lower = torch.zeros_like(mu)
-        upper = torch.zeros_like(mu)
-        
-        # Calculate CI bounds for each sample
-        for i in range(len(alpha_np)):
-            a_val = float(alpha_np[i])
-            b_val = float(beta_np[i])
+        # Using PyTorch's native Beta distribution for CI calculation
+        # to avoid moving to CPU and back
+        try:
+            dist = Beta(alpha, beta)
             
-            # Handle potential numerical issues
-            if a_val <= 0 or b_val <= 0:
-                lower[i] = 0.0
-                upper[i] = 1.0
-            else:
-                lower[i] = torch.tensor(stats.beta.ppf((1 - ci_level) / 2, a_val, b_val))
-                upper[i] = torch.tensor(stats.beta.ppf(1 - (1 - ci_level) / 2, a_val, b_val))
+            # Calculate confidence interval bounds
+            lower = dist.icdf(torch.tensor((1 - ci_level) / 2, device=mu.device))
+            upper = dist.icdf(torch.tensor(1 - (1 - ci_level) / 2, device=mu.device))
+            
+            # Handle any potential NaNs in the result
+            lower = torch.nan_to_num(lower, nan=0.0)
+            upper = torch.nan_to_num(upper, nan=1.0)
+            
+            # Ensure bounds are valid
+            lower = torch.clamp(lower, 0.0, 0.99)
+            upper = torch.clamp(upper, 0.01, 1.0)
+            
+        except ValueError as e:
+            # Fallback to simple confidence interval if Beta distribution fails
+            print(f"Warning: CI calculation failed, using simple bounds. Error: {e}")
+            std = 0.1 * (1 - mu) * mu  # Simple approximation of standard deviation
+            lower = torch.clamp(mu - 2 * std, 0.0, 0.99)
+            upper = torch.clamp(mu + 2 * std, 0.01, 1.0)
         
         estimate = mu
         ci = torch.cat([lower, upper], dim=1)
@@ -374,8 +428,7 @@ class SetTransformerCancerDetection(nn.Module):
         detection_threshold = 0.5
         
         return (detection_score >= detection_threshold).float()
-
-
+    
 def calculate_loss(model, mu, phi, detection_probs, y_true, args):
     """
     Calculate combined loss using configurable parameters
