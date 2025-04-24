@@ -348,7 +348,7 @@ class SetTransformerCancerDetection(nn.Module):
     
     def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
         """
-        Get point estimate and confidence interval
+        Get point estimate and confidence interval using scipy's beta ppf
         
         Args:
             mu: Predicted mean [batch_size, 1]
@@ -375,29 +375,46 @@ class SetTransformerCancerDetection(nn.Module):
         alpha = torch.clamp(alpha, min=0.01)
         beta = torch.clamp(beta, min=0.01)
         
-        # Using PyTorch's native Beta distribution for CI calculation
-        # to avoid moving to CPU and back
-        try:
-            dist = Beta(alpha, beta)
+        # Move tensors to CPU and convert to numpy for scipy
+        alpha_np = alpha.detach().cpu().numpy()
+        beta_np = beta.detach().cpu().numpy()
+        
+        # Initialize tensors for results
+        lower = torch.zeros_like(mu)
+        upper = torch.zeros_like(mu)
+        
+        # Calculate CI bounds for each sample using scipy's beta ppf
+        for i in range(len(alpha_np)):
+            a_val = float(alpha_np[i])
+            b_val = float(beta_np[i])
             
-            # Calculate confidence interval bounds
-            lower = dist.icdf(torch.tensor((1 - ci_level) / 2, device=mu.device))
-            upper = dist.icdf(torch.tensor(1 - (1 - ci_level) / 2, device=mu.device))
-            
-            # Handle any potential NaNs in the result
-            lower = torch.nan_to_num(lower, nan=0.0)
-            upper = torch.nan_to_num(upper, nan=1.0)
-            
-            # Ensure bounds are valid
-            lower = torch.clamp(lower, 0.0, 0.99)
-            upper = torch.clamp(upper, 0.01, 1.0)
-            
-        except ValueError as e:
-            # Fallback to simple confidence interval if Beta distribution fails
-            print(f"Warning: CI calculation failed, using simple bounds. Error: {e}")
-            std = 0.1 * (1 - mu) * mu  # Simple approximation of standard deviation
-            lower = torch.clamp(mu - 2 * std, 0.0, 0.99)
-            upper = torch.clamp(mu + 2 * std, 0.01, 1.0)
+            # Handle potential numerical issues
+            if a_val <= 0 or b_val <= 0 or np.isnan(a_val) or np.isnan(b_val):
+                lower[i] = 0.0
+                upper[i] = 1.0
+            else:
+                try:
+                    # Use scipy.stats.beta for ppf (percent point function/quantile)
+                    from scipy import stats
+                    lower[i] = torch.tensor(stats.beta.ppf((1 - ci_level) / 2, a_val, b_val))
+                    upper[i] = torch.tensor(stats.beta.ppf(1 - (1 - ci_level) / 2, a_val, b_val))
+                    
+                    # Handle any NaN results from scipy
+                    if torch.isnan(lower[i]) or torch.isnan(upper[i]):
+                        lower[i] = max(0.0, mu[i] - 0.1)
+                        upper[i] = min(1.0, mu[i] + 0.1)
+                except:
+                    # Fallback if scipy calculation fails
+                    lower[i] = max(0.0, mu[i] - 0.1)
+                    upper[i] = min(1.0, mu[i] + 0.1)
+        
+        # Ensure bounds are valid
+        lower = torch.clamp(lower, 0.0, 0.99)
+        upper = torch.clamp(upper, 0.01, 1.0)
+        
+        # Move tensors back to the device of the input
+        lower = lower.to(mu.device)
+        upper = upper.to(mu.device)
         
         estimate = mu
         ci = torch.cat([lower, upper], dim=1)
@@ -406,7 +423,7 @@ class SetTransformerCancerDetection(nn.Module):
         uncertainty = upper - lower
         
         return estimate, ci, uncertainty
-    
+
     def get_binary_prediction(self, mu, detection_probs, threshold_idx=1):
         """
         Get binary prediction for cancer detection
