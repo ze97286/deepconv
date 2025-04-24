@@ -2,47 +2,88 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Beta
-import math
-import scipy.stats as stats
 import numpy as np
+from scipy import stats
 
-class PositionalEncoding(nn.Module):
+class MultiheadAttentionBlock(nn.Module):
     """
-    Positional encoding to provide marker position information
+    Multihead Attention Block (MAB) for Set Transformer
     """
-    def __init__(self, d_model, max_len=5000):
+    def __init__(self, dim, num_heads, dropout=0.1):
         super().__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+        self.attention = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
+        self.ln1 = nn.LayerNorm(dim)
+        self.ln2 = nn.LayerNorm(dim)
+        self.ff = nn.Sequential(
+            nn.Linear(dim, dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim * 4, dim)
+        )
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x, y, mask=None):
+        """
+        Args:
+            x: Query tensor [B, seq_len_q, dim]
+            y: Key/Value tensor [B, seq_len_kv, dim]
+            mask: Boolean mask for y [B, seq_len_kv]
+        """
+        attention_mask = None if mask is None else ~mask
+        x_norm = self.ln1(x)
+        y_norm = self.ln1(y)
+        attention_output, attention_weights = self.attention(x_norm, y_norm, y_norm, key_padding_mask=attention_mask)
+        x = x + self.dropout(attention_output)
+        x = x + self.dropout(self.ff(self.ln2(x)))
+        return x, attention_weights
 
-    def forward(self, x):
-        return x + self.pe[:x.size(1), :].unsqueeze(0)
-
-
-class EnhancedCancerDetectionModel(nn.Module):
+class SetAttentionBlock(nn.Module):
     """
-    DL model for cancer detection with specialised concentration handling
-    and improved detection capabilities.
-
-    * Transformer Architecture: The use of transformer encoders allows the model to capture complex relationships between biomarkers, 
-      leveraging attention mechanisms to focus on relevant markers.
-    * Dual Encoder Design: A dedicated low-concentration encoder enhances performance for low biomarker concentrations, 
-      which are often the most challenging to detect.
-    * Focal Loss: An enhanced focal loss emphasizes difficult samples (e.g., low concentrations or values near detection thresholds),
-      improving model performance on critical cases.
-    * Positional Encoding: Incorporating positional information helps the model understand the context of biomarker positions, 
-      which may be relevant in multi-marker assays.
-    * Uncertainty-Aware Detection: By integrating uncertainty estimates into detection heads, the model provides more reliable 
-      binary predictions.
-
+    Set Attention Block (SAB) for Set Transformer
     """
-    def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
-             dropout_rate=0.2, use_pos_encoding=True, detection_thresholds=(0.001, 0.01, 0.05),
-             focal_weight_factor=100, low_concentration_threshold=0.01):
+    def __init__(self, dim, num_heads, dropout=0.1):
+        super().__init__()
+        self.mab = MultiheadAttentionBlock(dim, num_heads, dropout)
+        
+    def forward(self, x, mask=None):
+        """
+        Args:
+            x: Input tensor [B, seq_len, dim]
+            mask: Boolean mask [B, seq_len]
+        """
+        return self.mab(x, x, mask)
+
+class PoolingByMultiheadAttention(nn.Module):
+    """
+    Pooling by Multihead Attention (PMA) for Set Transformer
+    """
+    def __init__(self, dim, num_heads, num_inds, dropout=0.1):
+        super().__init__()
+        self.inds = nn.Parameter(torch.randn(1, num_inds, dim))
+        self.mab = MultiheadAttentionBlock(dim, num_heads, dropout)
+        
+    def forward(self, x, mask=None):
+        """
+        Args:
+            x: Input tensor [B, seq_len, dim]
+            mask: Boolean mask [B, seq_len]
+        """
+        batch_size = x.size(0)
+        inds = self.inds.repeat(batch_size, 1, 1)
+        pooled, attention_weights = self.mab(inds, x, mask)
+        return pooled, attention_weights
+
+class SetTransformerCancerDetection(nn.Module):
+    """
+    Set Transformer model for cancer detection from cfDNA methylation data
+    
+    Provides permutation-invariant processing of marker data with specialized
+    components for accurate cancer concentration estimation and detection.
+    """
+    def __init__(self, num_markers, feature_dim=128, num_heads=8, num_inds=8, 
+                 num_encoder_blocks=2, dropout_rate=0.2, 
+                 detection_thresholds=(0.001, 0.01, 0.05),
+                 focal_weight_factor=100, low_concentration_threshold=0.01):
         super().__init__()
         
         # Store configuration
@@ -50,46 +91,32 @@ class EnhancedCancerDetectionModel(nn.Module):
         self.num_markers = num_markers
         self.focal_weight_factor = focal_weight_factor
         self.low_concentration_threshold = low_concentration_threshold
-            
-        # Store configuration
-        self.detection_thresholds = detection_thresholds
-        self.num_markers = num_markers
+        self.num_inds = num_inds
         
-        # Embedding components
-        self.value_embedding = nn.Linear(1, feature_dim // 2)
+        # Initial embedding for marker values and coverage
+        self.marker_embedding = nn.Linear(1, feature_dim // 2)
         self.coverage_embedding = nn.Linear(1, feature_dim // 2)
         self.feature_projection = nn.Linear(feature_dim, feature_dim)
-        self.pos_encoding = PositionalEncoding(feature_dim) if use_pos_encoding else None
         
-        # Transformer components
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=feature_dim,
-            nhead=num_heads,
-            dim_feedforward=feature_dim * 4,
-            dropout=dropout_rate,
-            activation=F.gelu,  # Using GELU for smoother gradients
-            batch_first=True,
-            norm_first=True  # Pre-norm helps training stability
+        # Main encoder (Set Attention Blocks)
+        self.encoder_blocks = nn.ModuleList([
+            SetAttentionBlock(feature_dim, num_heads, dropout_rate) 
+            for _ in range(num_encoder_blocks)
+        ])
+        
+        # Low concentration specialist encoder
+        self.low_conc_encoder_blocks = nn.ModuleList([
+            SetAttentionBlock(feature_dim, num_heads, dropout_rate) 
+            for _ in range(2)  # Smaller network for low concentration focus
+        ])
+        
+        # Pooling mechanisms
+        self.main_pooling = PoolingByMultiheadAttention(
+            feature_dim, num_heads, num_inds, dropout_rate
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Create a secondary encoder for low concentration focus
-        low_conc_encoder_layer = nn.TransformerEncoderLayer(
-            d_model=feature_dim,
-            nhead=num_heads,
-            dim_feedforward=feature_dim * 4,
-            dropout=dropout_rate,
-            activation=F.gelu,
-            batch_first=True,
-            norm_first=True
-        )
-        self.low_conc_encoder = nn.TransformerEncoder(low_conc_encoder_layer, num_layers=2)
-        
-        # Readout components
-        self.attention = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
-            nn.GELU(),
-            nn.Linear(feature_dim // 2, 1)
+        self.low_conc_pooling = PoolingByMultiheadAttention(
+            feature_dim, num_heads, num_inds, dropout_rate
         )
         
         # Main prediction components for concentration estimation
@@ -137,12 +164,26 @@ class EnhancedCancerDetectionModel(nn.Module):
         self.calibration = nn.Parameter(torch.ones(1))
         self.low_calibration = nn.Parameter(torch.ones(1))
         
-        # Dropout for regularisation
+        # Dropout for regularization
         self.dropout = nn.Dropout(dropout_rate)
         
     def forward(self, marker_values, coverage, y_true=None):
-        B, M = marker_values.shape
+        """
+        Forward pass through the Set Transformer Cancer Detection model
         
+        Args:
+            marker_values: Marker methylation values [batch_size, num_markers]
+            coverage: Coverage values for each marker [batch_size, num_markers]
+            y_true: Ground truth cancer concentration (optional) [batch_size, 1]
+            
+        Returns:
+            mu: Estimated cancer concentration [batch_size, 1]
+            phi: Concentration parameter for Beta distribution [batch_size, 1]
+            detection_probs: List of detection probabilities for each threshold [batch_size, 1]
+            attention_weights: Attention weights for markers [batch_size, num_markers]
+            
+            If y_true is provided, also returns y_true for loss calculation
+        """
         # Create mask for missing values (where coverage = 0)
         mask = (coverage == 0)  # [B, M]
         
@@ -150,7 +191,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         marker_values = torch.nan_to_num(marker_values, nan=0.5)  # Replace NaN with 0.5 (neutral)
         
         # Embed marker values and coverage separately
-        value_features = self.value_embedding(marker_values.unsqueeze(-1))  # [B, M, feature_dim//2]
+        value_features = self.marker_embedding(marker_values.unsqueeze(-1))  # [B, M, feature_dim//2]
         coverage_features = self.coverage_embedding(
             torch.log1p(coverage).unsqueeze(-1)  # Log transform for better numerical stability
         )  # [B, M, feature_dim//2]
@@ -159,45 +200,37 @@ class EnhancedCancerDetectionModel(nn.Module):
         features = torch.cat([value_features, coverage_features], dim=-1)  # [B, M, feature_dim]
         features = self.feature_projection(features)  # [B, M, feature_dim]
         
-        # Apply positional encoding if used
-        if self.pos_encoding is not None:
-            features = self.pos_encoding(features)
+        # Create attention mask (False = keep, True = mask out)
+        attention_mask = mask  # [B, M]
         
-        # Create padding mask for transformer (True indicates positions to mask)
-        padding_mask = mask  # [B, M]
+        # Process through main encoder blocks
+        x = features
+        for encoder_block in self.encoder_blocks:
+            x, _ = encoder_block(x, attention_mask)
         
-        # Apply main transformer with masking
-        transformer_output = self.transformer_encoder(
-            features, 
-            src_key_padding_mask=padding_mask
-        )  # [B, M, feature_dim]
+        # Process through low concentration encoder blocks
+        low_x = features  
+        for encoder_block in self.low_conc_encoder_blocks:
+            low_x, _ = encoder_block(low_x, attention_mask)
         
-        # Apply low concentration encoder
-        low_conc_output = self.low_conc_encoder(
-            features,
-            src_key_padding_mask=padding_mask
-        )  # [B, M, feature_dim]
+        # Apply pooling to get fixed-size representations
+        pooled, main_attention_weights = self.main_pooling(x, attention_mask)  # [B, num_inds, feature_dim]
+        low_pooled, _ = self.low_conc_pooling(low_x, attention_mask)  # [B, num_inds, feature_dim]
         
-        # Apply attention mechanism (ignoring masked positions)
-        attention_scores = self.attention(transformer_output).squeeze(-1)  # [B, M]
-        attention_scores = attention_scores.masked_fill(mask, -1e9)  # Set masked positions to large negative
-        attention_weights = F.softmax(attention_scores, dim=1)  # [B, M]
+        # Average across inducing points
+        main_features = pooled.mean(dim=1)  # [B, feature_dim]
+        main_features = self.dropout(main_features)
         
-        # Aggregate features with attention weights
-        aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)  # [B, feature_dim]
-        aggregated = self.dropout(aggregated)
-        
-        # Aggregate low concentration features with the same attention weights
-        low_conc_aggregated = torch.sum(attention_weights.unsqueeze(-1) * low_conc_output, dim=1)
-        low_conc_aggregated = self.dropout(low_conc_aggregated)
+        low_features = low_pooled.mean(dim=1)  # [B, feature_dim]
+        low_features = self.dropout(low_features)
         
         # Predict parameters for Beta distribution from main encoder
-        mu = self.mu_head(aggregated)  # [B, 1]
-        phi = self.phi_head(aggregated) * self.calibration  # [B, 1], calibrated concentration
+        mu = self.mu_head(main_features)  # [B, 1]
+        phi = self.phi_head(main_features) * self.calibration  # [B, 1], calibrated concentration
         
         # Predict parameters from low concentration encoder
-        low_mu = self.low_mu_head(low_conc_aggregated)  # [B, 1]
-        low_phi = self.low_phi_head(low_conc_aggregated) * self.low_calibration  # [B, 1]
+        low_mu = self.low_mu_head(low_features)  # [B, 1]
+        low_phi = self.low_phi_head(low_features) * self.low_calibration  # [B, 1]
         
         # Blend predictions based on predicted concentration
         # More weight to low_mu for low concentrations
@@ -210,20 +243,35 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Calculate uncertainty for detection heads
         _, _, uncertainty = self.get_estimate_and_ci(blended_mu, blended_phi)
         
+        # Extract marker-level attention weights (average across heads)
+        # For visualization/interpretation of which markers are important
+        # Since we're using inducing points, we'll use the attention from the pooling layer
+        # Shape of main_attention_weights: [batch, num_inds, num_markers]
+        marker_attention = main_attention_weights.mean(dim=1)  # [B, num_markers]
+        
         # Enhanced features for detection heads (including uncertainty)
-        detection_features = torch.cat([aggregated, uncertainty], dim=1)
+        detection_features = torch.cat([main_features, uncertainty], dim=1)
         
         # Get detection probabilities for each threshold
         detection_probs = [head(detection_features) for head in self.detection_heads]
         
         if y_true is not None:
-            return blended_mu, blended_phi, detection_probs, attention_weights, y_true
-            
-        return blended_mu, blended_phi, detection_probs, attention_weights
+            return blended_mu, blended_phi, detection_probs, marker_attention, y_true
+        
+        return blended_mu, blended_phi, detection_probs, marker_attention
     
     def compute_loss(self, mu, phi, y_true, epsilon=1e-6):
         """
         Compute enhanced focal Beta negative log likelihood loss with threshold emphasis
+        
+        Args:
+            mu: Predicted mean (concentration) [batch_size, 1]
+            phi: Precision parameter [batch_size, 1]
+            y_true: Ground truth concentration [batch_size, 1]
+            epsilon: Small value for numerical stability
+            
+        Returns:
+            Enhanced focal loss for optimization
         """
         y_clipped = torch.clamp(y_true, epsilon, 1 - epsilon)
         
@@ -264,38 +312,35 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Apply focal weighting
         focal_loss = nll_loss * focal_weight
         
-        # Add regularisation to prevent extremely confident predictions
+        # Add regularization to prevent extremely confident predictions
         reg_loss = 0.01 * torch.abs(torch.log(phi)).mean()
         
         return focal_loss.mean() + reg_loss
     
     def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
         """
-        Get point estimate and confidence interval using scipy
+        Get point estimate and confidence interval
+        
+        Args:
+            mu: Predicted mean [batch_size, 1]
+            phi: Precision parameter [batch_size, 1]
+            ci_level: Confidence interval level (default: 0.95 for 95% CI)
+            
+        Returns:
+            estimate: Point estimate [batch_size, 1]
+            ci: Confidence interval bounds [batch_size, 2]
+            uncertainty: Width of confidence interval [batch_size, 1]
         """
         alpha = mu * phi
         beta = (1 - mu) * phi
         
-        # Move tensors to CPU and convert to numpy for scipy
-        alpha_np = alpha.detach().cpu().numpy()
-        beta_np = beta.detach().cpu().numpy()
+        # Using PyTorch's native Beta distribution for CI calculation
+        # to avoid moving to CPU and back
+        dist = Beta(alpha, beta)
         
-        # Initialise tensors for results
-        lower = torch.zeros_like(mu)
-        upper = torch.zeros_like(mu)
-        
-        # Calculate CI bounds for each sample
-        for i in range(len(alpha_np)):
-            a_val = float(alpha_np[i])
-            b_val = float(beta_np[i])
-            
-            # Handle potential numerical issues
-            if a_val <= 0 or b_val <= 0:
-                lower[i] = 0.0
-                upper[i] = 1.0
-            else:
-                lower[i] = torch.tensor(stats.beta.ppf((1 - ci_level) / 2, a_val, b_val))
-                upper[i] = torch.tensor(stats.beta.ppf(1 - (1 - ci_level) / 2, a_val, b_val))
+        # Calculate confidence interval bounds
+        lower = dist.icdf(torch.tensor((1 - ci_level) / 2, device=mu.device))
+        upper = dist.icdf(torch.tensor(1 - (1 - ci_level) / 2, device=mu.device))
         
         estimate = mu
         ci = torch.cat([lower, upper], dim=1)
@@ -328,71 +373,43 @@ class EnhancedCancerDetectionModel(nn.Module):
         return (detection_score >= detection_threshold).float()
 
 
-class CancerDetectionEnsemble:
+def calculate_loss(model, mu, phi, detection_probs, y_true, args):
     """
-    Ensemble of cancer detection models for improved robustness
+    Calculate combined loss using configurable parameters
+    
+    Args:
+        model: The model instance
+        mu: Predicted mean (concentration)
+        phi: Precision parameter
+        detection_probs: List of detection probabilities for each threshold
+        y_true: Ground truth concentration
+        args: Arguments including detection thresholds and weights
+        
+    Returns:
+        total_loss: Combined loss for optimization
+        concentration_loss: Loss component for concentration estimation
+        detection_loss: Loss component for binary detection
     """
-    def __init__(self, models):
-        """
-        Initialise ensemble with multiple model instances
-        
-        Args:
-            models: List of EnhancedCancerDetectionModel instances
-        """
-        self.models = models
-        
-    def forward(self, marker_values, coverage, y_true=None):
-        """
-        Forward pass that combines predictions from all models
-        """
-        all_mus = []
-        all_phis = []
-        all_detection_probs = []
-        
-        # Get predictions from all models
-        for model in self.models:
-            model.eval()  # Ensure evaluation mode
-            if y_true is not None:
-                mu, phi, det_probs, _, _ = model(marker_values, coverage, y_true)
-            else:
-                mu, phi, det_probs, _ = model(marker_values, coverage)
-                
-            all_mus.append(mu)
-            all_phis.append(phi)
-            all_detection_probs.append(det_probs)
-        
-        # Average concentration estimates
-        ensemble_mu = torch.mean(torch.stack(all_mus), dim=0)
-        
-        # Weighted average of phi (inverse weighting by uncertainty)
-        all_phi_stack = torch.stack(all_phis)
-        weights = 1.0 / all_phi_stack
-        ensemble_phi = torch.sum(all_phi_stack * weights, dim=0) / torch.sum(weights, dim=0)
-        
-        # Take max detection probability (conservative approach favoring sensitivity)
-        ensemble_detection_probs = []
-        for i in range(len(all_detection_probs[0])):
-            probs_for_threshold = torch.stack([model_probs[i] for model_probs in all_detection_probs])
-            ensemble_detection_probs.append(torch.max(probs_for_threshold, dim=0)[0])
-        
-        return ensemble_mu, ensemble_phi, ensemble_detection_probs
+    # Get concentration loss
+    concentration_loss = model.compute_loss(mu, phi, y_true)
     
-    def get_estimate_and_ci(self, marker_values, coverage, ci_level=0.95):
-        """
-        Get ensemble estimate and confidence interval
-        """
-        mu, phi, _ = self.forward(marker_values, coverage)
-        
-        # Use the first model's get_estimate_and_ci method with our ensemble params
-        return self.models[0].get_estimate_and_ci(mu, phi, ci_level)
+    # Calculate detection losses for each threshold
+    detection_losses = []
+    for i, threshold in enumerate(args.detection_thresholds):
+        # Convert continuous concentration to binary label
+        binary_y = (y_true >= threshold).float()
+        # Binary cross-entropy loss
+        det_loss = F.binary_cross_entropy(detection_probs[i], binary_y)
+        detection_losses.append(det_loss)
     
-    def get_binary_prediction(self, marker_values, coverage, threshold_idx=1):
-        """
-        Get binary prediction from ensemble
-        """
-        mu, _, detection_probs = self.forward(marker_values, coverage)
-        return (detection_probs[threshold_idx] >= 0.5).float()
-
+    # Use configurable detection loss weight
+    detection_loss_weight = args.detection_loss_weight
+    combined_detection_loss = sum(detection_losses) / len(detection_losses)
+    
+    # Calculate total loss
+    total_loss = concentration_loss + detection_loss_weight * combined_detection_loss
+    
+    return total_loss, concentration_loss, combined_detection_loss
 
 class MarkerImportanceAnalyser:
     """
