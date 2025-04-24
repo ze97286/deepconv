@@ -1077,7 +1077,6 @@ def train_ensemble(args, train_loader, val_loader, test_loader, num_markers, dev
             num_heads=args.num_heads,
             num_layers=args.num_layers,
             dropout_rate=args.dropout_rate,
-            use_pos_encoding=args.use_pos_encoding,
             detection_thresholds=args.detection_thresholds
         )
         
@@ -1172,9 +1171,6 @@ def get_git_info():
 # T-cells
 # python -m deep_conv.detect.train \
 # --name CpGenie_T-cells \
-# --focal_weight_factor 200 \
-# --detection_loss_weight 0.6 \
-# --low_concentration_threshold 0.03 \
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/T-cells/ \
 # --target_cell_type T-cells \
 # --target_cell_idx 11 \
@@ -1185,9 +1181,6 @@ def get_git_info():
 # OAC
 # python -m deep_conv.detect.train \
 # --name CpGenie_OAC \
-# --focal_weight_factor 100 \
-# --detection_loss_weight 0.2 \
-# --low_concentration_threshold 0.01 \
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ \
 # --target_cell_type OAC \
 # --target_cell_idx 9 \
@@ -1268,7 +1261,9 @@ def main():
                 num_layers=args.num_layers,
                 dropout_rate=args.dropout_rate,
                 use_pos_encoding=args.use_pos_encoding,
-                detection_thresholds=args.detection_thresholds
+                detection_thresholds=args.detection_thresholds,
+                focal_weight_factor=args.focal_weight_factor,
+                low_concentration_threshold=args.low_concentration_threshold,
             )
             total_params = sum(p.numel() for p in model.parameters())
             trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
