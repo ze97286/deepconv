@@ -1080,15 +1080,16 @@ def get_git_info():
 # T-cells
 # python -m deep_conv.detect.train \
 # --name CpGenie_T-cells \
+# --num_inds 8 \  
+# --num_encoder_blocks 3 \ 
 # --focal_weight_factor 200 \
 # --detection_loss_weight 0.6 \
 # --low_concentration_threshold 0.03 \
-# --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/T-cells/
+# --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/T-cells/ \
 # --target_cell_type T-cells \
 # --target_cell_idx 11 \
 # --grad_accum_steps 8 \
-# --cell_profile low_snr \
-
+# --cell_profile ultra_low_snr 
 
 # OAC
 # python -m deep_conv.detect.train \
@@ -1101,7 +1102,7 @@ def get_git_info():
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ \
 # --target_cell_type OAC \
 # --target_cell_idx 9 \
-# --cell_profile high_snr \
+# --cell_profile high_snr
 
 def main():
     """Main function with enhanced logging and progress tracking"""
