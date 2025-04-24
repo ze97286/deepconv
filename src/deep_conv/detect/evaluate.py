@@ -10,7 +10,7 @@ from datetime import datetime
 from tqdm import tqdm
 from sklearn.metrics import r2_score, mean_absolute_error, roc_auc_score, precision_recall_curve, auc
 
-from deep_conv.detect.preprocess import load_dataset_from_directory
+from deep_conv.detect.preprocess import prepare_data_for_evaluation
 from deep_conv.detect.model import EnhancedCancerDetectionModel, CancerDetectionEnsemble
 
 
@@ -404,37 +404,37 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
             json.dump(results, f, indent=2)
         logger.info(f"Evaluation results saved to {results_file}")
         
-        # Create enhanced visualizations
-        viz_dir = os.path.join(output_dir, 'visualizations')
+        # Create enhanced visualisations
+        viz_dir = os.path.join(output_dir, 'visualisations')
         os.makedirs(viz_dir, exist_ok=True)
         
-        # Create standard visualizations if available
+        # Create standard visualisations if available
         try:
-            from deep_conv.detect.visualise import create_visualizations
+            from deep_conv.detect.visualise import create_visualisations
             
-            logger.info("Creating standard visualizations...")
-            viz_metrics = create_visualizations(
+            logger.info("Creating standard visualisations...")
+            viz_metrics = create_visualisations(
                 predictions=all_preds.flatten(), 
                 ground_truth=all_targets.flatten(),
                 output_dir=viz_dir
             )
             
-            logger.info(f"Standard visualizations saved to {viz_dir}")
+            logger.info(f"Standard visualisations saved to {viz_dir}")
         except ImportError:
-            logger.warning("Standard visualization module not found. Skipping standard visualizations.")
+            logger.warning("Standard visualisation module not found. Skipping standard visualisations.")
         except Exception as e:
-            logger.error(f"Error creating standard visualizations: {str(e)}")
+            logger.error(f"Error creating standard visualisations: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
         
-        # Create enhanced visualizations
+        # Create enhanced visualisations
         try:
-            logger.info("Creating enhanced visualizations...")
+            logger.info("Creating enhanced visualisations...")
             
             # Create prediction plots with CI
             plot_predictions(all_preds, all_targets, all_lower_ci, all_upper_ci, viz_dir)
             
-            # Create error band visualization
+            # Create error band visualisation
             plot_error_bands(all_targets, all_preds, viz_dir)
             
             # Create concentration-dependent performance plot
@@ -446,10 +446,10 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
             # Create CI reliability plot
             plot_ci_reliability(all_targets, all_lower_ci, all_upper_ci, viz_dir)
             
-            logger.info(f"Enhanced visualizations saved to {viz_dir}")
+            logger.info(f"Enhanced visualisations saved to {viz_dir}")
             
         except Exception as e:
-            logger.error(f"Error creating enhanced visualizations: {str(e)}")
+            logger.error(f"Error creating enhanced visualisations: {str(e)}")
             import traceback
             logger.error(traceback.format_exc())
     
@@ -479,7 +479,7 @@ def calculate_enhanced_metrics(targets, predictions, lower_ci=None, upper_ci=Non
     
     # Weighted R² - more weight to higher concentrations
     weights = np.sqrt(targets + 0.0001)  # Avoid sqrt(0)
-    weights = weights / np.mean(weights)  # Normalize weights
+    weights = weights / np.mean(weights)  # Normalise weights
     
     # Calculate weighted R²
     y_weighted_mean = np.average(targets, weights=weights)
@@ -527,7 +527,7 @@ def calculate_enhanced_metrics(targets, predictions, lower_ci=None, upper_ci=Non
         # Average CI width
         ci_width = np.mean(upper_ci - lower_ci)
         
-        # Normalized CI width (by target value)
+        # Normalised CI width (by target value)
         non_zero_mask = targets > 0
         norm_ci_width = np.zeros_like(targets)
         norm_ci_width[non_zero_mask] = (upper_ci[non_zero_mask] - lower_ci[non_zero_mask]) / targets[non_zero_mask]
@@ -570,7 +570,7 @@ def calculate_enhanced_metrics(targets, predictions, lower_ci=None, upper_ci=Non
         metrics.update({
             'in_ci_percentage': float(in_ci),
             'ci_width': float(ci_width),
-            'mean_normalized_ci_width': float(mean_norm_ci_width),
+            'mean_Normalised_ci_width': float(mean_norm_ci_width),
             'ci_calibration_error': float(ci_calibration_error)
         })
     
@@ -579,7 +579,7 @@ def calculate_enhanced_metrics(targets, predictions, lower_ci=None, upper_ci=Non
 
 def get_error_bands(targets, predictions):
     """
-    Categorize errors into bands based on relative error
+    Categorise errors into bands based on relative error
     
     Args:
         targets: Ground truth values
@@ -618,12 +618,12 @@ def get_error_bands(targets, predictions):
 
 def plot_error_bands(targets, predictions, output_dir):
     """
-    Create visualization of error bands at different concentration ranges
+    Create visualisation of error bands at different concentration ranges
     
     Args:
         targets: Ground truth values
         predictions: Predicted values
-        output_dir: Directory to save visualization
+        output_dir: Directory to save visualisation
     """
     import os
     import plotly.graph_objects as go
@@ -725,12 +725,12 @@ def plot_error_bands(targets, predictions, output_dir):
 
 def plot_concentration_dependent_performance(targets, predictions, output_dir):
     """
-    Create visualization showing how performance metrics vary with concentration
+    Create visualisation showing how performance metrics vary with concentration
     
     Args:
         targets: Ground truth values
         predictions: Predicted values
-        output_dir: Directory to save visualization
+        output_dir: Directory to save visualisation
     """
     import os
     import plotly.graph_objects as go
@@ -745,7 +745,7 @@ def plot_concentration_dependent_performance(targets, predictions, output_dir):
     bin_edges = np.logspace(-4, 0, 11)  # 10 bins from 0.0001 to 1.0
     bin_midpoints = np.sqrt(bin_edges[:-1] * bin_edges[1:])
     
-    # Initialize arrays to store metrics by bin
+    # Initialise arrays to store metrics by bin
     mae_by_bin = []
     mre_by_bin = []  # Mean relative error
     r2_by_bin = []
@@ -908,12 +908,12 @@ def plot_concentration_dependent_performance(targets, predictions, output_dir):
 
 def plot_error_distribution(targets, predictions, output_dir):
     """
-    Create visualization of error distribution at different concentration ranges
+    Create visualisation of error distribution at different concentration ranges
     
     Args:
         targets: Ground truth values
         predictions: Predicted values
-        output_dir: Directory to save visualization
+        output_dir: Directory to save visualisation
     """
     import os
     import plotly.graph_objects as go
@@ -1080,13 +1080,13 @@ def plot_error_distribution(targets, predictions, output_dir):
 
 def plot_ci_reliability(targets, lower_ci, upper_ci, output_dir):
     """
-    Create visualization of confidence interval reliability
+    Create visualisation of confidence interval reliability
     
     Args:
         targets: Ground truth values
         lower_ci: Lower confidence interval values
         upper_ci: Upper confidence interval values
-        output_dir: Directory to save visualization
+        output_dir: Directory to save visualisation
     """
     import os
     import plotly.graph_objects as go
@@ -1190,9 +1190,9 @@ def plot_ci_reliability(targets, lower_ci, upper_ci, output_dir):
     bin_edges = np.logspace(-4, 0, 11)  # 10 bins from 0.0001 to 1.0
     bin_midpoints = np.sqrt(bin_edges[:-1] * bin_edges[1:])
     
-    # Initialize arrays to store metrics by bin
+    # Initialise arrays to store metrics by bin
     width_by_bin = []
-    norm_width_by_bin = []  # Normalized by concentration
+    norm_width_by_bin = []  # Normalised by concentration
     in_ci_by_bin = []
     sample_counts = []
     
@@ -1220,7 +1220,7 @@ def plot_ci_reliability(targets, lower_ci, upper_ci, output_dir):
         # Calculate metrics
         width = np.mean(bin_upper - bin_lower)
         
-        # Normalized width (avoid division by zero)
+        # Normalised width (avoid division by zero)
         norm_width = np.mean((bin_upper - bin_lower) / np.maximum(bin_targets, 1e-10))
         
         # In-CI percentage
@@ -1259,16 +1259,16 @@ def plot_ci_reliability(targets, lower_ci, upper_ci, output_dir):
     fig_width.write_html(os.path.join(output_dir, 'ci_width_by_concentration.html'))
     fig_width.write_image(os.path.join(output_dir, 'ci_width_by_concentration.png'), scale=2)
     
-    # Create normalized CI width plot
+    # Create Normalised CI width plot
     fig_norm = go.Figure()
     
-    # Add normalized width trace
+    # Add Normalised width trace
     fig_norm.add_trace(
         go.Scatter(
             x=bin_midpoints,
             y=norm_width_by_bin,
             mode='lines+markers',
-            name='Normalized CI Width',
+            name='Normalised CI Width',
             line=dict(color='green', width=2),
             marker=dict(size=8)
         )
@@ -1276,7 +1276,7 @@ def plot_ci_reliability(targets, lower_ci, upper_ci, output_dir):
     
     # Update layout
     fig_norm.update_layout(
-        title='Normalized CI Width by Concentration',
+        title='Normalised CI Width by Concentration',
         xaxis_type='log',
         xaxis_title='True Concentration (log scale)',
         yaxis_title='Mean CI Width / Concentration',
@@ -1287,8 +1287,8 @@ def plot_ci_reliability(targets, lower_ci, upper_ci, output_dir):
     )
     
     # Save figure
-    fig_norm.write_html(os.path.join(output_dir, 'normalized_ci_width_by_concentration.html'))
-    fig_norm.write_image(os.path.join(output_dir, 'normalized_ci_width_by_concentration.png'), scale=2)
+    fig_norm.write_html(os.path.join(output_dir, 'Normalised_ci_width_by_concentration.html'))
+    fig_norm.write_image(os.path.join(output_dir, 'Normalised_ci_width_by_concentration.png'), scale=2)
     
     # Create CI coverage by concentration plot
     fig_coverage = go.Figure()
@@ -1341,7 +1341,7 @@ def plot_predictions(predictions, targets, lower_ci, upper_ci, output_dir):
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
     
-    # Sort by targets for clearer visualization
+    # Sort by targets for clearer visualisation
     sorted_indices = np.argsort(targets.flatten())
     sorted_targets = targets.flatten()[sorted_indices]
     sorted_preds = predictions.flatten()[sorted_indices]
@@ -1539,13 +1539,11 @@ def run_evaluation(model_dir, input_dir, output_dir=None, device=None):
         target_cell_idx = args.get('target_cell_idx', None)
         
         # Load dataset
-        data_loader = load_dataset_from_directory(
-            input_dir,
+        data_loader = prepare_data_for_evaluation(
+            data_dir=input_dir,
             atlas_path=atlas_path,
             target_cell_type=target_cell_type,
             target_cell_idx=target_cell_idx,
-            batch_size=args.get('batch_size', 32),
-            shuffle=False
         )
         
         # Evaluate model

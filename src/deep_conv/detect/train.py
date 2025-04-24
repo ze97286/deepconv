@@ -11,7 +11,7 @@ from sklearn.metrics import r2_score, mean_absolute_error
 import torch.nn.functional as F
 
 from deep_conv.detect.preprocess import prepare_data_for_training
-from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyzer, CancerDetectionEnsemble
+from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyser, CancerDetectionEnsemble
 
 
 def parse_args():
@@ -35,7 +35,7 @@ def parse_args():
     
     parser.add_argument('--cell_profile', type=str, default=None, 
                        choices=['default', 'high_snr', 'low_snr', 'ultra_low_snr'],
-                       help='Predefined optimization profile for different cell types')
+                       help='Predefined optimisation profile for different cell types')
     parser.add_argument('--detection_loss_weight', type=float, default=None, 
                        help='Weight of detection loss relative to concentration loss')
     parser.add_argument('--focal_weight_factor', type=float, default=None,
@@ -47,7 +47,7 @@ def parse_args():
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimizer')
+    parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimiser')
     parser.add_argument('--epochs', type=int, default=1000, help='Number of epochs')
     parser.add_argument('--grad_accum_steps', type=int, default=4, help='Gradient accumulation steps')
     parser.add_argument('--early_stopping', type=int, default=10, help='Early stopping patience')
@@ -94,7 +94,7 @@ def parse_args():
 
 
 def apply_cell_profile(args):
-    """Apply predefined parameter sets optimized for different cell types"""
+    """Apply predefined parameter sets optimised for different cell types"""
     profiles = {
         'default': {
             # Default parameters, good for most cell types
@@ -201,8 +201,8 @@ def train(model, train_loader, val_loader, args, device):
     git_commit = git_info['commit']
 
     model = model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    optimiser = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=args.epochs)
     scaler = torch.cuda.amp.GradScaler() 
     
     # Apply cell-specific parameters to model if provided
@@ -241,7 +241,7 @@ def train(model, train_loader, val_loader, args, device):
         train_loss = 0
         train_conc_loss = 0
         train_det_loss = 0
-        optimizer.zero_grad()
+        optimiser.zero_grad()
         
         batch_bar = tqdm(enumerate(train_loader), 
                          desc=f"Epoch {epoch+1}/{args.epochs} [Train]", 
@@ -284,9 +284,9 @@ def train(model, train_loader, val_loader, args, device):
             
             # Gradient accumulation and optimisation step
             if (i + 1) % args.grad_accum_steps == 0 or (i + 1) == len(train_loader):
-                scaler.step(optimizer)
+                scaler.step(optimiser)
                 scaler.update()
-                optimizer.zero_grad()
+                optimiser.zero_grad()
         
         # Validation phase
         model.eval()
@@ -355,14 +355,14 @@ def train(model, train_loader, val_loader, args, device):
         mae = mean_absolute_error(all_targets, all_preds)
         
         # Get current learning rate
-        current_lr = optimizer.param_groups[0]['lr']
+        current_lr = optimiser.param_groups[0]['lr']
         
         # Update learning rate
         scheduler.step()
         
         # Calculate detection metrics
-        analyzer = MarkerImportanceAnalyzer(model)
-        detection_metrics = analyzer.analyze_detection_performance(val_loader, thresholds=args.detection_thresholds)
+        analyser = MarkerImportanceAnalyser(model)
+        detection_metrics = analyser.analyse_detection_performance(val_loader, thresholds=args.detection_thresholds)
         
         # Update history
         history['train_loss'].append(train_loss)
@@ -437,7 +437,7 @@ def train(model, train_loader, val_loader, args, device):
         if (epoch + 1) % args.save_interval == 0:
             checkpoint = {
                 'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
+                'optimiser': optimiser.state_dict(),
                 'scheduler': scheduler.state_dict(),
                 'epoch': epoch,
                 'best_val_loss': best_val_loss,
@@ -519,7 +519,7 @@ def train(model, train_loader, val_loader, args, device):
 
 def plot_training_history(history, output_dir):
     """
-    Plot and save training history with enhanced visualizations using Plotly
+    Plot and save training history with enhanced visualisations using Plotly
     """
     import os
     import plotly.graph_objects as go
@@ -719,31 +719,31 @@ def plot_training_history(history, output_dir):
         fig.write_image(os.path.join(plots_dir, f'{name}_history.png'), scale=2)
 
 
-def visualize_results(predictions, ground_truth, output_subdir, ci_data=None, marker_importance=None, prefix=""):
+def visualise_results(predictions, ground_truth, output_subdir, ci_data=None, marker_importance=None, prefix=""):
     """
-    Unified visualization function for both validation and test results
+    Unified visualisation function for both validation and test results
     
     Args:
         predictions: Array of predicted cancer concentrations
         ground_truth: Array of true cancer concentrations
-        output_subdir: Directory to save visualizations (relative to output_dir)
-        ci_data: Optional tuple of (lower_ci, upper_ci) for confidence interval visualization
+        output_subdir: Directory to save visualisations (relative to output_dir)
+        ci_data: Optional tuple of (lower_ci, upper_ci) for confidence interval visualisation
         marker_importance: Optional marker importance data
         prefix: Optional prefix for output files
     """
     logger = logging.getLogger('cancer_detection')
     
-    # Create visualization directory
+    # Create visualisation directory
     os.makedirs(output_subdir, exist_ok=True)
     
-    # Try to import visualization module
+    # Try to import visualisation module
     try:
-        from deep_conv.detect.visualise import create_visualizations
+        from deep_conv.detect.visualise import create_visualisations
         
-        logger.info(f"Creating visualizations for {prefix}data...")
+        logger.info(f"Creating visualisations for {prefix}data...")
         
-        # Generate visualizations
-        metrics = create_visualizations(
+        # Generate visualisations
+        metrics = create_visualisations(
             predictions=predictions.flatten(), 
             ground_truth=ground_truth.flatten(),
             output_dir=output_subdir
@@ -766,19 +766,19 @@ def visualize_results(predictions, ground_truth, output_subdir, ci_data=None, ma
             logger.info(f"{prefix}Targets within CI: {in_ci * 100:.2f}%")
             logger.info(f"{prefix}Average CI Width: {ci_width:.6f}")
         
-        # If marker importance data is provided, visualize it
+        # If marker importance data is provided, visualise it
         if marker_importance is not None:
             # Plot marker importance
             plot_marker_importance(marker_importance, output_subdir)
         
-        logger.info(f"Visualizations saved to {output_subdir}")
+        logger.info(f"Visualisations saved to {output_subdir}")
         return metrics
         
     except ImportError:
-        logger.warning("Plotly visualization module not found. Skipping advanced visualizations.")
+        logger.warning("Plotly visualisation module not found. Skipping advanced visualisations.")
         return None
     except Exception as e:
-        logger.error(f"Error creating visualizations: {str(e)}")
+        logger.error(f"Error creating visualisations: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
         return None
@@ -796,7 +796,7 @@ def plot_predictions(predictions, targets, lower_ci, upper_ci, output_dir):
     plots_dir = os.path.join(output_dir, 'plots')
     os.makedirs(plots_dir, exist_ok=True)
     
-    # Sort by targets for clearer visualization
+    # Sort by targets for clearer visualisation
     sorted_indices = np.argsort(targets.flatten())
     sorted_targets = targets.flatten()[sorted_indices]
     sorted_preds = predictions.flatten()[sorted_indices]
@@ -876,7 +876,7 @@ def plot_predictions(predictions, targets, lower_ci, upper_ci, output_dir):
 
 def plot_marker_importance(marker_importance, output_dir):
     """
-    Visualize marker importance
+    Visualise marker importance
     """
     import os
     import numpy as np
@@ -990,8 +990,8 @@ def evaluate(model, data_loader, args, device, split_name="test"):
     logger.info(f"Average CI Width: {ci_width:.6f}")
     
     # Calculate detection metrics
-    analyzer = MarkerImportanceAnalyzer(model)
-    detection_metrics = analyzer.analyze_detection_performance(data_loader, thresholds=args.detection_thresholds)
+    analyser = MarkerImportanceAnalyser(model)
+    detection_metrics = analyser.analyse_detection_performance(data_loader, thresholds=args.detection_thresholds)
     
     # Log detection metrics
     logger.info(f"\n{split_name.upper()} DETECTION METRICS:")
@@ -1028,11 +1028,11 @@ def evaluate(model, data_loader, args, device, split_name="test"):
         json.dump(results, f, indent=2)
     logger.info(f"{split_name} results saved to {results_file}")
     
-    # Create visualizations
-    viz_dir = os.path.join(args.output_dir, 'visualizations')
+    # Create visualisations
+    viz_dir = os.path.join(args.output_dir, 'visualisations')
     split_viz_dir = os.path.join(viz_dir, split_name)
     
-    visualize_results(
+    visualise_results(
         predictions=all_preds,
         ground_truth=all_targets,
         output_subdir=split_viz_dir,
@@ -1041,9 +1041,9 @@ def evaluate(model, data_loader, args, device, split_name="test"):
         prefix=f"{split_name.capitalize()} "
     )
     
-    # Analyze marker importance
-    logger.info(f"Analyzing marker importance for {split_name} set...")
-    top_indices, top_weights = analyzer.get_marker_importance(data_loader)
+    # Analyse marker importance
+    logger.info(f"Analysing marker importance for {split_name} set...")
+    top_indices, top_weights = analyser.get_marker_importance(data_loader)
     marker_importance_file = os.path.join(args.output_dir, f'{split_name}_marker_importance.npy')
     np.save(marker_importance_file, all_marker_attentions.mean(axis=0))
     logger.info(f"Marker importance saved to {marker_importance_file}")
@@ -1224,7 +1224,7 @@ def main():
     # Save data stats
     stats_file = os.path.join(args.output_dir, 'data_stats.json')
     with open(stats_file, 'w') as f:
-        # Convert numpy types to Python types for JSON serialization
+        # Convert numpy types to Python types for JSON serialisation
         serializable_stats = {k: float(v) for k, v in data_stats.items()}
         json.dump(serializable_stats, f, indent=2)
     logger.info(f"Data statistics saved to {stats_file}")
@@ -1241,7 +1241,7 @@ def main():
             device=device
         )
     else:
-        # Initialize single model
+        # Initialise single model
         logger.info(f"Initializing model with {num_markers} markers...")
         try:
             model = EnhancedCancerDetectionModel(
@@ -1255,9 +1255,9 @@ def main():
             )
             total_params = sum(p.numel() for p in model.parameters())
             trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            logger.info(f"✓ Model initialized with {total_params:,} total parameters ({trainable_params:,} trainable)")
+            logger.info(f"✓ Model initialised with {total_params:,} total parameters ({trainable_params:,} trainable)")
         except Exception as e:
-            logger.error(f"× Error initializing model: {str(e)}")
+            logger.error(f"× Error initialising model: {str(e)}")
             raise
         
         # Train model

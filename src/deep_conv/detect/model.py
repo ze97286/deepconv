@@ -25,8 +25,20 @@ class PositionalEncoding(nn.Module):
 
 class EnhancedCancerDetectionModel(nn.Module):
     """
-    Enhanced model for cancer detection with specialized concentration handling
+    DL model for cancer detection with specialised concentration handling
     and improved detection capabilities.
+
+    * Transformer Architecture: The use of transformer encoders allows the model to capture complex relationships between biomarkers, 
+      leveraging attention mechanisms to focus on relevant markers.
+    * Dual Encoder Design: A dedicated low-concentration encoder enhances performance for low biomarker concentrations, 
+      which are often the most challenging to detect.
+    * Focal Loss: An enhanced focal loss emphasizes difficult samples (e.g., low concentrations or values near detection thresholds),
+      improving model performance on critical cases.
+    * Positional Encoding: Incorporating positional information helps the model understand the context of biomarker positions, 
+      which may be relevant in multi-marker assays.
+    * Uncertainty-Aware Detection: By integrating uncertainty estimates into detection heads, the model provides more reliable 
+      binary predictions.
+
     """
     def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
              dropout_rate=0.2, use_pos_encoding=True, detection_thresholds=(0.001, 0.01, 0.05),
@@ -125,7 +137,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         self.calibration = nn.Parameter(torch.ones(1))
         self.low_calibration = nn.Parameter(torch.ones(1))
         
-        # Dropout for regularization
+        # Dropout for regularisation
         self.dropout = nn.Dropout(dropout_rate)
         
     def forward(self, marker_values, coverage, y_true=None):
@@ -252,7 +264,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Apply focal weighting
         focal_loss = nll_loss * focal_weight
         
-        # Add regularization to prevent extremely confident predictions
+        # Add regularisation to prevent extremely confident predictions
         reg_loss = 0.01 * torch.abs(torch.log(phi)).mean()
         
         return focal_loss.mean() + reg_loss
@@ -268,7 +280,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         alpha_np = alpha.detach().cpu().numpy()
         beta_np = beta.detach().cpu().numpy()
         
-        # Initialize tensors for results
+        # Initialise tensors for results
         lower = torch.zeros_like(mu)
         upper = torch.zeros_like(mu)
         
@@ -322,7 +334,7 @@ class CancerDetectionEnsemble:
     """
     def __init__(self, models):
         """
-        Initialize ensemble with multiple model instances
+        Initialise ensemble with multiple model instances
         
         Args:
             models: List of EnhancedCancerDetectionModel instances
@@ -382,16 +394,16 @@ class CancerDetectionEnsemble:
         return (detection_probs[threshold_idx] >= 0.5).float()
 
 
-class MarkerImportanceAnalyzer:
+class MarkerImportanceAnalyser:
     """
-    Utility class to analyze the importance of different markers
+    Utility class to analyse the importance of different markers
     """
     def __init__(self, model):
         self.model = model
     
     def get_marker_importance(self, dataloader, top_k=20):
         """
-        Analyze marker importance across the dataset
+        Analyse marker importance across the dataset
         """
         self.model.eval()
         all_attentions = []
@@ -414,9 +426,9 @@ class MarkerImportanceAnalyzer:
         
         return top_k_indices.cpu().numpy(), top_k_weights.cpu().numpy()
     
-    def analyze_detection_performance(self, dataloader, thresholds=None):
+    def analyse_detection_performance(self, dataloader, thresholds=None):
         """
-        Analyze detection performance at different concentration thresholds
+        Analyse detection performance at different concentration thresholds
         """
         if isinstance(self.model, CancerDetectionEnsemble):
             model_thresholds = self.model.models[0].detection_thresholds

@@ -32,8 +32,8 @@ def load_and_preprocess_data(
     coverage_path, 
     ground_truth_path, 
     atlas_path, 
-    target_cell_type="OAC", 
-    target_cell_idx=9,
+    target_cell_type, 
+    target_cell_idx,
     test_size=0.2, 
     val_size=0.2, 
     random_state=42
@@ -138,11 +138,10 @@ def load_and_preprocess_data(
     return train_loader, val_loader, test_loader, marker_values.shape[1]
 
 
-def analyze_data_characteristics(train_loader, val_loader):
+def analyse_data_characteristics(train_loader, val_loader):
     """
-    Analyze data characteristics to inform model design
+    Analyse data characteristics to inform model design
     """
-    # Initialize accumulators
     total_samples = 0
     nan_count = 0
     zero_cov_count = 0
@@ -213,9 +212,9 @@ def analyze_data_characteristics(train_loader, val_loader):
 # Main execution function
 def prepare_data_for_training(
     data_dir,
-    atlas_path=None,
-    target_cell_type="OAC",
-    target_cell_idx=9,
+    atlas_path,
+    target_cell_type,
+    target_cell_idx,
 ):
     """
     Prepare data for training
@@ -248,22 +247,51 @@ def prepare_data_for_training(
         random_state=42
     )
     
-    # Analyze data characteristics
-    data_stats = analyze_data_characteristics(train_loader, val_loader)
+    # Analyse data characteristics
+    data_stats = analyse_data_characteristics(train_loader, val_loader)
     
     return train_loader, val_loader, test_loader, num_markers, data_stats
 
 
-if __name__ == "__main__":
-    data_dir = "/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/"
-    atlas_path = "/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed"
+def prepare_data_for_evaluation(
+        data_dir,
+    atlas_path,
+    target_cell_type,
+    target_cell_idx,
+):
+    marker_values_path = os.path.join(data_dir, "marker_values.parquet")
+    coverage_path = os.path.join(data_dir, "coverage.parquet")
+    ground_truth_path = os.path.join(data_dir, "ground_truth_y.parquet")
 
-    train_loader, val_loader, test_loader, num_markers, data_stats = prepare_data_for_training(
-        data_dir=data_dir,
-        atlas_path=atlas_path,
-        target_cell_type="OAC",
-        target_cell_idx=9
-    )
+    marker_values_df = pd.read_parquet(marker_values_path)
+    coverage_df = pd.read_parquet(coverage_path)
     
-    print(f"Prepared data with {num_markers} markers")
-    print(f"Data statistics: {data_stats}")
+    # Load ground truth
+    ground_truth_df = pd.read_parquet(ground_truth_path)
+    y_true = ground_truth_df.iloc[:, target_cell_idx].values
+    
+    # Load atlas and extract relevant markers
+    print(f"Loading atlas from {atlas_path} and extracting markers for {target_cell_type}...")
+    atlas = pd.read_csv(atlas_path, sep="\t")
+    target_markers = atlas[atlas.target == target_cell_type]
+    target_marker_indices = target_markers.index.values
+    
+    print(f"Found {len(target_marker_indices)} markers for {target_cell_type}")
+    
+    # Extract relevant markers from data
+    marker_values = marker_values_df.iloc[target_marker_indices][marker_values_df.columns[2:]].values.T
+    coverage = coverage_df.iloc[target_marker_indices][coverage_df.columns[2:]].values.T  
+
+    # Data summary
+    print(f"Marker values shape: {marker_values.shape}")
+    print(f"Coverage shape: {coverage.shape}")
+    print(f"Ground truth shape: {y_true.shape}")
+
+    val_dataset = cfDNAMethylationDataset(
+        marker_values, 
+        coverage, 
+        y_true
+    )
+
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)
+    return val_loader

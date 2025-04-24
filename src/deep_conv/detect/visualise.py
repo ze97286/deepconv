@@ -5,14 +5,14 @@ import plotly.express as px
 from plotly.subplots import make_subplots
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
 
-def create_visualizations(predictions, ground_truth, output_dir, threshold=0.5):
+def create_visualisations(predictions, ground_truth, output_dir, threshold=0.5):
     """
-    Create comprehensive visualizations for model performance analysis
+    Create comprehensive visualisations for model performance analysis
     
     Args:
         predictions: Array of predicted cancer concentrations
         ground_truth: Array of true cancer concentrations
-        output_dir: Directory to save visualizations
+        output_dir: Directory to save visualisations
         threshold: Classification threshold for binary metrics
     """
     # Convert to numpy arrays if not already
@@ -57,7 +57,7 @@ def create_visualizations(predictions, ground_truth, output_dir, threshold=0.5):
     within_10pct = np.mean(np.abs(y_pred - y_true) <= 0.10 * np.maximum(y_true, 1e-6)) * 100
     within_20pct = np.mean(np.abs(y_pred - y_true) <= 0.20 * np.maximum(y_true, 1e-6)) * 100
     
-    # Create visualizations
+    # Create visualisations
     create_scatter_plot(df, output_dir)
     create_stratified_mae(df, ranges, output_dir)
     create_relative_error_plot(df, ranges, output_dir)
@@ -143,7 +143,7 @@ def create_scatter_plot(df, output_dir):
         borderwidth=1
     )
     
-    # Customize layout
+    # Customise layout
     fig.update_layout(
         title='Predicted vs Ground Truth (Log Scale)',
         xaxis_title='True Value (%)',
@@ -198,7 +198,7 @@ def create_stratified_mae(df, ranges, output_dir):
         labels={'mae': 'Mean Absolute Error', 'range': 'Concentration Range'}
     )
     
-    # Customize layout
+    # Customise layout
     fig.update_layout(
         title='Concentration-Stratified MAE',
         xaxis_title='Concentration Range',
@@ -285,7 +285,7 @@ def create_relative_error_plot(df, ranges, output_dir):
     fig.add_hline(y=20, line=dict(color='gray', dash='dash'), secondary_y=False)
     fig.add_hline(y=-20, line=dict(color='gray', dash='dash'), secondary_y=False)
     
-    # Customize layout
+    # Customise layout
     fig.update_layout(
         title='Relative Error Rate',
         xaxis=dict(
@@ -409,7 +409,7 @@ def create_roc_curve(y_true, y_pred, threshold, output_dir):
         align="left"
     )
     
-    # Customize layout
+    # Customise layout
     fig.update_layout(
         title='Concentration Range<br>ROC Curve',
         xaxis_title='False Positive Rate',
@@ -453,7 +453,7 @@ def create_error_by_range_boxplot(df, output_dir):
     # Add reference line at 0
     fig.add_hline(y=0, line=dict(color='black', dash='dot'))
     
-    # Customize layout
+    # Customise layout
     fig.update_layout(
         title='Error by Concentration Range',
         xaxis_title='Concentration Range',
@@ -463,7 +463,7 @@ def create_error_by_range_boxplot(df, output_dir):
         width=900,
         height=600,
         yaxis=dict(
-            range=[-200, 200]  # Limit y range for better visualization
+            range=[-200, 200]  # Limit y range for better visualisation
         )
     )
     
@@ -517,7 +517,7 @@ def create_precision_recall_curve(y_true, y_pred, threshold, output_dir):
     baseline = sum(y_true >= threshold) / len(y_true)
     fig.add_hline(y=baseline, line=dict(color='gray', dash='dash'))
     
-    # Customize layout
+    # Customise layout
     fig.update_layout(
         title='Precision-Recall Curve',
         xaxis_title='Recall',
@@ -545,10 +545,10 @@ if __name__ == "__main__":
     import os
     import json
     
-    parser = argparse.ArgumentParser(description='Create visualizations for model evaluation')
+    parser = argparse.ArgumentParser(description='Create visualisations for model evaluation')
     parser.add_argument('--predictions', type=str, required=True, help='Path to predictions JSON or CSV')
     parser.add_argument('--ground_truth', type=str, required=True, help='Path to ground truth JSON or CSV')
-    parser.add_argument('--output_dir', type=str, default='visualizations', help='Output directory')
+    parser.add_argument('--output_dir', type=str, default='visualisations', help='Output directory')
     
     args = parser.parse_args()
     
@@ -578,8 +578,8 @@ if __name__ == "__main__":
     else:
         ground_truth = pd.read_csv(args.ground_truth).values.flatten()
     
-    # Create visualizations
-    metrics = create_visualizations(predictions, ground_truth, args.output_dir)
+    # Create visualisations
+    metrics = create_visualisations(predictions, ground_truth, args.output_dir)
     
     # Save metrics
     with open(f"{args.output_dir}/metrics.json", 'w') as f:
