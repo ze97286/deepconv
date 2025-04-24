@@ -198,11 +198,13 @@ class SetTransformerCancerDetection(nn.Module):
         # Create mask for missing values (where coverage = 0)
         mask = (coverage == 0)  # [B, M]
         
-        # Handle NaN values in marker_values
-        marker_values = torch.nan_to_num(marker_values, nan=0.5)  # Replace NaN with 0.5 (neutral)
+        # Handle NaN values in marker_values by replacing only when coverage > 0
+        # For markers with coverage = 0, the value doesn't matter as they'll be masked
+        marker_values_processed = torch.where(mask, torch.zeros_like(marker_values), marker_values)
+        marker_values_processed = torch.nan_to_num(marker_values_processed, nan=0.5)
         
         # Embed marker values and coverage separately
-        value_features = self.marker_embedding(marker_values.unsqueeze(-1))  # [B, M, feature_dim//2]
+        value_features = self.marker_embedding(marker_values_processed.unsqueeze(-1))  # [B, M, feature_dim//2]
         coverage_features = self.coverage_embedding(
             torch.log1p(coverage).unsqueeze(-1)  # Log transform for better numerical stability
         )  # [B, M, feature_dim//2]
@@ -260,92 +262,64 @@ class SetTransformerCancerDetection(nn.Module):
         
         # Extract marker-level attention weights (average across heads and inducing points)
         # For visualization/interpretation of which markers are important
-        # Shape of main_attention_weights from self.attention: [batch, num_inds, num_markers]
+        # Shape of main_attention_weights from pooling layer: [batch, num_inds, num_markers]
         marker_attention = main_attention_weights.mean(dim=1)  # [B, num_markers]
         
         # Enhanced features for detection heads (including uncertainty)
         detection_features = torch.cat([main_features, uncertainty], dim=1)
         
         # Get detection probabilities for each threshold
-        detection_probs = [head(detection_features) for head in self.detection_heads]
+        detection_probs_raw = [head(detection_features) for head in self.detection_heads]
         
+        # Ensure all detection probabilities are properly bounded between 0 and 1
+        detection_probs = [torch.clamp(dp, 0.0, 1.0) for dp in detection_probs_raw]
+            
         if y_true is not None:
             return blended_mu, blended_phi, detection_probs, marker_attention, y_true
         
         return blended_mu, blended_phi, detection_probs, marker_attention
-    
-    def compute_loss(self, mu, phi, y_true, epsilon=1e-6):
+    def calculate_loss(model, mu, phi, detection_probs, y_true, args):
         """
-        Compute enhanced focal Beta negative log likelihood loss with threshold emphasis
+        Calculate combined loss using configurable parameters
         
         Args:
-            mu: Predicted mean (concentration) [batch_size, 1]
-            phi: Precision parameter [batch_size, 1]
-            y_true: Ground truth concentration [batch_size, 1]
-            epsilon: Small value for numerical stability
+            model: The model instance
+            mu: Predicted mean (concentration)
+            phi: Precision parameter
+            detection_probs: List of detection probabilities for each threshold
+            y_true: Ground truth concentration
+            args: Arguments including detection thresholds and weights
             
         Returns:
-            Enhanced focal loss for optimization
+            total_loss: Combined loss for optimization
+            concentration_loss: Loss component for concentration estimation
+            detection_loss: Loss component for binary detection
         """
-        y_clipped = torch.clamp(y_true, epsilon, 1 - epsilon)
+        # Get concentration loss
+        concentration_loss = model.compute_loss(mu, phi, y_true)
         
-        # Add safeguards for phi to ensure it's positive and not too small
-        phi = torch.clamp(phi, min=1.0)  # Ensure phi is at least 1.0
+        # Calculate detection losses for each threshold
+        detection_losses = []
+        for i, threshold in enumerate(args.detection_thresholds):
+            # Convert continuous concentration to binary label
+            binary_y = (y_true >= threshold).float()
+            
+            # Ensure detection probabilities are properly bounded
+            det_probs = torch.clamp(detection_probs[i], 0.0, 1.0)
+            
+            # Binary cross-entropy loss
+            det_loss = F.binary_cross_entropy(det_probs, binary_y)
+            detection_losses.append(det_loss)
         
-        # Replace any NaN values in mu or phi
-        mu = torch.nan_to_num(mu, nan=0.5)
-        phi = torch.nan_to_num(phi, nan=1.0)
+        # Use configurable detection loss weight
+        detection_loss_weight = args.detection_loss_weight if hasattr(args, 'detection_loss_weight') else 1.0
+        combined_detection_loss = sum(detection_losses) / len(detection_losses)
         
-        # Calculate Beta distribution parameters with safeguards
-        alpha = mu * phi  # [B, 1]
-        beta = (1 - mu) * phi  # [B, 1]
+        # Calculate total loss
+        total_loss = concentration_loss + detection_loss_weight * combined_detection_loss
         
-        # Add safety margin to ensure alpha and beta are positive
-        alpha = torch.clamp(alpha, min=epsilon)
-        beta = torch.clamp(beta, min=epsilon)
-        
-        # Create Beta distribution with safety checks
-        try:
-            dist = Beta(alpha, beta)
-            nll_loss = -dist.log_prob(y_clipped)
-        except ValueError as e:
-            # Fallback to MSE loss if Beta distribution fails
-            print(f"Warning: Beta distribution failed, falling back to MSE loss. Error: {e}")
-            print(f"mu range: {mu.min().item():.4f}-{mu.max().item():.4f}, phi range: {phi.min().item():.4f}-{phi.max().item():.4f}")
-            nll_loss = F.mse_loss(mu, y_clipped, reduction='none')
-        
-        # Get focal weighting factor from args
-        focal_factor = self.focal_weight_factor if hasattr(self, 'focal_weight_factor') else 100
-        low_conc_threshold = self.low_concentration_threshold if hasattr(self, 'low_concentration_threshold') else 0.01
-        
-        # Enhanced focal weighting with configurable factor
-        base_weight = torch.exp(-y_true * focal_factor) + 1.0
-        
-        # Additional weight for samples near thresholds
-        threshold_weight = torch.zeros_like(y_true)
-        for threshold in self.detection_thresholds:
-            if threshold > 0:
-                relative_distance = torch.abs(y_true - threshold) / max(threshold, epsilon)
-                threshold_weight += torch.exp(-relative_distance * 5) * 2.0
-        
-        # Special handling for values below the low concentration threshold
-        is_low_conc = (y_true <= low_conc_threshold).float()
-        is_zero = (y_true < epsilon).float()
-        
-        # Extra weight for low but non-zero concentrations
-        low_conc_weight = is_low_conc * (1 - is_zero) * 2.0
-        
-        # Combine weights (cap at 5x to prevent extreme values)
-        focal_weight = torch.clamp(base_weight + threshold_weight + low_conc_weight, 1.0, 5.0)
-        
-        # Apply focal weighting
-        focal_loss = nll_loss * focal_weight
-        
-        # Add regularization to prevent extremely confident predictions
-        reg_loss = 0.01 * torch.abs(torch.log(torch.clamp(phi, min=epsilon))).mean()
-        
-        return focal_loss.mean() + reg_loss
-    
+        return total_loss, concentration_loss, combined_detection_loss
+
     def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
         """
         Get point estimate and confidence interval using scipy's beta ppf

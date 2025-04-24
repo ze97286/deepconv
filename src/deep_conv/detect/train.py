@@ -1075,8 +1075,6 @@ def get_git_info():
         return {'commit': 'unknown', 'branch': 'unknown', 'clean': False}
 
 
-
-
 # T-cells
 # python -m deep_conv.detect.train \
 # --name CpGenie_T-cells \
