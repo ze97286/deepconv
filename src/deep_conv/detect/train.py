@@ -285,8 +285,6 @@ def train(model, train_loader, val_loader, args, device):
                 
                 loss = loss / args.grad_accum_steps
             
-            print(f"mu has NaN: {torch.isnan(mu).any().item()}")
-            print(f"phi has NaN: {torch.isnan(phi).any().item()}")
             if torch.isnan(mu).any():
                 print(f"First batch with NaN in predictions")
                 # Save problematic batch for further analysis
