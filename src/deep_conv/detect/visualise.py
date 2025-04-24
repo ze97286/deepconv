@@ -4,16 +4,22 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
+import os
+import json
 
-def create_visualisations(predictions, ground_truth, output_dir, threshold=0.5):
+def create_visualisations(predictions, ground_truth, output_dir, threshold=0.01, model_name=None):
     """
-    Create comprehensive visualisations for model performance analysis
+    Create comprehensive visualisations for model performance analysis with consistent metrics
     
     Args:
         predictions: Array of predicted cell type concentrations
         ground_truth: Array of true cell type concentrations
         output_dir: Directory to save visualisations
-        threshold: Classification threshold for binary metrics
+        threshold: Default classification threshold for binary metrics (default 0.01 or 1%)
+        model_name: Optional name of the model for plot titles
+    
+    Returns:
+        Dictionary of calculated metrics
     """
     # Convert to numpy arrays if not already
     y_pred = np.array(predictions).flatten()
@@ -25,7 +31,7 @@ def create_visualisations(predictions, ground_truth, output_dir, threshold=0.5):
         'predicted_value': y_pred,
         'error': y_pred - y_true,
         'abs_error': np.abs(y_pred - y_true),
-        'rel_error': np.where(y_true > 0, (y_pred - y_true) / y_true * 100, np.nan)
+        'rel_error': np.where(y_true > 0, np.abs(y_pred - y_true) / y_true * 100, np.nan)
     })
     
     # Define concentration ranges
@@ -44,51 +50,79 @@ def create_visualisations(predictions, ground_truth, output_dir, threshold=0.5):
         mask = (df['true_value'] >= lower) & (df['true_value'] < upper)
         df.loc[mask, 'range'] = name
     
-    # Calculate metrics
+    # Calculate basic metrics
     r2 = np.corrcoef(y_true, y_pred)[0, 1]**2
     pearson_r = np.corrcoef(y_true, y_pred)[0, 1]
     spearman_r = pd.Series(y_true).corr(pd.Series(y_pred), method='spearman')
     mae = np.mean(np.abs(y_pred - y_true))
     rmse = np.sqrt(np.mean((y_pred - y_true)**2))
-    mape = np.mean(np.abs((y_true - y_pred) / np.maximum(y_true, 1e-6))) * 100
     
     # Calculate percentage within error bounds
     within_5pct = np.mean(np.abs(y_pred - y_true) <= 0.05 * np.maximum(y_true, 1e-6)) * 100
     within_10pct = np.mean(np.abs(y_pred - y_true) <= 0.10 * np.maximum(y_true, 1e-6)) * 100
     within_20pct = np.mean(np.abs(y_pred - y_true) <= 0.20 * np.maximum(y_true, 1e-6)) * 100
     
-    # Create visualisations
+    # Calculate detection metrics with consistent thresholds
+    detection_thresholds = [0.001, 0.01, 0.05, 0.1]
+    detection_metrics = {}
+    
+    for thresh in detection_thresholds:
+        y_true_binary = (y_true >= thresh).astype(int)
+        
+        # Skip if no positive examples
+        if sum(y_true_binary) == 0:
+            continue
+            
+        # ROC curve and AUC
+        fpr, tpr, roc_thresholds = roc_curve(y_true_binary, y_pred)
+        roc_auc = auc(fpr, tpr)
+        
+        # Find sensitivity at 95% specificity (5% FPR)
+        idx_95spec = np.argmin(np.abs(fpr - 0.05))
+        sens_at_95spec = tpr[idx_95spec]
+        
+        # Precision-recall curve and average precision
+        precision, recall, pr_thresholds = precision_recall_curve(y_true_binary, y_pred)
+        ap = average_precision_score(y_true_binary, y_pred)
+        
+        detection_metrics[thresh] = {
+            'auc': float(roc_auc),
+            'sensitivity_at_95spec': float(sens_at_95spec),
+            'average_precision': float(ap),
+            'fpr': fpr.tolist(),
+            'tpr': tpr.tolist(),
+            'precision': precision.tolist(),
+            'recall': recall.tolist()
+        }
+    
+    # Generate standard visualizations
     create_scatter_plot(df, output_dir)
     create_stratified_mae(df, ranges, output_dir)
-    create_relative_error_plot(df, ranges, output_dir)
-    create_roc_curve(y_true, y_pred, threshold, output_dir)
-    create_error_by_range_boxplot(df, output_dir)
-    create_precision_recall_curve(y_true, y_pred, threshold, output_dir)
+    create_relative_error_plot(df, ranges, output_dir) 
     
-    # Print summary statistics
-    print(f"Performance Summary:")
-    print(f"R² Score: {r2:.4f}")
-    print(f"Pearson correlation: {pearson_r:.4f}")
-    print(f"Spearman correlation: {spearman_r:.4f}")
-    print(f"MAE: {mae:.6f}")
-    print(f"RMSE: {rmse:.6f}")
-    print(f"MAPE: {mape:.2f}%")
-    print(f"Within 5% error: {within_5pct:.2f}%")
-    print(f"Within 10% error: {within_10pct:.2f}%")
-    print(f"Within 20% error: {within_20pct:.2f}%")
+    # Generate enhanced metrics and plots
+    create_enhanced_roc_curve(detection_metrics, output_dir, 
+                             title_prefix=model_name if model_name else "")
+    create_magnitude_aware_metrics(df, detection_thresholds, output_dir)
+    create_error_distribution_plot(df, output_dir)
     
-    # Save metrics to file
+    # Compile metrics dictionary for return
     metrics = {
         'r2': float(r2),
         'pearson_r': float(pearson_r),
         'spearman_r': float(spearman_r),
         'mae': float(mae),
         'rmse': float(rmse),
-        'mape': float(mape),
         'within_5pct': float(within_5pct),
         'within_10pct': float(within_10pct),
-        'within_20pct': float(within_20pct)
+        'within_20pct': float(within_20pct),
+        'detection_metrics': detection_metrics
     }
+    
+    # Save metrics to file
+    metrics_file = os.path.join(output_dir, 'visualization_metrics.json')
+    with open(metrics_file, 'w') as f:
+        json.dump(metrics, f, indent=2)
     
     return metrics
 
@@ -160,8 +194,9 @@ def create_scatter_plot(df, output_dir):
     fig.update_yaxes(tickformat='.2%')
     
     # Save figure
-    fig.write_html(f"{output_dir}/scatter_plot_log.html")
-    fig.write_image(f"{output_dir}/scatter_plot_log.png", scale=2)
+    os.makedirs(output_dir, exist_ok=True)
+    fig.write_html(os.path.join(output_dir, 'scatter_plot_log.html'))
+    fig.write_image(os.path.join(output_dir, 'scatter_plot_log.png'), scale=2)
 
 
 def create_stratified_mae(df, ranges, output_dir):
@@ -186,6 +221,10 @@ def create_stratified_mae(df, ranges, output_dir):
     
     # Convert to dataframe
     range_df = pd.DataFrame(range_stats)
+    
+    # Skip if no data
+    if len(range_df) == 0:
+        return
     
     # Create bar chart
     fig = px.bar(
@@ -213,8 +252,9 @@ def create_stratified_mae(df, ranges, output_dir):
     fig.update_traces(textposition='inside')
     
     # Save figure
-    fig.write_html(f"{output_dir}/stratified_mae.html")
-    fig.write_image(f"{output_dir}/stratified_mae.png", scale=2)
+    os.makedirs(output_dir, exist_ok=True)
+    fig.write_html(os.path.join(output_dir, 'stratified_mae.html'))
+    fig.write_image(os.path.join(output_dir, 'stratified_mae.png'), scale=2)
 
 
 def create_relative_error_plot(df, ranges, output_dir):
@@ -228,11 +268,11 @@ def create_relative_error_plot(df, ranges, output_dir):
         range_df = df[mask]
         if len(range_df) > 0:
             # Calculate relative error statistics
-            median_rel_error = range_df['rel_error'].median()
-            mean_rel_error = range_df['rel_error'].mean()
-            std_rel_error = range_df['rel_error'].std()
-            within_10pct = np.mean(np.abs(range_df['rel_error']) <= 10) * 100
-            within_20pct = np.mean(np.abs(range_df['rel_error']) <= 20) * 100
+            median_rel_error = np.nanmedian(range_df['rel_error'])
+            mean_rel_error = np.nanmean(range_df['rel_error']) 
+            std_rel_error = np.nanstd(range_df['rel_error'])
+            within_10pct = np.mean(range_df['rel_error'] <= 10) * 100
+            within_20pct = np.mean(range_df['rel_error'] <= 20) * 100
             
             range_stats.append({
                 'range': name,
@@ -248,6 +288,10 @@ def create_relative_error_plot(df, ranges, output_dir):
     # Convert to dataframe
     range_df = pd.DataFrame(range_stats)
     
+    # Skip if no data
+    if len(range_df) == 0:
+        return
+    
     # Create figure with two y-axes
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     
@@ -262,7 +306,7 @@ def create_relative_error_plot(df, ranges, output_dir):
                 visible=True
             ),
             mode='lines+markers',
-            name='Relative Error (%)',
+            name='Mean Relative Error (%)',
             line=dict(color='red', width=2)
         ),
         secondary_y=False
@@ -287,9 +331,9 @@ def create_relative_error_plot(df, ranges, output_dir):
     
     # Customise layout
     fig.update_layout(
-        title='Relative Error Rate',
+        title='Relative Error by Concentration Range',
         xaxis=dict(
-            title='Intended Dilution (%)',
+            title='Concentration (%)',
             type='log',
             tickformat='.4%'
         ),
@@ -306,52 +350,40 @@ def create_relative_error_plot(df, ranges, output_dir):
     )
     
     # Set y-axes titles
-    fig.update_yaxes(title_text="Percentage / Error", secondary_y=False)
+    fig.update_yaxes(title_text="Relative Error (%)", secondary_y=False)
     fig.update_yaxes(title_text="Percentage Within Tolerance", secondary_y=True)
     
     # Save figure
-    fig.write_html(f"{output_dir}/relative_error_by_range.html")
-    fig.write_image(f"{output_dir}/relative_error_by_range.png", scale=2)
+    os.makedirs(output_dir, exist_ok=True)
+    fig.write_html(os.path.join(output_dir, 'relative_error_by_range.html'))
+    fig.write_image(os.path.join(output_dir, 'relative_error_by_range.png'), scale=2)
 
 
-def create_roc_curve(y_true, y_pred, threshold, output_dir):
+def create_enhanced_roc_curve(detection_metrics, output_dir, title_prefix=""):
     """
-    Create ROC curve for various concentration thresholds
+    Create enhanced ROC curve with consistent metrics from detection_metrics 
     """
-    # Create classification targets at different thresholds
-    thresholds = [0.001, 0.005, 0.01, 0.05, 0.1]
-    
     # Create figure
     fig = go.Figure()
     
-    # Add diagonal reference line
+    # Add diagonal reference line (random classifier)
     fig.add_trace(
         go.Scatter(
             x=[0, 1],
             y=[0, 1],
             mode='lines',
-            name='Chance',
-            line=dict(color='navy', dash='dash'),
+            name='Random',
+            line=dict(color='gray', dash='dash'),
             showlegend=False
         )
     )
     
-    # Add ROC curves for each threshold
-    results = []
-    for thresh in thresholds:
-        y_true_binary = (y_true >= thresh).astype(int)
-        if sum(y_true_binary) > 0:  # Only calculate if we have positive examples
-            fpr, tpr, _ = roc_curve(y_true_binary, y_pred)
-            roc_auc = auc(fpr, tpr)
-            
-            # Add to results
-            results.append({
-                'threshold': thresh,
-                'roc_auc': roc_auc,
-                # Calculate sensitivity and specificity at the detection threshold
-                'sensitivity': tpr[np.argmax(fpr >= 0.05)],
-                'specificity': 1 - fpr[np.argmax(fpr >= 0.05)]
-            })
+    # Add ROC curves for each threshold from the pre-calculated metrics
+    for threshold, metrics in sorted(detection_metrics.items()):
+        if 'fpr' in metrics and 'tpr' in metrics:
+            fpr = metrics['fpr']
+            tpr = metrics['tpr']
+            auc_value = metrics['auc']
             
             # Add to plot
             fig.add_trace(
@@ -359,45 +391,39 @@ def create_roc_curve(y_true, y_pred, threshold, output_dir):
                     x=fpr,
                     y=tpr,
                     mode='lines',
-                    name=f'≥{thresh:.1%}, AUC={roc_auc:.3f}',
+                    name=f'≥{threshold:.1%}, AUC={auc_value:.3f}',
                     line=dict(width=2)
                 )
             )
     
-    # Create annotation with summary metrics
-    primary_thresh = 0.01  # 1% concentration as primary threshold
-    primary_results = next((r for r in results if r['threshold'] == primary_thresh), results[0])
+    # Create summary text with metrics
+    primary_threshold = 0.01  # Default to 1% as primary threshold
     
-    # Calculate overall metrics
-    r2 = np.corrcoef(y_true, y_pred)[0, 1]**2
-    pearson_r = np.corrcoef(y_true, y_pred)[0, 1]
-    spearman_r = pd.Series(y_true).corr(pd.Series(y_pred), method='spearman')
-    mae = np.mean(np.abs(y_pred - y_true))
-    rmse = np.sqrt(np.mean((y_pred - y_true)**2))
-    
-    # Create annotation text
-    annotation_text = (
-        f"<b>Summary Metrics for T-cells</b><br>"
-        f"R²: {r2:.3f} | Pearson r: {pearson_r:.3f} | Spearman r: {spearman_r:.3f}<br>"
-        f"MAE: {mae:.5f} | RMSE: {rmse:.5f}<br>"
-        f"ROC-AUC: {primary_results['roc_auc']:.3f}<br>"
-    )
-    
-    # Add detection metrics for each threshold
-    for result in results:
-        annotation_text += (
-            f"Detection at {result['threshold']:.1%}: "
-            f"{result['sensitivity']:.3f} sens, {result['specificity']:.3f} spec<br>"
+    # Use the provided metrics if available, otherwise use a default message
+    if primary_threshold in detection_metrics:
+        metrics = detection_metrics[primary_threshold]
+        
+        # Create annotation text
+        annotation_text = (
+            f"<b>ROC Analysis Summary</b><br>"
+            f"AUC at {primary_threshold:.1%}: {metrics['auc']:.3f}<br>"
+            f"Sensitivity at 95% specificity: {metrics['sensitivity_at_95spec']:.3f}<br>"
         )
-    
-    # Add a clinical relevance score (simplified example)
-    clinical_score = primary_results['roc_auc'] * 30 + (1 - mae) * 70
-    annotation_text += f"<b>Clinical Relevance Score: {clinical_score:.1f}/100</b>"
+        
+        # Add metrics for each threshold
+        for thresh, thresh_metrics in sorted(detection_metrics.items()):
+            annotation_text += (
+                f"For ≥{thresh:.1%}: "
+                f"AUC = {thresh_metrics['auc']:.3f}, "
+                f"Sens@95%Spec = {thresh_metrics['sensitivity_at_95spec']:.3f}<br>"
+            )
+    else:
+        annotation_text = "Metrics not available for standard thresholds"
     
     # Add annotation to figure
     fig.add_annotation(
         x=0.5,
-        y=0.25,
+        y=0.1,
         xref="paper",
         yref="paper",
         text=annotation_text,
@@ -410,8 +436,12 @@ def create_roc_curve(y_true, y_pred, threshold, output_dir):
     )
     
     # Customise layout
+    title = "ROC Curve by Concentration Threshold"
+    if title_prefix:
+        title = f"{title_prefix} - {title}"
+        
     fig.update_layout(
-        title='Concentration Range<br>ROC Curve',
+        title=title,
         xaxis_title='False Positive Rate',
         yaxis_title='True Positive Rate',
         template='plotly_white',
@@ -427,105 +457,156 @@ def create_roc_curve(y_true, y_pred, threshold, output_dir):
     )
     
     # Save figure
-    fig.write_html(f"{output_dir}/roc_curve.html")
-    fig.write_image(f"{output_dir}/roc_curve.png", scale=2)
+    os.makedirs(output_dir, exist_ok=True)
+    fig.write_html(os.path.join(output_dir, 'enhanced_roc_curve.html'))
+    fig.write_image(os.path.join(output_dir, 'enhanced_roc_curve.png'), scale=2)
 
 
-def create_error_by_range_boxplot(df, output_dir):
+def create_magnitude_aware_metrics(df, thresholds, output_dir):
     """
-    Create boxplot of relative error by concentration range
+    Create metrics and plot for magnitude-aware classification performance.
+    This considers both binary detection and the magnitude of errors.
     """
-    # Create figure
-    fig = go.Figure()
+    # Define error tolerance levels (as fraction of true value)
+    error_tolerances = [0.1, 0.2, 0.5, 1.0, 2.0]  # 10%, 20%, 50%, 100%, 200%
     
-    # Add boxplots for each range
-    for range_name in df['range'].unique():
-        range_df = df[df['range'] == range_name]
-        if len(range_df) > 0:
-            fig.add_trace(
-                go.Box(
-                    y=range_df['rel_error'],
-                    name=range_name,
-                    boxmean=True  # Show mean as a dashed line
-                )
-            )
+    # Initialize results dictionary
+    results = {}
     
-    # Add reference line at 0
-    fig.add_hline(y=0, line=dict(color='black', dash='dot'))
-    
-    # Customise layout
-    fig.update_layout(
-        title='Error by Concentration Range',
-        xaxis_title='Concentration Range',
-        yaxis_title='Relative Error (%)',
-        template='plotly_white',
-        autosize=False,
-        width=900,
-        height=600,
-        yaxis=dict(
-            range=[-200, 200]  # Limit y range for better visualisation
-        )
-    )
-    
-    # Add second y-axis for precision
-    fig.update_layout(
-        yaxis2=dict(
-            title="Precision",
-            titlefont=dict(color="red"),
-            tickfont=dict(color="red"),
-            anchor="x",
-            overlaying="y",
-            side="right",
-            position=1.0
-        )
-    )
-    
-    # Save figure
-    fig.write_html(f"{output_dir}/error_by_range_boxplot.html")
-    fig.write_image(f"{output_dir}/error_by_range_boxplot.png", scale=2)
-
-
-def create_precision_recall_curve(y_true, y_pred, threshold, output_dir):
-    """
-    Create precision-recall curve for various concentration thresholds
-    """
-    # Create classification targets at different thresholds
-    thresholds = [0.001, 0.005, 0.01, 0.05, 0.1]
-    
-    # Create figure
-    fig = go.Figure()
-    
-    # Add precision-recall curves for each threshold
-    for thresh in thresholds:
-        y_true_binary = (y_true >= thresh).astype(int)
-        if sum(y_true_binary) > 0:  # Only calculate if we have positive examples
-            precision, recall, _ = precision_recall_curve(y_true_binary, y_pred)
-            ap = average_precision_score(y_true_binary, y_pred)
+    # For each concentration threshold
+    for threshold in thresholds:
+        tolerance_results = {}
+        
+        # For each error tolerance
+        for tolerance in error_tolerances:
+            # True positive: predicted ≥ threshold when true ≥ threshold AND within tolerance
+            tp_mask = (df['true_value'] >= threshold) & (df['predicted_value'] >= threshold) & \
+                     (df['rel_error'] <= tolerance * 100)
             
-            # Add to plot
-            fig.add_trace(
-                go.Scatter(
-                    x=recall,
-                    y=precision,
-                    mode='lines',
-                    name=f'≥{thresh:.1%}, AP={ap:.3f}',
-                    line=dict(width=2)
-                )
-            )
+            # False positive: predicted ≥ threshold when true < threshold OR exceeds tolerance
+            fp_mask = ((df['true_value'] < threshold) & (df['predicted_value'] >= threshold)) | \
+                     ((df['true_value'] >= threshold) & (df['predicted_value'] >= threshold) & \
+                      (df['rel_error'] > tolerance * 100))
+            
+            # True negative: predicted < threshold when true < threshold
+            tn_mask = (df['true_value'] < threshold) & (df['predicted_value'] < threshold)
+            
+            # False negative: predicted < threshold when true ≥ threshold
+            fn_mask = (df['true_value'] >= threshold) & (df['predicted_value'] < threshold)
+            
+            # Calculate counts
+            tp = tp_mask.sum()
+            fp = fp_mask.sum()
+            tn = tn_mask.sum()
+            fn = fn_mask.sum()
+            
+            # Calculate metrics
+            sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+            specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            f1_score = 2 * precision * sensitivity / (precision + sensitivity) if (precision + sensitivity) > 0 else 0
+            
+            # Store metrics
+            tolerance_results[tolerance] = {
+                'sensitivity': float(sensitivity),
+                'specificity': float(specificity),
+                'precision': float(precision),
+                'f1_score': float(f1_score),
+                'tp': int(tp),
+                'fp': int(fp),
+                'tn': int(tn),
+                'fn': int(fn)
+            }
+        
+        results[threshold] = tolerance_results
     
-    # Add reference line for random classifier
-    baseline = sum(y_true >= threshold) / len(y_true)
-    fig.add_hline(y=baseline, line=dict(color='gray', dash='dash'))
+    # Create plot for key threshold (1%)
+    create_magnitude_aware_plot(results, output_dir)
     
-    # Customise layout
+    # Save results to file
+    magnitude_metrics_file = os.path.join(output_dir, 'magnitude_aware_metrics.json')
+    with open(magnitude_metrics_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    return results
+
+
+def create_magnitude_aware_plot(results, output_dir):
+    """
+    Create plot for magnitude-aware classification metrics
+    """
+    # Select a primary threshold for visualization (typically 1%)
+    primary_threshold = 0.01
+    if primary_threshold not in results:
+        # Use the first available threshold
+        primary_threshold = list(results.keys())[0]
+    
+    # Prepare data for plotting
+    tolerance_metrics = results[primary_threshold]
+    tolerances = sorted(float(t) for t in tolerance_metrics.keys())
+    
+    sensitivity = [tolerance_metrics[t]['sensitivity'] for t in tolerances]
+    specificity = [tolerance_metrics[t]['specificity'] for t in tolerances]
+    precision = [tolerance_metrics[t]['precision'] for t in tolerances]
+    f1_score = [tolerance_metrics[t]['f1_score'] for t in tolerances]
+    
+    # Convert tolerances to percentage labels for x-axis
+    tolerance_labels = [f"{t*100:.0f}%" for t in tolerances]
+    
+    # Create figure
+    fig = go.Figure()
+    
+    # Add metric lines
+    fig.add_trace(
+        go.Scatter(
+            x=tolerance_labels,
+            y=sensitivity,
+            mode='lines+markers',
+            name='Sensitivity',
+            line=dict(color='blue', width=2)
+        )
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=tolerance_labels,
+            y=specificity,
+            mode='lines+markers',
+            name='Specificity',
+            line=dict(color='red', width=2)
+        )
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=tolerance_labels,
+            y=precision,
+            mode='lines+markers',
+            name='Precision',
+            line=dict(color='green', width=2)
+        )
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=tolerance_labels,
+            y=f1_score,
+            mode='lines+markers',
+            name='F1 Score',
+            line=dict(color='purple', width=2)
+        )
+    )
+    
+    # Customize layout
     fig.update_layout(
-        title='Precision-Recall Curve',
-        xaxis_title='Recall',
-        yaxis_title='Precision',
+        title=f'Magnitude-Aware Classification Metrics at {primary_threshold:.1%} Threshold',
+        xaxis_title='Error Tolerance',
+        yaxis_title='Metric Value',
         template='plotly_white',
         autosize=False,
         width=900,
         height=600,
+        yaxis=dict(range=[0, 1]),
         legend=dict(
             yanchor="bottom",
             y=0.01,
@@ -535,52 +616,119 @@ def create_precision_recall_curve(y_true, y_pred, threshold, output_dir):
     )
     
     # Save figure
-    fig.write_html(f"{output_dir}/precision_recall_curve.html")
-    fig.write_image(f"{output_dir}/precision_recall_curve.png", scale=2)
+    os.makedirs(output_dir, exist_ok=True)
+    fig.write_html(os.path.join(output_dir, 'magnitude_aware_metrics.html'))
+    fig.write_image(os.path.join(output_dir, 'magnitude_aware_metrics.png'), scale=2)
 
 
-# Example usage
+def create_error_distribution_plot(df, output_dir):
+    """
+    Create error distribution plot to show both absolute and relative errors
+    """
+    fig = make_subplots(rows=2, cols=1, 
+                       subplot_titles=('Absolute Error Distribution', 'Relative Error Distribution'))
+    
+    # Add absolute error histogram
+    fig.add_trace(
+        go.Histogram(
+            x=df['abs_error'],
+            nbinsx=50,
+            name='Absolute Error',
+            marker_color='blue',
+            opacity=0.7
+        ),
+        row=1, col=1
+    )
+    
+    # Add vertical line at median and mean
+    median_abs_error = df['abs_error'].median()
+    mean_abs_error = df['abs_error'].mean()
+    
+    fig.add_vline(x=median_abs_error, line=dict(color="red", dash="dash"), 
+                 annotation_text=f"Median: {median_abs_error:.6f}", row=1, col=1)
+    fig.add_vline(x=mean_abs_error, line=dict(color="green", dash="dash"), 
+                 annotation_text=f"Mean: {mean_abs_error:.6f}", row=1, col=1)
+    
+    # Add relative error histogram (cap extreme values)
+    rel_error_capped = df['rel_error'].clip(-1000, 1000)  # Cap at ±1000%
+    rel_error_valid = rel_error_capped.dropna()
+    
+    fig.add_trace(
+        go.Histogram(
+            x=rel_error_valid,
+            nbinsx=50,
+            name='Relative Error',
+            marker_color='orange',
+            opacity=0.7
+        ),
+        row=2, col=1
+    )
+    
+    # Add vertical line at median and mean
+    median_rel_error = rel_error_valid.median()
+    mean_rel_error = rel_error_valid.mean()
+    
+    fig.add_vline(x=median_rel_error, line=dict(color="red", dash="dash"), 
+                 annotation_text=f"Median: {median_rel_error:.1f}%", row=2, col=1)
+    fig.add_vline(x=mean_rel_error, line=dict(color="green", dash="dash"), 
+                 annotation_text=f"Mean: {mean_rel_error:.1f}%", row=2, col=1)
+    
+    # Add reference lines at ±20%
+    fig.add_vline(x=20, line=dict(color="gray", dash="dot"), row=2, col=1)
+    fig.add_vline(x=-20, line=dict(color="gray", dash="dot"), row=2, col=1)
+    
+    # Update layout
+    fig.update_layout(
+        title='Error Distribution Analysis',
+        template='plotly_white',
+        height=800,
+        width=900,
+        showlegend=False
+    )
+    
+    # Update x-axis ranges
+    fig.update_xaxes(title_text="Absolute Error", row=1, col=1)
+    fig.update_xaxes(title_text="Relative Error (%)", row=2, col=1, range=[-100, 100])
+    
+    # Save figure
+    os.makedirs(output_dir, exist_ok=True)
+    fig.write_html(os.path.join(output_dir, 'error_distribution.html'))
+    fig.write_image(os.path.join(output_dir, 'error_distribution.png'), scale=2)
+
+
+def visualize_test_results(results_file, output_dir):
+    """
+    Visualize test results from a results.json file
+    
+    Args:
+        results_file: Path to test_results.json file
+        output_dir: Directory to save visualizations
+    """
+    # Load results
+    with open(results_file, 'r') as f:
+        results = json.load(f)
+    
+    # Extract data
+    predictions = np.array(results['predictions'])
+    targets = np.array(results['targets'])
+    
+    # Create visualizations
+    return create_visualisations(predictions, targets, output_dir)
+
+
 if __name__ == "__main__":
     import argparse
     import os
-    import json
     
-    parser = argparse.ArgumentParser(description='Create visualisations for model evaluation')
-    parser.add_argument('--predictions', type=str, required=True, help='Path to predictions JSON or CSV')
-    parser.add_argument('--ground_truth', type=str, required=True, help='Path to ground truth JSON or CSV')
-    parser.add_argument('--output_dir', type=str, default='visualisations', help='Output directory')
+    parser = argparse.ArgumentParser(description='Create enhanced visualizations for model evaluation')
+    parser.add_argument('--results_file', type=str, help='Path to test_results.json file')
+    parser.add_argument('--output_dir', type=str, default='enhanced_visualizations', help='Output directory')
     
     args = parser.parse_args()
     
-    # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Load predictions and ground truth
-    if args.predictions.endswith('.json'):
-        with open(args.predictions, 'r') as f:
-            predictions_data = json.load(f)
-        
-        if isinstance(predictions_data, dict) and 'predictions' in predictions_data:
-            predictions = predictions_data['predictions']
-        else:
-            predictions = predictions_data
+    if args.results_file:
+        metrics = visualize_test_results(args.results_file, args.output_dir)
+        print("Enhanced visualizations saved to", args.output_dir)
+        print(f"Key metrics: R² = {metrics['r2']:.4f}, MAE = {metrics['mae']:.6f}")
     else:
-        predictions = pd.read_csv(args.predictions).values.flatten()
-    
-    if args.ground_truth.endswith('.json'):
-        with open(args.ground_truth, 'r') as f:
-            ground_truth_data = json.load(f)
-        
-        if isinstance(ground_truth_data, dict) and 'ground_truth' in ground_truth_data:
-            ground_truth = ground_truth_data['ground_truth']
-        else:
-            ground_truth = ground_truth_data
-    else:
-        ground_truth = pd.read_csv(args.ground_truth).values.flatten()
-    
-    # Create visualisations
-    metrics = create_visualisations(predictions, ground_truth, args.output_dir)
-    
-    # Save metrics
-    with open(f"{args.output_dir}/metrics.json", 'w') as f:
-        json.dump(metrics, f, indent=2)
+        print("Please provide a results file with --results_file")

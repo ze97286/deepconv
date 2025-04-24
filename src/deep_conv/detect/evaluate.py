@@ -11,7 +11,7 @@ from tqdm import tqdm
 from sklearn.metrics import r2_score, mean_absolute_error, roc_auc_score, precision_recall_curve, auc
 
 from deep_conv.detect.preprocess import prepare_data_for_evaluation
-from deep_conv.detect.model import SetTransformerCancerDetection
+from deep_conv.detect.model import EnhancedCancerDetectionModel, CancerDetectionEnsemble
 
 
 def setup_logging(output_dir=None):
@@ -88,40 +88,64 @@ def load_model(model_dir, device='cpu'):
         if not args:
             logger.warning(f"No args.json found in {model_dir}. Using default parameters.")
             args = {}
-
-    # Standard single model
-    # Get model parameters
-    model_state = checkpoint.get('model', None)
-    if model_state is None:
-        # Some checkpoints store the model state directly
-        model_state = checkpoint
-
-    # Get num_markers from the first layer weights if not in args
-    if 'num_markers' not in args and isinstance(model_state, dict):
-        # Try to infer from marker_embedding.weight
-        marker_weights = model_state.get('marker_embedding.weight', None)
-        if marker_weights is not None:
-            args['num_markers'] = marker_weights.shape[0]
-
-    # Create and load model
-    model = SetTransformerCancerDetection(
-        num_markers=args.get("num_markers", 1000),
-        feature_dim=args.get("feature_dim", 128),
-        num_heads=args.get("num_heads", 8),
-        num_inds=args.get("num_inds", 3),
-        num_encoder_blocks=args.get("num_encoder_blocks", 3),
-        dropout_rate=args.get("dropout_rate", 0.2),
-        detection_thresholds=args.get("detection_thresholds", [0.001, 0.01, 0.05]),
-        focal_weight_factor=args.get("focal_weight_factor", 100),
-    )
-
-    # Load model weights
-    model.load_state_dict(model_state)
-
+    
+    # Check if it's an ensemble model
+    if 'model_states' in checkpoint:
+        logger.info("Detected ensemble model")
+        # Extract model config
+        config = checkpoint.get('model_config', {})
+        
+        # Create individual models
+        models = []
+        for model_state in checkpoint['model_states']:
+            model = EnhancedCancerDetectionModel(
+                num_markers=config.get('num_markers', 1000),
+                feature_dim=config.get('feature_dim', 128),
+                num_heads=config.get('num_heads', 8),
+                num_layers=config.get('num_layers', 3),
+                dropout_rate=config.get('dropout_rate', 0.2),
+                use_pos_encoding=config.get('use_pos_encoding', True),
+                detection_thresholds=config.get('detection_thresholds', [0.001, 0.01, 0.05])
+            )
+            model.load_state_dict(model_state)
+            models.append(model)
+        
+        # Create ensemble
+        model = CancerDetectionEnsemble(models)
+        
+    else:
+        # Standard single model
+        # Get model parameters
+        model_state = checkpoint.get('model', None)
+        if model_state is None:
+            # Some checkpoints store the model state directly
+            model_state = checkpoint
+        
+        # Get num_markers from the first layer weights if not in args
+        if 'num_markers' not in args and isinstance(model_state, dict):
+            # Try to infer from marker_embedding.weight
+            marker_weights = model_state.get('marker_embedding.weight', None)
+            if marker_weights is not None:
+                args['num_markers'] = marker_weights.shape[0]
+            
+        # Create and load model
+        model = EnhancedCancerDetectionModel(
+            num_markers=args.get('num_markers', 1000),
+            feature_dim=args.get('feature_dim', 128),
+            num_heads=args.get('num_heads', 8),
+            num_layers=args.get('num_layers', 3),
+            dropout_rate=args.get('dropout_rate', 0.2),
+            use_pos_encoding=args.get('use_pos_encoding', True),
+            detection_thresholds=args.get('detection_thresholds', [0.001, 0.01, 0.05])
+        )
+        
+        # Load model weights
+        model.load_state_dict(model_state)
+    
     # Move model to device
     model = model.to(device)
     model.eval()
-
+    
     logger.info(f"Model loaded successfully")
     return model, args
 
@@ -180,8 +204,22 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
             marker_values = marker_values.to(device)
             coverage = coverage.to(device)
             y_true = y_true.to(device)
-            mu, phi, det_probs, _ = model(marker_values, coverage)
-            estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
+            
+            # Handle different model types
+            if isinstance(model, CancerDetectionEnsemble):
+                # Ensemble model
+                mu, phi, det_probs = model(marker_values, coverage)
+                estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
+            else:
+                # Single model
+                if hasattr(model, 'forward_with_detection'):
+                    # Enhanced model with detection
+                    mu, phi, det_probs, _ = model.forward_with_detection(marker_values, coverage)
+                else:
+                    # Standard model
+                    mu, phi, det_probs, _ = model(marker_values, coverage)
+                
+                estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
             
             # Store predictions
             all_preds.append(estimate.cpu().numpy())
@@ -1369,7 +1407,7 @@ def plot_predictions(predictions, targets, lower_ci, upper_ci, output_dir):
     fig.update_layout(
         title=f'Predictions vs Targets (sorted) (R² = {r2:.4f}, MAE = {mae:.4f})',
         xaxis_title='Sample Index (sorted by true value)',
-        yaxis_title='Concentration',
+        yaxis_title='Cell type Concentration',
         template='plotly_white',
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
         width=900,
@@ -1422,8 +1460,8 @@ def plot_predictions(predictions, targets, lower_ci, upper_ci, output_dir):
     # Update layout
     fig.update_layout(
         title=f'True vs Predicted (R² = {r2:.4f}, MAE = {mae:.4f})',
-        xaxis_title='True Concentration',
-        yaxis_title='Predicted Concentration',
+        xaxis_title='True Cell type Concentration',
+        yaxis_title='Predicted Cell type Concentration',
         template='plotly_white',
         width=800,
         height=800,

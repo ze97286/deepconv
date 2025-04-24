@@ -254,7 +254,7 @@ def prepare_data_for_training(
 
 
 def prepare_data_for_evaluation(
-        data_dir,
+    data_dir,
     atlas_path,
     target_cell_type,
     target_cell_idx,

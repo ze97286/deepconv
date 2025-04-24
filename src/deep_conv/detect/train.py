@@ -11,7 +11,7 @@ from sklearn.metrics import r2_score, mean_absolute_error
 import torch.nn.functional as F
 
 from deep_conv.detect.preprocess import prepare_data_for_training
-from deep_conv.detect.model import SetTransformerCancerDetection, MarkerImportanceAnalyser
+from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyser, CancerDetectionEnsemble
 
 
 def parse_args():
@@ -25,20 +25,12 @@ def parse_args():
     parser.add_argument('--target_cell_type', type=str, default='OAC', help='Target cell type')
     parser.add_argument('--target_cell_idx', type=int, default=9, help='Target cell index in ground truth')
     
-    # Model parameters - Add Set Transformer specific parameters
+    # Model parameters
     parser.add_argument('--feature_dim', type=int, default=128, help='Feature dimension')
     parser.add_argument('--num_heads', type=int, default=8, help='Number of attention heads')
-    
-    # Set Transformer specific params (new)
-    parser.add_argument('--num_inds', type=int, default=8, help='Number of inducing points for PMA in Set Transformer')
-    parser.add_argument('--num_encoder_blocks', type=int, default=2, help='Number of encoder blocks in Set Transformer')
-    
-    # Remove transformer-specific params which don't apply to Set Transformer
-    # (Keep them but they'll be ignored for Set Transformer)
-    parser.add_argument('--num_layers', type=int, default=3, help='Number of transformer layers (ignored for Set Transformer)')
-    parser.add_argument('--use_pos_encoding', action='store_true', help='Use positional encoding (ignored for Set Transformer)')
-    
+    parser.add_argument('--num_layers', type=int, default=3, help='Number of transformer layers')
     parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate')
+    parser.add_argument('--num_layers', type=int, default=3, help='Number of transformer layers (ignored for Set Transformer)')
     
     parser.add_argument('--cell_profile', type=str, default=None, 
                        choices=['default', 'high_snr', 'low_snr', 'ultra_low_snr'],
@@ -58,7 +50,12 @@ def parse_args():
     parser.add_argument('--grad_accum_steps', type=int, default=4, help='Gradient accumulation steps')
     parser.add_argument('--early_stopping', type=int, default=10, help='Early stopping patience')
     parser.add_argument('--output_dir', type=str, default="/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell", help='Output directory')
-        
+    
+    # Ensemble parameters
+    parser.add_argument('--ensemble', action='store_true', help='Use ensemble of models')
+    parser.add_argument('--ensemble_size', type=int, default=3, help='Number of models in ensemble')
+    parser.add_argument('--ensemble_seeds', type=str, default=None, help='Comma-separated seeds for ensemble models')
+    
     # Evaluation parameters
     parser.add_argument('--detection_thresholds', type=str, default="0.001,0.01,0.05", help='Comma-separated detection thresholds')
     
@@ -79,6 +76,14 @@ def parse_args():
 
     # Process detection thresholds
     args.detection_thresholds = [float(x) for x in args.detection_thresholds.split(',')]
+    
+    # Process ensemble seeds if provided
+    if args.ensemble and args.ensemble_seeds:
+        args.ensemble_seeds = [int(x) for x in args.ensemble_seeds.split(',')]
+    elif args.ensemble:
+        # Generate random seeds if not provided
+        base_seed = args.seed
+        args.ensemble_seeds = [base_seed + i for i in range(args.ensemble_size)]
     
     if args.cell_profile:
         apply_cell_profile(args)
@@ -161,22 +166,7 @@ def setup_logging(output_dir):
 
 
 def calculate_loss(model, mu, phi, detection_probs, y_true, args):
-    """
-    Calculate combined loss using configurable parameters
-    
-    Args:
-        model: The model instance
-        mu: Predicted mean (concentration)
-        phi: Precision parameter
-        detection_probs: List of detection probabilities for each threshold
-        y_true: Ground truth concentration
-        args: Arguments including detection thresholds and weights
-        
-    Returns:
-        total_loss: Combined loss for optimization
-        concentration_loss: Loss component for concentration estimation
-        detection_loss: Loss component for binary detection
-    """
+    """Calculate combined loss using configurable parameters"""
     # Get concentration loss
     concentration_loss = model.compute_loss(mu, phi, y_true)
     
@@ -185,18 +175,12 @@ def calculate_loss(model, mu, phi, detection_probs, y_true, args):
     for i, threshold in enumerate(args.detection_thresholds):
         # Convert continuous concentration to binary label
         binary_y = (y_true >= threshold).float()
-        
-        # The key issue: make sure detection probability outputs are properly bounded
-        # The sigmoid in the model's detection head should already ensure this,
-        # but floating point precision issues can cause values slightly outside [0,1]
-        det_probs = torch.clamp(detection_probs[i], 0.0, 1.0)
-        
-        # Standard BCE loss with properly bounded inputs
-        det_loss = F.binary_cross_entropy(det_probs, binary_y)
+        # Binary cross-entropy loss
+        det_loss = F.binary_cross_entropy(detection_probs[i], binary_y)
         detection_losses.append(det_loss)
     
     # Use configurable detection loss weight
-    detection_loss_weight = args.detection_loss_weight if hasattr(args, 'detection_loss_weight') else 1.0
+    detection_loss_weight = args.detection_loss_weight
     combined_detection_loss = sum(detection_losses) / len(detection_losses)
     
     # Calculate total loss
@@ -284,17 +268,6 @@ def train(model, train_loader, val_loader, args, device):
                     det_loss = 0.0
                 
                 loss = loss / args.grad_accum_steps
-            
-            if torch.isnan(mu).any():
-                print(f"First batch with NaN in predictions")
-                # Save problematic batch for further analysis
-                torch.save({
-                    'marker_values': marker_values,
-                    'coverage': coverage,
-                    'y_true': y_true
-                }, 'debug_batch.pt')
-                # Exit training to prevent further issues
-                raise ValueError("NaN in predictions - check debug_batch.pt")
 
             # Mixed precision backward pass
             scaler.scale(loss).backward()
@@ -490,15 +463,15 @@ def train(model, train_loader, val_loader, args, device):
     # Save training history with improved error handling
     history_path = os.path.join(args.output_dir, 'training_history.json')
     with open(history_path, 'w') as f:
-        serializable_history = {}
+        serialisable_history = {}
         for key, values in history.items():
             if key != 'detection_metrics':
-                serializable_history[key] = [float(v) for v in values]
+                serialisable_history[key] = [float(v) for v in values]
             else:
                 # Handle nested dictionaries for detection metrics
-                serializable_detection_metrics = []
+                serialisable_detection_metrics = []
                 for epoch_metrics in values:
-                    serializable_epoch_metrics = {}
+                    serialisable_epoch_metrics = {}
                     for thresh, metrics in epoch_metrics.items():
                         if isinstance(thresh, dict):
                             # If thresh is already a dict, something is wrong with the data structure
@@ -512,15 +485,15 @@ def train(model, train_loader, val_loader, args, device):
                         # Similar safeguard for metrics
                         if isinstance(metrics, dict):
                             # Convert all metric values to float
-                            serializable_metrics = {k: float(v) if not isinstance(v, dict) else str(v) for k, v in metrics.items()}
+                            serialisable_metrics = {k: float(v) if not isinstance(v, dict) else str(v) for k, v in metrics.items()}
                         else:
                             # If metrics is not a dict (unexpected), store as string
-                            serializable_metrics = {"value": str(metrics)}
+                            serialisable_metrics = {"value": str(metrics)}
                         
-                        serializable_epoch_metrics[thresh_key] = serializable_metrics
-                    serializable_detection_metrics.append(serializable_epoch_metrics)
-                serializable_history[key] = serializable_detection_metrics
-        json.dump(serializable_history, f)
+                        serialisable_epoch_metrics[thresh_key] = serialisable_metrics
+                    serialisable_detection_metrics.append(serialisable_epoch_metrics)
+                serialisable_history[key] = serialisable_detection_metrics
+        json.dump(serialisable_history, f)
     
     logger.info(f"Training history saved to {history_path}")
     
@@ -967,11 +940,18 @@ def evaluate(model, data_loader, args, device, split_name="test"):
         for marker_values, coverage, y_true in eval_bar:
             marker_values = marker_values.to(device)
             coverage = coverage.to(device)
-            y_true = y_true.to(device)    
-           
-            mu, phi, det_probs, attention_weights = model(marker_values, coverage)
-            estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
-        
+            y_true = y_true.to(device)
+            
+            # Handle different return signatures
+            if isinstance(model, CancerDetectionEnsemble):
+                mu, phi, det_probs = model.forward(marker_values, coverage)
+                estimate, ci, uncertainty = model.get_estimate_and_ci(marker_values, coverage)
+                # Use first model's attention weights for analysis
+                _, _, _, attention_weights = model.models[0](marker_values, coverage)
+            else:
+                mu, phi, det_probs, attention_weights = model(marker_values, coverage)
+                estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
+            
             all_preds.append(estimate.cpu().numpy())
             all_targets.append(y_true.cpu().numpy())
             all_lower_ci.append(ci[:, 0:1].cpu().numpy())
@@ -1045,13 +1025,13 @@ def evaluate(model, data_loader, args, device, split_name="test"):
     logger.info(f"{split_name} results saved to {results_file}")
     
     # Create visualisations
-    viz_dir = os.path.join(args.output_dir, 'visualisations')
-    split_viz_dir = os.path.join(viz_dir, split_name)
+    vis_dir = os.path.join(args.output_dir, 'visualisations')
+    split_vis_dir = os.path.join(vis_dir, split_name)
     
     visualise_results(
         predictions=all_preds,
         ground_truth=all_targets,
-        output_subdir=split_viz_dir,
+        output_subdir=split_vis_dir,
         ci_data=(all_lower_ci, all_upper_ci),
         marker_importance=all_marker_attentions.mean(axis=0),
         prefix=f"{split_name.capitalize()} "
@@ -1070,6 +1050,90 @@ def evaluate(model, data_loader, args, device, split_name="test"):
         logger.info(f"  #{i+1}: Marker {idx} (weight: {weight:.4f})")
         
     return results
+
+
+def train_ensemble(args, train_loader, val_loader, test_loader, num_markers, device):
+    """Train an ensemble of models with different random seeds"""
+    logger = logging.getLogger('cancer_detection')
+    logger.info(f"Training ensemble of {args.ensemble_size} models...")
+    
+    models = []
+    best_states = []
+    
+    # Create subdirectory for individual models
+    ensemble_dir = os.path.join(args.output_dir, 'ensemble_models')
+    os.makedirs(ensemble_dir, exist_ok=True)
+    
+    # Train each model with a different seed
+    for i, seed in enumerate(args.ensemble_seeds):
+        logger.info(f"\n{'='*20} TRAINING ENSEMBLE MODEL {i+1}/{args.ensemble_size} (SEED: {seed}) {'='*20}\n")
+        
+        # Set seed for this model
+        set_seed(seed)
+        
+        # Create model
+        model = EnhancedCancerDetectionModel(
+            num_markers=num_markers,
+            feature_dim=args.feature_dim,
+            num_heads=args.num_heads,
+            num_layers=args.num_layers,
+            dropout_rate=args.dropout_rate,
+            use_pos_encoding=args.use_pos_encoding,
+            detection_thresholds=args.detection_thresholds
+        )
+        
+        # Create model directory
+        model_dir = os.path.join(ensemble_dir, f'model_{i+1}_seed_{seed}')
+        os.makedirs(model_dir, exist_ok=True)
+        
+        # Store original output_dir
+        original_output_dir = args.output_dir
+        
+        # Temporarily set output_dir to model directory
+        args.output_dir = model_dir
+        
+        # Train model
+        model, best_state = train(model, train_loader, val_loader, args, device)
+        
+        # Reset output_dir
+        args.output_dir = original_output_dir
+        
+        # Store model and best state
+        models.append(model)
+        best_states.append(best_state)
+        
+        # Log model results
+        logger.info(f"Model {i+1}/{args.ensemble_size} training complete")
+        logger.info(f"Best validation loss: {best_state['val_loss']:.6f}")
+        logger.info(f"Best R² score: {best_state['r2_score']:.4f}")
+    
+    # Create ensemble model
+    ensemble = CancerDetectionEnsemble(models)
+    
+    logger.info("\n" + "="*50)
+    logger.info(f"ENSEMBLE TRAINING COMPLETE ({args.ensemble_size} models)")
+    
+    # Save ensemble model
+    ensemble_state = {
+        'model_states': [model.state_dict() for model in models],
+        'ensemble_size': args.ensemble_size,
+        'seeds': args.ensemble_seeds,
+        'model_config': {
+            'num_markers': num_markers,
+            'feature_dim': args.feature_dim,
+            'num_heads': args.num_heads,
+            'num_layers': args.num_layers,
+            'dropout_rate': args.dropout_rate,
+            'use_pos_encoding': args.use_pos_encoding,
+            'detection_thresholds': args.detection_thresholds
+        }
+    }
+    
+    ensemble_path = os.path.join(args.output_dir, 'ensemble_model.pt')
+    torch.save(ensemble_state, ensemble_path)
+    logger.info(f"Ensemble model saved to {ensemble_path}")
+    
+    return ensemble, ensemble_state
 
 
 def get_git_info():
@@ -1109,8 +1173,6 @@ def get_git_info():
 # T-cells
 # python -m deep_conv.detect.train \
 # --name CpGenie_T-cells \
-# --num_inds 8 \  
-# --num_encoder_blocks 3 \ 
 # --focal_weight_factor 200 \
 # --detection_loss_weight 0.6 \
 # --low_concentration_threshold 0.03 \
@@ -1120,11 +1182,10 @@ def get_git_info():
 # --grad_accum_steps 8 \
 # --cell_profile ultra_low_snr 
 
+
 # OAC
 # python -m deep_conv.detect.train \
 # --name CpGenie_OAC \
-# --num_inds 8 \
-# --num_encoder_blocks 2 \
 # --focal_weight_factor 100 \
 # --detection_loss_weight 0.2 \
 # --low_concentration_threshold 0.01 \
@@ -1133,6 +1194,7 @@ def get_git_info():
 # --target_cell_idx 9 \
 # --cell_profile high_snr
 
+# python -m deep_conv.detect.train --ensemble --ensemble_size=3 --detection_thresholds=0.001,0.01,0.05 --name CpGenie_ensemble 
 def main():
     """Main function with enhanced logging and progress tracking"""
     # Parse arguments
@@ -1181,41 +1243,50 @@ def main():
     stats_file = os.path.join(args.output_dir, 'data_stats.json')
     with open(stats_file, 'w') as f:
         # Convert numpy types to Python types for JSON serialisation
-        serializable_stats = {k: float(v) for k, v in data_stats.items()}
-        json.dump(serializable_stats, f, indent=2)
+        serialisable_stats = {k: float(v) for k, v in data_stats.items()}
+        json.dump(serialisable_stats, f, indent=2)
     logger.info(f"Data statistics saved to {stats_file}")
     
     # Training phase
-    logger.info(f"Initialising Set Transformer model with {num_markers} markers...")
-    try:
-        model = SetTransformerCancerDetection(
+    if args.ensemble:
+        logger.info(f"Training ensemble of {args.ensemble_size} models...")
+        model, best_model_state = train_ensemble(
+            args=args,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
             num_markers=num_markers,
-            feature_dim=args.feature_dim,
-            num_heads=args.num_heads,
-            num_inds=args.num_inds,
-            num_encoder_blocks=args.num_encoder_blocks,
-            dropout_rate=args.dropout_rate,
-            detection_thresholds=args.detection_thresholds,
-            focal_weight_factor=args.focal_weight_factor if hasattr(args, 'focal_weight_factor') else 100,
-            low_concentration_threshold=args.low_concentration_threshold if hasattr(args, 'low_concentration_threshold') else 0.01
+            device=device
         )
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info(f"✓ Model initialized with {total_params:,} total parameters ({trainable_params:,} trainable)")
-        logger.info(f"  Using {args.num_inds} inducing points and {args.num_encoder_blocks} encoder blocks")
-    except Exception as e:
-        logger.error(f"× Error initializing model: {str(e)}")
-        raise
+    else:
+        # initialise single model
+        logger.info(f"initialising model with {num_markers} markers...")
+        try:
+            model = EnhancedCancerDetectionModel(
+                num_markers=num_markers,
+                feature_dim=args.feature_dim,
+                num_heads=args.num_heads,
+                num_layers=args.num_layers,
+                dropout_rate=args.dropout_rate,
+                use_pos_encoding=args.use_pos_encoding,
+                detection_thresholds=args.detection_thresholds
+            )
+            total_params = sum(p.numel() for p in model.parameters())
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            logger.info(f"✓ Model initialised with {total_params:,} total parameters ({trainable_params:,} trainable)")
+        except Exception as e:
+            logger.error(f"× Error initialising model: {str(e)}")
+            raise
         
-    # Train model
-    logger.info("Starting model training...")
-    try:
-        model, best_model_state = train(model, train_loader, val_loader, args, device)
-        logger.info(f"✓ Training completed successfully")
-    except Exception as e:
-        logger.error(f"× Error during training: {str(e)}")
-        raise
-
+        # Train model
+        logger.info("Starting model training...")
+        try:
+            model, best_model_state = train(model, train_loader, val_loader, args, device)
+            logger.info(f"✓ Training completed successfully")
+        except Exception as e:
+            logger.error(f"× Error during training: {str(e)}")
+            raise
+    
     # Evaluation phase
     try:
         # Validate final model
@@ -1227,11 +1298,15 @@ def main():
         test_results = evaluate(model, test_loader, args, device, split_name="test")
         
         # Print summary
-        logger.info("\n" + "="*60)
-        logger.info("TRAINING PIPELINE COMPLETED SUCCESSFULLY")
-        logger.info(f"Best validation loss: {best_model_state['val_loss']:.6f}")
-        logger.info(f"Best validation R²: {best_model_state['r2_score']:.4f}")
-        
+        if args.ensemble:
+            logger.info("\n" + "="*60)
+            logger.info("ENSEMBLE EVALUATION COMPLETE")
+        else:
+            logger.info("\n" + "="*60)
+            logger.info("TRAINING PIPELINE COMPLETED SUCCESSFULLY")
+            logger.info(f"Best validation loss: {best_model_state['val_loss']:.6f}")
+            logger.info(f"Best validation R²: {best_model_state['r2_score']:.4f}")
+            
         logger.info(f"Validation R²: {val_results['metrics']['r2']:.4f}")
         logger.info(f"Validation MAE: {val_results['metrics']['mae']:.6f}")
         logger.info(f"Test R²: {test_results['metrics']['r2']:.4f}")
