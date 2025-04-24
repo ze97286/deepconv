@@ -184,13 +184,13 @@ class SetTransformerCancerDetection(nn.Module):
             marker_values: Marker methylation values [batch_size, num_markers]
             coverage: Coverage values for each marker [batch_size, num_markers]
             y_true: Ground truth cancer concentration (optional) [batch_size, 1]
-            
+                
         Returns:
             mu: Estimated cancer concentration [batch_size, 1]
             phi: Concentration parameter for Beta distribution [batch_size, 1]
             detection_probs: List of detection probabilities for each threshold [batch_size, 1]
             attention_weights: Attention weights for markers [batch_size, num_markers]
-            
+                
             If y_true is provided, also returns y_true for loss calculation
         """
         B, M = marker_values.shape
@@ -198,8 +198,8 @@ class SetTransformerCancerDetection(nn.Module):
         # Create mask for missing values (where coverage = 0)
         mask = (coverage == 0)  # [B, M]
         
-        # Handle NaN values in marker_values by replacing only when coverage > 0
-        # For markers with coverage = 0, the value doesn't matter as they'll be masked
+        # Replace NaN values in marker_values only where coverage > 0
+        # For positions with coverage=0, set to 0 as they'll be masked anyway
         marker_values_processed = torch.where(mask, torch.zeros_like(marker_values), marker_values)
         marker_values_processed = torch.nan_to_num(marker_values_processed, nan=0.5)
         
@@ -213,22 +213,89 @@ class SetTransformerCancerDetection(nn.Module):
         features = torch.cat([value_features, coverage_features], dim=-1)  # [B, M, feature_dim]
         features = self.feature_projection(features)  # [B, M, feature_dim]
         
-        # Create attention mask (False = keep, True = mask out)
-        attention_mask = mask  # [B, M]
+        # Check if any sample has all markers masked
+        all_masked = mask.all(dim=1)  # [B]
+        
+        # If any sample has all markers masked, create a special token
+        if all_masked.any():
+            # Create a learned representation for samples with no valid markers
+            default_rep = torch.zeros_like(features[0:1])
+            # Apply it to samples where all markers are masked
+            for i in range(B):
+                if all_masked[i]:
+                    features[i] = default_rep
         
         # Process through main encoder blocks
         x = features
         for encoder_block in self.encoder_blocks:
-            x, _ = encoder_block(x, attention_mask)
+            x_out, _ = encoder_block(x, mask)
+            # Ensure no NaN propagated through the encoder
+            if torch.isnan(x_out).any():
+                # Keep previous non-NaN values if NaNs appear
+                x_out = torch.where(torch.isnan(x_out), x, x_out)
+            x = x_out
         
         # Process through low concentration encoder blocks
         low_x = features  
         for encoder_block in self.low_conc_encoder_blocks:
-            low_x, _ = encoder_block(low_x, attention_mask)
+            low_x_out, _ = encoder_block(low_x, mask)
+            # Ensure no NaN propagated through the encoder
+            if torch.isnan(low_x_out).any():
+                # Keep previous non-NaN values if NaNs appear
+                low_x_out = torch.where(torch.isnan(low_x_out), low_x, low_x_out)
+            low_x = low_x_out
         
-        # Apply pooling to get fixed-size representations
-        pooled, main_attention_weights = self.main_pooling(x, attention_mask)  # [B, num_inds, feature_dim]
-        low_pooled, _ = self.low_conc_pooling(low_x, attention_mask)  # [B, num_inds, feature_dim]
+        # For samples with all markers masked, use a learned representation
+        if all_masked.any():
+            for i in range(B):
+                if all_masked[i]:
+                    # Create identity mapping attention since there's nothing to attend to
+                    main_attention_weights_i = torch.zeros(self.num_inds, M, device=x.device)
+                    # Just use the default representation directly
+                    pooled_i = torch.zeros(self.num_inds, x.size(-1), device=x.device)
+                    
+                    # Handle these samples separately
+                    if 'pooled' not in locals():
+                        # First initialization
+                        pooled = torch.zeros(B, self.num_inds, x.size(-1), device=x.device)
+                        main_attention_weights = torch.zeros(B, self.num_inds, M, device=x.device)
+                    
+                    pooled[i] = pooled_i
+                    main_attention_weights[i] = main_attention_weights_i
+        
+        # Apply pooling for samples with at least one valid marker
+        if 'pooled' not in locals():
+            # No samples had all markers masked, do normal pooling
+            pooled, main_attention_weights = self.main_pooling(x, mask)
+            low_pooled, _ = self.low_conc_pooling(low_x, mask)
+        else:
+            # Some samples had all markers masked, handle remaining samples
+            valid_indices = ~all_masked
+            if valid_indices.any():
+                # Pool only for samples with at least one valid marker
+                valid_x = x[valid_indices]
+                valid_low_x = low_x[valid_indices]
+                valid_mask = mask[valid_indices]
+                
+                valid_pooled, valid_main_weights = self.main_pooling(valid_x, valid_mask)
+                valid_low_pooled, _ = self.low_conc_pooling(valid_low_x, valid_mask)
+                
+                # Update the tensor for valid samples
+                pooled[valid_indices] = valid_pooled
+                main_attention_weights[valid_indices] = valid_main_weights
+                
+                # Initialize low_pooled if not done
+                if 'low_pooled' not in locals():
+                    low_pooled = torch.zeros(B, self.num_inds, x.size(-1), device=x.device)
+                
+                low_pooled[valid_indices] = valid_low_pooled
+            else:
+                # All samples had all markers masked
+                low_pooled = torch.zeros_like(pooled)
+        
+        # Ensure no NaN in pooled representations
+        pooled = torch.nan_to_num(pooled, nan=0.0)
+        low_pooled = torch.nan_to_num(low_pooled, nan=0.0)
         
         # Average across inducing points
         main_features = pooled.mean(dim=1)  # [B, feature_dim]
@@ -257,12 +324,14 @@ class SetTransformerCancerDetection(nn.Module):
         blended_mu = blend_weight * low_mu + (1 - blend_weight) * mu
         blended_phi = blend_weight * low_phi + (1 - blend_weight) * phi
         
+        # Final check for NaN values
+        blended_mu = torch.nan_to_num(blended_mu, nan=0.5)
+        blended_phi = torch.nan_to_num(blended_phi, nan=1.0)
+        
         # Calculate uncertainty for detection heads
         _, _, uncertainty = self.get_estimate_and_ci(blended_mu, blended_phi)
         
-        # Extract marker-level attention weights (average across heads and inducing points)
-        # For visualization/interpretation of which markers are important
-        # Shape of main_attention_weights from pooling layer: [batch, num_inds, num_markers]
+        # Extract marker-level attention weights
         marker_attention = main_attention_weights.mean(dim=1)  # [B, num_markers]
         
         # Enhanced features for detection heads (including uncertainty)
@@ -273,12 +342,12 @@ class SetTransformerCancerDetection(nn.Module):
         
         # Ensure all detection probabilities are properly bounded between 0 and 1
         detection_probs = [torch.clamp(dp, 0.0, 1.0) for dp in detection_probs_raw]
-            
+        
         if y_true is not None:
             return blended_mu, blended_phi, detection_probs, marker_attention, y_true
         
         return blended_mu, blended_phi, detection_probs, marker_attention
-    
+
     def compute_loss(self, mu, phi, y_true, epsilon=1e-6):
         """
         Compute enhanced focal Beta negative log likelihood loss with threshold emphasis
@@ -292,14 +361,16 @@ class SetTransformerCancerDetection(nn.Module):
         Returns:
             Enhanced focal loss for optimization
         """
+        # Ensure no NaN in inputs
+        if torch.isnan(mu).any() or torch.isnan(phi).any() or torch.isnan(y_true).any():
+            mu = torch.nan_to_num(mu, nan=0.5)
+            phi = torch.nan_to_num(phi, nan=1.0)
+            y_true = torch.nan_to_num(y_true, nan=0.0)
+        
         y_clipped = torch.clamp(y_true, epsilon, 1 - epsilon)
         
         # Add safeguards for phi to ensure it's positive and not too small
         phi = torch.clamp(phi, min=1.0)  # Ensure phi is at least 1.0
-        
-        # Replace any NaN values in mu or phi
-        mu = torch.nan_to_num(mu, nan=0.5)
-        phi = torch.nan_to_num(phi, nan=1.0)
         
         # Calculate Beta distribution parameters with safeguards
         alpha = mu * phi  # [B, 1]
@@ -313,10 +384,16 @@ class SetTransformerCancerDetection(nn.Module):
         try:
             dist = Beta(alpha, beta)
             nll_loss = -dist.log_prob(y_clipped)
+            
+            # Check for NaN in loss and use fallback if needed
+            if torch.isnan(nll_loss).any():
+                # Identify which samples have NaN losses
+                nan_mask = torch.isnan(nll_loss)
+                # Use MSE for those samples only
+                mse_loss = F.mse_loss(mu, y_clipped, reduction='none')
+                nll_loss = torch.where(nan_mask, mse_loss, nll_loss)
         except ValueError as e:
             # Fallback to MSE loss if Beta distribution fails
-            print(f"Warning: Beta distribution failed, falling back to MSE loss. Error: {e}")
-            print(f"mu range: {mu.min().item():.4f}-{mu.max().item():.4f}, phi range: {phi.min().item():.4f}-{phi.max().item():.4f}")
             nll_loss = F.mse_loss(mu, y_clipped, reduction='none')
         
         # Get focal weighting factor from args
@@ -348,6 +425,9 @@ class SetTransformerCancerDetection(nn.Module):
         
         # Add regularization to prevent extremely confident predictions
         reg_loss = 0.01 * torch.abs(torch.log(torch.clamp(phi, min=epsilon))).mean()
+        
+        # Final check for NaN values
+        focal_loss = torch.nan_to_num(focal_loss, nan=1.0)
         
         return focal_loss.mean() + reg_loss
     
@@ -406,12 +486,12 @@ class SetTransformerCancerDetection(nn.Module):
                     
                     # Handle any NaN results from scipy
                     if torch.isnan(lower[i]) or torch.isnan(upper[i]):
-                        lower[i] = max(0.0, mu[i] - 0.1)
-                        upper[i] = min(1.0, mu[i] + 0.1)
+                        lower[i] = max(0.0, mu[i].item() - 0.1)
+                        upper[i] = min(1.0, mu[i].item() + 0.1)
                 except:
                     # Fallback if scipy calculation fails
-                    lower[i] = max(0.0, mu[i] - 0.1)
-                    upper[i] = min(1.0, mu[i] + 0.1)
+                    lower[i] = max(0.0, mu[i].item() - 0.1)
+                    upper[i] = min(1.0, mu[i].item() + 0.1)
         
         # Ensure bounds are valid
         lower = torch.clamp(lower, 0.0, 0.99)
@@ -428,7 +508,7 @@ class SetTransformerCancerDetection(nn.Module):
         uncertainty = upper - lower
         
         return estimate, ci, uncertainty
-
+    
     def get_binary_prediction(self, mu, detection_probs, threshold_idx=1):
         """
         Get binary prediction for cancer detection

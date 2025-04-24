@@ -161,7 +161,22 @@ def setup_logging(output_dir):
 
 
 def calculate_loss(model, mu, phi, detection_probs, y_true, args):
-    """Calculate combined loss using configurable parameters"""
+    """
+    Calculate combined loss using configurable parameters
+    
+    Args:
+        model: The model instance
+        mu: Predicted mean (concentration)
+        phi: Precision parameter
+        detection_probs: List of detection probabilities for each threshold
+        y_true: Ground truth concentration
+        args: Arguments including detection thresholds and weights
+        
+    Returns:
+        total_loss: Combined loss for optimization
+        concentration_loss: Loss component for concentration estimation
+        detection_loss: Loss component for binary detection
+    """
     # Get concentration loss
     concentration_loss = model.compute_loss(mu, phi, y_true)
     
@@ -171,13 +186,13 @@ def calculate_loss(model, mu, phi, detection_probs, y_true, args):
         # Convert continuous concentration to binary label
         binary_y = (y_true >= threshold).float()
         
-        # Instead of PyTorch's BCE, implement it manually to avoid the error
-        # First clamp the probabilities to avoid numerical issues
-        det_probs = torch.clamp(detection_probs[i], 1e-7, 1.0 - 1e-7)
+        # The key issue: make sure detection probability outputs are properly bounded
+        # The sigmoid in the model's detection head should already ensure this,
+        # but floating point precision issues can cause values slightly outside [0,1]
+        det_probs = torch.clamp(detection_probs[i], 0.0, 1.0)
         
-        # Manual BCE implementation
-        bce_loss = -binary_y * torch.log(det_probs) - (1 - binary_y) * torch.log(1 - det_probs)
-        det_loss = bce_loss.mean()
+        # Standard BCE loss with properly bounded inputs
+        det_loss = F.binary_cross_entropy(det_probs, binary_y)
         detection_losses.append(det_loss)
     
     # Use configurable detection loss weight
@@ -188,7 +203,6 @@ def calculate_loss(model, mu, phi, detection_probs, y_true, args):
     total_loss = concentration_loss + detection_loss_weight * combined_detection_loss
     
     return total_loss, concentration_loss, combined_detection_loss
-
 
 def train(model, train_loader, val_loader, args, device):
     """Train the model with progress bars and enhanced logging"""
