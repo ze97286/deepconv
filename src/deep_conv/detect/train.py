@@ -51,7 +51,7 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=1000, help='Number of epochs')
     parser.add_argument('--grad_accum_steps', type=int, default=4, help='Gradient accumulation steps')
     parser.add_argument('--early_stopping', type=int, default=10, help='Early stopping patience')
-    parser.add_argument('--output_dir', type=str, default="/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell_oac", help='Output directory')
+    parser.add_argument('--output_dir', type=str, default="/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell", help='Output directory')
     
     # Ensemble parameters
     parser.add_argument('--ensemble', action='store_true', help='Use ensemble of models')
@@ -1174,8 +1174,8 @@ def get_git_info():
         return {'commit': 'unknown', 'branch': 'unknown', 'clean': False}
 
 
-# python -m deep_conv.detect.train --name CpGenie --focal_weight_factor 200 --detection_loss_weight 0.6 --low_concentration_threshold 0.03 --name CpGenie --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/T-cells/ --target_cell_type T-cells --target_cell_idx 11 --grad_accum_steps 8
-# python -m deep_conv.detect.train --name CpGenie --focal_weight_factor 100 --detection_loss_weight 0.2 --low_concentration_threshold 0.01 
+# python -m deep_conv.detect.train --name CpGenie_T-cells --focal_weight_factor 200 --detection_loss_weight 0.6 --low_concentration_threshold 0.03 --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/T-cells/ --target_cell_type T-cells --target_cell_idx 11 --grad_accum_steps 8
+# python -m deep_conv.detect.train --name CpGenie_OAC --focal_weight_factor 100 --detection_loss_weight 0.2 --low_concentration_threshold 0.01 --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --target_cell_type OAC --target_cell_idx 9
 # python -m deep_conv.detect.train --ensemble --ensemble_size=3 --detection_thresholds=0.001,0.01,0.05 --name CpGenie_ensemble 
 def main():
     """Main function with enhanced logging and progress tracking"""
