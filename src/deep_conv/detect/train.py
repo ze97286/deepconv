@@ -246,8 +246,6 @@ def train(model, train_loader, val_loader, args, device):
         'detection_metrics': []
     }
     
-    torch.set_printoptions(precision=10)  # Increase precision for debugging
-
     epoch_bar = tqdm(range(args.epochs), desc="Training", position=0)
     for epoch in epoch_bar:
         # Training phase
@@ -267,11 +265,6 @@ def train(model, train_loader, val_loader, args, device):
             marker_values = marker_values.to(device)
             coverage = coverage.to(device)
             y_true = y_true.to(device)
-
-            print(f"Marker values shape: {marker_values.shape}")
-            print(f"Coverage shape: {coverage.shape}")
-            print(f"Coverage zeros: {(coverage == 0).sum().item() / coverage.numel():.2%}")
-            print(f"Marker values has NaN: {torch.isnan(marker_values).any().item()}")
 
             # Mixed precision forward pass
             with torch.cuda.amp.autocast():
