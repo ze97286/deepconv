@@ -1055,21 +1055,21 @@ def train_ensemble(args, train_loader, val_loader, test_loader, num_markers, dev
     """Train an ensemble of models with different random seeds"""
     logger = logging.getLogger('cancer_detection')
     logger.info(f"Training ensemble of {args.ensemble_size} models...")
-    
+
     models = []
     best_states = []
-    
+
     # Create subdirectory for individual models
     ensemble_dir = os.path.join(args.output_dir, 'ensemble_models')
     os.makedirs(ensemble_dir, exist_ok=True)
-    
+
     # Train each model with a different seed
     for i, seed in enumerate(args.ensemble_seeds):
         logger.info(f"\n{'='*20} TRAINING ENSEMBLE MODEL {i+1}/{args.ensemble_size} (SEED: {seed}) {'='*20}\n")
-        
+
         # Set seed for this model
         set_seed(seed)
-        
+
         # Create model
         model = EnhancedCancerDetectionModel(
             num_markers=num_markers,
@@ -1077,60 +1077,63 @@ def train_ensemble(args, train_loader, val_loader, test_loader, num_markers, dev
             num_heads=args.num_heads,
             num_layers=args.num_layers,
             dropout_rate=args.dropout_rate,
-            detection_thresholds=args.detection_thresholds
+            detection_thresholds=args.detection_thresholds,
+            focal_weight_factor=args.focal_weight_factor,
+            low_concentration_threshold=args.low_concentration_threshold,
         )
-        
+
         # Create model directory
         model_dir = os.path.join(ensemble_dir, f'model_{i+1}_seed_{seed}')
         os.makedirs(model_dir, exist_ok=True)
-        
+
         # Store original output_dir
         original_output_dir = args.output_dir
-        
+
         # Temporarily set output_dir to model directory
         args.output_dir = model_dir
-        
+
         # Train model
         model, best_state = train(model, train_loader, val_loader, args, device)
-        
+
         # Reset output_dir
         args.output_dir = original_output_dir
-        
+
         # Store model and best state
         models.append(model)
         best_states.append(best_state)
-        
+
         # Log model results
         logger.info(f"Model {i+1}/{args.ensemble_size} training complete")
         logger.info(f"Best validation loss: {best_state['val_loss']:.6f}")
         logger.info(f"Best R² score: {best_state['r2_score']:.4f}")
-    
+
     # Create ensemble model
     ensemble = CancerDetectionEnsemble(models)
-    
+
     logger.info("\n" + "="*50)
     logger.info(f"ENSEMBLE TRAINING COMPLETE ({args.ensemble_size} models)")
-    
+
     # Save ensemble model
     ensemble_state = {
-        'model_states': [model.state_dict() for model in models],
-        'ensemble_size': args.ensemble_size,
-        'seeds': args.ensemble_seeds,
-        'model_config': {
-            'num_markers': num_markers,
-            'feature_dim': args.feature_dim,
-            'num_heads': args.num_heads,
-            'num_layers': args.num_layers,
-            'dropout_rate': args.dropout_rate,
-            'use_pos_encoding': args.use_pos_encoding,
-            'detection_thresholds': args.detection_thresholds
-        }
+        "model_states": [model.state_dict() for model in models],
+        "ensemble_size": args.ensemble_size,
+        "seeds": args.ensemble_seeds,
+        "model_config": {
+            "num_markers": num_markers,
+            "feature_dim": args.feature_dim,
+            "num_heads": args.num_heads,
+            "num_layers": args.num_layers,
+            "dropout_rate": args.dropout_rate,
+            "focal_weight_factor": args.focal_weight_factor,
+            "detection_thresholds": args.detection_thresholds,
+            "low_concentration_threshold": args.low_concentration_threshold,
+        },
     }
-    
+
     ensemble_path = os.path.join(args.output_dir, 'ensemble_model.pt')
     torch.save(ensemble_state, ensemble_path)
     logger.info(f"Ensemble model saved to {ensemble_path}")
-    
+
     return ensemble, ensemble_state
 
 
@@ -1175,7 +1178,7 @@ def get_git_info():
 # --target_cell_type T-cells \
 # --target_cell_idx 11 \
 # --grad_accum_steps 8 \
-# --cell_profile ultra_low_snr 
+# --cell_profile ultra_low_snr
 
 
 # OAC
@@ -1186,7 +1189,7 @@ def get_git_info():
 # --target_cell_idx 9 \
 # --cell_profile high_snr
 
-# python -m deep_conv.detect.train --ensemble --ensemble_size=3 --detection_thresholds=0.001,0.01,0.05 --name CpGenie_ensemble 
+# python -m deep_conv.detect.train --ensemble --ensemble_size=3 --detection_thresholds=0.001,0.01,0.05 --name CpGenie_ensemble
 def main():
     """Main function with enhanced logging and progress tracking"""
     # Parse arguments
@@ -1260,7 +1263,6 @@ def main():
                 num_heads=args.num_heads,
                 num_layers=args.num_layers,
                 dropout_rate=args.dropout_rate,
-                use_pos_encoding=args.use_pos_encoding,
                 detection_thresholds=args.detection_thresholds,
                 focal_weight_factor=args.focal_weight_factor,
                 low_concentration_threshold=args.low_concentration_threshold,

@@ -104,7 +104,8 @@ def load_model(model_dir, device='cpu'):
                 num_heads=config.get('num_heads', 8),
                 num_layers=config.get('num_layers', 3),
                 dropout_rate=config.get('dropout_rate', 0.2),
-                use_pos_encoding=config.get('use_pos_encoding', True),
+                focal_weight_factor=config.get('focal_weight_factor', 100),
+                low_concentration_threshold=config.get('low_concentration_threshold', 0.01),
                 detection_thresholds=config.get('detection_thresholds', [0.001, 0.01, 0.05])
             )
             model.load_state_dict(model_state)
@@ -135,7 +136,6 @@ def load_model(model_dir, device='cpu'):
             num_heads=args.get('num_heads', 8),
             num_layers=args.get('num_layers', 3),
             dropout_rate=args.get('dropout_rate', 0.2),
-            use_pos_encoding=args.get('use_pos_encoding', True),
             detection_thresholds=args.get('detection_thresholds', [0.001, 0.01, 0.05])
         )
         
