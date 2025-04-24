@@ -451,47 +451,6 @@ class SetTransformerCancerDetection(nn.Module):
         
         return (detection_score >= detection_threshold).float()
     
-def calculate_loss(model, mu, phi, detection_probs, y_true, args):
-        """
-        Calculate combined loss using configurable parameters
-        
-        Args:
-            model: The model instance
-            mu: Predicted mean (concentration)
-            phi: Precision parameter
-            detection_probs: List of detection probabilities for each threshold
-            y_true: Ground truth concentration
-            args: Arguments including detection thresholds and weights
-            
-        Returns:
-            total_loss: Combined loss for optimization
-            concentration_loss: Loss component for concentration estimation
-            detection_loss: Loss component for binary detection
-        """
-        # Get concentration loss
-        concentration_loss = model.compute_loss(mu, phi, y_true)
-        
-        # Calculate detection losses for each threshold
-        detection_losses = []
-        for i, threshold in enumerate(args.detection_thresholds):
-            # Convert continuous concentration to binary label
-            binary_y = (y_true >= threshold).float()
-            
-            # Ensure detection probabilities are properly bounded
-            det_probs = torch.clamp(detection_probs[i], 0.0, 1.0)
-            
-            # Binary cross-entropy loss
-            det_loss = F.binary_cross_entropy(det_probs, binary_y)
-            detection_losses.append(det_loss)
-        
-        # Use configurable detection loss weight
-        detection_loss_weight = args.detection_loss_weight if hasattr(args, 'detection_loss_weight') else 1.0
-        combined_detection_loss = sum(detection_losses) / len(detection_losses)
-        
-        # Calculate total loss
-        total_loss = concentration_loss + detection_loss_weight * combined_detection_loss
-        
-        return total_loss, concentration_loss, combined_detection_loss
 
 class MarkerImportanceAnalyser:
     """
