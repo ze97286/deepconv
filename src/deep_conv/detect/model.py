@@ -349,87 +349,16 @@ class SetTransformerCancerDetection(nn.Module):
         return blended_mu, blended_phi, detection_probs, marker_attention
 
     def compute_loss(self, mu, phi, y_true, epsilon=1e-6):
-        """
-        Compute enhanced focal Beta negative log likelihood loss with threshold emphasis
+        # Simple MSE loss for debugging
+        mse_loss = F.mse_loss(mu, y_true, reduction='none')
         
-        Args:
-            mu: Predicted mean (concentration) [batch_size, 1]
-            phi: Precision parameter [batch_size, 1]
-            y_true: Ground truth concentration [batch_size, 1]
-            epsilon: Small value for numerical stability
-            
-        Returns:
-            Enhanced focal loss for optimization
-        """
-        # Ensure no NaN in inputs
-        if torch.isnan(mu).any() or torch.isnan(phi).any() or torch.isnan(y_true).any():
-            mu = torch.nan_to_num(mu, nan=0.5)
-            phi = torch.nan_to_num(phi, nan=1.0)
-            y_true = torch.nan_to_num(y_true, nan=0.0)
+        # Minimal focal weighting
+        focal_weight = torch.exp(-y_true * self.focal_weight_factor) + 1.0
+        focal_weight = torch.clamp(focal_weight, 1.0, 5.0)
         
-        y_clipped = torch.clamp(y_true, epsilon, 1 - epsilon)
-        
-        # Add safeguards for phi to ensure it's positive and not too small
-        phi = torch.clamp(phi, min=1.0)  # Ensure phi is at least 1.0
-        
-        # Calculate Beta distribution parameters with safeguards
-        alpha = mu * phi  # [B, 1]
-        beta = (1 - mu) * phi  # [B, 1]
-        
-        # Add safety margin to ensure alpha and beta are positive
-        alpha = torch.clamp(alpha, min=epsilon)
-        beta = torch.clamp(beta, min=epsilon)
-        
-        # Create Beta distribution with safety checks
-        try:
-            dist = Beta(alpha, beta)
-            nll_loss = -dist.log_prob(y_clipped)
-            
-            # Check for NaN in loss and use fallback if needed
-            if torch.isnan(nll_loss).any():
-                # Identify which samples have NaN losses
-                nan_mask = torch.isnan(nll_loss)
-                # Use MSE for those samples only
-                mse_loss = F.mse_loss(mu, y_clipped, reduction='none')
-                nll_loss = torch.where(nan_mask, mse_loss, nll_loss)
-        except ValueError as e:
-            # Fallback to MSE loss if Beta distribution fails
-            nll_loss = F.mse_loss(mu, y_clipped, reduction='none')
-        
-        # Get focal weighting factor from args
-        focal_factor = self.focal_weight_factor if hasattr(self, 'focal_weight_factor') else 100
-        low_conc_threshold = self.low_concentration_threshold if hasattr(self, 'low_concentration_threshold') else 0.01
-        
-        # Enhanced focal weighting with configurable factor
-        base_weight = torch.exp(-y_true * focal_factor) + 1.0
-        
-        # Additional weight for samples near thresholds
-        threshold_weight = torch.zeros_like(y_true)
-        for threshold in self.detection_thresholds:
-            if threshold > 0:
-                relative_distance = torch.abs(y_true - threshold) / max(threshold, epsilon)
-                threshold_weight += torch.exp(-relative_distance * 5) * 2.0
-        
-        # Special handling for values below the low concentration threshold
-        is_low_conc = (y_true <= low_conc_threshold).float()
-        is_zero = (y_true < epsilon).float()
-        
-        # Extra weight for low but non-zero concentrations
-        low_conc_weight = is_low_conc * (1 - is_zero) * 2.0
-        
-        # Combine weights (cap at 5x to prevent extreme values)
-        focal_weight = torch.clamp(base_weight + threshold_weight + low_conc_weight, 1.0, 5.0)
-        
-        # Apply focal weighting
-        focal_loss = nll_loss * focal_weight
-        
-        # Add regularization to prevent extremely confident predictions
-        reg_loss = 0.01 * torch.abs(torch.log(torch.clamp(phi, min=epsilon))).mean()
-        
-        # Final check for NaN values
-        focal_loss = torch.nan_to_num(focal_loss, nan=1.0)
-        
-        return focal_loss.mean() + reg_loss
+        # Apply weighting
+        weighted_loss = mse_loss * focal_weight
+        return weighted_loss.mean()
     
     def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
         """
