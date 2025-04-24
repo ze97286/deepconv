@@ -28,7 +28,6 @@ def parse_args():
     # Model parameters
     parser.add_argument('--feature_dim', type=int, default=128, help='Feature dimension')
     parser.add_argument('--num_heads', type=int, default=8, help='Number of attention heads')
-    parser.add_argument('--num_layers', type=int, default=3, help='Number of transformer layers')
     parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate')
     parser.add_argument('--num_layers', type=int, default=3, help='Number of transformer layers (ignored for Set Transformer)')
     
