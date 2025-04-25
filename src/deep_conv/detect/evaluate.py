@@ -979,18 +979,17 @@ def plot_error_distribution(targets, predictions, output_dir):
         std_error = np.std(bin_errors)
         median_error = np.median(bin_errors)
         
-        text = f"Mean: {mean_error:.6f}<br>Std Dev: {std_error:.6f}<br>Median: {median_error:.6f}"
-        
-        fig.add_annotation(
-            x=0.05, y=0.9,
-            xref=f"x{i+1} domain",
-            yref=f"y{i+1} domain",
-            text=text,
-            showarrow=False,
-            bgcolor="white",
-            bordercolor="black",
-            borderwidth=1,
-            font=dict(size=10)
+        fig.add_trace(
+            go.Scatter(
+                x=[bin_errors.min() + (bin_errors.max() - bin_errors.min()) * 0.05],  # Position at 5% of the range
+                y=[0],
+                text=f"Mean: {mean_error:.6f}<br>Std Dev: {std_error:.6f}<br>Median: {median_error:.6f}",
+                mode="text",
+                showlegend=False,
+                textposition="top left",
+                hoverinfo="none"
+            ),
+            row=i+1, col=1
         )
     
     # Update layout
