@@ -983,8 +983,8 @@ def plot_error_distribution(targets, predictions, output_dir):
         
         fig.add_annotation(
             x=0.05, y=0.9,
-            xref=f"x{i+1}domain", 
-            yref=f"y{i+1}domain", 
+            xref=f"x{i+1} domain",
+            yref=f"y{i+1} domain",
             text=text,
             showarrow=False,
             bgcolor="white",
