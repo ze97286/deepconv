@@ -9,6 +9,7 @@ import logging
 from datetime import datetime
 from tqdm import tqdm
 from sklearn.metrics import r2_score, mean_absolute_error, roc_auc_score, precision_recall_curve, auc
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 from deep_conv.detect.preprocess import prepare_data_for_evaluation
 from deep_conv.detect.model import EnhancedCancerDetectionModel, CancerDetectionEnsemble
@@ -1562,14 +1563,24 @@ def run_evaluation(model_dir, input_dir, output_dir=None, device=None):
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Evaluate trained cancer detection model')
-    
+
     parser.add_argument('--model_dir', type=str, required=True, help='Directory containing the trained model')
     parser.add_argument('--input_dir', type=str, required=True, help='Directory containing the data to evaluate')
     parser.add_argument('--output_dir', type=str, default=None, help='Directory to save evaluation results')
     parser.add_argument('--device', type=str, default=None, help='Device to run evaluation on (cuda or cpu)')
-    
+
     return parser.parse_args()
 
+
+# python -m deep_conv.detect.evaluate \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/CpGenie_OAC/ \
+# --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/ \
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/CpGenie_OAC
+
+# python -m deep_conv.detect.evaluate \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/CpGenie_T-cells/ \
+# --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/T-cells/ \
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/T-cells/CpGenie_T-cells
 
 if __name__ == '__main__':
     args = parse_args()
