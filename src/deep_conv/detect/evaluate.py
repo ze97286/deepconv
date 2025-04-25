@@ -847,12 +847,13 @@ def plot_concentration_dependent_performance(targets, predictions, output_dir):
             overlaying='y',
             side='right'
         ),
-        yaxis3_title='Mean Relative Error (%)',
         template='plotly_white',
         width=900,
         height=800,
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
     )
+
+    fig.update_yaxes(title_text='Mean Relative Error (%)', row=2, col=1)
     
     # Save figure
     fig.write_html(os.path.join(output_dir, 'concentration_dependent_performance.html'))

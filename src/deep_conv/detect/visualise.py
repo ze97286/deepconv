@@ -24,16 +24,19 @@ def create_visualisations(predictions, ground_truth, output_dir, threshold=0.01,
     # Convert to numpy arrays if not already
     y_pred = np.array(predictions).flatten()
     y_true = np.array(ground_truth).flatten()
-    
     # Create dataframe for easier manipulation
     df = pd.DataFrame({
         'true_value': y_true,
         'predicted_value': y_pred,
         'error': y_pred - y_true,
         'abs_error': np.abs(y_pred - y_true),
-        'rel_error': np.where(y_true > 0, np.abs(y_pred - y_true) / y_true * 100, np.nan)
     })
-    
+    rel_error = np.full_like(y_true, np.nan, dtype=float)
+    non_zero_mask = y_true > 0
+    rel_error[non_zero_mask] = np.abs(y_pred[non_zero_mask] - y_true[non_zero_mask]) / y_true[non_zero_mask] * 100
+    df['rel_error'] = rel_error
+
+
     # Define concentration ranges
     ranges = [
         ('Low', 0, 0.001),
