@@ -295,3 +295,34 @@ def prepare_data_for_evaluation(
 
     val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)
     return val_loader
+
+
+def prepare_data_for_predict(
+    data_dir,
+    atlas_path,
+    target_cell_type
+):
+    marker_values_path = os.path.join(data_dir, "marker_values.parquet")
+    coverage_path = os.path.join(data_dir, "coverage.parquet")
+
+    marker_values_df = pd.read_parquet(marker_values_path)
+    coverage_df = pd.read_parquet(coverage_path)
+
+    # Load atlas and extract relevant markers
+    print(f"Loading atlas from {atlas_path} and extracting markers for {target_cell_type}...")
+    atlas = pd.read_csv(atlas_path, sep="\t")
+    target_markers = atlas[atlas.target == target_cell_type]
+    target_marker_indices = target_markers.index.values
+
+    print(f"Found {len(target_marker_indices)} markers for {target_cell_type}")
+
+    # Extract relevant markers from data
+    sample_ids = marker_values_df.columns[2:]
+    marker_values = marker_values_df.iloc[target_marker_indices][marker_values_df.columns[2:]].values.T
+    coverage = coverage_df.iloc[target_marker_indices][coverage_df.columns[2:]].values.T  
+
+    # Data summary
+    print(f"Marker values shape: {marker_values.shape}")
+    print(f"Coverage shape: {coverage.shape}")
+
+    return marker_values, coverage, sample_ids

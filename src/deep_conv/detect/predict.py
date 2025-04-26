@@ -6,8 +6,8 @@ import json
 import logging
 from tqdm import tqdm
 
-from deep_conv.detect.preprocess import prepare_data_for_evaluation
-from deep_conv.detect.model import EnhancedCancerDetectionModel
+from deep_conv.detect.preprocess import prepare_data_for_predict
+from deep_conv.detect.model import EnhancedCancerDetectionModel,CancerDetectionEnsemble
 
 def parse_args():
     """Parse command line arguments"""
@@ -111,7 +111,8 @@ def load_model(model_dir, device='cpu'):
                 num_heads=config.get('num_heads', 8),
                 num_layers=config.get('num_layers', 3),
                 dropout_rate=config.get('dropout_rate', 0.2),
-                use_pos_encoding=config.get('use_pos_encoding', True),
+                focal_weight_factor=config.get('focal_weight_factor', 100),
+                low_concentration_threshold=config.get('low_concentration_threshold', 0.01),
                 detection_thresholds=config.get('detection_thresholds', [0.001, 0.01, 0.05])
             )
             model.load_state_dict(model_state)
@@ -142,7 +143,6 @@ def load_model(model_dir, device='cpu'):
             num_heads=args.get('num_heads', 8),
             num_layers=args.get('num_layers', 3),
             dropout_rate=args.get('dropout_rate', 0.2),
-            use_pos_encoding=args.get('use_pos_encoding', True),
             detection_thresholds=args.get('detection_thresholds', [0.001, 0.01, 0.05])
         )
         
@@ -156,7 +156,7 @@ def load_model(model_dir, device='cpu'):
     logger.info(f"Model loaded successfully")
     return model, args
 
-def predict(model, data_loader, output_dir=None, thresholds=None, device='cpu'):
+def predict(model, marker_values, coverage, sample_ids, output_dir=None, thresholds=None, device='cpu'):
     """
     Predict using a trained model on a dataset and save the results to the output dir
     
@@ -193,54 +193,30 @@ def predict(model, data_loader, output_dir=None, thresholds=None, device='cpu'):
     all_uncertainties = []
 
     # Create progress bar for evaluation
-    eval_bar = tqdm(data_loader, desc="Evaluating", position=0)
-
     with torch.no_grad():
-        for batch in eval_bar:
-            # Handle different batch formats
-            if len(batch) == 3:
-                marker_values, coverage, y_true = batch
-                sample_ids = None
-            elif len(batch) == 4:
-                marker_values, coverage, y_true, sample_ids = batch
-            else:
-                raise ValueError(f"Unexpected batch format with {len(batch)} elements")
+        marker_values = marker_values.to(device)
+        coverage = coverage.to(device)
+        if hasattr(model, 'forward_with_detection'):
+            # Enhanced model with detection
+            mu, phi, det_probs, _ = model.forward_with_detection(marker_values, coverage)
+        else:
+            # Standard model
+            mu, phi, det_probs, _ = model(marker_values, coverage)
+        estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
+        # Store predictions
+        all_preds.append(estimate.cpu().numpy())
+        all_lower_ci.append(ci[:, 0:1].cpu().numpy())
+        all_upper_ci.append(ci[:, 1:2].cpu().numpy())
+        all_uncertainties.append(uncertainty.cpu().numpy())
 
-            marker_values = marker_values.to(device)
-            coverage = coverage.to(device)
-            y_true = y_true.to(device)
-
-            # Handle different model types
-           
-            if hasattr(model, 'forward_with_detection'):
-                # Enhanced model with detection
-                mu, phi, det_probs, _ = model.forward_with_detection(marker_values, coverage)
-            else:
-                # Standard model
-                mu, phi, det_probs, _ = model(marker_values, coverage)
-
-            estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
-
-            # Store predictions
-            all_preds.append(estimate.cpu().numpy())
-            all_lower_ci.append(ci[:, 0:1].cpu().numpy())
-            all_upper_ci.append(ci[:, 1:2].cpu().numpy())
-            all_uncertainties.append(uncertainty.cpu().numpy())
-
-            # Store sample IDs if available
-            if sample_ids is not None:
-                all_sample_ids.extend(sample_ids)
 
     # Concatenate results
     all_preds = np.concatenate(all_preds)
     all_lower_ci = np.concatenate(all_lower_ci)
     all_upper_ci = np.concatenate(all_upper_ci)
     all_uncertainties = np.concatenate(all_uncertainties)
-
-    # Create sample ID list if not available
-    if not all_sample_ids:
-        all_sample_ids = [f"sample_{i}" for i in range(len(all_preds))]
-
+    all_sample_ids = sample_ids
+    
     # Save results
     predictions_df = pd.DataFrame(
         {
@@ -312,18 +288,16 @@ def run_predict(model_dir, input_dir, output_dir=None, device=None):
                 logger.warning("No atlas file specified or found in model directory")
         
         target_cell_type = args.get('target_cell_type', None)
-        target_cell_idx = args.get('target_cell_idx', None)
         
         # Load dataset
-        data_loader = prepare_data_for_evaluation(
+        marker_values, coverage, sample_ids = prepare_data_for_predict(
             data_dir=input_dir,
             atlas_path=atlas_path,
             target_cell_type=target_cell_type,
-            target_cell_idx=target_cell_idx,
         )
         
         # Evaluate model
-        predict(model, data_loader, output_dir, thresholds, device)        
+        predict(model, marker_values, coverage, sample_ids, output_dir, thresholds, device)        
         logger.info("Evaluation completed successfully")
         
     except Exception as e:
@@ -332,6 +306,15 @@ def run_predict(model_dir, input_dir, output_dir=None, device=None):
         logger.error(traceback.format_exc())
         return None
 
+# python -m deep_conv.detect.predict \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/CpGenie_OAC/ \
+# --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA/ \
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/CpGenie_OAC
+
+# python -m deep_conv.detect.predict \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/CpGenie_T-cells/ \
+# --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA/ \
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/CpGenie_T-cells
 
 if __name__ == '__main__':
     args = parse_args()
