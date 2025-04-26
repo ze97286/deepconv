@@ -1405,7 +1405,7 @@ def main():
     control_val_loader = None
     if hasattr(args, 'control_data_dir') and args.control_data_dir:
         logger.info(f"Loading control data from {args.control_data_dir}...")
-        train_loader, control_val_loader = load_train_with_contrastive_data(args.control_data_dir, args.atlas_path, args.target_cell_type, args.batch_size, logger)
+        train_loader, control_val_loader = load_train_with_contrastive_data(train_loader, args.control_data_dir, args.atlas_path, args.target_cell_type, args.batch_size, logger)
     
     # Training phase
     if args.ensemble:
