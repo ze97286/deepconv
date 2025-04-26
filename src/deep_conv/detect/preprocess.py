@@ -136,7 +136,7 @@ def load_and_preprocess_data(
     
     return train_loader, val_loader, test_loader, marker_values.shape[1]
 
-def load_train_with_contrastive_data(control_data_dir, atlas_path, target_cell_type, batch_size, logger):
+def load_train_with_contrastive_data(train_loader, control_data_dir, atlas_path, target_cell_type, batch_size, logger):
     try:
         # Load control data
         control_marker_values, control_coverage, _ = load_control_data(
