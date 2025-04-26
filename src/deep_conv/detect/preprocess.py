@@ -429,7 +429,7 @@ def prepare_data_for_training(
     # Analyse data characteristics
     # data_stats = analyse_data_characteristics(train_loader, val_loader)
     
-    return train_loader, val_loader, test_loader, num_markers, data_stats
+    return train_loader, val_loader, test_loader, num_markers
 
 
 def prepare_data_for_evaluation(
