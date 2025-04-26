@@ -325,4 +325,4 @@ def prepare_data_for_predict(
     print(f"Marker values shape: {marker_values.shape}")
     print(f"Coverage shape: {coverage.shape}")
 
-    return marker_values, coverage, sample_ids
+    return torch.tensor(marker_values, dtype=torch.float32), torch.tensor(coverage, dtype=torch.float32), sample_ids
