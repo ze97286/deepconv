@@ -1008,7 +1008,13 @@ def evaluate(model, data_loader, args, device, split_name="test"):
     eval_bar = tqdm(data_loader, desc=f"Evaluating {split_name} set", position=0)
     
     with torch.no_grad():
-        for marker_values, coverage, y_true in eval_bar:
+        for batch_data in eval_bar:
+            # Updated: Handle 4-element return from dataset
+            if len(batch_data) == 4:
+                marker_values, coverage, y_true, _ = batch_data  # Ignore control_mask
+            else:
+                marker_values, coverage, y_true = batch_data
+                
             marker_values = marker_values.to(device)
             coverage = coverage.to(device)
             y_true = y_true.to(device)
