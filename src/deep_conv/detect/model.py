@@ -409,7 +409,13 @@ class MarkerImportanceAnalyser:
         all_attentions = []
         
         with torch.no_grad():
-            for marker_values, coverage, _ in dataloader:
+            for batch_data in dataloader:
+                # Handle both 3-element and 4-element returns
+                if len(batch_data) == 4:
+                    marker_values, coverage, _, _ = batch_data  # Unpack 4 elements, ignore y_true and control_mask
+                else:
+                    marker_values, coverage, _ = batch_data  # Unpack 3 elements, ignore y_true
+                    
                 if isinstance(self.model, CancerDetectionEnsemble):
                     # For ensemble, use the first model for attention
                     _, _, _, attention_weights = self.model.models[0](marker_values, coverage)
@@ -434,7 +440,7 @@ class MarkerImportanceAnalyser:
             model_thresholds = self.model.models[0].detection_thresholds
         else:
             model_thresholds = self.model.detection_thresholds
-            
+                
         if thresholds is None:
             thresholds = model_thresholds
         
@@ -444,7 +450,13 @@ class MarkerImportanceAnalyser:
         detection_probs = []
         
         with torch.no_grad():
-            for marker_values, coverage, y_true in dataloader:
+            for batch_data in dataloader:
+                # Handle both 3-element and 4-element returns
+                if len(batch_data) == 4:
+                    marker_values, coverage, y_true, _ = batch_data  # Unpack 4 elements, ignore control_mask
+                else:
+                    marker_values, coverage, y_true = batch_data
+                    
                 if isinstance(self.model, CancerDetectionEnsemble):
                     mu, _, det_probs = self.model.forward(marker_values, coverage)
                 else:
@@ -453,11 +465,6 @@ class MarkerImportanceAnalyser:
                 predictions.append(mu.cpu().numpy())
                 ground_truth.append(y_true.cpu().numpy())
                 detection_probs.append([dp.cpu().numpy() for dp in det_probs])
-        
-        # Concatenate results
-        predictions = np.concatenate(predictions)
-        ground_truth = np.concatenate(ground_truth)
-        detection_probs = [np.concatenate([dp[i] for dp in detection_probs]) for i in range(len(model_thresholds))]
         
         # Calculate detection metrics for each threshold
         from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
