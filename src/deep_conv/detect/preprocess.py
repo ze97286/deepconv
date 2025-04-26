@@ -6,26 +6,25 @@ import os
 from sklearn.model_selection import train_test_split
 
 class cfDNAMethylationDataset(Dataset):
-    """
-    Dataset for cfDNA methylation data with cell type specific markers
-    """
-    def __init__(self, marker_values, coverage, y_true):
+    """Dataset for cfDNA methylation data with cell type specific markers"""
+    def __init__(self, marker_values, coverage, y_true, control_mask=None):
         """
         Args:
             marker_values: np.ndarray of shape [num_samples, num_markers]
             coverage: np.ndarray of shape [num_samples, num_markers]
             y_true: np.ndarray of shape [num_samples]
+            control_mask: Optional np.ndarray of shape [num_samples] indicating control samples
         """
         self.marker_values = torch.tensor(marker_values, dtype=torch.float32)
         self.coverage = torch.tensor(coverage, dtype=torch.float32)
         self.y_true = torch.tensor(y_true, dtype=torch.float32).unsqueeze(1)  # Shape: [num_samples, 1]
+        self.control_mask = torch.tensor(control_mask, dtype=torch.bool) if control_mask is not None else torch.zeros(len(y_true), dtype=torch.bool)
         
     def __len__(self):
         return len(self.y_true)
     
     def __getitem__(self, idx):
-        return self.marker_values[idx], self.coverage[idx], self.y_true[idx]
-
+        return self.marker_values[idx], self.coverage[idx], self.y_true[idx], self.control_mask[idx]
 
 def load_and_preprocess_data(
     marker_values_path, 
@@ -137,6 +136,186 @@ def load_and_preprocess_data(
     
     return train_loader, val_loader, test_loader, marker_values.shape[1]
 
+def load_train_with_contrastive_data(control_data_dir, atlas_path, target_cell_type, batch_size, logger):
+    try:
+        # Load control data
+        control_marker_values, control_coverage, _ = load_control_data(
+            control_data_dir,
+            atlas_path,
+            target_cell_type
+        )
+        
+        # Split controls for training and validation
+        control_size = len(control_marker_values)
+        control_val_size = min(int(control_size * 0.2), 100)  # 20% or max 100 samples for validation
+        
+        # Extract validation controls
+        control_val_marker_values = control_marker_values[:control_val_size]
+        control_val_coverage = control_coverage[:control_val_size]
+        
+        # Extract training controls
+        control_train_marker_values = control_marker_values[control_val_size:]
+        control_train_coverage = control_coverage[control_val_size:]
+        
+        # Create validation loader for controls (for calibration)
+        control_val_dataset = cfDNAMethylationDataset(
+            control_val_marker_values.numpy(),
+            control_val_coverage.numpy(),
+            np.zeros(control_val_size),
+            np.ones(control_val_size, dtype=bool)
+        )
+        control_val_loader = DataLoader(
+            control_val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=4
+        )
+        
+        # Create mixed dataset for training
+        mixed_marker_values, mixed_coverage, mixed_y, control_mask = create_mixed_dataset(
+            train_loader.dataset.marker_values,
+            train_loader.dataset.coverage,
+            train_loader.dataset.y_true,
+            control_train_marker_values,
+            control_train_coverage
+        )
+        
+        # Create new mixed dataset and dataloader
+        mixed_dataset = cfDNAMethylationDataset(
+            mixed_marker_values,
+            mixed_coverage,
+            mixed_y,
+            control_mask
+        )
+        
+        # Replace original train loader with mixed dataset
+        train_loader = DataLoader(
+            mixed_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=4
+        )
+        
+        logger.info(f"✓ Control data loaded successfully:")
+        logger.info(f"  Training samples: {len(train_loader.dataset)} (including {control_mask.sum()} controls)")
+        logger.info(f"  Validation controls: {control_val_size}")
+        
+    except Exception as e:
+        logger.error(f"× Error loading control data: {str(e)}")
+        logger.info("  Continuing without control data")
+
+    return train_loader, control_val_loader 
+
+
+# Add to preprocess.py
+def load_control_data(
+    data_dir,
+    atlas_path,
+    target_cell_type
+):
+    """
+    Load control data for contrastive learning
+    """
+    marker_values_df = pd.read_parquet(os.path.join(data_dir, "*marker_values.parquet"))
+    coverage_df = pd.read_parquet(os.path.join(data_dir, "*coverage.parquet"))
+
+    # Load atlas and extract relevant markers
+    print(f"Loading atlas from {atlas_path} and extracting markers for {target_cell_type}...")
+    atlas = pd.read_csv(atlas_path, sep="\t")
+    target_markers = atlas[atlas.target == target_cell_type]
+    target_marker_indices = target_markers.index.values
+
+    print(f"Found {len(target_marker_indices)} markers for {target_cell_type}")
+
+    # Extract relevant markers from data
+    sample_ids = marker_values_df.columns[2:]
+    marker_values = marker_values_df.iloc[target_marker_indices][marker_values_df.columns[2:]].values.T
+    coverage = coverage_df.iloc[target_marker_indices][coverage_df.columns[2:]].values.T  
+
+    # Data summary
+    print(f"Marker values shape: {marker_values.shape}")
+    print(f"Coverage shape: {coverage.shape}")
+
+    return torch.tensor(marker_values, dtype=torch.float32), torch.tensor(coverage, dtype=torch.float32), sample_ids
+
+def create_mixed_dataset(
+    train_marker_values, 
+    train_coverage, 
+    train_y_true,
+    control_marker_values, 
+    control_coverage
+):
+    """
+    Create a mixed dataset with both training and control samples
+    """
+    # Create zero concentration for controls
+    control_y = torch.zeros(control_marker_values.shape[0])
+    
+    # Create control mask
+    train_size = train_marker_values.shape[0]
+    control_size = control_marker_values.shape[0]
+    control_mask = np.concatenate([
+        np.zeros(train_size, dtype=bool),
+        np.ones(control_size, dtype=bool)
+    ])
+    
+    # Combine data
+    combined_marker_values = np.concatenate([
+        train_marker_values.numpy(), 
+        control_marker_values.numpy()
+    ], axis=0)
+    
+    combined_coverage = np.concatenate([
+        train_coverage.numpy(), 
+        control_coverage.numpy()
+    ], axis=0)
+    
+    combined_y = np.concatenate([
+        train_y_true.squeeze().numpy(), 
+        control_y.numpy()
+    ])
+    
+    return combined_marker_values, combined_coverage, combined_y, control_mask
+
+
+def create_mixed_dataset(
+    train_marker_values, 
+    train_coverage, 
+    train_y_true,
+    control_marker_values, 
+    control_coverage
+):
+    """
+    Create a mixed dataset with both training and control samples
+    """
+    # Create zero concentration for controls
+    control_y = torch.zeros(control_marker_values.shape[0])
+    
+    # Create control mask
+    train_size = train_marker_values.shape[0]
+    control_size = control_marker_values.shape[0]
+    control_mask = np.concatenate([
+        np.zeros(train_size, dtype=bool),
+        np.ones(control_size, dtype=bool)
+    ])
+    
+    # Combine data
+    combined_marker_values = np.concatenate([
+        train_marker_values.numpy(), 
+        control_marker_values.numpy()
+    ], axis=0)
+    
+    combined_coverage = np.concatenate([
+        train_coverage.numpy(), 
+        control_coverage.numpy()
+    ], axis=0)
+    
+    combined_y = np.concatenate([
+        train_y_true.squeeze().numpy(), 
+        control_y.numpy()
+    ])
+    
+    return combined_marker_values, combined_coverage, combined_y, control_mask
 
 def analyse_data_characteristics(train_loader, val_loader):
     """

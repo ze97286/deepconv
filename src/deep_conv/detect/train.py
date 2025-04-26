@@ -10,7 +10,7 @@ from tqdm import tqdm
 from sklearn.metrics import r2_score, mean_absolute_error
 import torch.nn.functional as F
 
-from deep_conv.detect.preprocess import prepare_data_for_training
+from deep_conv.detect.preprocess import prepare_data_for_training,load_train_with_contrastive_data
 from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyser, CancerDetectionEnsemble
 
 
@@ -63,6 +63,13 @@ def parse_args():
     parser.add_argument('--device', type=str, default='', help='Device to use (empty for auto)')
     parser.add_argument('--save_interval', type=int, default=1000, help='Save checkpoint every N epochs')
     
+    parser.add_argument('--control_data_dir', type=str, default=None, 
+                   help='Directory containing control data for contrastive learning')
+    parser.add_argument('--calibrate', action='store_true', 
+                    help='Calibrate confidence intervals and background correction')
+    parser.add_argument('--contrastive_weight', type=float, default=5.0,
+                    help='Weight for contrastive loss component')
+
     args = parser.parse_args()
     
     if args.name:
@@ -164,10 +171,15 @@ def setup_logging(output_dir):
     return logger
 
 
-def calculate_loss(model, mu, phi, detection_probs, y_true, args):
+def calculate_loss(model, mu, phi, detection_probs, y_true, args, control_mask=None, epoch=None):
     """Calculate combined loss using configurable parameters"""
-    # Get concentration loss
-    concentration_loss = model.compute_loss(mu, phi, y_true)
+    # Get concentration loss with contrastive component if control_mask provided
+    if control_mask is not None:
+        concentration_loss = contrastive_loss(
+            model, mu, phi, detection_probs, y_true, control_mask, epoch
+        )
+    else:
+        concentration_loss = model.compute_loss(mu, phi, y_true)
     
     # Calculate detection losses for each threshold
     detection_losses = []
@@ -186,6 +198,40 @@ def calculate_loss(model, mu, phi, detection_probs, y_true, args):
     total_loss = concentration_loss + detection_loss_weight * combined_detection_loss
     
     return total_loss, concentration_loss, combined_detection_loss
+
+# Add to model.py or create a new function in train.py
+def contrastive_loss(model, mu, phi, detection_probs, y_true, control_mask, epoch=None):
+    """
+    Enhanced loss function with contrastive component for controls
+    """
+    # Get standard concentration loss
+    standard_loss = model.compute_loss(mu, phi, y_true)
+    
+    # No contrastive component if no control samples
+    if control_mask is None or control_mask.sum() == 0:
+        return standard_loss
+        
+    # Add contrastive component for controls
+    # Get predictions for control samples
+    control_preds = mu[control_mask]
+    
+    # Scale weight based on training progress
+    contrastive_weight = 5.0
+    if epoch is not None:
+        contrastive_weight = min(5.0, (epoch / 10) * 5.0)
+    
+    # Strong penalty for any prediction above minimal threshold on controls
+    threshold = 0.002  # 0.2% threshold 
+    contrastive_component = F.smooth_l1_loss(
+        control_preds, 
+        torch.zeros_like(control_preds),
+        beta=threshold
+    ) * contrastive_weight
+    
+    # Add stronger regularization for model stability
+    reg_loss = 0.03 * torch.abs(torch.log(phi)).mean()
+    
+    return standard_loss + contrastive_component + reg_loss
 
 def train(model, train_loader, val_loader, args, device):
     """Train the model with progress bars and enhanced logging"""
@@ -244,29 +290,50 @@ def train(model, train_loader, val_loader, args, device):
                          position=1, 
                          leave=False)
         
-        for i, (marker_values, coverage, y_true) in batch_bar:
-            marker_values = marker_values.to(device)
-            coverage = coverage.to(device)
-            y_true = y_true.to(device)
-
-            # Mixed precision forward pass
-            with torch.cuda.amp.autocast():
-                # Use updated forward pass that returns components instead of loss
-                output = model(marker_values, coverage, y_true)
+        for i, batch_data in batch_bar:
+            # Handle both dataset types (with or without control_mask)
+            if len(batch_data) == 4:  # Dataset includes control_mask
+                marker_values, coverage, y_true, control_mask = batch_data
+                marker_values = marker_values.to(device)
+                coverage = coverage.to(device)
+                y_true = y_true.to(device)
+                control_mask = control_mask.to(device)
                 
-                if len(output) == 5:  # Enhanced model returns 5 values
-                    mu, phi, detection_probs, attention_weights, _ = output
-                    # Calculate loss with parameter-based function
+                # Mixed precision forward pass
+                with torch.cuda.amp.autocast():
+                    output = model(marker_values, coverage, y_true, control_mask)
+                    mu, phi, detection_probs, attention_weights, _, _ = output
+                    
+                    # Calculate loss with contrastive component
                     loss, conc_loss, det_loss = calculate_loss(
-                        model, mu, phi, detection_probs, y_true, args
+                        model, mu, phi, detection_probs, y_true, args, 
+                        control_mask=control_mask, epoch=epoch
                     )
-                else:  # Standard model returns 4 values
-                    # Fallback for backward compatibility
-                    mu, phi, loss, attention_weights = output
-                    conc_loss = loss
-                    det_loss = 0.0
-                
-                loss = loss / args.grad_accum_steps
+                    loss = loss / args.grad_accum_steps
+            else:  # Standard dataset without control_mask
+                marker_values, coverage, y_true = batch_data
+                marker_values = marker_values.to(device)
+                coverage = coverage.to(device)
+                y_true = y_true.to(device)
+
+                # Mixed precision forward pass
+                with torch.cuda.amp.autocast():
+                    # Use updated forward pass that returns components instead of loss
+                    output = model(marker_values, coverage, y_true)
+                    
+                    if len(output) == 5:  # Enhanced model returns 5 values
+                        mu, phi, detection_probs, attention_weights, _ = output
+                        # Calculate loss with parameter-based function
+                        loss, conc_loss, det_loss = calculate_loss(
+                            model, mu, phi, detection_probs, y_true, args
+                        )
+                    else:  # Standard model returns 4 values
+                        # Fallback for backward compatibility
+                        mu, phi, loss, attention_weights = output
+                        conc_loss = loss
+                        det_loss = 0.0
+                    
+                    loss = loss / args.grad_accum_steps
 
             # Mixed precision backward pass
             scaler.scale(loss).backward()
@@ -299,7 +366,12 @@ def train(model, train_loader, val_loader, args, device):
                       leave=False)
         
         with torch.no_grad():
-            for marker_values, coverage, y_true in val_bar:
+            for batch_data in val_bar:
+                if len(batch_data) == 4:  # Dataset includes control_mask
+                    marker_values, coverage, y_true, _ = batch_data  # Ignore control_mask for validation
+                else:
+                    marker_values, coverage, y_true = batch_data
+                
                 marker_values = marker_values.to(device)
                 coverage = coverage.to(device)
                 y_true = y_true.to(device)
@@ -1050,6 +1122,91 @@ def evaluate(model, data_loader, args, device, split_name="test"):
         
     return results
 
+def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
+    """
+    Calibrate model confidence intervals and background level
+    """
+    model.eval()
+    
+    # 1. Calibrate confidence intervals
+    best_factor = 1.0
+    best_error = float('inf')
+    
+    with torch.no_grad():
+        # Test different calibration factors
+        for factor in [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]:
+            coverage_error = 0
+            n_batches = 0
+            
+            for marker_values, coverage, y_true, _ in val_loader:
+                marker_values = marker_values.to(device)
+                coverage = coverage.to(device)
+                y_true = y_true.to(device)
+                
+                mu, phi, _, _ = model(marker_values, coverage)
+                
+                # Apply test calibration factor
+                phi_calibrated = phi * factor
+                
+                # Calculate alpha, beta parameters
+                alpha = mu * phi_calibrated
+                beta = (1 - mu) * phi_calibrated
+                
+                # Move to numpy for scipy operations
+                alpha_np = alpha.cpu().numpy()
+                beta_np = beta.cpu().numpy()
+                y_true_np = y_true.cpu().numpy()
+                
+                # Calculate 95% CI
+                lower = np.zeros_like(y_true_np)
+                upper = np.zeros_like(y_true_np)
+                
+                for i in range(len(alpha_np)):
+                    a, b = float(alpha_np[i]), float(beta_np[i])
+                    if a > 0 and b > 0:
+                        lower[i] = stats.beta.ppf(0.025, a, b)
+                        upper[i] = stats.beta.ppf(0.975, a, b)
+                
+                # Calculate CI coverage
+                in_ci = (y_true_np >= lower) & (y_true_np <= upper)
+                ci_coverage = in_ci.mean()
+                
+                # Error relative to target 95%
+                error = abs(ci_coverage - 0.95)
+                coverage_error += error
+                n_batches += 1
+            
+            avg_error = coverage_error / n_batches
+            if avg_error < best_error:
+                best_error = avg_error
+                best_factor = factor
+    
+    # Apply best calibration factor
+    with torch.no_grad():
+        model.calibration.fill_(best_factor)
+        model.low_calibration.fill_(best_factor)
+    
+    # 2. Set background correction from controls
+    if control_loader is not None:
+        all_preds = []
+        
+        with torch.no_grad():
+            for marker_values, coverage, _, _ in control_loader:
+                marker_values = marker_values.to(device)
+                coverage = coverage.to(device)
+                
+                mu, _, _, _ = model(marker_values, coverage)
+                all_preds.append(mu.cpu().numpy())
+        
+        # Calculate median of predictions on controls
+        all_preds = np.concatenate(all_preds)
+        background = np.median(all_preds)
+        
+        # Set background level
+        with torch.no_grad():
+            model.background_level.fill_(torch.tensor(float(background)))
+    
+    return best_factor, float(model.background_level.item())
 
 def train_ensemble(args, train_loader, val_loader, test_loader, num_markers, device):
     """Train an ensemble of models with different random seeds"""
@@ -1179,6 +1336,7 @@ def get_git_info():
 # --target_cell_idx 11 \
 # --grad_accum_steps 8 \
 # --cell_profile ultra_low_snr
+# --calibrate
 
 
 # OAC
@@ -1188,6 +1346,8 @@ def get_git_info():
 # --target_cell_type OAC \
 # --target_cell_idx 9 \
 # --cell_profile high_snr
+# --control_data_dir 
+# --calibrate
 
 # python -m deep_conv.detect.train --ensemble --ensemble_size=3 --detection_thresholds=0.001,0.01,0.05 --name CpGenie_ensemble
 def main():
@@ -1197,7 +1357,6 @@ def main():
     
     # Set seed for reproducibility
     set_seed(args.seed)
-    
     
     # Determine device
     if args.device:
@@ -1242,6 +1401,12 @@ def main():
         json.dump(serialisable_stats, f, indent=2)
     logger.info(f"Data statistics saved to {stats_file}")
     
+    # Load control data if provided
+    control_val_loader = None
+    if hasattr(args, 'control_data_dir') and args.control_data_dir:
+        logger.info(f"Loading control data from {args.control_data_dir}...")
+        train_loader, control_val_loader = load_train_with_contrastive_data(args.control_data_dir, args.atlas_path, args.target_cell_type, args.batch_size, logger)
+    
     # Training phase
     if args.ensemble:
         logger.info(f"Training ensemble of {args.ensemble_size} models...")
@@ -1254,8 +1419,8 @@ def main():
             device=device
         )
     else:
-        # initialise single model
-        logger.info(f"initialising model with {num_markers} markers...")
+        # Initialize single model
+        logger.info(f"Initializing model with {num_markers} markers...")
         try:
             model = EnhancedCancerDetectionModel(
                 num_markers=num_markers,
@@ -1269,9 +1434,9 @@ def main():
             )
             total_params = sum(p.numel() for p in model.parameters())
             trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            logger.info(f"✓ Model initialised with {total_params:,} total parameters ({trainable_params:,} trainable)")
+            logger.info(f"✓ Model initialized with {total_params:,} total parameters ({trainable_params:,} trainable)")
         except Exception as e:
-            logger.error(f"× Error initialising model: {str(e)}")
+            logger.error(f"× Error initializing model: {str(e)}")
             raise
         
         # Train model
@@ -1282,6 +1447,18 @@ def main():
         except Exception as e:
             logger.error(f"× Error during training: {str(e)}")
             raise
+        
+        # Calibrate model if requested
+        if hasattr(args, 'calibrate') and args.calibrate:
+            logger.info("Calibrating model confidence intervals and background level...")
+            try:
+                calibration_factor, background = calibrate_model(
+                    model, val_loader, control_val_loader, device
+                )
+                logger.info(f"✓ Model calibrated: factor={calibration_factor:.4f}, background={background:.6f}")
+            except Exception as e:
+                logger.error(f"× Error during calibration: {str(e)}")
+                logger.info("  Continuing without calibration")
     
     # Evaluation phase
     try:

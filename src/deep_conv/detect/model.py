@@ -120,12 +120,26 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         # Dropout for regularisation
         self.dropout = nn.Dropout(dropout_rate)
+
+        self.coverage_attention = nn.Sequential(
+            nn.Linear(1, feature_dim // 4),
+            nn.GELU(),
+            nn.Linear(feature_dim // 4, 1),
+            nn.Sigmoid()
+        )
         
-    def forward(self, marker_values, coverage, y_true=None):
+        # Add background correction parameter
+        self.background_level = nn.Parameter(torch.zeros(1))
+        
+        
+    def forward(self, marker_values, coverage, y_true=None, control_mask=None):
         B, M = marker_values.shape
         
         # Create mask for missing values (where coverage = 0)
         mask = (coverage == 0)  # [B, M]
+        
+        # Calculate coverage weights for attention
+        coverage_weight = self.coverage_attention(torch.log1p(coverage).unsqueeze(-1))
         
         # Handle NaN values in marker_values
         marker_values = torch.nan_to_num(marker_values, nan=0.5)  # Replace NaN with 0.5 (neutral)
@@ -155,8 +169,11 @@ class EnhancedCancerDetectionModel(nn.Module):
             src_key_padding_mask=padding_mask
         )  # [B, M, feature_dim]
         
-        # Apply attention mechanism (ignoring masked positions)
+        # Apply attention mechanism with coverage weighting
         attention_scores = self.attention(transformer_output).squeeze(-1)  # [B, M]
+        
+        # Apply coverage weights to attention scores - this makes low coverage markers less influential
+        attention_scores = attention_scores * coverage_weight.squeeze(-1)
         attention_scores = attention_scores.masked_fill(mask, -1e9)  # Set masked positions to large negative
         attention_weights = F.softmax(attention_scores, dim=1)  # [B, M]
         
@@ -184,6 +201,9 @@ class EnhancedCancerDetectionModel(nn.Module):
         blended_mu = blend_weight * low_mu + (1 - blend_weight) * mu
         blended_phi = blend_weight * low_phi + (1 - blend_weight) * phi
         
+        # Apply background correction to reduce false positives in controls
+        blended_mu = torch.max(blended_mu - self.background_level, torch.zeros_like(blended_mu))
+        
         # Calculate uncertainty for detection heads
         _, _, uncertainty = self.get_estimate_and_ci(blended_mu, blended_phi)
         
@@ -193,7 +213,10 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Get detection probabilities for each threshold
         detection_probs = [head(detection_features) for head in self.detection_heads]
         
-        if y_true is not None:
+        # Return with control_mask if provided for contrastive learning
+        if y_true is not None and control_mask is not None:
+            return blended_mu, blended_phi, detection_probs, attention_weights, y_true, control_mask
+        elif y_true is not None:
             return blended_mu, blended_phi, detection_probs, attention_weights, y_true
             
         return blended_mu, blended_phi, detection_probs, attention_weights
