@@ -1345,8 +1345,8 @@ def get_git_info():
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ \
 # --target_cell_type OAC \
 # --target_cell_idx 9 \
-# --cell_profile high_snr
-# --control_data_dir 
+# --cell_profile high_snr \
+# --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ \
 # --calibrate
 
 # python -m deep_conv.detect.train --ensemble --ensemble_size=3 --detection_thresholds=0.001,0.01,0.05 --name CpGenie_ensemble
@@ -1382,7 +1382,7 @@ def main():
     # Prepare data
     logger.info(f"Preparing data from {args.data_dir}...")
     try:
-        train_loader, val_loader, test_loader, num_markers, data_stats = prepare_data_for_training(
+        train_loader, val_loader, test_loader, num_markers = prepare_data_for_training(
             data_dir=args.data_dir,
             atlas_path=args.atlas_path,
             target_cell_type=args.target_cell_type,
@@ -1394,12 +1394,12 @@ def main():
         raise
     
     # Save data stats
-    stats_file = os.path.join(args.output_dir, 'data_stats.json')
-    with open(stats_file, 'w') as f:
-        # Convert numpy types to Python types for JSON serialisation
-        serialisable_stats = {k: float(v) for k, v in data_stats.items()}
-        json.dump(serialisable_stats, f, indent=2)
-    logger.info(f"Data statistics saved to {stats_file}")
+    # stats_file = os.path.join(args.output_dir, 'data_stats.json')
+    # with open(stats_file, 'w') as f:
+    #     # Convert numpy types to Python types for JSON serialisation
+    #     serialisable_stats = {k: float(v) for k, v in data_stats.items()}
+    #     json.dump(serialisable_stats, f, indent=2)
+    # logger.info(f"Data statistics saved to {stats_file}")
     
     # Load control data if provided
     control_val_loader = None
