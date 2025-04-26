@@ -217,8 +217,8 @@ def load_control_data(
     """
     Load control data for contrastive learning
     """
-    marker_values_df = pd.read_parquet(os.path.join(data_dir, "*marker_values.parquet"))
-    coverage_df = pd.read_parquet(os.path.join(data_dir, "*coverage.parquet"))
+    marker_values_df = pd.read_parquet(os.path.join(data_dir, "marker_values.parquet"))
+    coverage_df = pd.read_parquet(os.path.join(data_dir, "coverage.parquet"))
 
     # Load atlas and extract relevant markers
     print(f"Loading atlas from {atlas_path} and extracting markers for {target_cell_type}...")
