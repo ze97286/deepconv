@@ -217,8 +217,8 @@ def load_control_data(
     """
     Load control data for contrastive learning
     """
-    marker_values_df = pd.read_parquet(glob.glob(os.path.join(data_dir, "*marker_values.parquet")))
-    coverage_df = pd.read_parquet(glob.glob(os.path.join(data_dir, "*coverage.parquet")))
+    marker_values_df = pd.read_parquet(os.path.join(data_dir, "*marker_values.parquet"))
+    coverage_df = pd.read_parquet(os.path.join(data_dir, "*coverage.parquet"))
 
     # Load atlas and extract relevant markers
     print(f"Loading atlas from {atlas_path} and extracting markers for {target_cell_type}...")
@@ -239,26 +239,26 @@ def load_control_data(
 
     return torch.tensor(marker_values, dtype=torch.float32), torch.tensor(coverage, dtype=torch.float32), sample_ids
 
-def create_mixed_dataset(
-    train_marker_values, 
-    train_coverage, 
-    train_y_true,
-    control_marker_values, 
-    control_coverage
-):
-    """
-    Create a mixed dataset with both training and control samples
-    """
-    # Create zero concentration for controls
-    control_y = torch.zeros(control_marker_values.shape[0])
-    
-    # Create control mask
+def create_mixed_dataset(train_marker_values, train_coverage, train_y_true, control_marker_values, control_coverage):
+    """Create a mixed dataset with both training and control samples"""
+    # Print sizes for debugging
     train_size = train_marker_values.shape[0]
     control_size = control_marker_values.shape[0]
+    
+    # Create control mask
     control_mask = np.concatenate([
         np.zeros(train_size, dtype=bool),
         np.ones(control_size, dtype=bool)
     ])
+    
+    # Ensure y_true is properly shaped
+    if len(train_y_true.shape) > 1:
+        train_y = train_y_true.squeeze().numpy()
+    else:
+        train_y = train_y_true.numpy()
+    
+    # Create zero concentration for controls with matching shape
+    control_y = np.zeros(control_size)
     
     # Combine data
     combined_marker_values = np.concatenate([
@@ -271,13 +271,12 @@ def create_mixed_dataset(
         control_coverage.numpy()
     ], axis=0)
     
-    combined_y = np.concatenate([
-        train_y_true.squeeze().numpy(), 
-        control_y.numpy()
-    ])
+    combined_y = np.concatenate([train_y, control_y])
+    
+    # Add safety check
+    assert len(combined_marker_values) == len(combined_coverage) == len(combined_y) == len(control_mask)
     
     return combined_marker_values, combined_coverage, combined_y, control_mask
-
 
 def create_mixed_dataset(
     train_marker_values, 
