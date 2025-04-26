@@ -462,9 +462,15 @@ class MarkerImportanceAnalyser:
                 else:
                     mu, _, det_probs, _ = self.model(marker_values, coverage)
                 
+                # Make sure to convert tensors to numpy arrays consistently
                 predictions.append(mu.cpu().numpy())
                 ground_truth.append(y_true.cpu().numpy())
                 detection_probs.append([dp.cpu().numpy() for dp in det_probs])
+        
+        # Concatenate results - ensure these are numpy arrays, not lists
+        predictions = np.concatenate(predictions)
+        ground_truth = np.concatenate(ground_truth).flatten()  # Make sure it's flattened
+        detection_probs = [np.concatenate([dp[i] for dp in detection_probs]) for i in range(len(model_thresholds))]
         
         # Calculate detection metrics for each threshold
         from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
@@ -474,7 +480,7 @@ class MarkerImportanceAnalyser:
             if i >= len(detection_probs):
                 continue  # Skip if threshold not in model_thresholds
                 
-            # Binary ground truth
+            # Binary ground truth - ensure ground_truth is a numpy array
             y_binary = (ground_truth >= threshold).astype(int)
             
             # ROC curve and AUC
