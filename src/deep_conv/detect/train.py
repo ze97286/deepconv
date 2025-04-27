@@ -325,42 +325,22 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
                 
                 # Get model predictions
                 with autocast():
-                    mu, phi, detection_probs, attention_weights, _, _ = model(
-                        marker_values, coverage, y_true, control_mask
-                    )
+                    mu, phi, detection_probs, attention_weights, _ = model(marker_values, coverage, y_true)
                     
-                    # Simplified training approach - use MSE for early phase
-                    if epoch < 5:  # First 5 epochs use MSE for stability
-                        loss = F.mse_loss(mu, y_true) / args.grad_accum_steps
-                    else:
-                        # Apply more gentle phase-specific weighting
-                        if phase == "early" or phase == "mid":
-                            # Early/Mid phase: Balanced focus
-                            sample_weight = torch.ones_like(y_true)
-                        else:
-                            # Late phase: Focus on low concentration samples
-                            sample_weight = torch.clamp(torch.exp(-y_true * 5) + 1.0, 1.0, 3.0)
-                        
-                        # Compute loss with sample weighting
-                        base_loss = model.compute_loss(mu, phi, y_true, control_mask)
-                        weighted_loss = (base_loss * sample_weight).mean() / args.grad_accum_steps
-                        
-                        # Add detection loss
-                        detection_loss = 0.0
-                        for j, threshold in enumerate(args.detection_thresholds):
-                            binary_y = (y_true >= threshold).float()
-                            det_loss = F.binary_cross_entropy(detection_probs[j], binary_y)
-                            detection_loss += det_loss
-                        
-                        detection_loss = detection_loss / len(args.detection_thresholds)
-                        
-                        # Combine losses
-                        if epoch < 10:  # Reduced detection weight for early epochs
-                            det_weight = args.detection_loss_weight * 0.25
-                        else:
-                            det_weight = args.detection_loss_weight
-                            
-                        loss = weighted_loss + det_weight * detection_loss / args.grad_accum_steps
+                    # Simplified loss approach - always use the same computation
+                    base_loss = model.compute_loss(mu, phi, y_true, control_mask if 'control_mask' in locals() else None)
+                    
+                    # Add detection loss
+                    detection_loss = 0.0
+                    for j, threshold in enumerate(args.detection_thresholds):
+                        binary_y = (y_true >= threshold).float()
+                        det_loss = F.binary_cross_entropy(detection_probs[j], binary_y)
+                        detection_loss += det_loss
+                    
+                    detection_loss = detection_loss / len(args.detection_thresholds)
+                    
+                    # Combine losses
+                    loss = base_loss + args.detection_loss_weight * detection_loss / args.grad_accum_steps
             else:  # Standard dataset without control_mask
                 marker_values, coverage, y_true = batch_data
                 marker_values = marker_values.to(device)

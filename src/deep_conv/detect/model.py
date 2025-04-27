@@ -206,116 +206,60 @@ class EnhancedCancerDetectionModel(nn.Module):
         attention_scores = attention_scores.masked_fill(mask, -1e9)  # Set masked positions to large negative
         attention_weights = F.softmax(attention_scores, dim=1)  # [B, M]
         
-        # Aggregate features with attention weights
-        aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)  # [B, feature_dim]
+        aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
         aggregated = self.dropout(aggregated)
         
-        # Aggregate low concentration features with the same attention weights
-        low_conc_aggregated = torch.sum(attention_weights.unsqueeze(-1) * low_conc_output, dim=1)
-        low_conc_aggregated = self.dropout(low_conc_aggregated)
+        # Direct prediction without Beta distribution
+        mu = self.mu_head(aggregated)
         
-        # Predict parameters for Beta distribution from main encoder
-        mu = self.mu_head(aggregated)  # [B, 1]
-        phi = self.phi_head(aggregated) * self.calibration  # [B, 1], calibrated concentration
+        # Force background subtraction
+        mu = torch.clamp(mu - self.background_level, min=0.0)
         
-        # Predict parameters from low concentration encoder
-        low_mu = self.low_mu_head(low_conc_aggregated)  # [B, 1]
-        low_phi = self.low_phi_head(low_conc_aggregated) * self.low_calibration  # [B, 1]
+        # Calculate features for detection
+        detection_features = torch.cat([aggregated, mu, torch.mean(coverage, dim=1, keepdim=True) / 100.0], dim=1)
         
-        # Blend predictions based on predicted concentration
-        # Less aggressive blending - reduced from 200 to 50
-        with torch.no_grad():
-            blend_weight = torch.exp(-mu * 50)  # Weight decreases as concentration increases
-        
-        blended_mu = blend_weight * low_mu + (1 - blend_weight) * mu
-        blended_phi = blend_weight * low_phi + (1 - blend_weight) * phi
-        
-        # Calculate average coverage for scaling predictions
-        avg_coverage = torch.mean(coverage, dim=1, keepdim=True)
-        coverage_scaling = torch.sigmoid((avg_coverage / self.min_reliable_coverage - 1) * 2)
-        
-        # Scale predictions based on coverage quality - more conservative for low overall coverage
-        blended_mu = blended_mu * coverage_scaling
-        
-        # Apply background correction to reduce false positives in controls
-        if self.marker_specific_bg:
-            # Apply marker-specific background correction using attention weights
-            marker_bg = torch.matmul(attention_weights, self.background_level.squeeze(0))
-            marker_bg = marker_bg.unsqueeze(1)
-            blended_mu = torch.max(blended_mu - marker_bg, torch.zeros_like(blended_mu))
-        else:
-            # Apply global background correction
-            blended_mu = torch.max(blended_mu - self.background_level, torch.zeros_like(blended_mu))
-        
-        # Force additional background subtraction to reduce false positives
-        blended_mu = torch.clamp(blended_mu - 0.03, min=0.0)
-        
-        # Calculate uncertainty for detection heads
-        _, _, uncertainty = self.get_estimate_and_ci(blended_mu, blended_phi)
-        
-        # Enhanced features for detection heads (including uncertainty and average coverage)
-        detection_features = torch.cat([aggregated, uncertainty, avg_coverage / 100.0], dim=1)
-        
-        # Get detection probabilities for each threshold
+        # Get detection probabilities
         detection_probs = [head(detection_features) for head in self.detection_heads]
         
-        # Return with control_mask if provided for contrastive learning
+        # For compatibility with existing code
+        phi = torch.ones_like(mu) * 10.0  # Placeholder
+        
+        # Return 
         if y_true is not None and control_mask is not None:
-            return blended_mu, blended_phi, detection_probs, attention_weights, y_true, control_mask
+            return mu, phi, detection_probs, attention_weights, y_true, control_mask
         elif y_true is not None:
-            return blended_mu, blended_phi, detection_probs, attention_weights, y_true
+            return mu, phi, detection_probs, attention_weights, y_true
             
-        return blended_mu, blended_phi, detection_probs, attention_weights
+        return mu, phi, detection_probs, attention_weights
     
     def compute_loss(self, mu, phi, y_true, control_mask=None, epsilon=1e-6):
         """
-        Compute improved focal Beta negative log likelihood loss with enhanced
-        contrastive learning and zero-concentration specific penalties
+        Simplified loss function that avoids Beta distribution entirely
         """
-        y_clipped = torch.clamp(y_true, epsilon, 1 - epsilon)
+        # Basic MSE loss for concentration
+        mse_loss = F.mse_loss(mu, y_true, reduction='none')
         
-        # Calculate Beta distribution parameters with safety floor
-        alpha = torch.clamp(mu * phi, min=epsilon)  # [B, 1]
-        beta = torch.clamp((1 - mu) * phi, min=epsilon)  # [B, 1]
+        # Add focal weighting to focus on low values
+        weight = 1.0 + 5.0 * (1.0 - y_true)  # Higher weight for low concentration 
+        weighted_loss = (mse_loss * weight).mean()
         
-        # Create Beta distribution
-        dist = Beta(alpha, beta)
+        # Zero-concentration specific loss
+        zero_penalty = 5.0 * (mu * (y_true < epsilon).float()).mean() if (y_true < epsilon).sum() > 0 else 0.0
         
-        # Negative log likelihood
-        nll_loss = -dist.log_prob(y_clipped)
-        
-        # Get focal weighting factor (reduced from 50 to 5)
-        focal_factor = 5.0
-        
-        # Enhanced focal weighting with reduced factor and clamping
-        base_weight = torch.clamp(torch.exp(-y_true * focal_factor) + 1.0, 1.0, 2.0)
-        
-        # No additional threshold weight or low concentration weight 
-        # to simplify and stabilize training
-        
-        # Apply focal weighting
-        focal_loss = nll_loss * base_weight
-        
-        # Add enhanced L2 regularization to prevent overfitting
-        l2_reg_loss = self.l2_weight * (torch.norm(phi) + torch.abs(torch.log(phi)).mean())
-        
-        # Zero-concentration specific loss (penalize any positive prediction for true zeros)
-        zero_conc_penalty = 5.0 * (mu * (y_true < epsilon).float()).mean() if (y_true < epsilon).sum() > 0 else 0.0
-        
-        # Simplified control loss with stronger penalty
+        # Control sample loss
         control_loss = 0.0
         if control_mask is not None and control_mask.sum() > 0:
             # Direct L1 penalty on control predictions
             control_loss = 20.0 * torch.mean(mu[control_mask])
         
-        # Attention regularization on the first Linear layer of attention
-        attention_l1_reg = 0.01 * self.attention[0].weight.abs().mean()
+        # L1 regularization
+        l1_reg = 0.001 * sum(p.abs().sum() for p in self.parameters())
         
-        # Combine all loss components with clipping to prevent extreme negative values
-        total_loss = torch.clamp(focal_loss.mean(), min=-10.0) + l2_reg_loss + zero_conc_penalty + control_loss + attention_l1_reg
+        # Total loss
+        total_loss = weighted_loss + zero_penalty + control_loss + l1_reg
         
         return total_loss
-    
+
     def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
         """
         Get point estimate and confidence interval for concentration
