@@ -516,7 +516,6 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
     # Save training history
     history_path = os.path.join(args.output_dir, 'training_history.json')
     with open(history_path, 'w') as f:
-        import json
         # Convert history values to native types for JSON serialization
         serializable_history = {}
         for key, values in history.items():
@@ -1825,9 +1824,6 @@ def main():
         }
         test_results_file = os.path.join(args.output_dir, 'test_results.json')
         with open(test_results_file, 'w') as f:
-            # Convert numpy types to native Python types for JSON serialization
-            import json
-            
             def convert_to_serializable(obj):
                 if isinstance(obj, dict):
                     return {k: convert_to_serializable(v) for k, v in obj.items()}
