@@ -610,6 +610,17 @@ def validate_model(model, val_loader, device, args):
     clinical_metrics = clinical_performance_metrics(all_preds, all_targets, args.detection_thresholds)
     
     # Return validation loss and metrics
+    if 0.01 in clinical_metrics and clinical_metrics[0.01]['sensitivity'] < 0.01:
+        # If sensitivity is near zero, adjust background level
+        with torch.no_grad():
+            if hasattr(model, 'marker_specific_bg') and model.marker_specific_bg:
+                model.background_level.mul_(0.8)  # Reduce background by 20%
+            else:
+                model.background_level.mul_(0.8)  # Reduce background by 20%
+        logger = logging.getLogger('cancer_detection')
+        logger.info("  Warning: Very low sensitivity detected. Reducing background level.")
+    
+    # Return validation loss and metrics
     metrics = {
         'concentration_loss': concentration_loss,
         'detection_loss': detection_loss,

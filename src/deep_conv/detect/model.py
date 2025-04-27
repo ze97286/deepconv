@@ -224,7 +224,7 @@ class EnhancedCancerDetectionModel(nn.Module):
             mu = torch.clamp(mu - self.background_level, min=0.0)
         
         # Add additional forced background subtraction
-        mu = torch.clamp(mu - 0.03, min=0.0)
+        mu = torch.clamp(mu - 0.01, min=0.0)
         
         # Create a placeholder for phi (concentration parameter)
         phi = torch.ones_like(mu) * 10.0
@@ -247,31 +247,31 @@ class EnhancedCancerDetectionModel(nn.Module):
             
         return mu, phi, detection_probs, attention_weights
     
+    # In compute_loss, add weighted BCE for detection thresholds:
     def compute_loss(self, mu, phi, y_true, control_mask=None, epsilon=1e-6):
-        """
-        Simplified loss function that avoids Beta distribution entirely
-        """
-        # Basic MSE loss for concentration
+        # Keep existing MSE loss
         mse_loss = F.mse_loss(mu, y_true, reduction='none')
         
-        # Add focal weighting to focus on low values
-        weight = 1.0 + 5.0 * (1.0 - y_true)  # Higher weight for low concentration 
+        # Focal weighting - but more balanced
+        weight = 1.0 + 2.0 * (1.0 - y_true)  # Reduced from 5.0 to 2.0
         weighted_loss = (mse_loss * weight).mean()
         
-        # Zero-concentration specific loss
-        zero_penalty = 5.0 * (mu * (y_true < epsilon).float()).mean() if (y_true < epsilon).sum() > 0 else 0.0
+        # Reduce zero-concentration penalty
+        zero_penalty = 2.0 * (mu * (y_true < epsilon).float()).mean() if (y_true < epsilon).sum() > 0 else 0.0
         
-        # Control sample loss
+        # Reduce control sample penalty
         control_loss = 0.0
         if control_mask is not None and control_mask.sum() > 0:
-            # Direct L1 penalty on control predictions
-            control_loss = 20.0 * torch.mean(mu[control_mask])
+            control_loss = 10.0 * torch.mean(mu[control_mask])  # Reduced from 20.0
         
-        # L1 regularization
-        l1_reg = 0.001 * sum(p.abs().sum() for p in self.parameters())
+        # NEW: Add balance penalty to encourage some positive predictions
+        # This penalizes if average predictions are too far from average targets
+        avg_pred = mu.mean()
+        avg_target = y_true.mean()
+        balance_penalty = 5.0 * torch.abs(avg_pred - avg_target)
         
         # Total loss
-        total_loss = weighted_loss + zero_penalty + control_loss + l1_reg
+        total_loss = weighted_loss + zero_penalty + control_loss + balance_penalty
         
         return total_loss
 
