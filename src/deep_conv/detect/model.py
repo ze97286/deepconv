@@ -325,8 +325,8 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         # Attention regularization to prevent over-reliance on specific markers
         # This encourages more distributed attention across markers
-        attention_l1_reg = 0.01 * self.attention[2].weight.abs().mean()
-        
+        attention_l1_reg = 0.01 * self.attention[0].weight.abs().mean() + 0.01 * self.attention[3].weight.abs().mean()
+
         # Combine all loss components
         total_loss = focal_loss.mean() + l2_reg_loss + zero_conc_penalty + control_loss + attention_l1_reg
         

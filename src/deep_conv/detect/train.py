@@ -1650,7 +1650,7 @@ def get_git_info():
 # python -m deep_conv.detect.train \
 # --name CpGenie_OAC \
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ \
-# --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/ \
+# --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed \
 # --target_cell_type OAC \
 # --target_cell_idx 9 \
 # --cell_profile high_snr \
