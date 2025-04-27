@@ -73,7 +73,8 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Linear(feature_dim // 2, 1),
             nn.Sigmoid()
         )
-        
+        self.mu_head[-2].bias.data.fill_(-1.0)  
+
         self.phi_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
