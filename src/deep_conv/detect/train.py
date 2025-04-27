@@ -11,45 +11,52 @@ from tqdm import tqdm
 from sklearn.metrics import r2_score, mean_absolute_error
 import torch.nn.functional as F
 
+import torch.optim as optim
+from torch.cuda.amp import GradScaler, autocast
+
 from deep_conv.detect.preprocess import prepare_data_for_training,load_train_with_contrastive_data
 from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyser, CancerDetectionEnsemble
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train cfDNA methylation cancer detection model')
+    parser = argparse.ArgumentParser(description='Train enhanced cfDNA methylation cancer detection model')
     
     parser.add_argument('--name', type=str, default=None, help='Name for this training run (used for output directory)')
 
     # Data parameters
-    parser.add_argument('--data_dir', type=str, default="/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/", help='Directory containing parquet files')
-    parser.add_argument('--atlas_path', type=str, default="/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed", help='Path to atlas file')
-    parser.add_argument('--target_cell_type', type=str, default='OAC', help='Target cell type')
-    parser.add_argument('--target_cell_idx', type=int, default=9, help='Target cell index in ground truth')
+    parser.add_argument('--data_dir', type=str, required=True, help='Directory containing parquet files')
+    parser.add_argument('--atlas_path', type=str, required=True, help='Path to atlas file')
+    parser.add_argument('--target_cell_type', type=str, required=True, help='Target cell type')
+    parser.add_argument('--target_cell_idx', type=int, required=True, help='Target cell index in ground truth')
     
     # Model parameters
     parser.add_argument('--feature_dim', type=int, default=128, help='Feature dimension')
     parser.add_argument('--num_heads', type=int, default=8, help='Number of attention heads')
-    parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate')
-    parser.add_argument('--num_layers', type=int, default=3, help='Number of transformer layers (ignored for Set Transformer)')
+    parser.add_argument('--dropout_rate', type=float, default=0.3, help='Dropout rate (increased for better regularization)')
+    parser.add_argument('--num_layers', type=int, default=3, help='Number of transformer layers')
     
     parser.add_argument('--cell_profile', type=str, default=None, 
                        choices=['default', 'high_snr', 'low_snr', 'ultra_low_snr'],
                        help='Predefined optimisation profile for different cell types')
-    parser.add_argument('--detection_loss_weight', type=float, default=None, 
+    parser.add_argument('--detection_loss_weight', type=float, default=0.2, 
                        help='Weight of detection loss relative to concentration loss')
-    parser.add_argument('--focal_weight_factor', type=float, default=None,
+    parser.add_argument('--focal_weight_factor', type=float, default=100,
                        help='Factor for focal weighting of low concentration samples')
-    parser.add_argument('--low_concentration_threshold', type=float, default=None,
+    parser.add_argument('--low_concentration_threshold', type=float, default=0.01,
                        help='Threshold defining low concentration samples for special handling')
+    parser.add_argument('--l2_weight', type=float, default=0.02,
+                       help='Weight for L2 regularization in loss calculation')
+    parser.add_argument('--marker_specific_bg', action='store_true',
+                       help='Use marker-specific background correction')
 
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimiser')
-    parser.add_argument('--epochs', type=int, default=1000, help='Number of epochs')
+    parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
     parser.add_argument('--grad_accum_steps', type=int, default=4, help='Gradient accumulation steps')
     parser.add_argument('--early_stopping', type=int, default=10, help='Early stopping patience')
-    parser.add_argument('--output_dir', type=str, default="/users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell", help='Output directory')
+    parser.add_argument('--output_dir', type=str, default="./saved_models", help='Output directory')
     
     # Ensemble parameters
     parser.add_argument('--ensemble', action='store_true', help='Use ensemble of models')
@@ -62,14 +69,12 @@ def parse_args():
     # Misc parameters
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--device', type=str, default='', help='Device to use (empty for auto)')
-    parser.add_argument('--save_interval', type=int, default=1000, help='Save checkpoint every N epochs')
+    parser.add_argument('--save_interval', type=int, default=50, help='Save checkpoint every N epochs')
     
     parser.add_argument('--control_data_dir', type=str, default=None, 
                    help='Directory containing control data for contrastive learning')
     parser.add_argument('--calibrate', action='store_true', 
                     help='Calibrate confidence intervals and background correction')
-    parser.add_argument('--contrastive_weight', type=float, default=5.0,
-                    help='Weight for contrastive loss component')
 
     args = parser.parse_args()
     
@@ -77,7 +82,7 @@ def parse_args():
         dir_name = args.name
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dir_name = f"run_{timestamp}"
+        dir_name = f"enhanced_model_{timestamp}"
     
     args.output_dir = os.path.join(args.output_dir, dir_name)
 
@@ -97,6 +102,7 @@ def parse_args():
 
     return args
 
+
 def apply_cell_profile(args):
     """Apply predefined parameter sets optimised for different cell types"""
     profiles = {
@@ -108,17 +114,17 @@ def apply_cell_profile(args):
         },
         'high_snr': {  # For cells like OAC with good SNR
             'detection_loss_weight': 0.2,
-            'focal_weight_factor': 100, 
+            'focal_weight_factor': 50,  
             'low_concentration_threshold': 0.01
         },
         'low_snr': {  # For cells with moderate SNR issues
             'detection_loss_weight': 0.4,
-            'focal_weight_factor': 150,
+            'focal_weight_factor': 120,  # Reduced from 150
             'low_concentration_threshold': 0.02
         },
         'ultra_low_snr': {  # For T-cells and other very low SNR cases
-            'detection_loss_weight': 0.6,
-            'focal_weight_factor': 200,
+            'detection_loss_weight': 0.5,  # Reduced from 0.6
+            'focal_weight_factor': 150,  # Reduced from 200
             'low_concentration_threshold': 0.03
         }
     }
@@ -131,6 +137,7 @@ def apply_cell_profile(args):
         args.focal_weight_factor = profile['focal_weight_factor']
     if args.low_concentration_threshold is None:
         args.low_concentration_threshold = profile['low_concentration_threshold']
+
 
 def set_seed(seed):
     """Set seed for reproducibility"""
@@ -173,19 +180,11 @@ def setup_logging(output_dir):
 
 
 def calculate_loss(model, mu, phi, detection_probs, y_true, args, control_mask=None):
+    """Calculate combined loss with concentration and detection components"""
     # Get concentration loss
-    concentration_loss = model.compute_loss(mu, phi, y_true)
+    concentration_loss = model.compute_loss(mu, phi, y_true, control_mask)
     
-    # Add simple control penalty if controls present
-    if control_mask is not None and control_mask.sum() > 0:
-        # Extract predictions for control samples
-        control_preds = mu[control_mask]
-        
-        # Simple L1 penalty for any prediction above minimal threshold on controls
-        control_penalty = 3.0 * torch.mean(control_preds)
-        concentration_loss = concentration_loss + control_penalty
-    
-    # Calculate detection losses (keep this part unchanged)
+    # Calculate detection losses
     detection_losses = []
     for i, threshold in enumerate(args.detection_thresholds):
         binary_y = (y_true >= threshold).float()
@@ -222,33 +221,52 @@ def coverage_weighted_loss(model, mu, phi, detection_probs, y_true, coverage):
     
     return weighted_loss + reg_loss
 
-def train(model, train_loader, val_loader, args, device):
-    """Train the model with progress bars and enhanced logging"""
-    os.makedirs(args.output_dir, exist_ok=True)
+def train_with_curriculum(model, train_loader, val_loader, control_loader, args, device):
+    """
+    Train the model with curriculum learning to focus on different concentration ranges
+    at different stages of training
+    
+    Args:
+        model: The cancer detection model to train
+        train_loader: DataLoader for training data
+        val_loader: DataLoader for validation data
+        control_loader: DataLoader for control samples (can be None)
+        args: Training arguments
+        device: Device to run training on
+        
+    Returns:
+        Trained model and best model state
+    """
     logger = logging.getLogger('cancer_detection')
     
-    git_info = get_git_info()
-    git_commit = git_info['commit']
-
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Move model to device
     model = model.to(device)
-    optimiser = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=args.epochs)
-    scaler = torch.cuda.amp.GradScaler() 
     
-    # Apply cell-specific parameters to model if provided
-    if hasattr(args, 'focal_weight_factor'):
-        model.focal_weight_factor = args.focal_weight_factor
-    if hasattr(args, 'low_concentration_threshold'):
-        model.low_concentration_threshold = args.low_concentration_threshold
+    # Setup optimizer with weight decay for regularization
+    optimizer = torch.optim.AdamW(
+        model.parameters(), 
+        lr=args.lr,
+        weight_decay=args.weight_decay  # L2 regularization
+    )
     
-    logger.info(f"Starting training with configuration:")
-    for arg, value in vars(args).items():
-        logger.info(f"  {arg}: {value}")
-    logger.info(f"Device: {device}")
-    logger.info(f"Model: {type(model).__name__}")
-    logger.info(f"Training samples: {len(train_loader.dataset)}")
-    logger.info(f"Validation samples: {len(val_loader.dataset)}")
+    # Learning rate scheduler with warmup
+    total_steps = len(train_loader) * args.epochs
+    warmup_steps = int(0.2 * total_steps)  # 20% warmup
     
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        return 0.5 * (1.0 + math.cos(math.pi * (current_step - warmup_steps) / (total_steps - warmup_steps)))
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    
+    # Mixed precision training
+    scaler = GradScaler()
+    
+    # Initialize tracking variables
     best_val_loss = float('inf')
     best_model_state = None
     patience_counter = 0
@@ -260,26 +278,43 @@ def train(model, train_loader, val_loader, args, device):
         'calibration_error': [],
         'r2_score': [],
         'mean_absolute_error': [],
-        'lr': [],
-        'detection_metrics': []
+        'clinical_metrics': [],
+        'lr': []
     }
     
-    epoch_bar = tqdm(range(args.epochs), desc="Training", position=0)
-    for epoch in epoch_bar:
+    # Divide training into phases for curriculum learning
+    early_phase = int(args.epochs * 0.3)  # First 30% of epochs
+    mid_phase = int(args.epochs * 0.6)   # Next 30% of epochs
+    # Remaining epochs are the late phase
+    
+    logger.info(f"Training with curriculum learning:")
+    logger.info(f"  Early phase (high concentration focus): epochs 1-{early_phase}")
+    logger.info(f"  Mid phase (balanced focus): epochs {early_phase+1}-{mid_phase}")
+    logger.info(f"  Late phase (low concentration focus): epochs {mid_phase+1}-{args.epochs}")
+    
+    # Start training loop
+    for epoch in range(args.epochs):
+        # Determine curriculum phase
+        if epoch < early_phase:
+            phase = "early"
+            logger.info(f"Epoch {epoch+1}/{args.epochs} [Early Phase - High Concentration Focus]")
+        elif epoch < mid_phase:
+            phase = "mid"
+            logger.info(f"Epoch {epoch+1}/{args.epochs} [Mid Phase - Balanced Focus]")
+        else:
+            phase = "late"
+            logger.info(f"Epoch {epoch+1}/{args.epochs} [Late Phase - Low Concentration Focus]")
+        
         # Training phase
         model.train()
         train_loss = 0
-        train_conc_loss = 0
-        train_det_loss = 0
-        optimiser.zero_grad()
         
-        batch_bar = tqdm(enumerate(train_loader), 
+        # Progress bar for training
+        train_bar = tqdm(enumerate(train_loader), 
                          desc=f"Epoch {epoch+1}/{args.epochs} [Train]", 
-                         total=len(train_loader),
-                         position=1, 
-                         leave=False)
+                         total=len(train_loader))
         
-        for i, batch_data in batch_bar:
+        for i, batch_data in train_bar:
             # Handle both dataset types (with or without control_mask)
             if len(batch_data) == 4:  # Dataset includes control_mask
                 marker_values, coverage, y_true, control_mask = batch_data
@@ -288,180 +323,147 @@ def train(model, train_loader, val_loader, args, device):
                 y_true = y_true.to(device)
                 control_mask = control_mask.to(device)
                 
-                # Mixed precision forward pass
-                with torch.cuda.amp.autocast():
-                    output = model(marker_values, coverage, y_true, control_mask)
-                    mu, phi, detection_probs, attention_weights, _, _ = output
-                    
-                    # Calculate loss with contrastive component
-                    loss, conc_loss, det_loss = calculate_loss(
-                        model, mu, phi, detection_probs, y_true, args, 
-                        control_mask=control_mask
+                # Curriculum learning: Apply phase-specific sample weighting
+                with autocast():
+                    # Get model predictions
+                    mu, phi, detection_probs, attention_weights, _, _ = model(
+                        marker_values, coverage, y_true, control_mask
                     )
-                    loss = loss / args.grad_accum_steps
+                    
+                    # Apply phase-specific weighting
+                    if phase == "early":
+                        # Early phase: Focus on high concentration samples
+                        sample_weight = torch.exp(y_true * 10) + 1.0  # Higher weight for higher concentrations
+                    elif phase == "mid":
+                        # Mid phase: Balanced focus
+                        sample_weight = torch.ones_like(y_true)  # Equal weight for all samples
+                    else:
+                        # Late phase: Focus on low concentration samples
+                        sample_weight = torch.exp(-y_true * 20) + 1.0  # Higher weight for lower concentrations
+                    
+                    # Compute loss with sample weighting
+                    base_loss = model.compute_loss(mu, phi, y_true, control_mask)
+                    weighted_loss = (base_loss * sample_weight).mean() / args.grad_accum_steps
+                    
+                    # Add detection loss
+                    detection_loss = 0.0
+                    for j, threshold in enumerate(args.detection_thresholds):
+                        binary_y = (y_true >= threshold).float()
+                        det_loss = F.binary_cross_entropy(detection_probs[j], binary_y)
+                        detection_loss += det_loss
+                    
+                    detection_loss = detection_loss / len(args.detection_thresholds)
+                    
+                    # Combine losses
+                    loss = weighted_loss + args.detection_loss_weight * detection_loss / args.grad_accum_steps
             else:  # Standard dataset without control_mask
                 marker_values, coverage, y_true = batch_data
                 marker_values = marker_values.to(device)
                 coverage = coverage.to(device)
                 y_true = y_true.to(device)
-
-                # Mixed precision forward pass
-                with torch.cuda.amp.autocast():
-                    # Use updated forward pass that returns components instead of loss
-                    output = model(marker_values, coverage, y_true)
+                
+                # Curriculum learning: Apply phase-specific sample weighting
+                with autocast():
+                    # Get model predictions
+                    mu, phi, detection_probs, attention_weights, _ = model(
+                        marker_values, coverage, y_true
+                    )
                     
-                    if len(output) == 5:  # Enhanced model returns 5 values
-                        mu, phi, detection_probs, attention_weights, _ = output
-                        # Calculate loss with parameter-based function
-                        loss, conc_loss, det_loss = calculate_loss(
-                            model, mu, phi, detection_probs, y_true, args
-                        )
-                    else:  # Standard model returns 4 values
-                        # Fallback for backward compatibility
-                        mu, phi, loss, attention_weights = output
-                        conc_loss = loss
-                        det_loss = 0.0
+                    # Apply phase-specific weighting
+                    if phase == "early":
+                        # Early phase: Focus on high concentration samples
+                        sample_weight = torch.exp(y_true * 10) + 1.0  # Higher weight for higher concentrations
+                    elif phase == "mid":
+                        # Mid phase: Balanced focus
+                        sample_weight = torch.ones_like(y_true)  # Equal weight for all samples
+                    else:
+                        # Late phase: Focus on low concentration samples
+                        sample_weight = torch.exp(-y_true * 20) + 1.0  # Higher weight for lower concentrations
                     
-                    loss = loss / args.grad_accum_steps
-
-            # Mixed precision backward pass
+                    # Compute loss with sample weighting
+                    base_loss = model.compute_loss(mu, phi, y_true)
+                    weighted_loss = (base_loss * sample_weight).mean() / args.grad_accum_steps
+                    
+                    # Add detection loss
+                    detection_loss = 0.0
+                    for j, threshold in enumerate(args.detection_thresholds):
+                        binary_y = (y_true >= threshold).float()
+                        det_loss = F.binary_cross_entropy(detection_probs[j], binary_y)
+                        detection_loss += det_loss
+                    
+                    detection_loss = detection_loss / len(args.detection_thresholds)
+                    
+                    # Combine losses
+                    loss = weighted_loss + args.detection_loss_weight * detection_loss / args.grad_accum_steps
+            
+            # Backpropagation with mixed precision
             scaler.scale(loss).backward()
-            batch_loss = loss.item() * args.grad_accum_steps
-            train_loss += batch_loss
-            train_conc_loss += conc_loss.item() / args.grad_accum_steps
-            train_det_loss += det_loss.item() / args.grad_accum_steps
             
-            batch_bar.set_postfix({"loss": f"{batch_loss:.4f}"})
+            # Update metrics
+            train_loss += loss.item() * args.grad_accum_steps
             
-            # Gradient accumulation and optimisation step
+            # Gradient accumulation and optimizer step
             if (i + 1) % args.grad_accum_steps == 0 or (i + 1) == len(train_loader):
-                scaler.step(optimiser)
+                # Gradient clipping to prevent exploding gradients
+                scaler.unscale_(optimizer)
+                if phase == "early":
+                    max_norm = 5.0
+                elif phase == "mid":
+                    max_norm = 3.0
+                else:
+                    max_norm = 1.0
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+
+                # Optimizer step with mixed precision
+                scaler.step(optimizer)
                 scaler.update()
-                optimiser.zero_grad()
+                optimizer.zero_grad()
+                scheduler.step()
+            
+            # Update progress bar
+            train_bar.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{scheduler.get_last_lr()[0]:.6f}"})
+        
+        # Calculate average training loss
+        train_loss /= len(train_loader)
         
         # Validation phase
-        model.eval()
-        val_loss = 0
-        val_conc_loss = 0
-        val_det_loss = 0
-        calibration_error = 0
-        all_preds = []
-        all_targets = []
+        val_loss, val_metrics = validate_model(model, val_loader, device, args)
         
-        # Use tqdm for validation
-        val_bar = tqdm(val_loader, 
-                      desc=f"Epoch {epoch+1}/{args.epochs} [Validate]", 
-                      position=1, 
-                      leave=False)
-        
-        with torch.no_grad():
-            for batch_data in val_bar:
-                if len(batch_data) == 4:  # Dataset includes control_mask
-                    marker_values, coverage, y_true, _ = batch_data  # Ignore control_mask for validation
-                else:
-                    marker_values, coverage, y_true = batch_data
-                
-                marker_values = marker_values.to(device)
-                coverage = coverage.to(device)
-                y_true = y_true.to(device)
-                
-                # Handle different model return signatures
-                output = model(marker_values, coverage, y_true)
-                
-                if len(output) == 5:  # Enhanced model returns 5 values
-                    mu, phi, detection_probs, attention_weights, _ = output
-                    # Calculate loss with parameter-based function
-                    loss, conc_loss, det_loss = calculate_loss(
-                        model, mu, phi, detection_probs, y_true, args
-                    )
-                else:  # Standard model returns 4 values
-                    # Fallback for backward compatibility
-                    mu, phi, loss, attention_weights = output
-                    conc_loss = loss
-                    det_loss = 0.0
-                
-                val_loss += loss.item()
-                val_conc_loss += conc_loss.item()
-                val_det_loss += det_loss.item()
-                
-                # Store predictions and targets for metrics
-                all_preds.append(mu.cpu().numpy())
-                all_targets.append(y_true.cpu().numpy())
-                
-                # Calculate calibration error
-                estimate, ci, _ = model.get_estimate_and_ci(mu, phi)
-                in_ci = (y_true >= ci[:, 0:1]) & (y_true <= ci[:, 1:2])
-                calibration_error += (1.0 - in_ci.float().mean()).item()
-                
-                # Update validation progress bar
-                val_bar.set_postfix({"loss": f"{loss.item():.4f}"})
-        
-        # Calculate metrics
-        val_loss /= len(val_loader)
-        val_conc_loss /= len(val_loader)
-        val_det_loss /= len(val_loader)
-        calibration_error /= len(val_loader)
-        train_loss /= len(train_loader)
-        train_conc_loss /= len(train_loader)
-        train_det_loss /= len(train_loader)
-        
-        all_preds = np.concatenate(all_preds)
-        all_targets = np.concatenate(all_targets)
-        r2 = r2_score(all_targets, all_preds)
-        mae = mean_absolute_error(all_targets, all_preds)
-        
-        # Get current learning rate
-        current_lr = optimiser.param_groups[0]['lr']
-        
-        # Update learning rate
-        scheduler.step()
-        
-        # Calculate detection metrics
-        analyser = MarkerImportanceAnalyser(model)
-        detection_metrics = analyser.analyse_detection_performance(val_loader, thresholds=args.detection_thresholds)
+        # Periodic calibration (every 5 epochs and in late phase)
+        if control_loader is not None and (epoch % 5 == 0 or phase == "late"):
+            logger.info(f"Calibrating model...")
+            calibration_results = calibrate_model(model, val_loader, control_loader, device)
+            logger.info(f"  Calibration factor: {calibration_results['calibration_factor']:.4f}")
+            logger.info(f"  Low conc. calibration: {calibration_results['low_calibration_factor']:.4f}")
+            if 'global_bg_level' in calibration_results:
+                logger.info(f"  Background level: {calibration_results['global_bg_level']:.6f}")
         
         # Update history
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
-        history['concentration_loss'].append(val_conc_loss)
-        history['detection_loss'].append(val_det_loss)
-        history['calibration_error'].append(calibration_error)
-        history['r2_score'].append(r2)
-        history['mean_absolute_error'].append(mae)
-        history['lr'].append(current_lr)
-        history['detection_metrics'].append(detection_metrics)
+        history['concentration_loss'].append(val_metrics['concentration_loss'])
+        history['detection_loss'].append(val_metrics['detection_loss'])
+        history['calibration_error'].append(val_metrics['calibration_error'])
+        history['r2_score'].append(val_metrics['r2'])
+        history['mean_absolute_error'].append(val_metrics['mae'])
+        history['clinical_metrics'].append(val_metrics['clinical_metrics'])
+        history['lr'].append(scheduler.get_last_lr()[0])
         
-        # Update epoch progress bar
-        epoch_bar.set_postfix({
-            "train_loss": f"{train_loss:.4f}",
-            "val_loss": f"{val_loss:.4f}",
-            "R²": f"{r2:.4f}"
-        })
+        # Log validation results
+        logger.info(f"Epoch {epoch+1}/{args.epochs} - "
+                   f"Train Loss: {train_loss:.6f}, "
+                   f"Val Loss: {val_loss:.6f}, "
+                   f"R²: {val_metrics['r2']:.4f}, "
+                   f"MAE: {val_metrics['mae']:.6f}")
         
-        # Log performance metrics
-        logger.info(
-            f"Epoch {epoch+1}/{args.epochs} - "
-            f"Train Loss: {train_loss:.6f}, "
-            f"Val Loss: {val_loss:.6f}, "
-            f"Conc Loss: {val_conc_loss:.6f}, "
-            f"Det Loss: {val_det_loss:.6f}, "
-            f"Calibration Error: {calibration_error:.4f}, "
-            f"R² Score: {r2:.4f}, "
-            f"MAE: {mae:.6f}, "
-            f"LR: {current_lr:.2e}"
-        )
+        # Log clinical metrics
+        if 0.01 in val_metrics['clinical_metrics']:
+            metrics_1pct = val_metrics['clinical_metrics'][0.01]
+            logger.info(f"  At 1% threshold - "
+                       f"Sensitivity: {metrics_1pct['sensitivity']:.4f}, "
+                       f"Specificity: {metrics_1pct['specificity']:.4f}")
         
-        # Log detection metrics for 1% threshold
-        key_threshold = 0.01  # 1% threshold is often clinically relevant
-        if key_threshold in detection_metrics:
-            key_metrics = detection_metrics[key_threshold]
-            logger.info(
-                f"Detection at {key_threshold:.1%}: "
-                f"AUC={key_metrics['auc']:.4f}, "
-                f"Sensitivity@95%Spec={key_metrics['sensitivity_at_95spec']:.4f}"
-            )
-        
-        # Check if this is the best model
+        # Check for improvement
         if val_loss < best_val_loss:
             improvement = "inf" if best_val_loss == float('inf') else f"{(best_val_loss - val_loss) / best_val_loss * 100:.2f}%"
             best_val_loss = val_loss
@@ -469,40 +471,35 @@ def train(model, train_loader, val_loader, args, device):
                 'model': model.state_dict(),
                 'epoch': epoch,
                 'val_loss': val_loss,
-                'concentration_loss': val_conc_loss,
-                'detection_loss': val_det_loss,
-                'r2_score': r2,
-                'mae': mae,
-                'calibration_error': calibration_error,
-                'detection_metrics': detection_metrics,
-                'commit-hash': git_commit,
+                'val_metrics': val_metrics,
+                'args': vars(args)
             }
+            
+            # Save best model
             torch.save(best_model_state, os.path.join(args.output_dir, 'best_model.pt'))
-            patience_counter = 0
             logger.info(f"✓ New best model saved! Improvement: {improvement}")
+            patience_counter = 0
         else:
             patience_counter += 1
             logger.info(f"× No improvement. Patience: {patience_counter}/{args.early_stopping}")
-            
-        # Early stopping check
+        
+        # Early stopping
         if patience_counter >= args.early_stopping:
             logger.info(f"Early stopping triggered after {epoch+1} epochs")
             break
         
-        # Save checkpoint every N epochs
+        # Checkpoint saving
         if (epoch + 1) % args.save_interval == 0:
-            checkpoint = {
-                'model': model.state_dict(),
-                'optimiser': optimiser.state_dict(),
-                'scheduler': scheduler.state_dict(),
-                'epoch': epoch,
-                'best_val_loss': best_val_loss,
-                'history': history,
-                'args': vars(args),
-                'commit-hash': git_commit,
-            }
             checkpoint_path = os.path.join(args.output_dir, f'checkpoint_epoch_{epoch+1}.pt')
-            torch.save(checkpoint, checkpoint_path)
+            torch.save({
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict(),
+                'scaler': scaler.state_dict(),
+                'epoch': epoch,
+                'args': vars(args),
+                'history': history
+            }, checkpoint_path)
             logger.info(f"Checkpoint saved to {checkpoint_path}")
     
     # Save final model
@@ -510,72 +507,236 @@ def train(model, train_loader, val_loader, args, device):
     torch.save({
         'model': model.state_dict(),
         'epoch': epoch,
-        'val_loss': val_loss,
-        'concentration_loss': val_conc_loss,
-        'detection_loss': val_det_loss,
-        'r2_score': r2,
-        'mae': mae,
-        'calibration_error': calibration_error,
-        'commit-hash': git_commit
+        'val_metrics': val_metrics,
+        'args': vars(args),
+        'history': history
     }, final_model_path)
     logger.info(f"Final model saved to {final_model_path}")
     
-    # Save training history with improved error handling
+    # Save training history
     history_path = os.path.join(args.output_dir, 'training_history.json')
     with open(history_path, 'w') as f:
-        serialisable_history = {}
+        import json
+        # Convert history values to native types for JSON serialization
+        serializable_history = {}
         for key, values in history.items():
-            if key != 'detection_metrics':
-                serialisable_history[key] = [float(v) for v in values]
+            if key != 'clinical_metrics':
+                serializable_history[key] = [float(v) for v in values]
             else:
-                # Handle nested dictionaries for detection metrics
-                serialisable_detection_metrics = []
+                # Handle nested clinical metrics
+                serializable_metrics = []
                 for epoch_metrics in values:
-                    serialisable_epoch_metrics = {}
-                    for thresh, metrics in epoch_metrics.items():
-                        if isinstance(thresh, dict):
-                            # If thresh is already a dict, something is wrong with the data structure
-                            print(f"Warning: Unexpected dict as threshold key: {thresh}")
-                            # Use a string representation as a fallback
-                            thresh_key = str(thresh)
-                        else:
-                            # Normal case: thresh should be a number
-                            thresh_key = str(float(thresh))
-                        
-                        # Similar safeguard for metrics
-                        if isinstance(metrics, dict):
-                            # Convert all metric values to float
-                            serialisable_metrics = {k: float(v) if not isinstance(v, dict) else str(v) for k, v in metrics.items()}
-                        else:
-                            # If metrics is not a dict (unexpected), store as string
-                            serialisable_metrics = {"value": str(metrics)}
-                        
-                        serialisable_epoch_metrics[thresh_key] = serialisable_metrics
-                    serialisable_detection_metrics.append(serialisable_epoch_metrics)
-                serialisable_history[key] = serialisable_detection_metrics
-        json.dump(serialisable_history, f)
+                    serializable_epoch = {}
+                    for threshold, metrics in epoch_metrics.items():
+                        serializable_epoch[str(threshold)] = {k: float(v) for k, v in metrics.items() if v is not None}
+                    serializable_metrics.append(serializable_epoch)
+                serializable_history[key] = serializable_metrics
+        
+        json.dump(serializable_history, f, indent=2)
     
-    logger.info(f"Training history saved to {history_path}")
-    
-    # Plot training history
+    # Create plots of training history
     plot_training_history(history, args.output_dir)
-    logger.info(f"Training plots saved to {args.output_dir}")
     
-    # Final performance summary
-    logger.info("\n" + "="*50)
-    logger.info("TRAINING COMPLETE")
-    logger.info(f"Best validation loss: {best_val_loss:.6f} (epoch {best_model_state['epoch']+1})")
-    logger.info(f"Best R² score: {best_model_state['r2_score']:.4f}")
-    logger.info(f"Best MAE: {best_model_state['mae']:.6f}")
-    logger.info("="*50 + "\n")
+    # Load best model for return
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state['model'])
     
-    # Load best model
-    model.load_state_dict(best_model_state['model'])
     return model, best_model_state
+
+def validate_model(model, val_loader, device, args):
+    """
+    Validate model performance on validation set
+    
+    Args:
+        model: The cancer detection model to validate
+        val_loader: DataLoader for validation data
+        device: Device to run validation on
+        args: Training arguments with detection thresholds
+        
+    Returns:
+        Tuple of (validation loss, metrics dictionary)
+    """
+    model.eval()
+    val_loss = 0
+    concentration_loss = 0
+    detection_loss = 0
+    calibration_error = 0
+    
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for batch_data in val_loader:
+            # Handle both dataset types
+            if len(batch_data) == 4:
+                marker_values, coverage, y_true, _ = batch_data  # Ignore control_mask for validation
+            else:
+                marker_values, coverage, y_true = batch_data
+            
+            marker_values = marker_values.to(device)
+            coverage = coverage.to(device)
+            y_true = y_true.to(device)
+            
+            # Forward pass
+            mu, phi, detection_probs, _ = model(marker_values, coverage)
+            
+            # Compute concentration loss
+            batch_conc_loss = model.compute_loss(mu, phi, y_true)
+            concentration_loss += batch_conc_loss.item()
+            
+            # Compute detection loss
+            batch_det_loss = 0
+            for i, threshold in enumerate(args.detection_thresholds):
+                binary_y = (y_true >= threshold).float()
+                det_loss = F.binary_cross_entropy(detection_probs[i], binary_y)
+                batch_det_loss += det_loss.item()
+            
+            batch_det_loss /= len(args.detection_thresholds)
+            detection_loss += batch_det_loss
+            
+            # Compute total loss
+            batch_loss = batch_conc_loss + args.detection_loss_weight * batch_det_loss
+            val_loss += batch_loss.item()
+            
+            # Calculate calibration error
+            estimate, ci, _ = model.get_estimate_and_ci(mu, phi)
+            in_ci = (y_true >= ci[:, 0:1]) & (y_true <= ci[:, 1:2])
+            calibration_error += (1.0 - in_ci.float().mean()).item()
+            
+            # Store predictions and targets for metrics
+            all_preds.append(mu.cpu().numpy())
+            all_targets.append(y_true.cpu().numpy())
+    
+    # Calculate average losses
+    val_loss /= len(val_loader)
+    concentration_loss /= len(val_loader)
+    detection_loss /= len(val_loader)
+    calibration_error /= len(val_loader)
+    
+    # Concatenate predictions and targets
+    all_preds = np.concatenate(all_preds)
+    all_targets = np.concatenate(all_targets)
+    
+    # Calculate regression metrics
+    r2 = r2_score(all_targets, all_preds)
+    mae = mean_absolute_error(all_targets, all_preds)
+    
+    # Calculate clinical metrics
+    clinical_metrics = clinical_performance_metrics(all_preds, all_targets, args.detection_thresholds)
+    
+    # Return validation loss and metrics
+    metrics = {
+        'concentration_loss': concentration_loss,
+        'detection_loss': detection_loss,
+        'calibration_error': calibration_error,
+        'r2': r2,
+        'mae': mae,
+        'clinical_metrics': clinical_metrics
+    }
+    
+    return val_loss, metrics
+
+def clinical_performance_metrics(predictions, ground_truth, thresholds=[0.001, 0.01, 0.05]):
+    """
+    Calculate clinically relevant metrics for cancer detection
+    
+    Args:
+        predictions: Predicted concentrations (numpy array)
+        ground_truth: True concentrations (numpy array)
+        thresholds: List of concentration thresholds to evaluate
+        
+    Returns:
+        Dictionary of clinical metrics at each threshold
+    """
+    import numpy as np
+    from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
+    
+    # Ensure arrays are flattened
+    predictions = predictions.flatten()
+    ground_truth = ground_truth.flatten()
+    
+    # Calculate metrics for each threshold
+    results = {}
+    
+    for threshold in thresholds:
+        # Convert to binary classification
+        y_pred = (predictions >= threshold).astype(float)
+        y_true = (ground_truth >= threshold).astype(float)
+        
+        # Calculate basic metrics
+        TP = np.sum((y_pred == 1) & (y_true == 1))
+        TN = np.sum((y_pred == 0) & (y_true == 0))
+        FP = np.sum((y_pred == 1) & (y_true == 0))
+        FN = np.sum((y_pred == 0) & (y_true == 1))
+        
+        # Calculate rates
+        sensitivity = TP / (TP + FN) if (TP + FN) > 0 else 0
+        specificity = TN / (TN + FP) if (TN + FP) > 0 else 0
+        ppv = TP / (TP + FP) if (TP + FP) > 0 else 0
+        npv = TN / (TN + FN) if (TN + FN) > 0 else 0
+        
+        # Calculate ROC curve and AUC
+        try:
+            fpr, tpr, _ = roc_curve(y_true, predictions)
+            roc_auc = auc(fpr, tpr)
+            
+            # Find sensitivity at 95% specificity (5% FPR)
+            idx_95spec = np.argmin(np.abs(fpr - 0.05))
+            sens_at_95spec = tpr[idx_95spec] if idx_95spec < len(tpr) else 0
+            
+            # Calculate PR curve and average precision
+            precision, recall, _ = precision_recall_curve(y_true, predictions)
+            avg_precision = average_precision_score(y_true, predictions)
+        except:
+            # Handle cases with only one class
+            roc_auc = 0
+            sens_at_95spec = 0
+            avg_precision = 0
+        
+        # Calculate magnitude-aware metrics
+        # How close are the predictions to the true values?
+        if np.sum(y_true) > 0:
+            positive_samples = predictions[y_true == 1]
+            positive_targets = ground_truth[y_true == 1]
+            
+            # Mean absolute percentage error for positive samples
+            mape = np.mean(np.abs(positive_samples - positive_targets) / np.maximum(positive_targets, 1e-6)) \
+                   if len(positive_samples) > 0 else np.nan
+                   
+            # Percentage of positive samples with error < 20%
+            within_20pct = np.mean(np.abs(positive_samples - positive_targets) <= 0.2 * np.maximum(positive_targets, 1e-6)) * 100 \
+                           if len(positive_samples) > 0 else np.nan
+        else:
+            mape = np.nan
+            within_20pct = np.nan
+        
+        # Store all metrics
+        results[threshold] = {
+            'sensitivity': float(sensitivity),
+            'specificity': float(specificity),
+            'ppv': float(ppv),
+            'npv': float(npv),
+            'roc_auc': float(roc_auc),
+            'sens_at_95spec': float(sens_at_95spec),
+            'avg_precision': float(avg_precision),
+            'TP': int(TP),
+            'TN': int(TN),
+            'FP': int(FP),
+            'FN': int(FN),
+            'mape': float(mape) if not np.isnan(mape) else None,
+            'within_20pct': float(within_20pct) if not np.isnan(within_20pct) else None
+        }
+    
+    return results
 
 def plot_training_history(history, output_dir):
     """
-    Plot and save training history with enhanced visualisations using Plotly
+    Create enhanced plots of training history metrics using Plotly, including clinical metrics
+    like sensitivity, specificity, and false positive rate (FPR) at the 1% threshold.
+    
+    Args:
+        history: Dictionary containing training history metrics
+        output_dir: Directory to save the plots
     """
     import os
     import plotly.graph_objects as go
@@ -585,7 +746,10 @@ def plot_training_history(history, output_dir):
     plots_dir = os.path.join(output_dir, 'plots')
     os.makedirs(plots_dir, exist_ok=True)
     
-    # Create figure with subplots
+    # Get epoch numbers
+    epochs = list(range(1, len(history['train_loss']) + 1))
+    
+    # Create figure with subplots for main metrics
     fig = make_subplots(
         rows=3, cols=2,
         subplot_titles=(
@@ -598,15 +762,12 @@ def plot_training_history(history, output_dir):
         )
     )
     
-    # Get epochs
-    epochs = list(range(1, len(history['train_loss']) + 1))
-    
     # 1. Training and validation loss
     fig.add_trace(
         go.Scatter(
             x=epochs, 
             y=history['train_loss'], 
-            mode='lines', 
+            mode='lines+markers', 
             name='Train Loss',
             line=dict(color='blue', width=2)
         ),
@@ -617,7 +778,7 @@ def plot_training_history(history, output_dir):
         go.Scatter(
             x=epochs, 
             y=history['val_loss'], 
-            mode='lines', 
+            mode='lines+markers', 
             name='Validation Loss',
             line=dict(color='red', width=2)
         ),
@@ -629,7 +790,7 @@ def plot_training_history(history, output_dir):
         go.Scatter(
             x=epochs, 
             y=history['calibration_error'], 
-            mode='lines', 
+            mode='lines+markers', 
             name='Calibration Error',
             line=dict(color='green', width=2),
             showlegend=False
@@ -642,7 +803,7 @@ def plot_training_history(history, output_dir):
         go.Scatter(
             x=epochs, 
             y=history['r2_score'], 
-            mode='lines', 
+            mode='lines+markers', 
             name='R² Score',
             line=dict(color='purple', width=2),
             showlegend=False
@@ -655,7 +816,7 @@ def plot_training_history(history, output_dir):
         go.Scatter(
             x=epochs, 
             y=history['mean_absolute_error'], 
-            mode='lines', 
+            mode='lines+markers', 
             name='MAE',
             line=dict(color='orange', width=2),
             showlegend=False
@@ -669,7 +830,7 @@ def plot_training_history(history, output_dir):
             go.Scatter(
                 x=epochs, 
                 y=history['lr'], 
-                mode='lines', 
+                mode='lines+markers', 
                 name='Learning Rate',
                 line=dict(color='cyan', width=2),
                 showlegend=False
@@ -710,7 +871,7 @@ def plot_training_history(history, output_dir):
                 row=3, col=2
             )
     
-    # Update layout
+    # Update layout for main figure
     fig.update_layout(
         height=1000,
         width=1000,
@@ -729,16 +890,126 @@ def plot_training_history(history, output_dir):
     
     fig.update_yaxes(title_text='Loss', row=1, col=1)
     fig.update_yaxes(title_text='Error', row=1, col=2)
-    fig.update_yaxes(title_text='R²', row=2, col=1)
+    fig.update_yaxes(title_text='R²', row=2, col=1, range=[0, 1])
     fig.update_yaxes(title_text='MAE', row=2, col=2)
     fig.update_yaxes(title_text='Learning Rate', row=3, col=1)
-    fig.update_yaxes(title_text='R² Score', row=3, col=2)
+    fig.update_yaxes(title_text='R² Score', row=3, col=2, range=[0, 1])
     
     # Save main figure
     fig.write_html(os.path.join(plots_dir, 'training_history.html'))
     fig.write_image(os.path.join(plots_dir, 'training_history.png'), scale=2)
     
-    # Also create individual plots for better detail
+    # Create clinical metrics plot if available
+    if 'clinical_metrics' in history and len(history['clinical_metrics']) > 0:
+        # Extract metrics for 1% threshold (typically most relevant)
+        sensitivity_1pct = []
+        specificity_1pct = []
+        fpr_1pct = []
+        
+        for epoch_metrics in history['clinical_metrics']:
+            if 0.01 in epoch_metrics or '0.01' in epoch_metrics:
+                metrics = epoch_metrics.get(0.01, epoch_metrics.get('0.01', {}))
+                sensitivity_1pct.append(metrics.get('sensitivity', None))
+                specificity_1pct.append(metrics.get('specificity', None))
+                # Calculate FPR = FP / (FP + TN)
+                fp = metrics.get('FP', 0)
+                tn = metrics.get('TN', 0)
+                fpr = fp / (fp + tn) if (fp + tn) > 0 else 0
+                fpr_1pct.append(fpr)
+            else:
+                sensitivity_1pct.append(None)
+                specificity_1pct.append(None)
+                fpr_1pct.append(None)
+        
+        # Filter out None values and create valid data for plotting
+        valid_epochs = []
+        valid_sens = []
+        valid_spec = []
+        valid_fpr = []
+        
+        for i, (sens, spec, fpr) in enumerate(zip(sensitivity_1pct, specificity_1pct, fpr_1pct)):
+            if sens is not None and spec is not None and fpr is not None:
+                valid_epochs.append(epochs[i])
+                valid_sens.append(sens)
+                valid_spec.append(spec)
+                valid_fpr.append(fpr)
+        
+        # Create clinical metrics figure if there is valid data
+        if valid_epochs:
+            clinical_fig = go.Figure()
+            
+            # Sensitivity at 1% threshold
+            clinical_fig.add_trace(
+                go.Scatter(
+                    x=valid_epochs,
+                    y=valid_sens,
+                    mode='lines+markers',
+                    name='Sensitivity (1% threshold)',
+                    line=dict(color='blue', width=2)
+                )
+            )
+            
+            # Specificity at 1% threshold
+            clinical_fig.add_trace(
+                go.Scatter(
+                    x=valid_epochs,
+                    y=valid_spec,
+                    mode='lines+markers',
+                    name='Specificity (1% threshold)',
+                    line=dict(color='red', width=2)
+                )
+            )
+            
+            # False Positive Rate (FPR) at 1% threshold
+            clinical_fig.add_trace(
+                go.Scatter(
+                    x=valid_epochs,
+                    y=valid_fpr,
+                    mode='lines+markers',
+                    name='FPR (1% threshold)',
+                    line=dict(color='orange', width=2)
+                )
+            )
+            
+            # Update layout
+            clinical_fig.update_layout(
+                title='Clinical Metrics at 1% Threshold',
+                xaxis_title='Epoch',
+                yaxis_title='Value',
+                template='plotly_white',
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
+                width=900,
+                height=500,
+                yaxis=dict(range=[0, 1])
+            )
+            
+            # Add reference line at 0.95 for sensitivity and specificity
+            clinical_fig.add_shape(
+                type="line",
+                x0=min(valid_epochs),
+                y0=0.95,
+                x1=max(valid_epochs),
+                y1=0.95,
+                line=dict(color="green", dash="dash"),
+                name="95% Reference"
+            )
+            
+            # Add reference line at 0.05 for FPR (target for 95% specificity)
+            clinical_fig.add_shape(
+                type="line",
+                x0=min(valid_epochs),
+                y0=0.05,
+                x1=max(valid_epochs),
+                y1=0.05,
+                line=dict(color="purple", dash="dash"),
+                name="5% FPR Target"
+            )
+            
+            # Save clinical metrics figure
+            clinical_fig.write_html(os.path.join(plots_dir, 'clinical_metrics.html'))
+            clinical_fig.write_image(os.path.join(plots_dir, 'clinical_metrics.png'), scale=2)
+    
+    # Create individual plots for better detail
     metrics = [
         ('loss', ['train_loss', 'val_loss'], ['Train Loss', 'Validation Loss'], ['blue', 'red']),
         ('r2_score', ['r2_score'], ['R² Score'], ['purple']),
@@ -747,33 +1018,60 @@ def plot_training_history(history, output_dir):
     ]
     
     for name, keys, labels, colors in metrics:
-        fig = go.Figure()
+        detail_fig = go.Figure()
         
         for key, label, color in zip(keys, labels, colors):
-            fig.add_trace(
+            detail_fig.add_trace(
                 go.Scatter(
                     x=epochs,
                     y=history[key],
-                    mode='lines',
+                    mode='lines+markers',
                     name=label,
                     line=dict(color=color, width=2)
                 )
             )
         
-        fig.update_layout(
+        # Add reference lines for R² and calibration error
+        if name == 'r2_score':
+            detail_fig.add_shape(
+                type="line",
+                x0=min(epochs),
+                y0=0.9,
+                x1=max(epochs),
+                y1=0.9,
+                line=dict(color="green", dash="dash"),
+                name="0.9 R² Reference"
+            )
+        elif name == 'calibration':
+            detail_fig.add_shape(
+                type="line",
+                x0=min(epochs),
+                y0=0.05,
+                x1=max(epochs),
+                y1=0.05,
+                line=dict(color="purple", dash="dash"),
+                name="5% Calibration Error Target"
+            )
+        
+        detail_fig.update_layout(
             title=f'{labels[0]}' if len(labels) == 1 else 'Loss Curves',
             xaxis_title='Epoch',
             yaxis_title=name.replace('_', ' ').title(),
             template='plotly_white',
-            width=800,
-            height=500,
+            width=900,
+            height=600,
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
         )
         
+        # Set y-axis range for R² and calibration error plots
+        if name == 'r2_score':
+            detail_fig.update_yaxes(range=[0, 1])
+        elif name == 'calibration':
+            detail_fig.update_yaxes(range=[0, max(history[key]) * 1.1])
+        
         # Save individual figure
-        fig.write_html(os.path.join(plots_dir, f'{name}_history.html'))
-        fig.write_image(os.path.join(plots_dir, f'{name}_history.png'), scale=2)
-
+        detail_fig.write_html(os.path.join(plots_dir, f'{name}_history.html'))
+        detail_fig.write_image(os.path.join(plots_dir, f'{name}_history.png'), scale=2)
 
 def visualise_results(predictions, ground_truth, output_subdir, ci_data=None, marker_importance=None, prefix=""):
     """
@@ -1139,10 +1437,11 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
     best_factor = 1.0
     best_error = float('inf')
     best_low_factor = 1.0
+    best_low_error = float('inf')
     
     with torch.no_grad():
         # Test different calibration factors
-        for factor in [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]:
+        for factor in [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]:
             coverage_error = 0
             n_batches = 0
             
@@ -1201,9 +1500,8 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
                 best_factor = factor
         
         # Calibration factor for low concentrations (separate calibration)
-        best_low_error = float('inf')
         # Try different calibration factors for low concentrations
-        for factor in [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]:
+        for factor in [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]:
             coverage_error = 0
             n_batches = 0
             
@@ -1226,6 +1524,9 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
                 low_mask = y_true <= low_thresh
                 if low_mask.sum() == 0:
                     continue  # Skip if no low concentration samples
+                
+                # Get model predictions
+                mu, phi, _, _ = model(marker_values, coverage)
                 
                 # Process only low concentration samples
                 mu_low = mu[low_mask]
@@ -1274,27 +1575,10 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
                     best_low_error = avg_error
                     best_low_factor = factor
     
-    # 2. Calculate background level from controls if available
-    background_level = 0.0
+    # 2. Calibrate background level using controls
+    background_results = {}
     if control_loader is not None:
-        all_preds = []
-        
-        with torch.no_grad():
-            for batch_data in control_loader:
-                if len(batch_data) == 4:
-                    marker_values, coverage, _, _ = batch_data
-                else:
-                    marker_values, coverage, _ = batch_data
-                
-                marker_values = marker_values.to(device)
-                coverage = coverage.to(device)
-                
-                mu, _, _, _ = model(marker_values, coverage)
-                all_preds.append(mu.cpu().numpy())
-        
-        # Calculate median of predictions on controls
-        all_preds = np.concatenate(all_preds)
-        background_level = float(np.median(all_preds))
+        background_results = model.calibrate_background(control_loader, device)
     
     # Apply calibration factors to model
     with torch.no_grad():
@@ -1303,105 +1587,20 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
             model.calibration.fill_(best_factor)
         if hasattr(model, 'low_calibration'):
             model.low_calibration.fill_(best_low_factor)
-        if hasattr(model, 'background_level'):
-            model.background_level.fill_(background_level)
     
     # Return calibration parameters
     calibration_results = {
         'calibration_factor': best_factor,
         'low_calibration_factor': best_low_factor,
-        'background_level': background_level,
         'coverage_error': float(best_error),
         'low_coverage_error': float(best_low_error) if best_low_error != float('inf') else None
     }
     
+    # Merge with background results if available
+    if background_results:
+        calibration_results.update(background_results)
+    
     return calibration_results
-
-def train_ensemble(args, train_loader, val_loader, test_loader, num_markers, device):
-    """Train an ensemble of models with different random seeds"""
-    logger = logging.getLogger('cancer_detection')
-    logger.info(f"Training ensemble of {args.ensemble_size} models...")
-
-    models = []
-    best_states = []
-
-    # Create subdirectory for individual models
-    ensemble_dir = os.path.join(args.output_dir, 'ensemble_models')
-    os.makedirs(ensemble_dir, exist_ok=True)
-
-    # Train each model with a different seed
-    for i, seed in enumerate(args.ensemble_seeds):
-        logger.info(f"\n{'='*20} TRAINING ENSEMBLE MODEL {i+1}/{args.ensemble_size} (SEED: {seed}) {'='*20}\n")
-
-        # Set seed for this model
-        set_seed(seed)
-
-        # Create model
-        model = EnhancedCancerDetectionModel(
-            num_markers=num_markers,
-            feature_dim=args.feature_dim,
-            num_heads=args.num_heads,
-            num_layers=args.num_layers,
-            dropout_rate=args.dropout_rate,
-            detection_thresholds=args.detection_thresholds,
-            focal_weight_factor=args.focal_weight_factor,
-            low_concentration_threshold=args.low_concentration_threshold,
-        )
-
-        # Create model directory
-        model_dir = os.path.join(ensemble_dir, f'model_{i+1}_seed_{seed}')
-        os.makedirs(model_dir, exist_ok=True)
-
-        # Store original output_dir
-        original_output_dir = args.output_dir
-
-        # Temporarily set output_dir to model directory
-        args.output_dir = model_dir
-
-        # Train model
-        model, best_state = train(model, train_loader, val_loader, args, device)
-
-        # Reset output_dir
-        args.output_dir = original_output_dir
-
-        # Store model and best state
-        models.append(model)
-        best_states.append(best_state)
-
-        # Log model results
-        logger.info(f"Model {i+1}/{args.ensemble_size} training complete")
-        logger.info(f"Best validation loss: {best_state['val_loss']:.6f}")
-        logger.info(f"Best R² score: {best_state['r2_score']:.4f}")
-
-    # Create ensemble model
-    ensemble = CancerDetectionEnsemble(models)
-
-    logger.info("\n" + "="*50)
-    logger.info(f"ENSEMBLE TRAINING COMPLETE ({args.ensemble_size} models)")
-
-    # Save ensemble model
-    ensemble_state = {
-        "model_states": [model.state_dict() for model in models],
-        "ensemble_size": args.ensemble_size,
-        "seeds": args.ensemble_seeds,
-        "model_config": {
-            "num_markers": num_markers,
-            "feature_dim": args.feature_dim,
-            "num_heads": args.num_heads,
-            "num_layers": args.num_layers,
-            "dropout_rate": args.dropout_rate,
-            "focal_weight_factor": args.focal_weight_factor,
-            "detection_thresholds": args.detection_thresholds,
-            "low_concentration_threshold": args.low_concentration_threshold,
-        },
-    }
-
-    ensemble_path = os.path.join(args.output_dir, 'ensemble_model.pt')
-    torch.save(ensemble_state, ensemble_path)
-    logger.info(f"Ensemble model saved to {ensemble_path}")
-
-    return ensemble, ensemble_state
-
 
 def get_git_info():
     """Retrieve information about the current Git repository state.
@@ -1452,15 +1651,24 @@ def get_git_info():
 # python -m deep_conv.detect.train \
 # --name CpGenie_OAC \
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ \
+# --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/ \
 # --target_cell_type OAC \
 # --target_cell_idx 9 \
 # --cell_profile high_snr \
+# --dropout_rate 0.3 \
+# --l2_weight 0.05 \
+# --feature_dim 128 \
+# --num_heads 8 \
+# --num_layers 3 \
+# --marker_specific_bg \
 # --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ \
 # --calibrate
 
 # python -m deep_conv.detect.train --ensemble --ensemble_size=3 --detection_thresholds=0.001,0.01,0.05 --name CpGenie_ensemble
 def main():
-    """Main function with enhanced logging and progress tracking"""
+    """
+    Main function with enhanced approach to training and calibration
+    """
     # Parse arguments
     args = parse_args()
     
@@ -1478,7 +1686,7 @@ def main():
     
     # Setup logging
     logger = setup_logging(args.output_dir)
-    logger.info(f"Starting cancer detection training pipeline")
+    logger.info(f"Starting enhanced cancer detection training pipeline")
     logger.info(f"Using device: {device}")
     logger.info(f"Output directory: {args.output_dir}")
     
@@ -1502,116 +1710,153 @@ def main():
         logger.error(f"× Error during data preparation: {str(e)}")
         raise
     
-    # Save data stats
-    # stats_file = os.path.join(args.output_dir, 'data_stats.json')
-    # with open(stats_file, 'w') as f:
-    #     # Convert numpy types to Python types for JSON serialisation
-    #     serialisable_stats = {k: float(v) for k, v in data_stats.items()}
-    #     json.dump(serialisable_stats, f, indent=2)
-    # logger.info(f"Data statistics saved to {stats_file}")
-    
     # Load control data if provided
     control_val_loader = None
-    if hasattr(args, 'control_data_dir') and args.control_data_dir:
+    if args.control_data_dir:
         logger.info(f"Loading control data from {args.control_data_dir}...")
-        train_loader, control_val_loader = load_train_with_contrastive_data(train_loader, args.control_data_dir, args.atlas_path, args.target_cell_type, args.batch_size, logger)
-    
-    # Training phase
-    if args.ensemble:
-        logger.info(f"Training ensemble of {args.ensemble_size} models...")
-        model, best_model_state = train_ensemble(
-            args=args,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            test_loader=test_loader,
-            num_markers=num_markers,
-            device=device
-        )
-    else:
-        # Initialize single model
-        logger.info(f"Initializing model with {num_markers} markers...")
         try:
-            model = EnhancedCancerDetectionModel(
-                num_markers=num_markers,
-                feature_dim=args.feature_dim,
-                num_heads=args.num_heads,
-                num_layers=args.num_layers,
-                dropout_rate=args.dropout_rate,
-                detection_thresholds=args.detection_thresholds,
-                focal_weight_factor=args.focal_weight_factor,
-                low_concentration_threshold=args.low_concentration_threshold,
+            train_loader, control_val_loader = load_train_with_contrastive_data(
+                train_loader, 
+                args.control_data_dir, 
+                args.atlas_path, 
+                args.target_cell_type, 
+                args.batch_size, 
+                logger
             )
-            total_params = sum(p.numel() for p in model.parameters())
-            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            logger.info(f"✓ Model initialized with {total_params:,} total parameters ({trainable_params:,} trainable)")
+            logger.info(f"✓ Control data loaded successfully")
         except Exception as e:
-            logger.error(f"× Error initializing model: {str(e)}")
-            raise
-        
-        # Train model
-        logger.info("Starting model training...")
-        try:
-            model, best_model_state = train(model, train_loader, val_loader, args, device)
-            logger.info(f"✓ Training completed successfully")
-        except Exception as e:
-            logger.error(f"× Error during training: {str(e)}")
-            raise
-        
-        if hasattr(args, 'calibrate') and args.calibrate:
-            logger.info("Calibrating model confidence intervals and background level...")
-            try:
-                calibration_results = calibrate_model(
-                    model, val_loader, control_val_loader, device
-                )
-                best_model_state['calibration'] = calibration_results
-                torch.save(best_model_state, os.path.join(args.output_dir, 'best_model.pt'))
-                logger.info(f"✓ Model calibrated: factor={calibration_results['calibration_factor']:.4f}, {calibration_results['low_calibration_factor']:.4f}, background={calibration_results['background_level']:.6f}")
-                logger.info(f"Calibration results saved with best model checkpoint")
-            except Exception as e:
-                logger.error(f"× Error during calibration: {str(e)}")
-                logger.info("  Continuing without calibration")
+            logger.error(f"× Error loading control data: {str(e)}")
+            logger.info("  Continuing without control data")
     
-    # Evaluation phase
+    # Initialize enhanced model
+    logger.info(f"Initializing enhanced model with {num_markers} markers...")
     try:
-        # Validate final model
-        logger.info("Evaluating model on validation set...")
-        val_results = evaluate(model, val_loader, args, device, split_name="validation")
-        
-        # Test final model
-        logger.info("Evaluating model on test set...")
-        test_results = evaluate(model, test_loader, args, device, split_name="test")
-        
-        # Print summary
-        if args.ensemble:
-            logger.info("\n" + "="*60)
-            logger.info("ENSEMBLE EVALUATION COMPLETE")
-        else:
-            logger.info("\n" + "="*60)
-            logger.info("TRAINING PIPELINE COMPLETED SUCCESSFULLY")
-            logger.info(f"Best validation loss: {best_model_state['val_loss']:.6f}")
-            logger.info(f"Best validation R²: {best_model_state['r2_score']:.4f}")
+        model = EnhancedCancerDetectionModel(
+            num_markers=num_markers,
+            feature_dim=args.feature_dim,
+            num_heads=args.num_heads,
+            num_layers=args.num_layers,
+            dropout_rate=args.dropout_rate,
+            detection_thresholds=args.detection_thresholds,
+            focal_weight_factor=args.focal_weight_factor,
+            low_concentration_threshold=args.low_concentration_threshold,
+            l2_weight=args.l2_weight,
+            marker_specific_bg=args.marker_specific_bg
+        )
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        logger.info(f"✓ Enhanced model initialized with {total_params:,} total parameters ({trainable_params:,} trainable)")
+    except Exception as e:
+        logger.error(f"× Error initializing enhanced model: {str(e)}")
+        raise
+    
+    # Train model with curriculum learning or standard approach
+    logger.info("Starting model training...")
+    try:
+        logger.info("Using curriculum learning approach")
+        model, best_model_state = train_with_curriculum(
+            model, 
+            train_loader, 
+            val_loader, 
+            control_val_loader, 
+            args, 
+            device
+        )
+        logger.info(f"✓ Training completed successfully")
+    except Exception as e:
+        logger.error(f"× Error during training: {str(e)}")
+        raise
+    
+    # Perform final calibration if requested
+    if args.calibrate:
+        logger.info("Performing final model calibration...")
+        try:
+            calibration_results = calibrate_model(
+                model, 
+                val_loader, 
+                control_val_loader, 
+                device
+            )
+            # Update best model state with calibration results
+            best_model_state['calibration'] = calibration_results
+            # Save updated best model
+            torch.save(best_model_state, os.path.join(args.output_dir, 'best_model_calibrated.pt'))
             
-        logger.info(f"Validation R²: {val_results['metrics']['r2']:.4f}")
-        logger.info(f"Validation MAE: {val_results['metrics']['mae']:.6f}")
-        logger.info(f"Test R²: {test_results['metrics']['r2']:.4f}")
-        logger.info(f"Test MAE: {test_results['metrics']['mae']:.6f}")
+            logger.info(f"✓ Model calibrated:")
+            logger.info(f"  Main calibration factor: {calibration_results['calibration_factor']:.4f}")
+            logger.info(f"  Low concentration factor: {calibration_results['low_calibration_factor']:.4f}")
+            if 'global_bg_level' in calibration_results:
+                logger.info(f"  Background level: {calibration_results['global_bg_level']:.6f}")
+            if 'marker_specific_bg' in calibration_results and calibration_results['marker_specific_bg']:
+                logger.info(f"  Marker-specific background correction applied")
+                if 'marker_bg_stats' in calibration_results:
+                    stats = calibration_results['marker_bg_stats']
+                    logger.info(f"  Background stats - Mean: {stats['mean']:.6f}, Min: {stats['min']:.6f}, Max: {stats['max']:.6f}")
+            
+        except Exception as e:
+            logger.error(f"× Error during calibration: {str(e)}")
+            logger.info("  Continuing without calibration")
+    
+    # Evaluate on test set
+    logger.info("Evaluating final model on test set...")
+    try:
+        # Use the validate_model function for evaluation
+        test_loss, test_metrics = validate_model(model, test_loader, device, args)
         
-        # Log detection metrics
-        key_threshold = 0.01  # 1% is often clinical threshold
-        if str(float(key_threshold)) in test_results['detection_metrics']:
-            metrics = test_results['detection_metrics'][str(float(key_threshold))]
-            logger.info(f"Test detection at {key_threshold:.1%}:")
-            logger.info(f"  AUC: {metrics['auc']:.4f}")
-            logger.info(f"  Sensitivity@95%Spec: {metrics['sensitivity_at_95spec']:.4f}")
+        logger.info(f"Test results:")
+        logger.info(f"  Loss: {test_loss:.6f}")
+        logger.info(f"  R²: {test_metrics['r2']:.4f}")
+        logger.info(f"  MAE: {test_metrics['mae']:.6f}")
+        logger.info(f"  Calibration error: {test_metrics['calibration_error']:.4f}")
         
-        logger.info(f"All results saved to: {args.output_dir}")
-        logger.info("="*60 + "\n")
+        # Log clinical metrics
+        if 0.01 in test_metrics['clinical_metrics']:
+            metrics_1pct = test_metrics['clinical_metrics'][0.01]
+            logger.info(f"  At 1% threshold:")
+            logger.info(f"    Sensitivity: {metrics_1pct['sensitivity']:.4f}")
+            logger.info(f"    Specificity: {metrics_1pct['specificity']:.4f}")
+            logger.info(f"    AUC: {metrics_1pct['roc_auc']:.4f}")
+            logger.info(f"    Sens@95%Spec: {metrics_1pct['sens_at_95spec']:.4f}")
+        
+        # Save test results
+        test_results = {
+            'loss': float(test_loss),
+            'metrics': test_metrics
+        }
+        test_results_file = os.path.join(args.output_dir, 'test_results.json')
+        with open(test_results_file, 'w') as f:
+            # Convert numpy types to native Python types for JSON serialization
+            import json
+            
+            def convert_to_serializable(obj):
+                if isinstance(obj, dict):
+                    return {k: convert_to_serializable(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_to_serializable(item) for item in obj]
+                elif isinstance(obj, (np.int32, np.int64)):
+                    return int(obj)
+                elif isinstance(obj, (np.float32, np.float64)):
+                    return float(obj)
+                elif obj is None:
+                    return None
+                else:
+                    return obj
+            
+            serializable_results = convert_to_serializable(test_results)
+            json.dump(serializable_results, f, indent=2)
+            
+        logger.info(f"Test results saved to {test_results_file}")
         
     except Exception as e:
-        logger.error(f"× Error during evaluation: {str(e)}")
-        logger.exception(e)
+        logger.error(f"× Error during test evaluation: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
     
-    # Return success
+    logger.info("\n" + "="*60)
+    logger.info("ENHANCED MODEL TRAINING COMPLETED SUCCESSFULLY")
+    logger.info(f"Results saved to: {args.output_dir}")
+    logger.info("="*60 + "\n")
+    
     return True
 
 
