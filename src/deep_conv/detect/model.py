@@ -206,25 +206,40 @@ class EnhancedCancerDetectionModel(nn.Module):
         attention_scores = attention_scores.masked_fill(mask, -1e9)  # Set masked positions to large negative
         attention_weights = F.softmax(attention_scores, dim=1)  # [B, M]
         
-        aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
+        # Aggregate features with attention weights
+        aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)  # [B, feature_dim]
         aggregated = self.dropout(aggregated)
         
-        # Direct prediction without Beta distribution
-        mu = self.mu_head(aggregated)
+        # Direct prediction without Beta distribution complexities
+        mu = self.mu_head(aggregated)  # [B, 1]
         
         # Force background subtraction
-        mu = torch.clamp(mu - self.background_level, min=0.0)
+        if self.marker_specific_bg:
+            # Apply marker-specific background correction using attention weights
+            marker_bg = torch.matmul(attention_weights, self.background_level.squeeze(0))
+            marker_bg = marker_bg.unsqueeze(1)
+            mu = torch.clamp(mu - marker_bg, min=0.0)
+        else:
+            # Apply global background correction
+            mu = torch.clamp(mu - self.background_level, min=0.0)
         
-        # Calculate features for detection
-        detection_features = torch.cat([aggregated, mu, torch.mean(coverage, dim=1, keepdim=True) / 100.0], dim=1)
+        # Add additional forced background subtraction
+        mu = torch.clamp(mu - 0.03, min=0.0)
         
-        # Get detection probabilities
+        # Create a placeholder for phi (concentration parameter)
+        phi = torch.ones_like(mu) * 10.0
+        
+        # Calculate uncertainty for detection heads (placeholder since we're not using Beta distribution)
+        uncertainty = torch.ones_like(mu) * 0.1
+        
+        # Enhanced features for detection heads (including uncertainty and average coverage)
+        # IMPORTANT: This must match the expected input dimension of detection_heads
+        detection_features = torch.cat([aggregated, uncertainty, torch.mean(coverage, dim=1, keepdim=True) / 100.0], dim=1)
+        
+        # Get detection probabilities for each threshold
         detection_probs = [head(detection_features) for head in self.detection_heads]
         
-        # For compatibility with existing code
-        phi = torch.ones_like(mu) * 10.0  # Placeholder
-        
-        # Return 
+        # Return with control_mask if provided for contrastive learning
         if y_true is not None and control_mask is not None:
             return mu, phi, detection_probs, attention_weights, y_true, control_mask
         elif y_true is not None:
