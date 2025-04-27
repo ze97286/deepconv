@@ -261,10 +261,11 @@ class EnhancedCancerDetectionModel(nn.Module):
         contrastive learning and zero-concentration specific penalties
         """
         y_clipped = torch.clamp(y_true, epsilon, 1 - epsilon)
-        
+    
         # Calculate Beta distribution parameters
-        alpha = mu * phi  # [B, 1]
-        beta = (1 - mu) * phi  # [B, 1]
+        # Add a small epsilon to ensure parameters are strictly positive
+        alpha = mu * phi + epsilon  # [B, 1]
+        beta = (1 - mu) * phi + epsilon  # [B, 1]
         
         # Create Beta distribution
         dist = Beta(alpha, beta)
