@@ -333,7 +333,7 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
                     # Apply phase-specific weighting
                     if phase == "early":
                         # Early phase: Focus on high concentration samples
-                        sample_weight = torch.exp(y_true * 10) + 1.0  # Higher weight for higher concentrations
+                        sample_weight = torch.exp(y_true * 2) + 1.0  # Higher weight for higher concentrations
                     elif phase == "mid":
                         # Mid phase: Balanced focus
                         sample_weight = torch.ones_like(y_true)  # Equal weight for all samples

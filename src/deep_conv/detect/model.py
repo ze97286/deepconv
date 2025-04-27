@@ -102,13 +102,16 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Binary detection heads with enhanced features
         self.detection_heads = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(feature_dim + 2, feature_dim),  # +2 for uncertainty feature & coverage
+                nn.Linear(feature_dim + 2, feature_dim),
                 nn.GELU(),
                 nn.Dropout(dropout_rate),
                 nn.Linear(feature_dim, 1),
                 nn.Sigmoid()
             ) for _ in detection_thresholds
         ])
+        for head in self.detection_heads:
+            # Set the bias of the final layer to produce outputs around 0.3 initially
+            head[-2].bias.data.fill_(-0.8)  # This biases sigmoid to ~0.3
         
         # Improved reliability weighting component - more aggressive for low coverage
         self.reliability_weight = nn.Sequential(
@@ -119,8 +122,9 @@ class EnhancedCancerDetectionModel(nn.Module):
         )
         
         # Calibration components
-        self.calibration = nn.Parameter(torch.ones(1))
-        self.low_calibration = nn.Parameter(torch.ones(1))
+        self.calibration = nn.Parameter(torch.ones(1) * 0.5)  # Lower initial value
+        self.low_calibration = nn.Parameter(torch.ones(1) * 0.5)
+
         
         # Dropout for regularisation
         self.dropout = nn.Dropout(dropout_rate)
@@ -135,11 +139,9 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         # Background correction parameters
         if marker_specific_bg:
-            # One background parameter per marker
-            self.background_level = nn.Parameter(torch.zeros(1, num_markers))
+            self.background_level = nn.Parameter(torch.ones(1, num_markers) * 0.05)
         else:
-            # Global background parameter
-            self.background_level = nn.Parameter(torch.zeros(1))
+            self.background_level = nn.Parameter(torch.tensor([0.05]))
         
     def forward(self, marker_values, coverage, y_true=None, control_mask=None):
         B, M = marker_values.shape
@@ -255,7 +257,7 @@ class EnhancedCancerDetectionModel(nn.Module):
             
         return blended_mu, blended_phi, detection_probs, attention_weights
     
-    def compute_loss(self, mu, phi, y_true, control_mask=None, epsilon=1e-6):
+    def compute_loss(self, mu, phi, y_true, control_mask=None, epsilon=1e-8):
         """
         Compute improved focal Beta negative log likelihood loss with enhanced
         contrastive learning and zero-concentration specific penalties
@@ -331,6 +333,11 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Combine all loss components
         total_loss = focal_loss.mean() + l2_reg_loss + zero_conc_penalty + control_loss + attention_l1_reg
         
+        print(f"Debug - focal_loss: {focal_loss.mean().item()}")
+        print(f"Debug - l2_reg_loss: {l2_reg_loss.item()}")
+        print(f"Debug - zero_conc_penalty: {zero_conc_penalty}")
+        print(f"Debug - control_loss: {control_loss}")
+
         return total_loss
     
     def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
