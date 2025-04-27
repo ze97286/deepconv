@@ -142,6 +142,11 @@ def load_model(model_dir, device='cpu'):
         
         # Load model weights
         model.load_state_dict(model_state)
+        if 'calibration' in checkpoint:
+            with torch.no_grad():
+                model.calibration.fill_(checkpoint['calibration']['calibration_factor'])
+                model.background_level.fill_(checkpoint['calibration']['background_level'])
+                model.low_calibration.fill_(checkpoint['calibration']['low_calibration_factor'])
     
     # Move model to device
     model = model.to(device)

@@ -271,10 +271,11 @@ class EnhancedCancerDetectionModel(nn.Module):
     
     def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
         """
-        Get point estimate and confidence interval using scipy
+        Get point estimate and confidence interval for concentration
         """
-        alpha = mu * phi
-        beta = (1 - mu) * phi
+        phi_calibrated = phi * self.calibration
+        alpha = mu * phi_calibrated
+        beta = (1 - mu) * phi_calibrated
         
         # Move tensors to CPU and convert to numpy for scipy
         alpha_np = alpha.detach().cpu().numpy()
@@ -304,7 +305,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         uncertainty = upper - lower
         
         return estimate, ci, uncertainty
-    
+
     def get_binary_prediction(self, mu, detection_probs, threshold_idx=1):
         """
         Get binary prediction for cancer detection

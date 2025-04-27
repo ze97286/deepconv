@@ -5,6 +5,7 @@ import torch
 import numpy as np
 import json
 import logging
+import scipy.stats as stats
 from datetime import datetime
 from tqdm import tqdm
 from sklearn.metrics import r2_score, mean_absolute_error
@@ -171,22 +172,23 @@ def setup_logging(output_dir):
     return logger
 
 
-def calculate_loss(model, mu, phi, detection_probs, y_true, args, control_mask=None, epoch=None):
-    """Calculate combined loss using configurable parameters"""
-    # Get concentration loss with contrastive component if control_mask provided
-    if control_mask is not None:
-        concentration_loss = contrastive_loss(
-            model, mu, phi, detection_probs, y_true, control_mask, epoch
-        )
-    else:
-        concentration_loss = model.compute_loss(mu, phi, y_true)
+def calculate_loss(model, mu, phi, detection_probs, y_true, args, control_mask=None):
+    # Get concentration loss
+    concentration_loss = model.compute_loss(mu, phi, y_true)
     
-    # Calculate detection losses for each threshold
+    # Add simple control penalty if controls present
+    if control_mask is not None and control_mask.sum() > 0:
+        # Extract predictions for control samples
+        control_preds = mu[control_mask]
+        
+        # Simple L1 penalty for any prediction above minimal threshold on controls
+        control_penalty = 3.0 * torch.mean(control_preds)
+        concentration_loss = concentration_loss + control_penalty
+    
+    # Calculate detection losses (keep this part unchanged)
     detection_losses = []
     for i, threshold in enumerate(args.detection_thresholds):
-        # Convert continuous concentration to binary label
         binary_y = (y_true >= threshold).float()
-        # Binary cross-entropy loss
         det_loss = F.binary_cross_entropy(detection_probs[i], binary_y)
         detection_losses.append(det_loss)
     
@@ -199,39 +201,26 @@ def calculate_loss(model, mu, phi, detection_probs, y_true, args, control_mask=N
     
     return total_loss, concentration_loss, combined_detection_loss
 
-# Add to model.py or create a new function in train.py
-def contrastive_loss(model, mu, phi, detection_probs, y_true, control_mask, epoch=None):
+
+def coverage_weighted_loss(model, mu, phi, detection_probs, y_true, coverage):
     """
-    Enhanced loss function with contrastive component for controls
+    Weight the loss by coverage to reduce the impact of low-coverage markers
     """
-    # Get standard concentration loss
+    # Standard loss component
     standard_loss = model.compute_loss(mu, phi, y_true)
     
-    # No contrastive component if no control samples
-    if control_mask is None or control_mask.sum() == 0:
-        return standard_loss
-        
-    # Add contrastive component for controls
-    # Get predictions for control samples
-    control_preds = mu[control_mask]
+    # Calculate weights based on coverage
+    # Sigmoid function to smoothly transition from low to high weight
+    # as coverage increases
+    weights = 2.0 / (1.0 + torch.exp(-0.2 * (coverage.mean(dim=1, keepdim=True) - 5.0)))
     
-    # Scale weight based on training progress
-    contrastive_weight = 5.0
-    if epoch is not None:
-        contrastive_weight = min(5.0, (epoch / 10) * 5.0)
+    # Apply weights to loss
+    weighted_loss = standard_loss * weights.mean()
     
-    # Strong penalty for any prediction above minimal threshold on controls
-    threshold = 0.002  # 0.2% threshold 
-    contrastive_component = F.smooth_l1_loss(
-        control_preds, 
-        torch.zeros_like(control_preds),
-        beta=threshold
-    ) * contrastive_weight
-    
-    # Add stronger regularization for model stability
+    # Add a small regularization to maintain overall scale
     reg_loss = 0.03 * torch.abs(torch.log(phi)).mean()
     
-    return standard_loss + contrastive_component + reg_loss
+    return weighted_loss + reg_loss
 
 def train(model, train_loader, val_loader, args, device):
     """Train the model with progress bars and enhanced logging"""
@@ -1131,12 +1120,25 @@ def evaluate(model, data_loader, args, device, split_name="test"):
 def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
     """
     Calibrate model confidence intervals and background level
+    
+    Args:
+        model: The cancer detection model to calibrate
+        val_loader: DataLoader for validation data
+        control_loader: Optional DataLoader for control samples
+        device: Device to run calibration on
+        
+    Returns:
+        dict: Dictionary containing calibration parameters
     """
+    from scipy import stats
+    import numpy as np
+    
     model.eval()
     
     # 1. Calibrate confidence intervals
     best_factor = 1.0
     best_error = float('inf')
+    best_low_factor = 1.0
     
     with torch.no_grad():
         # Test different calibration factors
@@ -1144,7 +1146,13 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
             coverage_error = 0
             n_batches = 0
             
-            for marker_values, coverage, y_true, _ in val_loader:
+            for batch_data in val_loader:
+                # Handle both 3-element and 4-element returns
+                if len(batch_data) == 4:
+                    marker_values, coverage, y_true, _ = batch_data  # Ignore control_mask
+                else:
+                    marker_values, coverage, y_true = batch_data
+                
                 marker_values = marker_values.to(device)
                 coverage = coverage.to(device)
                 y_true = y_true.to(device)
@@ -1163,15 +1171,20 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
                 beta_np = beta.cpu().numpy()
                 y_true_np = y_true.cpu().numpy()
                 
-                # Calculate 95% CI
+                # Calculate 95% CI using scipy.stats.beta
                 lower = np.zeros_like(y_true_np)
                 upper = np.zeros_like(y_true_np)
                 
                 for i in range(len(alpha_np)):
                     a, b = float(alpha_np[i]), float(beta_np[i])
                     if a > 0 and b > 0:
-                        lower[i] = stats.beta.ppf(0.025, a, b)
-                        upper[i] = stats.beta.ppf(0.975, a, b)
+                        try:
+                            lower[i] = stats.beta.ppf(0.025, a, b)
+                            upper[i] = stats.beta.ppf(0.975, a, b)
+                        except:
+                            # In case of numerical issues, use fallbacks
+                            lower[i] = max(0.0, mu[i].item() - 2.0 * (1.0 / np.sqrt(phi_calibrated[i].item())))
+                            upper[i] = min(1.0, mu[i].item() + 2.0 * (1.0 / np.sqrt(phi_calibrated[i].item())))
                 
                 # Calculate CI coverage
                 in_ci = (y_true_np >= lower) & (y_true_np <= upper)
@@ -1186,18 +1199,93 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
             if avg_error < best_error:
                 best_error = avg_error
                 best_factor = factor
+        
+        # Calibration factor for low concentrations (separate calibration)
+        best_low_error = float('inf')
+        # Try different calibration factors for low concentrations
+        for factor in [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]:
+            coverage_error = 0
+            n_batches = 0
+            
+            for batch_data in val_loader:
+                if len(batch_data) == 4:
+                    marker_values, coverage, y_true, _ = batch_data
+                else:
+                    marker_values, coverage, y_true = batch_data
+                
+                marker_values = marker_values.to(device)
+                coverage = coverage.to(device)
+                y_true = y_true.to(device)
+                
+                # Select only low concentration samples
+                if hasattr(model, 'low_concentration_threshold'):
+                    low_thresh = model.low_concentration_threshold
+                else:
+                    low_thresh = 0.01  # Default
+                
+                low_mask = y_true <= low_thresh
+                if low_mask.sum() == 0:
+                    continue  # Skip if no low concentration samples
+                
+                # Process only low concentration samples
+                mu_low = mu[low_mask]
+                phi_low = phi[low_mask]
+                y_true_low = y_true[low_mask]
+                
+                # Apply test calibration factor
+                phi_calibrated = phi_low * factor
+                
+                # Calculate alpha, beta parameters
+                alpha = mu_low * phi_calibrated
+                beta = (1 - mu_low) * phi_calibrated
+                
+                # Move to numpy for scipy operations
+                alpha_np = alpha.cpu().numpy()
+                beta_np = beta.cpu().numpy()
+                y_true_np = y_true_low.cpu().numpy()
+                
+                # Calculate 95% CI
+                lower = np.zeros_like(y_true_np)
+                upper = np.zeros_like(y_true_np)
+                
+                for i in range(len(alpha_np)):
+                    a, b = float(alpha_np[i]), float(beta_np[i])
+                    if a > 0 and b > 0:
+                        try:
+                            lower[i] = stats.beta.ppf(0.025, a, b)
+                            upper[i] = stats.beta.ppf(0.975, a, b)
+                        except:
+                            # Fallback on error
+                            lower[i] = max(0.0, mu_low[i].item() - 2.0 * (1.0 / np.sqrt(phi_calibrated[i].item())))
+                            upper[i] = min(1.0, mu_low[i].item() + 2.0 * (1.0 / np.sqrt(phi_calibrated[i].item())))
+                
+                # Calculate CI coverage for low concentrations
+                in_ci = (y_true_np >= lower) & (y_true_np <= upper)
+                ci_coverage = in_ci.mean()
+                
+                # Error relative to target 95%
+                error = abs(ci_coverage - 0.95)
+                coverage_error += error
+                n_batches += 1
+            
+            if n_batches > 0:
+                avg_error = coverage_error / n_batches
+                if avg_error < best_low_error:
+                    best_low_error = avg_error
+                    best_low_factor = factor
     
-    # Apply best calibration factor
-    with torch.no_grad():
-        model.calibration.fill_(best_factor)
-        model.low_calibration.fill_(best_factor)
-    
-    # 2. Set background correction from controls
+    # 2. Calculate background level from controls if available
+    background_level = 0.0
     if control_loader is not None:
         all_preds = []
         
         with torch.no_grad():
-            for marker_values, coverage, _, _ in control_loader:
+            for batch_data in control_loader:
+                if len(batch_data) == 4:
+                    marker_values, coverage, _, _ = batch_data
+                else:
+                    marker_values, coverage, _ = batch_data
+                
                 marker_values = marker_values.to(device)
                 coverage = coverage.to(device)
                 
@@ -1206,13 +1294,28 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
         
         # Calculate median of predictions on controls
         all_preds = np.concatenate(all_preds)
-        background = np.median(all_preds)
-        
-        # Set background level
-        with torch.no_grad():
-            model.background_level.fill_(torch.tensor(float(background)))
+        background_level = float(np.median(all_preds))
     
-    return best_factor, float(model.background_level.item())
+    # Apply calibration factors to model
+    with torch.no_grad():
+        # Update model parameters if they exist
+        if hasattr(model, 'calibration'):
+            model.calibration.fill_(best_factor)
+        if hasattr(model, 'low_calibration'):
+            model.low_calibration.fill_(best_low_factor)
+        if hasattr(model, 'background_level'):
+            model.background_level.fill_(background_level)
+    
+    # Return calibration parameters
+    calibration_results = {
+        'calibration_factor': best_factor,
+        'low_calibration_factor': best_low_factor,
+        'background_level': background_level,
+        'coverage_error': float(best_error),
+        'low_coverage_error': float(best_low_error) if best_low_error != float('inf') else None
+    }
+    
+    return calibration_results
 
 def train_ensemble(args, train_loader, val_loader, test_loader, num_markers, device):
     """Train an ensemble of models with different random seeds"""
@@ -1454,14 +1557,16 @@ def main():
             logger.error(f"× Error during training: {str(e)}")
             raise
         
-        # Calibrate model if requested
         if hasattr(args, 'calibrate') and args.calibrate:
             logger.info("Calibrating model confidence intervals and background level...")
             try:
-                calibration_factor, background = calibrate_model(
+                calibration_results = calibrate_model(
                     model, val_loader, control_val_loader, device
                 )
-                logger.info(f"✓ Model calibrated: factor={calibration_factor:.4f}, background={background:.6f}")
+                best_model_state['calibration'] = calibration_results
+                torch.save(best_model_state, os.path.join(args.output_dir, 'best_model.pt'))
+                logger.info(f"✓ Model calibrated: factor={calibration_results['calibration_factor']:.4f}, {calibration_results['low_calibration_factor']:.4f}, background={calibration_results['background_level']:.6f}")
+                logger.info(f"Calibration results saved with best model checkpoint")
             except Exception as e:
                 logger.error(f"× Error during calibration: {str(e)}")
                 logger.info("  Continuing without calibration")
