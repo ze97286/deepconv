@@ -13,10 +13,10 @@ class EnhancedCancerDetectionModel(nn.Module):
     and better calibration capabilities.
     """
     def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
-                 dropout_rate=0.3, detection_thresholds=(0.001, 0.01, 0.05),
-                 focal_weight_factor=50, low_concentration_threshold=0.01,
-                 l2_weight=0.05, marker_specific_bg=False, 
-                 min_reliable_coverage=5.0):
+             dropout_rate=0.3, detection_thresholds=(0.001, 0.01, 0.05),
+             focal_weight_factor=50, low_concentration_threshold=0.01,
+             l2_weight=0.05, marker_specific_bg=False, 
+             min_reliable_coverage=5.0):
         super().__init__()
         
         # Store configuration
@@ -73,8 +73,7 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Linear(feature_dim // 2, 1),
             nn.Sigmoid()
         )
-        self.mu_head[-2].bias.data.fill_(-1.0)  
-
+        
         self.phi_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
@@ -100,19 +99,20 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Softplus()
         )
         
-        # Binary detection heads with enhanced features
-        self.detection_heads = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(feature_dim + 2, feature_dim),
+        # Binary detection heads
+        self.detection_heads = nn.ModuleList()
+        for _ in detection_thresholds:
+            head = nn.Sequential(
+                nn.Linear(feature_dim + 2, feature_dim),  # +2 for uncertainty feature & coverage
                 nn.GELU(),
                 nn.Dropout(dropout_rate),
                 nn.Linear(feature_dim, 1),
                 nn.Sigmoid()
-            ) for _ in detection_thresholds
-        ])
-        for head in self.detection_heads:
-            # Set the bias of the final layer to produce outputs around 0.3 initially
-            head[-2].bias.data.fill_(-0.8)  # This biases sigmoid to ~0.3
+            )
+            # Initialize with negative bias for lower initial predictions
+            with torch.no_grad():
+                head[-2].bias.data.fill_(-1.0)
+            self.detection_heads.append(head)
         
         # Improved reliability weighting component - more aggressive for low coverage
         self.reliability_weight = nn.Sequential(
@@ -123,9 +123,8 @@ class EnhancedCancerDetectionModel(nn.Module):
         )
         
         # Calibration components
-        self.calibration = nn.Parameter(torch.ones(1) * 0.5)  # Lower initial value
-        self.low_calibration = nn.Parameter(torch.ones(1) * 0.5)
-
+        self.calibration = nn.Parameter(torch.ones(1) * 0.5)  # Start with lower calibration
+        self.low_calibration = nn.Parameter(torch.ones(1) * 0.5)  # Start with lower calibration
         
         # Dropout for regularisation
         self.dropout = nn.Dropout(dropout_rate)
@@ -138,11 +137,18 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Sigmoid()
         )
         
-        # Background correction parameters
+        # Background correction parameters with initializations
         if marker_specific_bg:
+            # One background parameter per marker
             self.background_level = nn.Parameter(torch.ones(1, num_markers) * 0.05)
         else:
+            # Global background parameter
             self.background_level = nn.Parameter(torch.tensor([0.05]))
+        
+        # Bias prediction components toward low values initially
+        with torch.no_grad():
+            self.mu_head[-2].bias.data.fill_(-2.0)
+            self.low_mu_head[-2].bias.data.fill_(-2.0)
         
     def forward(self, marker_values, coverage, y_true=None, control_mask=None):
         B, M = marker_values.shape
@@ -241,6 +247,9 @@ class EnhancedCancerDetectionModel(nn.Module):
             # Apply global background correction
             blended_mu = torch.max(blended_mu - self.background_level, torch.zeros_like(blended_mu))
         
+        # Force additional background subtraction to reduce false positives
+        blended_mu = torch.clamp(blended_mu - 0.03, min=0.0)
+        
         # Calculate uncertainty for detection heads
         _, _, uncertainty = self.get_estimate_and_ci(blended_mu, blended_phi)
         
@@ -258,17 +267,16 @@ class EnhancedCancerDetectionModel(nn.Module):
             
         return blended_mu, blended_phi, detection_probs, attention_weights
     
-    def compute_loss(self, mu, phi, y_true, control_mask=None, epsilon=1e-8):
+    def compute_loss(self, mu, phi, y_true, control_mask=None, epsilon=1e-6):
         """
         Compute improved focal Beta negative log likelihood loss with enhanced
         contrastive learning and zero-concentration specific penalties
         """
         y_clipped = torch.clamp(y_true, epsilon, 1 - epsilon)
-    
-        # Calculate Beta distribution parameters
-        # Add a small epsilon to ensure parameters are strictly positive
-        alpha = mu * phi + epsilon  # [B, 1]
-        beta = (1 - mu) * phi + epsilon  # [B, 1]
+        
+        # Calculate Beta distribution parameters with safety floor
+        alpha = torch.clamp(mu * phi, min=epsilon)  # [B, 1]
+        beta = torch.clamp((1 - mu) * phi, min=epsilon)  # [B, 1]
         
         # Create Beta distribution
         dist = Beta(alpha, beta)
@@ -276,69 +284,36 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Negative log likelihood
         nll_loss = -dist.log_prob(y_clipped)
         
-        # Get focal weighting factor (reduced from 100 to 50)
-        focal_factor = self.focal_weight_factor if hasattr(self, 'focal_weight_factor') else 50
-        low_conc_threshold = self.low_concentration_threshold if hasattr(self, 'low_concentration_threshold') else 0.01
+        # Get focal weighting factor (reduced from 50 to 5)
+        focal_factor = 5.0
         
-        # Enhanced focal weighting with reduced factor
-        base_weight = torch.exp(-y_true * focal_factor) + 1.0
+        # Enhanced focal weighting with reduced factor and clamping
+        base_weight = torch.clamp(torch.exp(-y_true * focal_factor) + 1.0, 1.0, 2.0)
         
-        # Additional weight for samples near thresholds
-        threshold_weight = torch.zeros_like(y_true)
-        for threshold in self.detection_thresholds:
-            if threshold > 0:
-                relative_distance = torch.abs(y_true - threshold) / threshold
-                threshold_weight += torch.exp(-relative_distance * 5) * 2.0
-        
-        # Special handling for values below the low concentration threshold
-        is_low_conc = (y_true <= low_conc_threshold).float()
-        is_zero = (y_true < epsilon).float()
-        
-        # Extra weight for low but non-zero concentrations
-        low_conc_weight = is_low_conc * (1 - is_zero) * 2.0
-        
-        # Combine weights (cap at 5x to prevent extreme values)
-        focal_weight = torch.clamp(base_weight + threshold_weight + low_conc_weight, 1.0, 5.0)
+        # No additional threshold weight or low concentration weight 
+        # to simplify and stabilize training
         
         # Apply focal weighting
-        focal_loss = nll_loss * focal_weight
+        focal_loss = nll_loss * base_weight
         
-        # Add enhanced L2 regularization to prevent overfitting (increased from 0.02 to 0.05)
+        # Add enhanced L2 regularization to prevent overfitting
         l2_reg_loss = self.l2_weight * (torch.norm(phi) + torch.abs(torch.log(phi)).mean())
         
         # Zero-concentration specific loss (penalize any positive prediction for true zeros)
-        zero_conc_penalty = 5.0 * (mu * is_zero).mean() if is_zero.sum() > 0 else 0.0
+        zero_conc_penalty = 5.0 * (mu * (y_true < epsilon).float()).mean() if (y_true < epsilon).sum() > 0 else 0.0
         
-        # Add specific high-weight loss for controls if provided
+        # Simplified control loss with stronger penalty
         control_loss = 0.0
         if control_mask is not None and control_mask.sum() > 0:
-            # Extract predictions for control samples
-            control_preds = mu[control_mask]
-            
-            # Strong L1 penalty for any prediction above minimal threshold on controls
-            # Increased from 3.0 to 10.0 for stronger penalty
-            control_l1_penalty = 10.0 * torch.mean(control_preds)
-            
-            # Add L2 penalty to ensure very low predictions on controls
-            control_l2_penalty = 5.0 * torch.mean(torch.pow(control_preds, 2))
-            
-            # Add max penalty to strongly penalize the highest prediction on controls
-            control_max_penalty = 3.0 * torch.max(control_preds)
-            
-            control_loss = control_l1_penalty + control_l2_penalty + control_max_penalty
+            # Direct L1 penalty on control predictions
+            control_loss = 20.0 * torch.mean(mu[control_mask])
         
-        # Attention regularization to prevent over-reliance on specific markers
-        # This encourages more distributed attention across markers
-        attention_l1_reg = 0.01 * self.attention[0].weight.abs().mean() + 0.01 * self.attention[3].weight.abs().mean()
-
-        # Combine all loss components
-        total_loss = focal_loss.mean() + l2_reg_loss + zero_conc_penalty + control_loss + attention_l1_reg
+        # Attention regularization on the first Linear layer of attention
+        attention_l1_reg = 0.01 * self.attention[0].weight.abs().mean()
         
-        print(f"Debug - focal_loss: {focal_loss.mean().item()}")
-        print(f"Debug - l2_reg_loss: {l2_reg_loss.item()}")
-        print(f"Debug - zero_conc_penalty: {zero_conc_penalty}")
-        print(f"Debug - control_loss: {control_loss}")
-
+        # Combine all loss components with clipping to prevent extreme negative values
+        total_loss = torch.clamp(focal_loss.mean(), min=-10.0) + l2_reg_loss + zero_conc_penalty + control_loss + attention_l1_reg
+        
         return total_loss
     
     def get_estimate_and_ci(self, mu, phi, ci_level=0.95):

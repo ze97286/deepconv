@@ -10,7 +10,7 @@ from datetime import datetime
 from tqdm import tqdm
 from sklearn.metrics import r2_score, mean_absolute_error
 import torch.nn.functional as F
-
+import math
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
 
@@ -248,7 +248,7 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
     # Setup optimizer with weight decay for regularization
     optimizer = torch.optim.AdamW(
         model.parameters(), 
-        lr=args.lr,
+        lr=args.lr * 0.5,
         weight_decay=args.weight_decay  # L2 regularization
     )
     
@@ -287,8 +287,8 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
     mid_phase = int(args.epochs * 0.6)   # Next 30% of epochs
     # Remaining epochs are the late phase
     
-    logger.info(f"Training with curriculum learning:")
-    logger.info(f"  Early phase (high concentration focus): epochs 1-{early_phase}")
+    logger.info(f"Training with modified curriculum learning:")
+    logger.info(f"  Early phase (balanced focus): epochs 1-{early_phase}")
     logger.info(f"  Mid phase (balanced focus): epochs {early_phase+1}-{mid_phase}")
     logger.info(f"  Late phase (low concentration focus): epochs {mid_phase+1}-{args.epochs}")
     
@@ -297,7 +297,7 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
         # Determine curriculum phase
         if epoch < early_phase:
             phase = "early"
-            logger.info(f"Epoch {epoch+1}/{args.epochs} [Early Phase - High Concentration Focus]")
+            logger.info(f"Epoch {epoch+1}/{args.epochs} [Early Phase - Balanced Focus]")
         elif epoch < mid_phase:
             phase = "mid"
             logger.info(f"Epoch {epoch+1}/{args.epochs} [Mid Phase - Balanced Focus]")
@@ -323,78 +323,88 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
                 y_true = y_true.to(device)
                 control_mask = control_mask.to(device)
                 
-                # Curriculum learning: Apply phase-specific sample weighting
+                # Get model predictions
                 with autocast():
-                    # Get model predictions
                     mu, phi, detection_probs, attention_weights, _, _ = model(
                         marker_values, coverage, y_true, control_mask
                     )
                     
-                    # Apply phase-specific weighting
-                    if phase == "early":
-                        # Early phase: Focus on high concentration samples
-                        sample_weight = torch.exp(y_true * 2) + 1.0  # Higher weight for higher concentrations
-                    elif phase == "mid":
-                        # Mid phase: Balanced focus
-                        sample_weight = torch.ones_like(y_true)  # Equal weight for all samples
+                    # Simplified training approach - use MSE for early phase
+                    if epoch < 5:  # First 5 epochs use MSE for stability
+                        loss = F.mse_loss(mu, y_true) / args.grad_accum_steps
                     else:
-                        # Late phase: Focus on low concentration samples
-                        sample_weight = torch.exp(-y_true * 20) + 1.0  # Higher weight for lower concentrations
-                    
-                    # Compute loss with sample weighting
-                    base_loss = model.compute_loss(mu, phi, y_true, control_mask)
-                    weighted_loss = (base_loss * sample_weight).mean() / args.grad_accum_steps
-                    
-                    # Add detection loss
-                    detection_loss = 0.0
-                    for j, threshold in enumerate(args.detection_thresholds):
-                        binary_y = (y_true >= threshold).float()
-                        det_loss = F.binary_cross_entropy(detection_probs[j], binary_y)
-                        detection_loss += det_loss
-                    
-                    detection_loss = detection_loss / len(args.detection_thresholds)
-                    
-                    # Combine losses
-                    loss = weighted_loss + args.detection_loss_weight * detection_loss / args.grad_accum_steps
+                        # Apply more gentle phase-specific weighting
+                        if phase == "early" or phase == "mid":
+                            # Early/Mid phase: Balanced focus
+                            sample_weight = torch.ones_like(y_true)
+                        else:
+                            # Late phase: Focus on low concentration samples
+                            sample_weight = torch.clamp(torch.exp(-y_true * 5) + 1.0, 1.0, 3.0)
+                        
+                        # Compute loss with sample weighting
+                        base_loss = model.compute_loss(mu, phi, y_true, control_mask)
+                        weighted_loss = (base_loss * sample_weight).mean() / args.grad_accum_steps
+                        
+                        # Add detection loss
+                        detection_loss = 0.0
+                        for j, threshold in enumerate(args.detection_thresholds):
+                            binary_y = (y_true >= threshold).float()
+                            det_loss = F.binary_cross_entropy(detection_probs[j], binary_y)
+                            detection_loss += det_loss
+                        
+                        detection_loss = detection_loss / len(args.detection_thresholds)
+                        
+                        # Combine losses
+                        if epoch < 10:  # Reduced detection weight for early epochs
+                            det_weight = args.detection_loss_weight * 0.25
+                        else:
+                            det_weight = args.detection_loss_weight
+                            
+                        loss = weighted_loss + det_weight * detection_loss / args.grad_accum_steps
             else:  # Standard dataset without control_mask
                 marker_values, coverage, y_true = batch_data
                 marker_values = marker_values.to(device)
                 coverage = coverage.to(device)
                 y_true = y_true.to(device)
                 
-                # Curriculum learning: Apply phase-specific sample weighting
                 with autocast():
                     # Get model predictions
                     mu, phi, detection_probs, attention_weights, _ = model(
                         marker_values, coverage, y_true
                     )
                     
-                    # Apply phase-specific weighting
-                    if phase == "early":
-                        # Early phase: Focus on high concentration samples
-                        sample_weight = torch.exp(y_true * 10) + 1.0  # Higher weight for higher concentrations
-                    elif phase == "mid":
-                        # Mid phase: Balanced focus
-                        sample_weight = torch.ones_like(y_true)  # Equal weight for all samples
+                    # Simplified training approach - use MSE for early phase
+                    if epoch < 5:  # First 5 epochs use MSE for stability
+                        loss = F.mse_loss(mu, y_true) / args.grad_accum_steps
                     else:
-                        # Late phase: Focus on low concentration samples
-                        sample_weight = torch.exp(-y_true * 20) + 1.0  # Higher weight for lower concentrations
-                    
-                    # Compute loss with sample weighting
-                    base_loss = model.compute_loss(mu, phi, y_true)
-                    weighted_loss = (base_loss * sample_weight).mean() / args.grad_accum_steps
-                    
-                    # Add detection loss
-                    detection_loss = 0.0
-                    for j, threshold in enumerate(args.detection_thresholds):
-                        binary_y = (y_true >= threshold).float()
-                        det_loss = F.binary_cross_entropy(detection_probs[j], binary_y)
-                        detection_loss += det_loss
-                    
-                    detection_loss = detection_loss / len(args.detection_thresholds)
-                    
-                    # Combine losses
-                    loss = weighted_loss + args.detection_loss_weight * detection_loss / args.grad_accum_steps
+                        # Apply more gentle phase-specific weighting
+                        if phase == "early" or phase == "mid":
+                            # Early/Mid phase: Balanced focus
+                            sample_weight = torch.ones_like(y_true)
+                        else:
+                            # Late phase: Focus on low concentration samples
+                            sample_weight = torch.clamp(torch.exp(-y_true * 5) + 1.0, 1.0, 3.0)
+                        
+                        # Compute loss with sample weighting
+                        base_loss = model.compute_loss(mu, phi, y_true)
+                        weighted_loss = (base_loss * sample_weight).mean() / args.grad_accum_steps
+                        
+                        # Add detection loss
+                        detection_loss = 0.0
+                        for j, threshold in enumerate(args.detection_thresholds):
+                            binary_y = (y_true >= threshold).float()
+                            det_loss = F.binary_cross_entropy(detection_probs[j], binary_y)
+                            detection_loss += det_loss
+                        
+                        detection_loss = detection_loss / len(args.detection_thresholds)
+                        
+                        # Combine losses
+                        if epoch < 10:  # Reduced detection weight for early epochs
+                            det_weight = args.detection_loss_weight * 0.25
+                        else:
+                            det_weight = args.detection_loss_weight
+                            
+                        loss = weighted_loss + det_weight * detection_loss / args.grad_accum_steps
             
             # Backpropagation with mixed precision
             scaler.scale(loss).backward()
@@ -406,13 +416,9 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
             if (i + 1) % args.grad_accum_steps == 0 or (i + 1) == len(train_loader):
                 # Gradient clipping to prevent exploding gradients
                 scaler.unscale_(optimizer)
-                if phase == "early":
-                    max_norm = 5.0
-                elif phase == "mid":
-                    max_norm = 3.0
-                else:
-                    max_norm = 1.0
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+                
+                # More aggressive gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
 
                 # Optimizer step with mixed precision
                 scaler.step(optimizer)
@@ -429,8 +435,8 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
         # Validation phase
         val_loss, val_metrics = validate_model(model, val_loader, device, args)
         
-        # Periodic calibration (every 5 epochs and in late phase)
-        if control_loader is not None and (epoch % 5 == 0 or phase == "late"):
+        # Periodic calibration (more frequent and starting from epoch 0)
+        if control_loader is not None and (epoch % 2 == 0 or phase == "late"):
             logger.info(f"Calibrating model...")
             calibration_results = calibrate_model(model, val_loader, control_loader, device)
             logger.info(f"  Calibration factor: {calibration_results['calibration_factor']:.4f}")
@@ -1432,15 +1438,15 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
     
     model.eval()
     
-    # 1. Calibrate confidence intervals
+    # 1. Calibrate confidence intervals - use fewer test factors for speed
     best_factor = 1.0
     best_error = float('inf')
     best_low_factor = 1.0
     best_low_error = float('inf')
     
     with torch.no_grad():
-        # Test different calibration factors
-        for factor in [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]:
+        # Test different calibration factors - simplified options
+        for factor in [0.5, 1.0, 2.0]:
             coverage_error = 0
             n_batches = 0
             
@@ -1461,8 +1467,8 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
                 phi_calibrated = phi * factor
                 
                 # Calculate alpha, beta parameters
-                alpha = mu * phi_calibrated
-                beta = (1 - mu) * phi_calibrated
+                alpha = torch.clamp(mu * phi_calibrated, min=1e-6)
+                beta = torch.clamp((1 - mu) * phi_calibrated, min=1e-6)
                 
                 # Move to numpy for scipy operations
                 alpha_np = alpha.cpu().numpy()
@@ -1498,86 +1504,53 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
                 best_error = avg_error
                 best_factor = factor
         
-        # Calibration factor for low concentrations (separate calibration)
-        # Try different calibration factors for low concentrations
-        for factor in [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]:
-            coverage_error = 0
-            n_batches = 0
-            
-            for batch_data in val_loader:
+        # Use the same factor for low concentrations to simplify
+        best_low_factor = best_factor
+    
+    # 2. Calibrate background level using controls - more aggressive
+    background_results = {}
+    if control_loader is not None:
+        all_preds = []
+        
+        with torch.no_grad():
+            for batch_data in control_loader:
                 if len(batch_data) == 4:
-                    marker_values, coverage, y_true, _ = batch_data
+                    marker_values, coverage, _, _ = batch_data
                 else:
-                    marker_values, coverage, y_true = batch_data
+                    marker_values, coverage, _ = batch_data
                 
                 marker_values = marker_values.to(device)
                 coverage = coverage.to(device)
-                y_true = y_true.to(device)
                 
-                # Select only low concentration samples
-                if hasattr(model, 'low_concentration_threshold'):
-                    low_thresh = model.low_concentration_threshold
-                else:
-                    low_thresh = 0.01  # Default
+                mu, _, _, _ = model(marker_values, coverage)
+                all_preds.append(mu.cpu().numpy())
+        
+        # Use 95th percentile instead of median for more conservative background correction
+        all_preds = np.concatenate(all_preds)
+        global_bg_level = float(np.percentile(all_preds, 95))
+        
+        # Make sure background level is at least 0.05
+        global_bg_level = max(global_bg_level, 0.05)
+        
+        # Update background level parameter
+        if model.marker_specific_bg:
+            # For simplicity, set all markers to the same background level initially
+            with torch.no_grad():
+                model.background_level.fill_(global_bg_level)
                 
-                low_mask = y_true <= low_thresh
-                if low_mask.sum() == 0:
-                    continue  # Skip if no low concentration samples
+            background_results = {
+                'global_bg_level': global_bg_level,
+                'marker_specific_bg': True
+            }
+        else:
+            # Set global background level using 95th percentile
+            with torch.no_grad():
+                model.background_level.fill_(global_bg_level)
                 
-                # Get model predictions
-                mu, phi, _, _ = model(marker_values, coverage)
-                
-                # Process only low concentration samples
-                mu_low = mu[low_mask]
-                phi_low = phi[low_mask]
-                y_true_low = y_true[low_mask]
-                
-                # Apply test calibration factor
-                phi_calibrated = phi_low * factor
-                
-                # Calculate alpha, beta parameters
-                alpha = mu_low * phi_calibrated
-                beta = (1 - mu_low) * phi_calibrated
-                
-                # Move to numpy for scipy operations
-                alpha_np = alpha.cpu().numpy()
-                beta_np = beta.cpu().numpy()
-                y_true_np = y_true_low.cpu().numpy()
-                
-                # Calculate 95% CI
-                lower = np.zeros_like(y_true_np)
-                upper = np.zeros_like(y_true_np)
-                
-                for i in range(len(alpha_np)):
-                    a, b = float(alpha_np[i]), float(beta_np[i])
-                    if a > 0 and b > 0:
-                        try:
-                            lower[i] = stats.beta.ppf(0.025, a, b)
-                            upper[i] = stats.beta.ppf(0.975, a, b)
-                        except:
-                            # Fallback on error
-                            lower[i] = max(0.0, mu_low[i].item() - 2.0 * (1.0 / np.sqrt(phi_calibrated[i].item())))
-                            upper[i] = min(1.0, mu_low[i].item() + 2.0 * (1.0 / np.sqrt(phi_calibrated[i].item())))
-                
-                # Calculate CI coverage for low concentrations
-                in_ci = (y_true_np >= lower) & (y_true_np <= upper)
-                ci_coverage = in_ci.mean()
-                
-                # Error relative to target 95%
-                error = abs(ci_coverage - 0.95)
-                coverage_error += error
-                n_batches += 1
-            
-            if n_batches > 0:
-                avg_error = coverage_error / n_batches
-                if avg_error < best_low_error:
-                    best_low_error = avg_error
-                    best_low_factor = factor
-    
-    # 2. Calibrate background level using controls
-    background_results = {}
-    if control_loader is not None:
-        background_results = model.calibrate_background(control_loader, device)
+            background_results = {
+                'global_bg_level': global_bg_level,
+                'marker_specific_bg': False
+            }
     
     # Apply calibration factors to model
     with torch.no_grad():
@@ -1592,7 +1565,6 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
         'calibration_factor': best_factor,
         'low_calibration_factor': best_low_factor,
         'coverage_error': float(best_error),
-        'low_coverage_error': float(best_low_error) if best_low_error != float('inf') else None
     }
     
     # Merge with background results if available
