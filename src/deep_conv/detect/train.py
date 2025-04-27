@@ -296,7 +296,7 @@ def train(model, train_loader, val_loader, args, device):
                     # Calculate loss with contrastive component
                     loss, conc_loss, det_loss = calculate_loss(
                         model, mu, phi, detection_probs, y_true, args, 
-                        control_mask=control_mask, epoch=epoch
+                        control_mask=control_mask
                     )
                     loss = loss / args.grad_accum_steps
             else:  # Standard dataset without control_mask
