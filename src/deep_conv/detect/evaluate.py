@@ -524,10 +524,10 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
         logger.info(f"Detailed predictions saved to {predictions_file}")
         
         # Save summary results
-        results_file = os.path.join(output_dir, 'evaluation_results.json')
-        with open(results_file, 'w') as f:
-            json.dump(results, f, indent=2)
-        logger.info(f"Evaluation results saved to {results_file}")
+        # results_file = os.path.join(output_dir, 'evaluation_results.json')
+        # with open(results_file, 'w') as f:
+        #     json.dump(results, f, indent=2)
+        # logger.info(f"Evaluation results saved to {results_file}")
         
         # Create enhanced visualisations
         viz_dir = os.path.join(output_dir, 'visualisations')
