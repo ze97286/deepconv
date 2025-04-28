@@ -272,12 +272,13 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
     all_upper_ci = []
     all_sample_ids = []
     all_detection_probs = {t: [] for t in thresholds}
+    nan_batches = []
     
     # Create progress bar for evaluation
     eval_bar = tqdm(data_loader, desc="Evaluating", position=0)
     
     with torch.no_grad():
-        for batch in eval_bar:
+        for batch_idx, batch in enumerate(eval_bar):
             # Handle different batch formats
             if len(batch) == 3:
                 marker_values, coverage, y_true = batch
@@ -291,36 +292,74 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
             coverage = coverage.to(device)
             y_true = y_true.to(device)
             
-            # Handle different model types
-            if isinstance(model, CancerDetectionEnsemble):
-                # Ensemble model
-                mu, phi, det_probs = model(marker_values, coverage)
-                estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
-            else:
-                # Single model
-                if hasattr(model, 'forward_with_detection'):
-                    # Enhanced model with detection
-                    mu, phi, det_probs, _ = model.forward_with_detection(marker_values, coverage)
+            try:
+                # Handle different model types
+                if isinstance(model, CancerDetectionEnsemble):
+                    # Ensemble model
+                    mu, phi, det_probs = model(marker_values, coverage)
+                    estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
                 else:
-                    # Standard model
-                    mu, phi, det_probs, _ = model(marker_values, coverage)
+                    # Single model
+                    if hasattr(model, 'forward_with_detection'):
+                        # Enhanced model with detection
+                        mu, phi, det_probs, _ = model.forward_with_detection(marker_values, coverage)
+                    else:
+                        # Standard model
+                        mu, phi, det_probs, _ = model(marker_values, coverage)
+                    
+                    estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
                 
-                estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
-            
-            # Store predictions
-            all_preds.append(estimate.cpu().numpy())
-            all_targets.append(y_true.cpu().numpy())
-            all_lower_ci.append(ci[:, 0:1].cpu().numpy())
-            all_upper_ci.append(ci[:, 1:2].cpu().numpy())
-            
-            # Store detection probabilities
-            for i, threshold in enumerate(thresholds):
-                if i < len(det_probs):
-                    all_detection_probs[threshold].append(det_probs[i].cpu().numpy())
-            
-            # Store sample IDs if available
-            if sample_ids is not None:
-                all_sample_ids.extend(sample_ids)
+                # Check for NaNs in output
+                if torch.isnan(estimate).any():
+                    logger.warning(f"NaN detected in model output (batch {batch_idx})")
+                    nan_batches.append(batch_idx)
+                    
+                    if output_dir:
+                        # Save problem batch for debugging
+                        torch.save({
+                            'marker_values': marker_values.cpu(),
+                            'coverage': coverage.cpu(),
+                            'y_true': y_true.cpu(),
+                            'mu': mu.cpu(),
+                            'phi': phi.cpu(),
+                            'estimate': estimate.cpu()
+                        }, os.path.join(output_dir, f'nan_batch_{batch_idx}.pt'))
+                    
+                    # Skip this batch for evaluation
+                    continue
+                
+                # Store predictions
+                all_preds.append(estimate.cpu().numpy())
+                all_targets.append(y_true.cpu().numpy())
+                all_lower_ci.append(ci[:, 0:1].cpu().numpy())
+                all_upper_ci.append(ci[:, 1:2].cpu().numpy())
+                
+                # Store detection probabilities
+                for i, threshold in enumerate(thresholds):
+                    if i < len(det_probs):
+                        all_detection_probs[threshold].append(det_probs[i].cpu().numpy())
+                
+                # Store sample IDs if available
+                if sample_ids is not None:
+                    all_sample_ids.extend(sample_ids)
+                    
+            except Exception as e:
+                logger.error(f"Error processing batch {batch_idx}: {str(e)}")
+                if output_dir:
+                    # Save problem batch for debugging
+                    torch.save({
+                        'marker_values': marker_values.cpu(),
+                        'coverage': coverage.cpu(),
+                        'y_true': y_true.cpu()
+                    }, os.path.join(output_dir, f'error_batch_{batch_idx}.pt'))
+    
+    # Report NaN statistics if any were found
+    if nan_batches:
+        logger.warning(f"NaNs found in {len(nan_batches)} batches: {nan_batches}")
+    
+    if not all_preds:
+        logger.error("No valid predictions were collected. All batches produced NaNs or errors.")
+        return {"error": "No valid predictions"}
     
     # Concatenate results
     all_preds = np.concatenate(all_preds)
@@ -540,7 +579,6 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
             logger.error(traceback.format_exc())
     
     return results
-
 
 def calculate_enhanced_metrics(targets, predictions, lower_ci=None, upper_ci=None):
     """
