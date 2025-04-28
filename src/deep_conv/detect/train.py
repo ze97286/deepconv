@@ -192,7 +192,7 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
 
 def train_model(model, train_loader, val_loader, control_loader, args, device):
     """
-    Train the model with improved training process
+    Train the model with improved concentration-focused approach while retaining original architecture
     
     Args:
         model: The cancer detection model to train
@@ -243,9 +243,9 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         'val_loss': [],
         'concentration_loss': [],
         'detection_loss': [],
-        'calibration_error': [],
         'r2_score': [],
         'mean_absolute_error': [],
+        'concentration_metrics': [],
         'clinical_metrics': [],
         'lr': []
     }
@@ -257,6 +257,8 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         # Training phase
         model.train()
         train_loss = 0
+        concentration_loss = 0
+        detection_loss = 0
         
         # Progress bar for training
         train_bar = tqdm(enumerate(train_loader), 
@@ -276,7 +278,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                 with autocast():
                     mu, uncertainty, detection_probs, _ = model(marker_values, coverage)
                     
-                    # Calculate loss
+                    # Calculate combined loss
                     loss, conc_loss, det_loss = calculate_loss(
                         model, mu, uncertainty, detection_probs, y_true, args, control_mask
                     )
@@ -293,7 +295,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                     # Get model predictions
                     mu, uncertainty, detection_probs, _ = model(marker_values, coverage)
                     
-                    # Calculate loss
+                    # Calculate combined loss
                     loss, conc_loss, det_loss = calculate_loss(
                         model, mu, uncertainty, detection_probs, y_true, args
                     )
@@ -305,6 +307,8 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
             
             # Update metrics
             train_loss += loss.item() * args.grad_accum_steps
+            concentration_loss += conc_loss.item()
+            detection_loss += det_loss.item()
             
             # Gradient accumulation and optimizer step
             if (i + 1) % args.grad_accum_steps == 0 or (i + 1) == len(train_loader):
@@ -323,26 +327,30 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         
         # Calculate average training loss
         train_loss /= len(train_loader)
+        concentration_loss /= len(train_loader)
+        detection_loss /= len(train_loader)
         
-        # Validation phase
+        # Validation phase with both standard and concentration-focused metrics
         val_loss, val_metrics = validate_model(model, val_loader, device, args)
+        conc_metrics = compute_concentration_metrics(model, val_loader, device)
         
         # Periodic calibration
         if args.calibrate and (epoch % 5 == 0 or epoch == args.epochs - 1):
             logger.info(f"Calibrating model...")
-            calibration_results = model.calibrate(val_loader, control_loader, device)
+            calibration_results = calibrate_model(model, val_loader, control_loader, device)
             logger.info(f"  Calibration factor: {calibration_results['calibration_factor']:.4f}")
-            logger.info(f"  Background level: {calibration_results['background_level']:.6f}")
+            if 'global_bg_level' in calibration_results:
+                logger.info(f"  Background level: {calibration_results['global_bg_level']:.6f}")
         
         # Update history
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
-        history['concentration_loss'].append(val_metrics['concentration_loss'])
-        history['detection_loss'].append(val_metrics['detection_loss'])
-        history['calibration_error'].append(val_metrics['calibration_error'])
+        history['concentration_loss'].append(concentration_loss)
+        history['detection_loss'].append(detection_loss)
         history['r2_score'].append(val_metrics['r2'])
         history['mean_absolute_error'].append(val_metrics['mae'])
         history['clinical_metrics'].append(val_metrics['clinical_metrics'])
+        history['concentration_metrics'].append(conc_metrics)
         history['lr'].append(scheduler.get_last_lr()[0])
         
         # Log validation results
@@ -359,6 +367,14 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                        f"Sensitivity: {metrics_1pct['sensitivity']:.4f}, "
                        f"Specificity: {metrics_1pct['specificity']:.4f}")
         
+        # Log concentration metrics for key ranges
+        for range_name in ['0.1-1%', '1-5%']:
+            if range_name in conc_metrics['stratified_metrics']:
+                range_metrics = conc_metrics['stratified_metrics'][range_name]
+                logger.info(f"  {range_name} (n={range_metrics['count']}): "
+                           f"MAE={range_metrics['mae']:.6f}, "
+                           f"Within 25%={range_metrics.get('within_25pct', 0):.1f}%")
+        
         # Check for improvement
         if val_loss < best_val_loss:
             improvement = "inf" if best_val_loss == float('inf') else f"{(best_val_loss - val_loss) / best_val_loss * 100:.2f}%"
@@ -368,6 +384,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                 'epoch': epoch,
                 'val_loss': val_loss,
                 'val_metrics': val_metrics,
+                'concentration_metrics': conc_metrics,
                 'args': vars(args)
             }
             
@@ -404,6 +421,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         'model': model.state_dict(),
         'epoch': epoch,
         'val_metrics': val_metrics,
+        'concentration_metrics': conc_metrics,
         'args': vars(args),
         'history': history
     }, final_model_path)
@@ -415,15 +433,24 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         # Convert history values to native types for JSON serialization
         serializable_history = {}
         for key, values in history.items():
-            if key != 'clinical_metrics':
+            if key not in ['clinical_metrics', 'concentration_metrics']:
                 serializable_history[key] = [float(v) for v in values]
-            else:
+            elif key == 'clinical_metrics':
                 # Handle nested clinical metrics
                 serializable_metrics = []
                 for epoch_metrics in values:
                     serializable_epoch = {}
                     for threshold, metrics in epoch_metrics.items():
                         serializable_epoch[str(threshold)] = {k: float(v) for k, v in metrics.items() if v is not None}
+                    serializable_metrics.append(serializable_epoch)
+                serializable_history[key] = serializable_metrics
+            elif key == 'concentration_metrics':
+                # Handle concentration metrics
+                serializable_metrics = []
+                for epoch_metrics in values:
+                    serializable_epoch = {}
+                    for range_name, metrics in epoch_metrics.get('stratified_metrics', {}).items():
+                        serializable_epoch[range_name] = {k: float(v) if v is not None else None for k, v in metrics.items()}
                     serializable_metrics.append(serializable_epoch)
                 serializable_history[key] = serializable_metrics
         
@@ -437,6 +464,190 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         model.load_state_dict(best_model_state['model'])
     
     return model, best_model_state
+
+
+def compute_concentration_metrics(model, data_loader, device):
+    """
+    Compute concentration-focused metrics without changing the validation flow
+    
+    Args:
+        model: The model to evaluate
+        data_loader: DataLoader for evaluation
+        device: Device to run evaluation on
+        
+    Returns:
+        Dictionary of concentration-focused metrics
+    """
+    model.eval()
+    
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for batch_data in data_loader:
+            # Handle both dataset types
+            if len(batch_data) == 4:
+                marker_values, coverage, y_true, _ = batch_data  # Ignore control_mask
+            else:
+                marker_values, coverage, y_true = batch_data
+            
+            marker_values = marker_values.to(device)
+            coverage = coverage.to(device)
+            y_true = y_true.to(device)
+            
+            # Forward pass
+            mu, _, _, _ = model(marker_values, coverage)
+            
+            # Store predictions and targets
+            all_preds.append(mu.cpu().numpy())
+            all_targets.append(y_true.cpu().numpy())
+    
+    # Concatenate results
+    all_preds = np.concatenate(all_preds)
+    all_targets = np.concatenate(all_targets)
+    
+    # Calculate concentration-aware metrics
+    concentration_metrics = compute_concentration_aware_metrics(all_preds, all_targets)
+    
+    return concentration_metrics
+
+
+def compute_concentration_aware_metrics(predictions, targets):
+    """
+    Compute concentration-aware metrics that evaluate how well the model estimates
+    across different concentration ranges.
+    
+    Args:
+        predictions: Predicted concentrations (numpy array)
+        targets: Ground truth concentrations (numpy array)
+        
+    Returns:
+        Dictionary of various concentration-aware metrics
+    """
+    import numpy as np
+    from sklearn.metrics import r2_score, mean_absolute_error
+    
+    # Ensure arrays are flattened
+    predictions = predictions.flatten()
+    targets = targets.flatten()
+    
+    # Basic regression metrics
+    r2 = r2_score(targets, predictions)
+    mae = mean_absolute_error(targets, predictions)
+    
+    # Define concentration ranges
+    ranges = [
+        (0, 0.001, "0-0.1%"),
+        (0.001, 0.01, "0.1-1%"),
+        (0.01, 0.05, "1-5%"),
+        (0.05, 0.1, "5-10%"),
+        (0.1, 1.0, ">10%")
+    ]
+    
+    # Initialize results dict
+    results = {
+        'r2': r2,
+        'mae': mae,
+        'stratified_metrics': {},
+        'ordering_metrics': {},
+        'band_accuracy': {}
+    }
+    
+    # Calculate stratified metrics for each concentration range
+    for low, high, name in ranges:
+        mask = (targets >= low) & (targets < high)
+        range_predictions = predictions[mask]
+        range_targets = targets[mask]
+        
+        if len(range_targets) > 0:
+            # Calculate range-specific metrics
+            range_mae = mean_absolute_error(range_targets, range_predictions)
+            
+            # Calculate percentage of predictions within percentage bands of true value
+            within_10pct = 0
+            within_25pct = 0
+            within_50pct = 0
+            
+            if low > 0:  # Only for non-zero ranges
+                # Calculate relative errors
+                rel_errors = np.abs(range_predictions - range_targets) / np.maximum(range_targets, 1e-6)
+                within_10pct = np.mean(rel_errors <= 0.1) * 100
+                within_25pct = np.mean(rel_errors <= 0.25) * 100
+                within_50pct = np.mean(rel_errors <= 0.5) * 100
+            
+            results['stratified_metrics'][name] = {
+                'count': int(np.sum(mask)),
+                'mae': float(range_mae),
+                'within_10pct': float(within_10pct),
+                'within_25pct': float(within_25pct),
+                'within_50pct': float(within_50pct)
+            }
+    
+    # Calculate concentration ordering metrics
+    # This measures how well the model orders samples by concentration
+    # Specifically, can it distinguish between different concentration bands
+    correct_orders = 0
+    total_comparisons = 0
+    
+    # Create broader bands for clearer distinction
+    bands = [(0, 0.001), (0.001, 0.01), (0.01, 0.1), (0.1, 1.0)]
+    band_names = ["0-0.1%", "0.1-1%", "1-10%", ">10%"]
+    
+    # Calculate in-band accuracy
+    for i, (low, high) in enumerate(bands):
+        mask = (targets >= low) & (targets < high)
+        band_preds = predictions[mask]
+        correct_band = np.sum((band_preds >= low) & (band_preds < high))
+        total_in_band = np.sum(mask)
+        
+        if total_in_band > 0:
+            accuracy = float(correct_band) / float(total_in_band) * 100
+            results['band_accuracy'][band_names[i]] = {
+                'accuracy': accuracy,
+                'count': int(total_in_band)
+            }
+    
+    # Calculate ordering accuracy between bands
+    for i in range(len(bands)):
+        for j in range(i+1, len(bands)):
+            low_i, high_i = bands[i]
+            low_j, high_j = bands[j]
+            
+            mask_i = (targets >= low_i) & (targets < high_i)
+            mask_j = (targets >= low_j) & (targets < high_j)
+            
+            for pred_i, pred_j in zip(predictions[mask_i], predictions[mask_j]):
+                if pred_i < pred_j:  # Correct ordering
+                    correct_orders += 1
+                total_comparisons += 1
+    
+    if total_comparisons > 0:
+        ordering_accuracy = float(correct_orders) / float(total_comparisons) * 100
+        results['ordering_metrics']['accuracy'] = ordering_accuracy
+        results['ordering_metrics']['comparisons'] = total_comparisons
+    
+    # Calculate background level adjustment optimality
+    # Find optimal background level that maximizes metrics
+    r2_scores = []
+    bg_levels = np.linspace(0, 0.05, 50)  # Test different background levels
+    
+    for bg in bg_levels:
+        adjusted_preds = np.maximum(predictions - bg, 0)
+        r2_bg = r2_score(targets, adjusted_preds)
+        r2_scores.append(r2_bg)
+    
+    optimal_bg_idx = np.argmax(r2_scores)
+    optimal_bg = bg_levels[optimal_bg_idx]
+    optimal_r2 = r2_scores[optimal_bg_idx]
+    
+    results['background_analysis'] = {
+        'current_r2': r2,
+        'optimal_bg': float(optimal_bg),
+        'optimal_r2': float(optimal_r2),
+        'improvement': float(optimal_r2 - r2)
+    }
+    
+    return results
 
 
 def validate_model(model, val_loader, device, args):
@@ -1041,7 +1252,6 @@ def visualise_results(predictions, ground_truth, output_subdir, ci_data=None, ma
         logger.error(traceback.format_exc())
         return None
 
-
 def plot_predictions(predictions, targets, lower_ci, upper_ci, output_dir):
     """
     Plot predictions vs targets with confidence intervals using Plotly
@@ -1130,7 +1340,6 @@ def plot_predictions(predictions, targets, lower_ci, upper_ci, output_dir):
     # Save figure
     fig.write_html(os.path.join(plots_dir, 'predictions_vs_targets.html'))
     fig.write_image(os.path.join(plots_dir, 'predictions_vs_targets.png'), scale=2)
-
 
 def plot_marker_importance(marker_importance, output_dir):
     """
@@ -1471,7 +1680,7 @@ def parse_excluded_markers(excluded_markers_str):
     return [int(idx.strip()) for idx in excluded_markers_str.split(',')]# T-cells
 
 
-# python -m deep_conv.detect.train \
+# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_t -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_t.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train \
 # --name CpGenie_T-cells \
 # --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell \
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/T-cells/ \
@@ -1484,14 +1693,16 @@ def parse_excluded_markers(excluded_markers_str):
 # --feature_dim 96 \
 # --num_heads 6 \
 # --num_layers 2 \
-# --cell_profile ultra_low_snr
-# --calibrate
+# --cell_profile ultra_low_snr \
+# --calibrate \
 # --detection_thresholds "0.001,0.005,0.01,0.05" \
 # --min_reliable_coverage 5.0 \
+# --epochs 100"
+
 
 
 # OAC
-# python -m deep_conv.detect.train \
+# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train \
 # --name CpGenie_OAC \
 # --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell \
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ \
@@ -1508,7 +1719,9 @@ def parse_excluded_markers(excluded_markers_str):
 # --min_reliable_coverage 5.0 \
 # --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ \
 # --calibrate \
-# --excluded_markers "44,58,111,133,77,95,127,38,108,115"
+# --excluded_markers "44,58,111,133,77,95,127,38,108,115" \
+# --epochs 100 
+
 def main():
     """
     Main function with enhanced approach to training and calibration
