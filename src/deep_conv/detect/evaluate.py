@@ -105,11 +105,22 @@ def load_model(model_dir, device='cpu'):
                 num_heads=config.get('num_heads', 8),
                 num_layers=config.get('num_layers', 3),
                 dropout_rate=config.get('dropout_rate', 0.2),
-                focal_weight_factor=config.get('focal_weight_factor', 100),
+                focal_weight_factor=config.get('focal_weight_factor', 50),
                 low_concentration_threshold=config.get('low_concentration_threshold', 0.01),
-                detection_thresholds=config.get('detection_thresholds', [0.001, 0.01, 0.05])
+                detection_thresholds=config.get('detection_thresholds', [0.001, 0.01, 0.05]),
+                marker_specific_bg=config.get('marker_specific_bg', False),
+                l2_weight=config.get('l2_weight', 0.05),
+                min_reliable_coverage=config.get('min_reliable_coverage', 5.0)
             )
-            model.load_state_dict(model_state)
+            # Handle potential key mismatches in state dict
+            try:
+                model.load_state_dict(model_state, strict=True)
+            except Exception as e:
+                logger.warning(f"Strict loading failed: {e}")
+                # Try non-strict loading
+                model.load_state_dict(model_state, strict=False)
+                logger.info("Used non-strict loading instead")
+            
             models.append(model)
         
         # Create ensemble
@@ -125,28 +136,82 @@ def load_model(model_dir, device='cpu'):
         
         # Get num_markers from the first layer weights if not in args
         if 'num_markers' not in args and isinstance(model_state, dict):
-            # Try to infer from marker_embedding.weight
-            marker_weights = model_state.get('marker_embedding.weight', None)
-            if marker_weights is not None:
-                args['num_markers'] = marker_weights.shape[0]
-            
-        # Create and load model
-        model = EnhancedCancerDetectionModel(
-            num_markers=args.get('num_markers', 1000),
-            feature_dim=args.get('feature_dim', 128),
-            num_heads=args.get('num_heads', 8),
-            num_layers=args.get('num_layers', 3),
-            dropout_rate=args.get('dropout_rate', 0.2),
-            detection_thresholds=args.get('detection_thresholds', [0.001, 0.01, 0.05])
-        )
+            # Try to infer from value_embedding.weight or other layers
+            for key in model_state:
+                if 'value_embedding.weight' in key:
+                    args['num_markers'] = model_state[key].shape[0]
+                    break
+                elif 'embedding' in key and 'weight' in key:
+                    args['num_markers'] = model_state[key].shape[0]
+                    break
         
-        # Load model weights
-        model.load_state_dict(model_state)
-        if 'calibration' in checkpoint:
-            with torch.no_grad():
-                model.calibration.fill_(checkpoint['calibration']['calibration_factor'])
-                model.background_level.fill_(checkpoint['calibration']['background_level'])
-                model.low_calibration.fill_(checkpoint['calibration']['low_calibration_factor'])
+        # Set defaults with fallbacks
+        detection_thresholds = args.get('detection_thresholds', [0.001, 0.01, 0.05])
+        # Convert from string if needed
+        if isinstance(detection_thresholds, str):
+            try:
+                detection_thresholds = json.loads(detection_thresholds)
+            except:
+                detection_thresholds = [0.001, 0.01, 0.05]
+        
+        # Create and load model
+        try:
+            model = EnhancedCancerDetectionModel(
+                num_markers=args.get('num_markers', 1000),
+                feature_dim=args.get('feature_dim', 128),
+                num_heads=args.get('num_heads', 8),
+                num_layers=args.get('num_layers', 3),
+                dropout_rate=args.get('dropout_rate', 0.2),
+                detection_thresholds=detection_thresholds,
+                focal_weight_factor=args.get('focal_weight_factor', 50),
+                low_concentration_threshold=args.get('low_concentration_threshold', 0.01),
+                marker_specific_bg=args.get('marker_specific_bg', False),
+                l2_weight=args.get('l2_weight', 0.05),
+                min_reliable_coverage=args.get('min_reliable_coverage', 5.0)
+            )
+            
+            # First try strict loading
+            try:
+                model.load_state_dict(model_state, strict=True)
+            except Exception as e:
+                logger.warning(f"Strict loading failed: {e}")
+                # Try non-strict loading
+                model.load_state_dict(model_state, strict=False)
+                logger.info("Used non-strict loading instead")
+            
+            # Apply calibration values if available
+            if 'calibration' in checkpoint:
+                with torch.no_grad():
+                    if hasattr(model, 'calibration'):
+                        model.calibration.fill_(checkpoint['calibration'].get('calibration_factor', 1.0))
+                    
+                    # Handle background level properly
+                    if hasattr(model, 'background_level'):
+                        if 'global_bg_level' in checkpoint['calibration']:
+                            # Single background level
+                            bg_level = checkpoint['calibration'].get('global_bg_level', 0.05)
+                            model.background_level.fill_(bg_level)
+                        elif model.marker_specific_bg and 'marker_bg_levels' in checkpoint['calibration']:
+                            # Marker-specific background levels (if shape matches)
+                            bg_levels = checkpoint['calibration']['marker_bg_levels']
+                            if isinstance(bg_levels, torch.Tensor) and bg_levels.shape == model.background_level.shape:
+                                model.background_level.copy_(bg_levels)
+                            else:
+                                # Fall back to global stats if available
+                                if 'marker_bg_stats' in checkpoint['calibration']:
+                                    stats = checkpoint['calibration']['marker_bg_stats']
+                                    median_val = stats.get('median', 0.05)
+                                    model.background_level.fill_(median_val)
+                                else:
+                                    # Default fallback
+                                    model.background_level.fill_(0.05)
+                    
+                    if hasattr(model, 'low_calibration'):
+                        model.low_calibration.fill_(checkpoint['calibration'].get('low_calibration_factor', 1.0))
+            
+        except Exception as e:
+            logger.error(f"Error creating model: {e}")
+            raise
     
     # Move model to device
     model = model.to(device)
