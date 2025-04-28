@@ -141,15 +141,30 @@ def load_model(model_dir, device='cpu'):
             model_state = checkpoint
         
         # Get num_markers from the first layer weights if not in args
-        if 'num_markers' not in args and isinstance(model_state, dict):
-            # Try to infer from value_embedding.weight or other layers
-            for key in model_state:
-                if 'value_embedding.weight' in key:
-                    args['num_markers'] = model_state[key].shape[0]
-                    break
-                elif 'embedding' in key and 'weight' in key:
-                    args['num_markers'] = model_state[key].shape[0]
-                    break
+        if isinstance(model_state, dict):
+            # Check for background_level dimension
+            if 'background_level' in model_state:
+                bg_shape = model_state['background_level'].shape
+                if len(bg_shape) > 1 and bg_shape[1] > 1:
+                    # This is a marker-specific background, extract the number of markers
+                    args['num_markers'] = bg_shape[1]
+                    args['marker_specific_bg'] = True
+            
+            # If still not found, try to infer from value_embedding or other layers
+            if 'num_markers' not in args:
+                for key in model_state:
+                    if 'value_embedding.weight' in key:
+                        feature_dim = model_state[key].shape[1]
+                        args['feature_dim'] = feature_dim * 2  # Assuming feature_dim//2 in the embedding
+                        break
+                    elif 'embedding' in key and 'weight' in key:
+                        # Try to infer from embedding dimensions
+                        shape = model_state[key].shape
+                        if len(shape) > 1:
+                            for dim in shape:
+                                if dim > 50:  # Likely the marker dimension
+                                    args['num_markers'] = dim
+                                    break
         
         # Set defaults with fallbacks
         detection_thresholds = args.get('detection_thresholds', [0.001, 0.01, 0.05])
@@ -163,7 +178,7 @@ def load_model(model_dir, device='cpu'):
         # Create and load model
         try:
             model = EnhancedCancerDetectionModel(
-                num_markers=args.get('num_markers', 1000),
+                num_markers=args.get('num_markers', 136),  # Default to 136 as a fallback
                 feature_dim=args.get('feature_dim', 128),
                 num_heads=args.get('num_heads', 8),
                 num_layers=args.get('num_layers', 3),
@@ -171,7 +186,7 @@ def load_model(model_dir, device='cpu'):
                 detection_thresholds=detection_thresholds,
                 focal_weight_factor=args.get('focal_weight_factor', 50),
                 low_concentration_threshold=args.get('low_concentration_threshold', 0.01),
-                marker_specific_bg=args.get('marker_specific_bg', False),
+                marker_specific_bg=args.get('marker_specific_bg', True),  # Default to True if we have evidence of it
                 l2_weight=args.get('l2_weight', 0.05),
                 min_reliable_coverage=args.get('min_reliable_coverage', 5.0)
             )
