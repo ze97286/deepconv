@@ -12,7 +12,7 @@ from sklearn.metrics import r2_score, mean_absolute_error, roc_auc_score, precis
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 from deep_conv.detect.preprocess import prepare_data_for_evaluation
-from deep_conv.detect.model import EnhancedCancerDetectionModel, CancerDetectionEnsemble
+from deep_conv.detect.model import EnhancedCancerDetectionModel
 
 
 def setup_logging(output_dir=None):
@@ -70,10 +70,7 @@ def load_model(model_dir, device='cpu'):
         # Fall back to final model if best model doesn't exist
         model_path = os.path.join(model_dir, 'final_model.pt')
         if not os.path.exists(model_path):
-            # Check for ensemble model
-            model_path = os.path.join(model_dir, 'ensemble_model.pt')
-            if not os.path.exists(model_path):
-                raise FileNotFoundError(f"No model checkpoint found in {model_dir}")
+            raise FileNotFoundError(f"No model checkpoint found in {model_dir}")
 
     logger.info(f"Loading checkpoint from {model_path}")
     checkpoint = torch.load(model_path, map_location=device)
@@ -90,143 +87,107 @@ def load_model(model_dir, device='cpu'):
             logger.warning(f"No args.json found in {model_dir}. Using default parameters.")
             args = {}
     
-    # Check if it's an ensemble model
-    if 'model_states' in checkpoint:
-        logger.info("Detected ensemble model")
-        # Extract model config
-        config = checkpoint.get('model_config', {})
+    
+    # Standard single model
+    # Get model parameters
+    model_state = checkpoint.get('model', None)
+    if model_state is None:
+        # Some checkpoints store the model state directly
+        model_state = checkpoint
+    
+    # Get num_markers from the first layer weights if not in args
+    if isinstance(model_state, dict):
+        # Check for background_level dimension
+        if 'background_level' in model_state:
+            bg_shape = model_state['background_level'].shape
+            if len(bg_shape) > 1 and bg_shape[1] > 1:
+                # This is a marker-specific background, extract the number of markers
+                args['num_markers'] = bg_shape[1]
+                args['marker_specific_bg'] = True
         
-        # Create individual models
-        models = []
-        for model_state in checkpoint['model_states']:
-            model = EnhancedCancerDetectionModel(
-                num_markers=config.get('num_markers', 1000),
-                feature_dim=config.get('feature_dim', 128),
-                num_heads=config.get('num_heads', 8),
-                num_layers=config.get('num_layers', 3),
-                dropout_rate=config.get('dropout_rate', 0.2),
-                focal_weight_factor=config.get('focal_weight_factor', 50),
-                low_concentration_threshold=config.get('low_concentration_threshold', 0.01),
-                detection_thresholds=config.get('detection_thresholds', [0.001, 0.01, 0.05]),
-                marker_specific_bg=config.get('marker_specific_bg', False),
-                l2_weight=config.get('l2_weight', 0.05),
-                min_reliable_coverage=config.get('min_reliable_coverage', 5.0)
-            )
-            # Handle potential key mismatches in state dict
-            try:
-                model.load_state_dict(model_state, strict=True)
-            except Exception as e:
-                logger.warning(f"Strict loading failed: {e}")
-                # Try non-strict loading
-                model.load_state_dict(model_state, strict=False)
-                logger.info("Used non-strict loading instead")
-            
-            models.append(model)
-        
-        # Create ensemble
-        model = CancerDetectionEnsemble(models)
-        
-    else:
-        # Standard single model
-        # Get model parameters
-        model_state = checkpoint.get('model', None)
-        if model_state is None:
-            # Some checkpoints store the model state directly
-            model_state = checkpoint
-        
-        # Get num_markers from the first layer weights if not in args
-        if isinstance(model_state, dict):
-            # Check for background_level dimension
-            if 'background_level' in model_state:
-                bg_shape = model_state['background_level'].shape
-                if len(bg_shape) > 1 and bg_shape[1] > 1:
-                    # This is a marker-specific background, extract the number of markers
-                    args['num_markers'] = bg_shape[1]
-                    args['marker_specific_bg'] = True
-            
-            # If still not found, try to infer from value_embedding or other layers
-            if 'num_markers' not in args:
-                for key in model_state:
-                    if 'value_embedding.weight' in key:
-                        feature_dim = model_state[key].shape[1]
-                        args['feature_dim'] = feature_dim * 2  # Assuming feature_dim//2 in the embedding
-                        break
-                    elif 'embedding' in key and 'weight' in key:
-                        # Try to infer from embedding dimensions
-                        shape = model_state[key].shape
-                        if len(shape) > 1:
-                            for dim in shape:
-                                if dim > 50:  # Likely the marker dimension
-                                    args['num_markers'] = dim
-                                    break
-        
-        # Set defaults with fallbacks
-        detection_thresholds = args.get('detection_thresholds', [0.001, 0.01, 0.05])
-        # Convert from string if needed
-        if isinstance(detection_thresholds, str):
-            try:
-                detection_thresholds = json.loads(detection_thresholds)
-            except:
-                detection_thresholds = [0.001, 0.01, 0.05]
-        
-        # Create and load model
+        # If still not found, try to infer from value_embedding or other layers
+        if 'num_markers' not in args:
+            for key in model_state:
+                if 'value_embedding.weight' in key:
+                    feature_dim = model_state[key].shape[1]
+                    args['feature_dim'] = feature_dim * 2  # Assuming feature_dim//2 in the embedding
+                    break
+                elif 'embedding' in key and 'weight' in key:
+                    # Try to infer from embedding dimensions
+                    shape = model_state[key].shape
+                    if len(shape) > 1:
+                        for dim in shape:
+                            if dim > 50:  # Likely the marker dimension
+                                args['num_markers'] = dim
+                                break
+    
+    # Set defaults with fallbacks
+    detection_thresholds = args.get('detection_thresholds', [0.001, 0.01, 0.05])
+    # Convert from string if needed
+    if isinstance(detection_thresholds, str):
         try:
-            model = EnhancedCancerDetectionModel(
-                num_markers=args.get('num_markers', 136),  # Default to 136 as a fallback
-                feature_dim=args.get('feature_dim', 128),
-                num_heads=args.get('num_heads', 8),
-                num_layers=args.get('num_layers', 3),
-                dropout_rate=args.get('dropout_rate', 0.2),
-                detection_thresholds=detection_thresholds,
-                focal_weight_factor=args.get('focal_weight_factor', 50),
-                low_concentration_threshold=args.get('low_concentration_threshold', 0.01),
-                marker_specific_bg=args.get('marker_specific_bg', True),  # Default to True if we have evidence of it
-                l2_weight=args.get('l2_weight', 0.05),
-                min_reliable_coverage=args.get('min_reliable_coverage', 5.0)
-            )
-            
-            # First try strict loading
-            try:
-                model.load_state_dict(model_state, strict=True)
-            except Exception as e:
-                logger.warning(f"Strict loading failed: {e}")
-                # Try non-strict loading
-                model.load_state_dict(model_state, strict=False)
-                logger.info("Used non-strict loading instead")
-            
-            # Apply calibration values if available
-            if 'calibration' in checkpoint:
-                with torch.no_grad():
-                    if hasattr(model, 'calibration'):
-                        model.calibration.fill_(checkpoint['calibration'].get('calibration_factor', 1.0))
-                    
-                    # Handle background level properly
-                    if hasattr(model, 'background_level'):
-                        if 'global_bg_level' in checkpoint['calibration']:
-                            # Single background level
-                            bg_level = checkpoint['calibration'].get('global_bg_level', 0.05)
-                            model.background_level.fill_(bg_level)
-                        elif model.marker_specific_bg and 'marker_bg_levels' in checkpoint['calibration']:
-                            # Marker-specific background levels (if shape matches)
-                            bg_levels = checkpoint['calibration']['marker_bg_levels']
-                            if isinstance(bg_levels, torch.Tensor) and bg_levels.shape == model.background_level.shape:
-                                model.background_level.copy_(bg_levels)
-                            else:
-                                # Fall back to global stats if available
-                                if 'marker_bg_stats' in checkpoint['calibration']:
-                                    stats = checkpoint['calibration']['marker_bg_stats']
-                                    median_val = stats.get('median', 0.05)
-                                    model.background_level.fill_(median_val)
-                                else:
-                                    # Default fallback
-                                    model.background_level.fill_(0.05)
-                    
-                    if hasattr(model, 'low_calibration'):
-                        model.low_calibration.fill_(checkpoint['calibration'].get('low_calibration_factor', 1.0))
-            
+            detection_thresholds = json.loads(detection_thresholds)
+        except:
+            detection_thresholds = [0.001, 0.01, 0.05]
+    
+    # Create and load model
+    try:
+        model = EnhancedCancerDetectionModel(
+            num_markers=args.get('num_markers', 136),  # Default to 136 as a fallback
+            feature_dim=args.get('feature_dim', 128),
+            num_heads=args.get('num_heads', 8),
+            num_layers=args.get('num_layers', 3),
+            dropout_rate=args.get('dropout_rate', 0.2),
+            detection_thresholds=detection_thresholds,
+            focal_weight_factor=args.get('focal_weight_factor', 50),
+            low_concentration_threshold=args.get('low_concentration_threshold', 0.01),
+            marker_specific_bg=args.get('marker_specific_bg', True),  # Default to True if we have evidence of it
+            l2_weight=args.get('l2_weight', 0.05),
+            min_reliable_coverage=args.get('min_reliable_coverage', 5.0)
+        )
+        
+        # First try strict loading
+        try:
+            model.load_state_dict(model_state, strict=True)
         except Exception as e:
-            logger.error(f"Error creating model: {e}")
-            raise
+            logger.warning(f"Strict loading failed: {e}")
+            # Try non-strict loading
+            model.load_state_dict(model_state, strict=False)
+            logger.info("Used non-strict loading instead")
+        
+        # Apply calibration values if available
+        if 'calibration' in checkpoint:
+            with torch.no_grad():
+                if hasattr(model, 'calibration'):
+                    model.calibration.fill_(checkpoint['calibration'].get('calibration_factor', 1.0))
+                
+                # Handle background level properly
+                if hasattr(model, 'background_level'):
+                    if 'global_bg_level' in checkpoint['calibration']:
+                        # Single background level
+                        bg_level = checkpoint['calibration'].get('global_bg_level', 0.05)
+                        model.background_level.fill_(bg_level)
+                    elif model.marker_specific_bg and 'marker_bg_levels' in checkpoint['calibration']:
+                        # Marker-specific background levels (if shape matches)
+                        bg_levels = checkpoint['calibration']['marker_bg_levels']
+                        if isinstance(bg_levels, torch.Tensor) and bg_levels.shape == model.background_level.shape:
+                            model.background_level.copy_(bg_levels)
+                        else:
+                            # Fall back to global stats if available
+                            if 'marker_bg_stats' in checkpoint['calibration']:
+                                stats = checkpoint['calibration']['marker_bg_stats']
+                                median_val = stats.get('median', 0.05)
+                                model.background_level.fill_(median_val)
+                            else:
+                                # Default fallback
+                                model.background_level.fill_(0.05)
+                
+                if hasattr(model, 'low_calibration'):
+                    model.low_calibration.fill_(checkpoint['calibration'].get('low_calibration_factor', 1.0))
+        
+    except Exception as e:
+        logger.error(f"Error creating model: {e}")
+        raise
     
     # Move model to device
     model = model.to(device)
@@ -293,21 +254,14 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
             y_true = y_true.to(device)
             
             try:
-                # Handle different model types
-                if isinstance(model, CancerDetectionEnsemble):
-                    # Ensemble model
-                    mu, phi, det_probs = model(marker_values, coverage)
-                    estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
+                if hasattr(model, 'forward_with_detection'):
+                    # Enhanced model with detection
+                    mu, phi, det_probs, _ = model.forward_with_detection(marker_values, coverage)
                 else:
-                    # Single model
-                    if hasattr(model, 'forward_with_detection'):
-                        # Enhanced model with detection
-                        mu, phi, det_probs, _ = model.forward_with_detection(marker_values, coverage)
-                    else:
-                        # Standard model
-                        mu, phi, det_probs, _ = model(marker_values, coverage)
-                    
-                    estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
+                    # Standard model
+                    mu, phi, det_probs, _ = model(marker_values, coverage)
+                
+                estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
                 
                 # Check for NaNs in output
                 if torch.isnan(estimate).any():

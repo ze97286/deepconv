@@ -15,7 +15,7 @@ import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
 
 from deep_conv.detect.preprocess import prepare_data_for_training,load_train_with_contrastive_data
-from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyser, CancerDetectionEnsemble
+from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyser
 
 
 def parse_args():
@@ -57,12 +57,7 @@ def parse_args():
     parser.add_argument('--grad_accum_steps', type=int, default=4, help='Gradient accumulation steps')
     parser.add_argument('--early_stopping', type=int, default=10, help='Early stopping patience')
     parser.add_argument('--output_dir', type=str, default="./saved_models", help='Output directory')
-    
-    # Ensemble parameters
-    parser.add_argument('--ensemble', action='store_true', help='Use ensemble of models')
-    parser.add_argument('--ensemble_size', type=int, default=3, help='Number of models in ensemble')
-    parser.add_argument('--ensemble_seeds', type=str, default=None, help='Comma-separated seeds for ensemble models')
-    
+ 
     # Evaluation parameters
     parser.add_argument('--detection_thresholds', type=str, default="0.001,0.01,0.05", help='Comma-separated detection thresholds')
     
@@ -75,6 +70,9 @@ def parse_args():
                    help='Directory containing control data for contrastive learning')
     parser.add_argument('--calibrate', action='store_true', 
                     help='Calibrate confidence intervals and background correction')
+    
+    parser.add_argument('--excluded_markers', type=str, default="", 
+                   help='Comma-separated list of marker indices to exclude')
 
     args = parser.parse_args()
     
@@ -88,14 +86,6 @@ def parse_args():
 
     # Process detection thresholds
     args.detection_thresholds = [float(x) for x in args.detection_thresholds.split(',')]
-    
-    # Process ensemble seeds if provided
-    if args.ensemble and args.ensemble_seeds:
-        args.ensemble_seeds = [int(x) for x in args.ensemble_seeds.split(',')]
-    elif args.ensemble:
-        # Generate random seeds if not provided
-        base_seed = args.seed
-        args.ensemble_seeds = [base_seed + i for i in range(args.ensemble_size)]
     
     if args.cell_profile:
         apply_cell_profile(args)
@@ -1301,17 +1291,9 @@ def evaluate(model, data_loader, args, device, split_name="test"):
             marker_values = marker_values.to(device)
             coverage = coverage.to(device)
             y_true = y_true.to(device)
-            
-            # Handle different return signatures
-            if isinstance(model, CancerDetectionEnsemble):
-                mu, phi, det_probs = model.forward(marker_values, coverage)
-                estimate, ci, uncertainty = model.get_estimate_and_ci(marker_values, coverage)
-                # Use first model's attention weights for analysis
-                _, _, _, attention_weights = model.models[0](marker_values, coverage)
-            else:
-                mu, phi, det_probs, attention_weights = model(marker_values, coverage)
-                estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
-            
+            mu, phi, det_probs, attention_weights = model(marker_values, coverage)
+            estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
+        
             all_preds.append(estimate.cpu().numpy())
             all_targets.append(y_true.cpu().numpy())
             all_lower_ci.append(ci[:, 0:1].cpu().numpy())
@@ -1598,6 +1580,13 @@ def get_git_info():
         return {'commit': 'unknown', 'branch': 'unknown', 'clean': False}
 
 
+def parse_excluded_markers(excluded_markers_str):
+    """Parse excluded markers string into a list of indices"""
+    if not excluded_markers_str:
+        return []
+    return [int(idx) for idx in excluded_markers_str.split(',')]
+
+
 # T-cells
 # python -m deep_conv.detect.train \
 # --name CpGenie_T-cells \
@@ -1627,7 +1616,6 @@ def get_git_info():
 # --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ \
 # --calibrate
 
-# python -m deep_conv.detect.train --ensemble --ensemble_size=3 --detection_thresholds=0.001,0.01,0.05 --name CpGenie_ensemble
 def main():
     """
     Main function with enhanced approach to training and calibration
@@ -1662,11 +1650,16 @@ def main():
     # Prepare data
     logger.info(f"Preparing data from {args.data_dir}...")
     try:
+        excluded_markers = parse_excluded_markers(args.excluded_markers) if args.excluded_markers else None
+        if excluded_markers:
+            logger.info(f"Excluding {len(excluded_markers)} markers: {excluded_markers}")
+
         train_loader, val_loader, test_loader, num_markers = prepare_data_for_training(
             data_dir=args.data_dir,
             atlas_path=args.atlas_path,
             target_cell_type=args.target_cell_type,
             target_cell_idx=args.target_cell_idx,
+            excluded_markers=excluded_markers,
         )
         logger.info(f"✓ Data preparation complete")
     except Exception as e:
@@ -1684,7 +1677,8 @@ def main():
                 args.atlas_path, 
                 args.target_cell_type, 
                 args.batch_size, 
-                logger
+                logger,
+                excluded_markers=excluded_markers,
             )
             logger.info(f"✓ Control data loaded successfully")
         except Exception as e:

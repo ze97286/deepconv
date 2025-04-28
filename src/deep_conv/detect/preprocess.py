@@ -27,6 +27,13 @@ class cfDNAMethylationDataset(Dataset):
     def __getitem__(self, idx):
         return self.marker_values[idx], self.coverage[idx], self.y_true[idx], self.control_mask[idx]
 
+def parse_excluded_markers(excluded_markers_str):
+    """Parse excluded markers string into a list of indices"""
+    if not excluded_markers_str:
+        return []
+    return [int(idx) for idx in excluded_markers_str.split(',')]
+
+
 def load_and_preprocess_data(
     marker_values_path, 
     coverage_path, 
@@ -34,6 +41,7 @@ def load_and_preprocess_data(
     atlas_path, 
     target_cell_type, 
     target_cell_idx,
+    excluded_markers=None,
     test_size=0.2, 
     val_size=0.2, 
     random_state=42
@@ -73,8 +81,12 @@ def load_and_preprocess_data(
     atlas = pd.read_csv(atlas_path, sep="\t")
     target_markers = atlas[atlas.target == target_cell_type]
     target_marker_indices = target_markers.index.values
+    if excluded_markers:
+        excluded_indices = parse_excluded_markers(excluded_markers) if isinstance(excluded_markers, str) else excluded_markers
+        target_marker_indices = np.array([idx for idx in target_marker_indices if idx not in excluded_indices])
+        print(f"Excluded {len(excluded_indices)} markers: {excluded_indices}")
     
-    print(f"Found {len(target_marker_indices)} markers for {target_cell_type}")
+    print(f"Using {len(target_marker_indices)} markers for {target_cell_type}")
     
     # Extract relevant markers from data
     marker_values = marker_values_df.iloc[target_marker_indices][marker_values_df.columns[2:]].values.T
@@ -137,13 +149,22 @@ def load_and_preprocess_data(
     
     return train_loader, val_loader, test_loader, marker_values.shape[1]
 
-def load_train_with_contrastive_data(train_loader, control_data_dir, atlas_path, target_cell_type, batch_size, logger):
+def load_train_with_contrastive_data(
+        train_loader, 
+        control_data_dir, 
+        atlas_path, 
+        target_cell_type, 
+        batch_size, 
+        logger,
+        excluded_markers=None
+    ):
     try:
         # Load control data
         control_marker_values, control_coverage, _ = load_control_data(
             control_data_dir,
             atlas_path,
-            target_cell_type
+            target_cell_type,
+            excluded_markers=excluded_markers
         )
         
         # Split controls for training and validation
@@ -212,7 +233,8 @@ def load_train_with_contrastive_data(train_loader, control_data_dir, atlas_path,
 def load_control_data(
     data_dir,
     atlas_path,
-    target_cell_type
+    target_cell_type,
+    excluded_markers=None
 ):
     """
     Load control data for contrastive learning
@@ -226,7 +248,12 @@ def load_control_data(
     target_markers = atlas[atlas.target == target_cell_type]
     target_marker_indices = target_markers.index.values
 
-    print(f"Found {len(target_marker_indices)} markers for {target_cell_type}")
+    if excluded_markers:
+        excluded_indices = parse_excluded_markers(excluded_markers) if isinstance(excluded_markers, str) else excluded_markers
+        target_marker_indices = np.array([idx for idx in target_marker_indices if idx not in excluded_indices])
+        print(f"Excluded {len(excluded_indices)} markers for control data: {excluded_indices}")
+    
+    print(f"Using {len(target_marker_indices)} markers for {target_cell_type} in control data")
 
     # Extract relevant markers from data
     sample_ids = marker_values_df.columns[2:]
@@ -394,6 +421,7 @@ def prepare_data_for_training(
     atlas_path,
     target_cell_type,
     target_cell_idx,
+    excluded_markers=None, 
 ):
     """
     Prepare data for training
@@ -423,7 +451,8 @@ def prepare_data_for_training(
         target_cell_idx=target_cell_idx,
         test_size=0.2,
         val_size=0.2,
-        random_state=42
+        random_state=42,
+        excluded_markers=excluded_markers,
     )
     
     # Analyse data characteristics
@@ -437,6 +466,7 @@ def prepare_data_for_evaluation(
     atlas_path,
     target_cell_type,
     target_cell_idx,
+    excluded_markers=None,
 ):
     marker_values_path = os.path.join(data_dir, "marker_values.parquet")
     coverage_path = os.path.join(data_dir, "coverage.parquet")
@@ -454,6 +484,10 @@ def prepare_data_for_evaluation(
     atlas = pd.read_csv(atlas_path, sep="\t")
     target_markers = atlas[atlas.target == target_cell_type]
     target_marker_indices = target_markers.index.values
+    if excluded_markers:
+        excluded_indices = parse_excluded_markers(excluded_markers) if isinstance(excluded_markers, str) else excluded_markers
+        target_marker_indices = np.array([idx for idx in target_marker_indices if idx not in excluded_indices])
+        print(f"Excluded {len(excluded_indices)} markers: {excluded_indices}")
     
     print(f"Found {len(target_marker_indices)} markers for {target_cell_type}")
     
@@ -479,7 +513,8 @@ def prepare_data_for_evaluation(
 def prepare_data_for_predict(
     data_dir,
     atlas_path,
-    target_cell_type
+    target_cell_type,
+    excluded_markers=None,
 ):
     marker_values_path = os.path.join(data_dir, "marker_values.parquet")
     coverage_path = os.path.join(data_dir, "coverage.parquet")
@@ -492,7 +527,10 @@ def prepare_data_for_predict(
     atlas = pd.read_csv(atlas_path, sep="\t")
     target_markers = atlas[atlas.target == target_cell_type]
     target_marker_indices = target_markers.index.values
-
+    if excluded_markers:
+        excluded_indices = parse_excluded_markers(excluded_markers) if isinstance(excluded_markers, str) else excluded_markers
+        target_marker_indices = np.array([idx for idx in target_marker_indices if idx not in excluded_indices])
+        print(f"Excluded {len(excluded_indices)} markers: {excluded_indices}")
     print(f"Found {len(target_marker_indices)} markers for {target_cell_type}")
 
     # Extract relevant markers from data
