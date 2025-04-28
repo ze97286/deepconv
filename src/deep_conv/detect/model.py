@@ -9,55 +9,54 @@ import numpy as np
 
 class EnhancedCancerDetectionModel(nn.Module):
     """
-    Improved DL model for cancer detection with enhanced concentration handling
-    and better calibration capabilities.
+    Enhanced deep learning model for cancer detection from cfDNA methylation markers.
+    This model uses transformer architecture with attention mechanisms to estimate
+    cell type concentration and provide calibrated confidence intervals.
     """
-    def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
-             dropout_rate=0.3, detection_thresholds=(0.001, 0.01, 0.05),
-             focal_weight_factor=50, low_concentration_threshold=0.01,
-             l2_weight=0.05, marker_specific_bg=False, 
-             min_reliable_coverage=5.0):
+    def __init__(self, num_markers, feature_dim=96, num_heads=6, num_layers=2, 
+                 dropout_rate=0.2, detection_thresholds=(0.001, 0.005, 0.01, 0.05),
+                 background_level=0.05, min_reliable_coverage=5.0):
+        """
+        Initialize the EnhancedCancerDetectionModel.
+        
+        Args:
+            num_markers: Number of methylation markers in input
+            feature_dim: Dimension of feature representations
+            num_heads: Number of attention heads in transformer
+            num_layers: Number of transformer encoder layers
+            dropout_rate: Dropout probability for regularization
+            detection_thresholds: Concentration thresholds for binary detection
+            background_level: Initial background level for correction
+            min_reliable_coverage: Minimum coverage to consider a marker reliable
+        """
         super().__init__()
         
-        # Store configuration
+        # Store configuration parameters
         self.detection_thresholds = detection_thresholds
         self.num_markers = num_markers
-        self.focal_weight_factor = focal_weight_factor
-        self.low_concentration_threshold = low_concentration_threshold
-        self.l2_weight = l2_weight
-        self.marker_specific_bg = marker_specific_bg
         self.min_reliable_coverage = min_reliable_coverage
             
-        # Embedding components
+        # Separate embeddings for marker values and coverage
+        # These transform the raw inputs into higher-dimensional representations
         self.value_embedding = nn.Linear(1, feature_dim // 2)
         self.coverage_embedding = nn.Linear(1, feature_dim // 2)
         self.feature_projection = nn.Linear(feature_dim, feature_dim)
         
-        # Transformer components
+        # Transformer encoder for learning marker interactions
+        # Uses pre-norm for better training stability
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=feature_dim,
-            nhead=num_heads,
-            dim_feedforward=feature_dim * 4,
-            dropout=dropout_rate,
-            activation=F.gelu,  # Using GELU for smoother gradients
-            batch_first=True,
-            norm_first=True  # Pre-norm helps training stability
-        )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        # Create a secondary encoder for low concentration focus
-        low_conc_encoder_layer = nn.TransformerEncoderLayer(
             d_model=feature_dim,
             nhead=num_heads,
             dim_feedforward=feature_dim * 2,
             dropout=dropout_rate,
-            activation=F.gelu,
+            activation=F.gelu,  # GELU for smoother gradients
             batch_first=True,
-            norm_first=True
+            norm_first=True     # Pre-norm architecture
         )
-        self.low_conc_encoder = nn.TransformerEncoder(low_conc_encoder_layer, num_layers=1)  # Single layer instead of 2
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Readout components with enhanced signal handling
+        # Attention mechanism for marker importance weighting
+        # Learns which markers are most informative
         self.attention = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
@@ -65,7 +64,17 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Linear(feature_dim // 2, 1)
         )
         
-        # Main prediction components for concentration estimation
+        # Coverage reliability weighting mechanism
+        # Produces weights that reduce the influence of low-coverage markers
+        self.reliability_weight = nn.Sequential(
+            nn.Linear(1, feature_dim // 4),
+            nn.GELU(),
+            nn.Linear(feature_dim // 4, 1),
+            nn.Sigmoid()
+        )
+        
+        # Concentration estimation head (mu)
+        # Predicts the cell type concentration (0-1)
         self.mu_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
@@ -74,363 +83,312 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Sigmoid()
         )
         
-        self.phi_head = nn.Sequential(
+        # Uncertainty estimation head
+        # Predicts the uncertainty/confidence in the concentration estimate
+        self.uncertainty_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
             nn.Dropout(dropout_rate),
             nn.Linear(feature_dim // 2, 1),
-            nn.Softplus()  # Ensures positive concentration parameter
+            nn.Softplus()  # Ensures positive uncertainty values
         )
         
-        # Low concentration specialist head
-        self.low_mu_head = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim // 2, 1),
-            nn.Sigmoid()
-        )
-        
-        self.low_phi_head = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim // 2, 1),
-            nn.Softplus()
-        )
-        
-        # Binary detection heads
+        # Binary detection heads for different concentration thresholds
+        # Each head predicts the probability that concentration exceeds the threshold
         self.detection_heads = nn.ModuleList()
         for _ in detection_thresholds:
             head = nn.Sequential(
-                nn.Linear(feature_dim + 2, feature_dim),  # +2 for uncertainty feature & coverage
+                nn.Linear(feature_dim + 1, feature_dim // 2),  # +1 for uncertainty feature
                 nn.GELU(),
                 nn.Dropout(dropout_rate),
-                nn.Linear(feature_dim, 1),
+                nn.Linear(feature_dim // 2, 1),
                 nn.Sigmoid()
             )
             # Initialize with negative bias for lower initial predictions
+            # This helps avoid excessive false positives early in training
             with torch.no_grad():
                 head[-2].bias.data.fill_(-1.0)
             self.detection_heads.append(head)
         
-        # Improved reliability weighting component - more aggressive for low coverage
-        self.reliability_weight = nn.Sequential(
-            nn.Linear(1, feature_dim // 4),
-            nn.GELU(),
-            nn.Linear(feature_dim // 4, 1),
-            nn.Sigmoid()
-        )
+        # Background correction parameter
+        # Subtracts background signal from concentration estimates
+        self.register_buffer('background_level', torch.tensor([background_level]))
         
-        # Calibration components
-        self.calibration = nn.Parameter(torch.ones(1) * 0.5)  # Start with lower calibration
-        self.low_calibration = nn.Parameter(torch.ones(1) * 0.5)  # Start with lower calibration
+        # Confidence interval calibration parameter
+        # Scales uncertainty estimates to achieve desired CI coverage
+        self.register_buffer('calibration', torch.ones(1))
         
-        # Dropout for regularisation
-        self.dropout = nn.Dropout(dropout_rate)
-
-        # Coverage attention for reliability weighting
-        self.coverage_attention = nn.Sequential(
-            nn.Linear(1, feature_dim // 4),
-            nn.GELU(),
-            nn.Linear(feature_dim // 4, 1),
-            nn.Sigmoid()
-        )
-        
-        # Background correction parameters with initializations
-        if marker_specific_bg:
-            # One background parameter per marker
-            self.background_level = nn.Parameter(torch.ones(1, num_markers) * 0.05)
-        else:
-            # Global background parameter
-            self.background_level = nn.Parameter(torch.tensor([0.05]))
-        
-        # Bias prediction components toward low values initially
+        # Initialize mu_head bias to predict low values initially
+        # This conservative bias helps reduce false positives early in training
         with torch.no_grad():
             self.mu_head[-2].bias.data.fill_(-2.0)
-            self.low_mu_head[-2].bias.data.fill_(-2.0)
         
-    def forward(self, marker_values, coverage, y_true=None, control_mask=None):
+    def forward(self, marker_values, coverage):
+        """
+        Forward pass through the model.
+        
+        Args:
+            marker_values: Tensor of shape [batch_size, num_markers] with methylation values
+            coverage: Tensor of shape [batch_size, num_markers] with read coverage
+            
+        Returns:
+            mu: Estimated cell type concentration
+            uncertainty: Uncertainty in the estimation
+            detection_probs: Probability of exceeding each detection threshold
+            attention_weights: Learned importance weights for each marker
+        """
         B, M = marker_values.shape
         
-        # Create mask for missing values (where coverage = 0) AND low coverage regions
+        # Create mask for missing/unreliable values
+        # Zero coverage markers are completely ignored
         mask_missing = (coverage == 0)  # [B, M]
-        mask_low_cov = (coverage < self.min_reliable_coverage)  # Low coverage mask
-        mask = mask_missing | mask_low_cov  # Combined mask for unreliable regions
+        # Low coverage markers are considered unreliable
+        mask_low_cov = (coverage < self.min_reliable_coverage)  # [B, M]
+        # Combined mask identifies all markers to be treated cautiously
+        mask = mask_missing | mask_low_cov  # [B, M]
         
-        # Enhanced reliability weighting based on coverage
-        # Log-transform for better scaling of coverage values
-        log_coverage = torch.log1p(coverage).unsqueeze(-1)
+        # Transform coverage to log space for better numerical stability
+        # Log transformation helps handle the wide range of coverage values
+        log_coverage = torch.log1p(coverage).unsqueeze(-1)  # [B, M, 1]
         
-        # Calculate reliability weights - more aggressive for low coverage regions
-        reliability_weight = self.reliability_weight(log_coverage)
+        # Calculate reliability weights based on coverage
+        # Higher coverage markers get higher reliability
+        reliability_weight = self.reliability_weight(log_coverage)  # [B, M, 1]
         
-        # Quadratic scaling for sharper dropoff below threshold
+        # Apply quadratic scaling for sharper dropoff below threshold
+        # This creates a non-linear boundary that heavily downweights low coverage
         coverage_reliability = torch.pow(
             torch.clamp(coverage.unsqueeze(-1) / self.min_reliable_coverage, 0.0, 1.0), 
-            2  # Quadratic power for sharper falloff
-        )
-        reliability_weight = reliability_weight * coverage_reliability
+            2  # Quadratic power creates sharper falloff
+        )  # [B, M, 1]
         
-        # Handle NaN values in marker_values
-        marker_values = torch.nan_to_num(marker_values, nan=0.5)  # Replace NaN with 0.5 (neutral)
+        # Combine learned reliability and coverage-based reliability
+        reliability_weight = reliability_weight * coverage_reliability  # [B, M, 1]
+        
+        # Handle NaN values in marker_values (replacing with zeros)
+        # NaNs typically come from markers with zero coverage
+        marker_values = torch.nan_to_num(marker_values, nan=0.0)  # [B, M]
         
         # Embed marker values and coverage separately
+        # This allows different representations for these different data types
         value_features = self.value_embedding(marker_values.unsqueeze(-1))  # [B, M, feature_dim//2]
         coverage_features = self.coverage_embedding(log_coverage)  # [B, M, feature_dim//2]
         
-        # Combine features
+        # Combine and project features
         features = torch.cat([value_features, coverage_features], dim=-1)  # [B, M, feature_dim]
         features = self.feature_projection(features)  # [B, M, feature_dim]
         
-        # Create padding mask for transformer (True indicates positions to mask)
-        padding_mask = mask  # [B, M]
-        
-        # Apply main transformer with masking
+        # Apply transformer with masking
+        # The transformer learns interactions between markers
+        # Masked markers are ignored by the self-attention mechanism
         transformer_output = self.transformer_encoder(
             features, 
-            src_key_padding_mask=padding_mask
+            src_key_padding_mask=mask
         )  # [B, M, feature_dim]
         
-        # Apply simplified low concentration encoder
-        low_conc_output = self.low_conc_encoder(
-            features,
-            src_key_padding_mask=padding_mask
-        )  # [B, M, feature_dim]
-        
-        # Apply attention mechanism with more aggressive reliability weighting
+        # Calculate attention scores for each marker
+        # These scores determine how much each marker contributes to the final prediction
         attention_scores = self.attention(transformer_output).squeeze(-1)  # [B, M]
         
-        # Apply reliability weights to attention scores - makes low coverage markers much less influential
-        attention_scores = attention_scores * reliability_weight.squeeze(-1)
-        attention_scores = attention_scores.masked_fill(mask, -1e9)  # Set masked positions to large negative
+        # Apply reliability weights to attention scores
+        # This ensures low-coverage markers have minimal influence
+        attention_scores = attention_scores * reliability_weight.squeeze(-1)  # [B, M]
+        
+        # Set masked positions to large negative values
+        # This ensures zero attention weight for unreliable markers
+        attention_scores = attention_scores.masked_fill(mask, -1e9)  # [B, M]
+        
+        # Apply softmax to get normalized attention weights
         attention_weights = F.softmax(attention_scores, dim=1)  # [B, M]
         
-        # Aggregate features with attention weights
+        # Compute weighted sum of features using attention weights
+        # This creates a single feature vector representing the sample
         aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)  # [B, feature_dim]
-        aggregated = self.dropout(aggregated)
         
-        # Direct prediction without Beta distribution complexities
+        # Predict cell type concentration (mu)
         mu = self.mu_head(aggregated)  # [B, 1]
         
-        # Force background subtraction
-        if self.marker_specific_bg:
-            # Apply marker-specific background correction using attention weights
-            marker_bg = torch.matmul(attention_weights, self.background_level.squeeze(0))
-            marker_bg = marker_bg.unsqueeze(1)
-            mu = torch.clamp(mu - marker_bg, min=0.0)
-        else:
-            # Apply global background correction
-            mu = torch.clamp(mu - self.background_level, min=0.0)
+        # Apply background correction
+        # Subtracts the estimated background signal from predictions
+        mu = torch.clamp(mu - self.background_level, min=0.0)  # [B, 1]
         
-        # Add additional forced background subtraction
-        mu = torch.clamp(mu - 0.01, min=0.0)
+        # Predict uncertainty in the concentration estimate
+        uncertainty = self.uncertainty_head(aggregated)  # [B, 1]
         
-        # Create a placeholder for phi (concentration parameter)
-        phi = torch.ones_like(mu) * 10.0
-        
-        # Calculate uncertainty for detection heads (placeholder since we're not using Beta distribution)
-        uncertainty = torch.ones_like(mu) * 0.1
-        
-        # Enhanced features for detection heads (including uncertainty and average coverage)
-        # IMPORTANT: This must match the expected input dimension of detection_heads
-        detection_features = torch.cat([aggregated, uncertainty, torch.mean(coverage, dim=1, keepdim=True) / 100.0], dim=1)
+        # Create enhanced features for detection heads
+        # Includes both the aggregated features and the uncertainty estimate
+        detection_features = torch.cat([aggregated, uncertainty], dim=1)  # [B, feature_dim+1]
         
         # Get detection probabilities for each threshold
-        detection_probs = [head(detection_features) for head in self.detection_heads]
+        # Each head predicts whether concentration exceeds its threshold
+        detection_probs = [head(detection_features) for head in self.detection_heads]  # List of [B, 1]
         
-        # Return with control_mask if provided for contrastive learning
-        if y_true is not None and control_mask is not None:
-            return mu, phi, detection_probs, attention_weights, y_true, control_mask
-        elif y_true is not None:
-            return mu, phi, detection_probs, attention_weights, y_true
-            
-        return mu, phi, detection_probs, attention_weights
+        return mu, uncertainty, detection_probs, attention_weights
     
-    # In compute_loss, add weighted BCE for detection thresholds:
-    def compute_loss(self, mu, phi, y_true, control_mask=None, epsilon=1e-6):
-        # Keep existing MSE loss
-        mse_loss = F.mse_loss(mu, y_true, reduction='none')
-        
-        # Focal weighting - but more balanced
-        weight = 1.0 + 2.0 * (1.0 - y_true)  # Reduced from 5.0 to 2.0
-        weighted_loss = (mse_loss * weight).mean()
-        
-        # Reduce zero-concentration penalty
-        zero_penalty = 2.0 * (mu * (y_true < epsilon).float()).mean() if (y_true < epsilon).sum() > 0 else 0.0
-        
-        # Reduce control sample penalty
-        control_loss = 0.0
-        if control_mask is not None and control_mask.sum() > 0:
-            control_loss = 10.0 * torch.mean(mu[control_mask])  # Reduced from 20.0
-        
-        # NEW: Add balance penalty to encourage some positive predictions
-        # This penalizes if average predictions are too far from average targets
-        avg_pred = mu.mean()
-        avg_target = y_true.mean()
-        balance_penalty = 5.0 * torch.abs(avg_pred - avg_target)
-        
-        # Total loss
-        total_loss = weighted_loss + zero_penalty + control_loss + balance_penalty
-        
-        return total_loss
-
-    def get_estimate_and_ci(self, mu, phi, ci_level=0.95):
+    def compute_loss(self, mu, uncertainty, y_true, control_mask=None):
         """
-        Get point estimate and confidence interval for concentration
-        """
-        phi_calibrated = phi * self.calibration
-        alpha = mu * phi_calibrated
-        beta = (1 - mu) * phi_calibrated
-        
-        # Move tensors to CPU and convert to numpy for scipy
-        alpha_np = alpha.detach().cpu().numpy()
-        beta_np = beta.detach().cpu().numpy()
-        
-        # Initialise tensors for results
-        lower = torch.zeros_like(mu)
-        upper = torch.zeros_like(mu)
-        
-        # Calculate CI bounds for each sample
-        for i in range(len(alpha_np)):
-            a_val = float(alpha_np[i])
-            b_val = float(beta_np[i])
-            
-            # Handle potential numerical issues
-            if a_val <= 0 or b_val <= 0:
-                lower[i] = 0.0
-                upper[i] = 1.0
-            else:
-                try:
-                    lower[i] = torch.tensor(stats.beta.ppf((1 - ci_level) / 2, a_val, b_val))
-                    upper[i] = torch.tensor(stats.beta.ppf(1 - (1 - ci_level) / 2, a_val, b_val))
-                except:
-                    # Fallback method using approximation
-                    mean = a_val / (a_val + b_val)
-                    variance = (a_val * b_val) / ((a_val + b_val)**2 * (a_val + b_val + 1))
-                    std_dev = np.sqrt(variance)
-                    z_score = 1.96  # Approx. for 95% CI
-                    
-                    lower[i] = max(0.0, mean - z_score * std_dev)
-                    upper[i] = min(1.0, mean + z_score * std_dev)
-        
-        estimate = mu
-        ci = torch.cat([lower, upper], dim=1)
-        
-        # Calculate uncertainty (width of CI)
-        uncertainty = upper - lower
-        
-        return estimate, ci, uncertainty
-        
-    def calibrate_background(self, control_loader, device):
-        """
-        Enhanced calibration of background level using control samples
-        with more robust estimation methods
+        Compute the loss function for training.
         
         Args:
-            control_loader: DataLoader with control samples
-            device: Device to run inference on
+            mu: Predicted concentration values [batch_size, 1]
+            uncertainty: Predicted uncertainty values [batch_size, 1]
+            y_true: Ground truth concentration values [batch_size, 1]
+            control_mask: Optional boolean mask identifying control samples
             
         Returns:
-            Dictionary with calibration parameters
+            total_loss: Combined loss value for optimization
+        """
+        # Basic MSE loss between predictions and ground truth
+        mse_loss = F.mse_loss(mu, y_true, reduction='none')  # [batch_size, 1]
+        
+        # Apply focal weighting to focus more on lower concentration samples
+        # This addresses class imbalance where high concentration samples are rare
+        weight = 1.0 + 2.0 * (1.0 - y_true)  # [batch_size, 1]
+        weighted_loss = (mse_loss * weight).mean()  # scalar
+        
+        # Add penalty for predicting non-zero concentration for zero-concentration samples
+        # This helps avoid false positives for healthy samples
+        epsilon = 1e-6
+        zero_penalty = 0.0
+        if (y_true < epsilon).sum() > 0:
+            zero_penalty = 2.0 * (mu * (y_true < epsilon).float()).mean()  # scalar
+        
+        # Add penalty for control samples if provided
+        # Control samples should have zero concentration
+        control_loss = 0.0
+        if control_mask is not None and control_mask.sum() > 0:
+            control_loss = 10.0 * torch.mean(mu[control_mask])  # scalar
+        
+        # Combine all loss components
+        total_loss = weighted_loss + zero_penalty + control_loss  # scalar
+        
+        return total_loss
+    
+    def get_estimate_and_ci(self, mu, uncertainty, ci_level=0.95):
+        """
+        Get point estimate and confidence interval for concentration.
+        
+        Args:
+            mu: Predicted concentration values [batch_size, 1]
+            uncertainty: Predicted uncertainty values [batch_size, 1]
+            ci_level: Confidence interval level (default: 0.95 for 95% CI)
+            
+        Returns:
+            mu: Point estimate of concentration
+            ci: Lower and upper bounds of confidence interval [batch_size, 2]
+            scaled_uncertainty: Calibrated uncertainty values
+        """
+        # Scale uncertainty by calibration factor
+        # This ensures proper coverage of the confidence interval
+        scaled_uncertainty = uncertainty * self.calibration  # [batch_size, 1]
+        
+        # Calculate z-score for desired confidence level
+        # e.g., z_score=1.96 for 95% CI
+        z_score = stats.norm.ppf((1 + ci_level) / 2)  # scalar
+        
+        # Calculate lower bound of CI, clipped to valid range
+        lower = torch.clamp(mu - z_score * scaled_uncertainty, min=0.0)  # [batch_size, 1]
+        
+        # Calculate upper bound of CI, clipped to valid range
+        upper = torch.clamp(mu + z_score * scaled_uncertainty, max=1.0)  # [batch_size, 1]
+        
+        # Combine into single tensor
+        ci = torch.cat([lower, upper], dim=1)  # [batch_size, 2]
+        
+        return mu, ci, scaled_uncertainty
+    
+    def calibrate(self, val_loader, control_loader=None, device='cpu'):
+        """
+        Calibrate model confidence intervals and background level.
+        
+        Args:
+            val_loader: DataLoader with validation data
+            control_loader: Optional DataLoader with control samples
+            device: Device to run calibration on ('cpu' or 'cuda')
+            
+        Returns:
+            dict: Calibration results with calibration_factor and background_level
         """
         self.eval()
-        all_preds = []
-        all_attentions = []
+        
+        # 1. Calibrate confidence intervals using validation data
+        all_errors = []
+        all_uncertainties = []
         
         with torch.no_grad():
-            for batch_data in control_loader:
-                # Handle both 3-element and 4-element returns from DataLoader
+            for batch_data in val_loader:
+                # Handle both 3-element and 4-element returns
                 if len(batch_data) == 4:
-                    marker_values, coverage, _, _ = batch_data
+                    marker_values, coverage, y_true, _ = batch_data  # Ignore control_mask
                 else:
-                    marker_values, coverage, _ = batch_data
+                    marker_values, coverage, y_true = batch_data
                 
                 marker_values = marker_values.to(device)
                 coverage = coverage.to(device)
+                y_true = y_true.to(device)
                 
-                # Forward pass to get predictions and attention weights
-                mu, _, _, attention_weights = self(marker_values, coverage)
+                # Get model predictions
+                mu, uncertainty, _, _ = self(marker_values, coverage)
                 
-                all_preds.append(mu.cpu())
-                all_attentions.append(attention_weights.cpu())
+                # Calculate absolute errors
+                errors = torch.abs(mu - y_true)
                 
-        # Concatenate results
-        all_preds = torch.cat(all_preds, dim=0)
-        all_attentions = torch.cat(all_attentions, dim=0)
+                # Store results for later analysis
+                all_errors.append(errors.cpu())
+                all_uncertainties.append(uncertainty.cpu())
         
-        # Use 95th percentile instead of median for more conservative background correction
-        global_bg_level = float(torch.quantile(all_preds, 0.95))
+        # Concatenate collected data
+        all_errors = torch.cat(all_errors)  # [total_samples, 1]
+        all_uncertainties = torch.cat(all_uncertainties)  # [total_samples, 1]
         
-        # Update background level parameter
-        if self.marker_specific_bg:
-            # Calculate marker-specific background levels
-            # This is based on marker contribution to the predictions via attention
-            marker_importance = all_attentions.mean(dim=0)  # Average attention per marker
+        # Calculate calibration factor based on empirical error distribution
+        # We aim for 95% of errors to be within the predicted uncertainty range
+        error_95_percentile = torch.quantile(all_errors, 0.95)  # scalar
+        avg_uncertainty = all_uncertainties.mean()  # scalar
+        
+        # Scale factor to achieve desired CI coverage
+        # For 95% CI with normal distribution, z-score = 1.96
+        calibration_factor = error_95_percentile / (1.96 * avg_uncertainty)  # scalar
+        
+        # 2. Calibrate background level using control samples if provided
+        bg_level = self.background_level.item()  # Start with current value
+        
+        if control_loader is not None:
+            all_control_preds = []
             
-            # Calculate weighted background level for each marker
-            weighted_bg = torch.zeros(self.num_markers)
-            for i, pred in enumerate(all_preds):
-                weighted_bg += all_attentions[i] * pred.item()
-            
-            # Normalize by attention sum
-            attention_sum = all_attentions.sum(dim=0)
-            mask = attention_sum > 0
-            weighted_bg[mask] = weighted_bg[mask] / attention_sum[mask]
-            weighted_bg[~mask] = global_bg_level
-            
-            # Apply bootstrap to get more robust estimates
-            bootstrap_samples = 100
-            bootstrap_bgs = []
-            
-            for _ in range(bootstrap_samples):
-                # Sample with replacement
-                indices = torch.randint(0, len(all_preds), (len(all_preds),))
-                bootstrap_preds = all_preds[indices]
-                bootstrap_attentions = all_attentions[indices]
-                
-                # Calculate background
-                bootstrap_bg = torch.zeros(self.num_markers)
-                for i, pred in enumerate(bootstrap_preds):
-                    bootstrap_bg += bootstrap_attentions[i] * pred.item()
-                
-                # Normalize
-                bootstrap_bg[mask] = bootstrap_bg[mask] / attention_sum[mask]
-                bootstrap_bg[~mask] = global_bg_level
-                
-                bootstrap_bgs.append(bootstrap_bg)
-            
-            # Get 95th percentile for each marker
-            bootstrap_bgs = torch.stack(bootstrap_bgs)
-            percentile_bg = torch.quantile(bootstrap_bgs, 0.95, dim=0)
-            
-            # Set background level parameter
             with torch.no_grad():
-                self.background_level.copy_(percentile_bg.unsqueeze(0))
-                
-            marker_bg_stats = {
-                'mean': float(percentile_bg.mean()),
-                'median': float(torch.median(percentile_bg)),
-                'min': float(percentile_bg.min()),
-                'max': float(percentile_bg.max()),
-                'std': float(percentile_bg.std())
-            }
+                for batch_data in control_loader:
+                    if len(batch_data) == 4:
+                        marker_values, coverage, _, _ = batch_data
+                    else:
+                        marker_values, coverage, _ = batch_data
+                    
+                    marker_values = marker_values.to(device)
+                    coverage = coverage.to(device)
+                    
+                    # Get predictions for control samples
+                    mu, _, _, _ = self(marker_values, coverage)
+                    all_control_preds.append(mu.cpu())
             
-            return {
-                'global_bg_level': global_bg_level,
-                'marker_specific_bg': True,
-                'marker_bg_stats': marker_bg_stats
-            }
-        else:
-            # Set global background level using 95th percentile
-            with torch.no_grad():
-                self.background_level.fill_(global_bg_level)
-                
-            return {
-                'global_bg_level': global_bg_level,
-                'marker_specific_bg': False
-            }
-
+            # Use 95th percentile for conservative background correction
+            # This helps avoid false positives in control samples
+            all_control_preds = torch.cat(all_control_preds)  # [total_control_samples, 1]
+            bg_level = float(torch.quantile(all_control_preds, 0.95))  # scalar
+            
+            # Ensure minimum background level for stability
+            bg_level = max(bg_level, 0.05)
+        
+        # Apply calibration parameters to model
+        with torch.no_grad():
+            self.calibration.copy_(torch.tensor([calibration_factor]))
+            self.background_level.copy_(torch.tensor([bg_level]))
+        
+        # Return calibration results
+        return {
+            'calibration_factor': calibration_factor.item(),
+            'background_level': bg_level
+        }
+        
     def get_binary_prediction(self, mu, detection_probs, threshold_idx=1):
         """
         Get binary prediction for cancer detection
@@ -454,7 +412,6 @@ class EnhancedCancerDetectionModel(nn.Module):
         return (detection_score >= detection_threshold).float()
 
 
-
 class MarkerImportanceAnalyser:
     """
     Utility class to analyse the importance of different markers
@@ -476,12 +433,7 @@ class MarkerImportanceAnalyser:
                     marker_values, coverage, _, _ = batch_data  # Unpack 4 elements, ignore y_true and control_mask
                 else:
                     marker_values, coverage, _ = batch_data  # Unpack 3 elements, ignore y_true
-                    
-                if isinstance(self.model, CancerDetectionEnsemble):
-                    # For ensemble, use the first model for attention
-                    _, _, _, attention_weights = self.model.models[0](marker_values, coverage)
-                else:
-                    _, _, _, attention_weights = self.model(marker_values, coverage)
+                _, _, _, attention_weights = self.model(marker_values, coverage)
                 all_attentions.append(attention_weights)
         
         # Average attention weights across batches
@@ -497,10 +449,7 @@ class MarkerImportanceAnalyser:
         """
         Analyse detection performance at different concentration thresholds
         """
-        if isinstance(self.model, CancerDetectionEnsemble):
-            model_thresholds = self.model.models[0].detection_thresholds
-        else:
-            model_thresholds = self.model.detection_thresholds
+        model_thresholds = self.model.detection_thresholds
                 
         if thresholds is None:
             thresholds = model_thresholds
@@ -517,11 +466,7 @@ class MarkerImportanceAnalyser:
                     marker_values, coverage, y_true, _ = batch_data  # Unpack 4 elements, ignore control_mask
                 else:
                     marker_values, coverage, y_true = batch_data
-                    
-                if isinstance(self.model, CancerDetectionEnsemble):
-                    mu, _, det_probs = self.model.forward(marker_values, coverage)
-                else:
-                    mu, _, det_probs, _ = self.model(marker_values, coverage)
+                mu, _, det_probs, _ = self.model(marker_values, coverage)
                 
                 # Make sure to convert tensors to numpy arrays consistently
                 predictions.append(mu.cpu().numpy())

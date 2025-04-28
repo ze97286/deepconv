@@ -14,7 +14,7 @@ import math
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
 
-from deep_conv.detect.preprocess import prepare_data_for_training,load_train_with_contrastive_data
+from deep_conv.detect.preprocess import prepare_data_for_training, load_train_with_contrastive_data
 from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyser
 
 
@@ -28,19 +28,20 @@ def parse_args():
     parser.add_argument('--atlas_path', type=str, required=True, help='Path to atlas file')
     parser.add_argument('--target_cell_type', type=str, required=True, help='Target cell type')
     parser.add_argument('--target_cell_idx', type=int, required=True, help='Target cell index in ground truth')
+    parser.add_argument('--excluded_markers', type=str, default='', help='Comma-separated list of marker indices to exclude')
     
     # Model parameters
-    parser.add_argument('--feature_dim', type=int, default=128, help='Feature dimension')
-    parser.add_argument('--num_heads', type=int, default=8, help='Number of attention heads')
-    parser.add_argument('--dropout_rate', type=float, default=0.3, help='Dropout rate (increased for better regularization)')
-    parser.add_argument('--num_layers', type=int, default=3, help='Number of transformer layers')
+    parser.add_argument('--feature_dim', type=int, default=96, help='Feature dimension')
+    parser.add_argument('--num_heads', type=int, default=6, help='Number of attention heads')
+    parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for regularization')
+    parser.add_argument('--num_layers', type=int, default=2, help='Number of transformer layers')
     
     parser.add_argument('--cell_profile', type=str, default=None, 
                        choices=['default', 'high_snr', 'low_snr', 'ultra_low_snr'],
                        help='Predefined optimisation profile for different cell types')
     parser.add_argument('--detection_loss_weight', type=float, default=0.2, 
                        help='Weight of detection loss relative to concentration loss')
-    parser.add_argument('--focal_weight_factor', type=float, default=100,
+    parser.add_argument('--focal_weight_factor', type=float, default=50,
                        help='Factor for focal weighting of low concentration samples')
     parser.add_argument('--low_concentration_threshold', type=float, default=0.01,
                        help='Threshold defining low concentration samples for special handling')
@@ -48,6 +49,8 @@ def parse_args():
                        help='Weight for L2 regularization in loss calculation')
     parser.add_argument('--marker_specific_bg', action='store_true',
                        help='Use marker-specific background correction')
+    parser.add_argument('--min_reliable_coverage', type=float, default=5.0,
+                       help='Minimum coverage to consider a marker reliable')
 
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
@@ -59,7 +62,8 @@ def parse_args():
     parser.add_argument('--output_dir', type=str, default="./saved_models", help='Output directory')
  
     # Evaluation parameters
-    parser.add_argument('--detection_thresholds', type=str, default="0.001,0.01,0.05", help='Comma-separated detection thresholds')
+    parser.add_argument('--detection_thresholds', type=str, default="0.001,0.005,0.01,0.05", 
+                       help='Comma-separated detection thresholds')
     
     # Misc parameters
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
@@ -70,9 +74,6 @@ def parse_args():
                    help='Directory containing control data for contrastive learning')
     parser.add_argument('--calibrate', action='store_true', 
                     help='Calibrate confidence intervals and background correction')
-    
-    parser.add_argument('--excluded_markers', type=str, default="", 
-                   help='Comma-separated list of marker indices to exclude')
 
     args = parser.parse_args()
     
@@ -97,9 +98,8 @@ def apply_cell_profile(args):
     """Apply predefined parameter sets optimised for different cell types"""
     profiles = {
         'default': {
-            # Default parameters, good for most cell types
             'detection_loss_weight': 0.2,
-            'focal_weight_factor': 100,
+            'focal_weight_factor': 50,
             'low_concentration_threshold': 0.01
         },
         'high_snr': {  # For cells like OAC with good SNR
@@ -109,12 +109,12 @@ def apply_cell_profile(args):
         },
         'low_snr': {  # For cells with moderate SNR issues
             'detection_loss_weight': 0.4,
-            'focal_weight_factor': 120,  # Reduced from 150
+            'focal_weight_factor': 100,
             'low_concentration_threshold': 0.02
         },
         'ultra_low_snr': {  # For T-cells and other very low SNR cases
-            'detection_loss_weight': 0.5,  # Reduced from 0.6
-            'focal_weight_factor': 150,  # Reduced from 200
+            'detection_loss_weight': 0.5,
+            'focal_weight_factor': 120,
             'low_concentration_threshold': 0.03
         }
     }
@@ -169,10 +169,10 @@ def setup_logging(output_dir):
     return logger
 
 
-def calculate_loss(model, mu, phi, detection_probs, y_true, args, control_mask=None):
+def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, control_mask=None):
     """Calculate combined loss with concentration and detection components"""
     # Get concentration loss
-    concentration_loss = model.compute_loss(mu, phi, y_true, control_mask)
+    concentration_loss = model.compute_loss(mu, uncertainty, y_true, control_mask)
     
     # Calculate detection losses
     detection_losses = []
@@ -190,31 +190,9 @@ def calculate_loss(model, mu, phi, detection_probs, y_true, args, control_mask=N
     
     return total_loss, concentration_loss, combined_detection_loss
 
-
-def coverage_weighted_loss(model, mu, phi, detection_probs, y_true, coverage):
+def train_model(model, train_loader, val_loader, control_loader, args, device):
     """
-    Weight the loss by coverage to reduce the impact of low-coverage markers
-    """
-    # Standard loss component
-    standard_loss = model.compute_loss(mu, phi, y_true)
-    
-    # Calculate weights based on coverage
-    # Sigmoid function to smoothly transition from low to high weight
-    # as coverage increases
-    weights = 2.0 / (1.0 + torch.exp(-0.2 * (coverage.mean(dim=1, keepdim=True) - 5.0)))
-    
-    # Apply weights to loss
-    weighted_loss = standard_loss * weights.mean()
-    
-    # Add a small regularization to maintain overall scale
-    reg_loss = 0.03 * torch.abs(torch.log(phi)).mean()
-    
-    return weighted_loss + reg_loss
-
-def train_with_curriculum(model, train_loader, val_loader, control_loader, args, device):
-    """
-    Train the model with curriculum learning to focus on different concentration ranges
-    at different stages of training
+    Train the model with improved training process
     
     Args:
         model: The cancer detection model to train
@@ -238,13 +216,13 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
     # Setup optimizer with weight decay for regularization
     optimizer = torch.optim.AdamW(
         model.parameters(), 
-        lr=args.lr * 0.5,
-        weight_decay=args.weight_decay  # L2 regularization
+        lr=args.lr,
+        weight_decay=args.weight_decay
     )
     
     # Learning rate scheduler with warmup
     total_steps = len(train_loader) * args.epochs
-    warmup_steps = int(0.2 * total_steps)  # 20% warmup
+    warmup_steps = int(0.1 * total_steps)  # 10% warmup
     
     def lr_lambda(current_step):
         if current_step < warmup_steps:
@@ -272,28 +250,9 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
         'lr': []
     }
     
-    # Divide training into phases for curriculum learning
-    early_phase = int(args.epochs * 0.3)  # First 30% of epochs
-    mid_phase = int(args.epochs * 0.6)   # Next 30% of epochs
-    # Remaining epochs are the late phase
-    
-    logger.info(f"Training with modified curriculum learning:")
-    logger.info(f"  Early phase (balanced focus): epochs 1-{early_phase}")
-    logger.info(f"  Mid phase (balanced focus): epochs {early_phase+1}-{mid_phase}")
-    logger.info(f"  Late phase (low concentration focus): epochs {mid_phase+1}-{args.epochs}")
-    
     # Start training loop
     for epoch in range(args.epochs):
-        # Determine curriculum phase
-        if epoch < early_phase:
-            phase = "early"
-            logger.info(f"Epoch {epoch+1}/{args.epochs} [Early Phase - Balanced Focus]")
-        elif epoch < mid_phase:
-            phase = "mid"
-            logger.info(f"Epoch {epoch+1}/{args.epochs} [Mid Phase - Balanced Focus]")
-        else:
-            phase = "late"
-            logger.info(f"Epoch {epoch+1}/{args.epochs} [Late Phase - Low Concentration Focus]")
+        logger.info(f"Epoch {epoch+1}/{args.epochs}")
         
         # Training phase
         model.train()
@@ -315,22 +274,15 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
                 
                 # Get model predictions
                 with autocast():
-                    mu, phi, detection_probs, attention_weights, _ = model(marker_values, coverage, y_true)
+                    mu, uncertainty, detection_probs, _ = model(marker_values, coverage)
                     
-                    # Simplified loss approach - always use the same computation
-                    base_loss = model.compute_loss(mu, phi, y_true, control_mask if 'control_mask' in locals() else None)
+                    # Calculate loss
+                    loss, conc_loss, det_loss = calculate_loss(
+                        model, mu, uncertainty, detection_probs, y_true, args, control_mask
+                    )
+                    # Scale for gradient accumulation
+                    loss = loss / args.grad_accum_steps
                     
-                    # Add detection loss
-                    detection_loss = 0.0
-                    for j, threshold in enumerate(args.detection_thresholds):
-                        binary_y = (y_true >= threshold).float()
-                        det_loss = F.binary_cross_entropy(detection_probs[j], binary_y)
-                        detection_loss += det_loss
-                    
-                    detection_loss = detection_loss / len(args.detection_thresholds)
-                    
-                    # Combine losses
-                    loss = base_loss + args.detection_loss_weight * detection_loss / args.grad_accum_steps
             else:  # Standard dataset without control_mask
                 marker_values, coverage, y_true = batch_data
                 marker_values = marker_values.to(device)
@@ -339,42 +291,14 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
                 
                 with autocast():
                     # Get model predictions
-                    mu, phi, detection_probs, attention_weights, _ = model(
-                        marker_values, coverage, y_true
-                    )
+                    mu, uncertainty, detection_probs, _ = model(marker_values, coverage)
                     
-                    # Simplified training approach - use MSE for early phase
-                    if epoch < 5:  # First 5 epochs use MSE for stability
-                        loss = F.mse_loss(mu, y_true) / args.grad_accum_steps
-                    else:
-                        # Apply more gentle phase-specific weighting
-                        if phase == "early" or phase == "mid":
-                            # Early/Mid phase: Balanced focus
-                            sample_weight = torch.ones_like(y_true)
-                        else:
-                            # Late phase: Focus on low concentration samples
-                            sample_weight = torch.clamp(torch.exp(-y_true * 5) + 1.0, 1.0, 3.0)
-                        
-                        # Compute loss with sample weighting
-                        base_loss = model.compute_loss(mu, phi, y_true)
-                        weighted_loss = (base_loss * sample_weight).mean() / args.grad_accum_steps
-                        
-                        # Add detection loss
-                        detection_loss = 0.0
-                        for j, threshold in enumerate(args.detection_thresholds):
-                            binary_y = (y_true >= threshold).float()
-                            det_loss = F.binary_cross_entropy(detection_probs[j], binary_y)
-                            detection_loss += det_loss
-                        
-                        detection_loss = detection_loss / len(args.detection_thresholds)
-                        
-                        # Combine losses
-                        if epoch < 10:  # Reduced detection weight for early epochs
-                            det_weight = args.detection_loss_weight * 0.25
-                        else:
-                            det_weight = args.detection_loss_weight
-                            
-                        loss = weighted_loss + det_weight * detection_loss / args.grad_accum_steps
+                    # Calculate loss
+                    loss, conc_loss, det_loss = calculate_loss(
+                        model, mu, uncertainty, detection_probs, y_true, args
+                    )
+                    # Scale for gradient accumulation
+                    loss = loss / args.grad_accum_steps
             
             # Backpropagation with mixed precision
             scaler.scale(loss).backward()
@@ -386,9 +310,7 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
             if (i + 1) % args.grad_accum_steps == 0 or (i + 1) == len(train_loader):
                 # Gradient clipping to prevent exploding gradients
                 scaler.unscale_(optimizer)
-                
-                # More aggressive gradient clipping
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
                 # Optimizer step with mixed precision
                 scaler.step(optimizer)
@@ -405,14 +327,12 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
         # Validation phase
         val_loss, val_metrics = validate_model(model, val_loader, device, args)
         
-        # Periodic calibration (more frequent and starting from epoch 0)
-        if control_loader is not None and (epoch % 2 == 0 or phase == "late"):
+        # Periodic calibration
+        if args.calibrate and (epoch % 5 == 0 or epoch == args.epochs - 1):
             logger.info(f"Calibrating model...")
-            calibration_results = calibrate_model(model, val_loader, control_loader, device)
+            calibration_results = model.calibrate(val_loader, control_loader, device)
             logger.info(f"  Calibration factor: {calibration_results['calibration_factor']:.4f}")
-            logger.info(f"  Low conc. calibration: {calibration_results['low_calibration_factor']:.4f}")
-            if 'global_bg_level' in calibration_results:
-                logger.info(f"  Background level: {calibration_results['global_bg_level']:.6f}")
+            logger.info(f"  Background level: {calibration_results['background_level']:.6f}")
         
         # Update history
         history['train_loss'].append(train_loss)
@@ -518,6 +438,7 @@ def train_with_curriculum(model, train_loader, val_loader, control_loader, args,
     
     return model, best_model_state
 
+
 def validate_model(model, val_loader, device, args):
     """
     Validate model performance on validation set
@@ -553,10 +474,10 @@ def validate_model(model, val_loader, device, args):
             y_true = y_true.to(device)
             
             # Forward pass
-            mu, phi, detection_probs, _ = model(marker_values, coverage)
+            mu, uncertainty, detection_probs, _ = model(marker_values, coverage)
             
             # Compute concentration loss
-            batch_conc_loss = model.compute_loss(mu, phi, y_true)
+            batch_conc_loss = model.compute_loss(mu, uncertainty, y_true)
             concentration_loss += batch_conc_loss.item()
             
             # Compute detection loss
@@ -574,7 +495,7 @@ def validate_model(model, val_loader, device, args):
             val_loss += batch_loss.item()
             
             # Calculate calibration error
-            estimate, ci, _ = model.get_estimate_and_ci(mu, phi)
+            estimate, ci, _ = model.get_estimate_and_ci(mu, uncertainty)
             in_ci = (y_true >= ci[:, 0:1]) & (y_true <= ci[:, 1:2])
             calibration_error += (1.0 - in_ci.float().mean()).item()
             
@@ -603,10 +524,7 @@ def validate_model(model, val_loader, device, args):
     if 0.01 in clinical_metrics and clinical_metrics[0.01]['sensitivity'] < 0.01:
         # If sensitivity is near zero, adjust background level
         with torch.no_grad():
-            if hasattr(model, 'marker_specific_bg') and model.marker_specific_bg:
-                model.background_level.mul_(0.8)  # Reduce background by 20%
-            else:
-                model.background_level.mul_(0.8)  # Reduce background by 20%
+            model.background_level.mul_(0.8)  # Reduce background by 20%
         logger = logging.getLogger('cancer_detection')
         logger.info("  Warning: Very low sensitivity detected. Reducing background level.")
     
@@ -1291,8 +1209,8 @@ def evaluate(model, data_loader, args, device, split_name="test"):
             marker_values = marker_values.to(device)
             coverage = coverage.to(device)
             y_true = y_true.to(device)
-            mu, phi, det_probs, attention_weights = model(marker_values, coverage)
-            estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
+            mu, uncertainty, det_probs, attention_weights = model(marker_values, coverage)
+            estimate, ci, _ = model.get_estimate_and_ci(mu, uncertainty)
         
             all_preds.append(estimate.cpu().numpy())
             all_targets.append(y_true.cpu().numpy())
@@ -1434,38 +1352,19 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
                 coverage = coverage.to(device)
                 y_true = y_true.to(device)
                 
-                mu, phi, _, _ = model(marker_values, coverage)
+                mu, uncertainty, _, _ = model(marker_values, coverage)
                 
                 # Apply test calibration factor
-                phi_calibrated = phi * factor
+                uncertainty_calibrated = uncertainty * factor
                 
-                # Calculate alpha, beta parameters
-                alpha = torch.clamp(mu * phi_calibrated, min=1e-6)
-                beta = torch.clamp((1 - mu) * phi_calibrated, min=1e-6)
-                
-                # Move to numpy for scipy operations
-                alpha_np = alpha.cpu().numpy()
-                beta_np = beta.cpu().numpy()
-                y_true_np = y_true.cpu().numpy()
-                
-                # Calculate 95% CI using scipy.stats.beta
-                lower = np.zeros_like(y_true_np)
-                upper = np.zeros_like(y_true_np)
-                
-                for i in range(len(alpha_np)):
-                    a, b = float(alpha_np[i]), float(beta_np[i])
-                    if a > 0 and b > 0:
-                        try:
-                            lower[i] = stats.beta.ppf(0.025, a, b)
-                            upper[i] = stats.beta.ppf(0.975, a, b)
-                        except:
-                            # In case of numerical issues, use fallbacks
-                            lower[i] = max(0.0, mu[i].item() - 2.0 * (1.0 / np.sqrt(phi_calibrated[i].item())))
-                            upper[i] = min(1.0, mu[i].item() + 2.0 * (1.0 / np.sqrt(phi_calibrated[i].item())))
+                # Calculate CI
+                z_score = 1.96  # for 95% CI
+                lower = torch.clamp(mu - z_score * uncertainty_calibrated, min=0.0)
+                upper = torch.clamp(mu + z_score * uncertainty_calibrated, max=1.0)
                 
                 # Calculate CI coverage
-                in_ci = (y_true_np >= lower) & (y_true_np <= upper)
-                ci_coverage = in_ci.mean()
+                in_ci = (y_true >= lower) & (y_true <= upper)
+                ci_coverage = in_ci.float().mean().item()
                 
                 # Error relative to target 95%
                 error = abs(ci_coverage - 0.95)
@@ -1506,32 +1405,17 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
         global_bg_level = max(global_bg_level, 0.05)
         
         # Update background level parameter
-        if model.marker_specific_bg:
-            # For simplicity, set all markers to the same background level initially
-            with torch.no_grad():
-                model.background_level.fill_(global_bg_level)
+        with torch.no_grad():
+            model.background_level.fill_(global_bg_level)
                 
-            background_results = {
-                'global_bg_level': global_bg_level,
-                'marker_specific_bg': True
-            }
-        else:
-            # Set global background level using 95th percentile
-            with torch.no_grad():
-                model.background_level.fill_(global_bg_level)
-                
-            background_results = {
-                'global_bg_level': global_bg_level,
-                'marker_specific_bg': False
-            }
+        background_results = {
+            'global_bg_level': global_bg_level
+        }
     
     # Apply calibration factors to model
     with torch.no_grad():
         # Update model parameters if they exist
-        if hasattr(model, 'calibration'):
-            model.calibration.fill_(best_factor)
-        if hasattr(model, 'low_calibration'):
-            model.low_calibration.fill_(best_low_factor)
+        model.calibration.copy_(torch.tensor([best_factor]))
     
     # Return calibration parameters
     calibration_results = {
@@ -1584,18 +1468,26 @@ def parse_excluded_markers(excluded_markers_str):
     """Parse excluded markers string into a list of indices"""
     if not excluded_markers_str:
         return []
-    return [int(idx) for idx in excluded_markers_str.split(',')]
+    return [int(idx.strip()) for idx in excluded_markers_str.split(',')]# T-cells
 
 
-# T-cells
 # python -m deep_conv.detect.train \
 # --name CpGenie_T-cells \
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell \
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/T-cells/ \
+# --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed \
 # --target_cell_type T-cells \
 # --target_cell_idx 11 \
 # --grad_accum_steps 8 \
+# --dropout_rate 0.2 \
+# --l2_weight 0.05 \
+# --feature_dim 96 \
+# --num_heads 6 \
+# --num_layers 2 \
 # --cell_profile ultra_low_snr
 # --calibrate
+# --detection_thresholds "0.001,0.005,0.01,0.05" \
+# --min_reliable_coverage 5.0 \
 
 
 # OAC
@@ -1607,15 +1499,16 @@ def parse_excluded_markers(excluded_markers_str):
 # --target_cell_type OAC \
 # --target_cell_idx 9 \
 # --cell_profile high_snr \
-# --dropout_rate 0.3 \
+# --dropout_rate 0.2 \
 # --l2_weight 0.05 \
-# --feature_dim 128 \
-# --num_heads 8 \
-# --num_layers 3 \
-# --marker_specific_bg \
+# --feature_dim 96 \
+# --num_heads 6 \
+# --num_layers 2 \
+# --detection_thresholds "0.001,0.005,0.01,0.05" \
+# --min_reliable_coverage 5.0 \
 # --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ \
-# --calibrate
-
+# --calibrate \
+# --excluded_markers "44,58,111,133,77,95,127,38,108,115"
 def main():
     """
     Main function with enhanced approach to training and calibration
@@ -1647,19 +1540,20 @@ def main():
         json.dump(vars(args), f, indent=2)
     logger.info(f"Arguments saved to {args_file}")
     
+    # Process excluded markers
+    excluded_markers = parse_excluded_markers(args.excluded_markers)
+    if excluded_markers:
+        logger.info(f"Excluding {len(excluded_markers)} markers: {excluded_markers}")
+    
     # Prepare data
     logger.info(f"Preparing data from {args.data_dir}...")
     try:
-        excluded_markers = parse_excluded_markers(args.excluded_markers) if args.excluded_markers else None
-        if excluded_markers:
-            logger.info(f"Excluding {len(excluded_markers)} markers: {excluded_markers}")
-
         train_loader, val_loader, test_loader, num_markers = prepare_data_for_training(
             data_dir=args.data_dir,
             atlas_path=args.atlas_path,
             target_cell_type=args.target_cell_type,
             target_cell_idx=args.target_cell_idx,
-            excluded_markers=excluded_markers,
+            excluded_markers=excluded_markers
         )
         logger.info(f"✓ Data preparation complete")
     except Exception as e:
@@ -1678,7 +1572,7 @@ def main():
                 args.target_cell_type, 
                 args.batch_size, 
                 logger,
-                excluded_markers=excluded_markers,
+                excluded_markers=excluded_markers
             )
             logger.info(f"✓ Control data loaded successfully")
         except Exception as e:
@@ -1695,10 +1589,7 @@ def main():
             num_layers=args.num_layers,
             dropout_rate=args.dropout_rate,
             detection_thresholds=args.detection_thresholds,
-            focal_weight_factor=args.focal_weight_factor,
-            low_concentration_threshold=args.low_concentration_threshold,
-            l2_weight=args.l2_weight,
-            marker_specific_bg=args.marker_specific_bg
+            min_reliable_coverage=args.min_reliable_coverage
         )
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -1707,11 +1598,10 @@ def main():
         logger.error(f"× Error initializing enhanced model: {str(e)}")
         raise
     
-    # Train model with curriculum learning or standard approach
+    # Train model
     logger.info("Starting model training...")
     try:
-        logger.info("Using curriculum learning approach")
-        model, best_model_state = train_with_curriculum(
+        model, best_model_state = train_model(
             model, 
             train_loader, 
             val_loader, 
@@ -1740,15 +1630,10 @@ def main():
             torch.save(best_model_state, os.path.join(args.output_dir, 'best_model_calibrated.pt'))
             
             logger.info(f"✓ Model calibrated:")
-            logger.info(f"  Main calibration factor: {calibration_results['calibration_factor']:.4f}")
-            logger.info(f"  Low concentration factor: {calibration_results['low_calibration_factor']:.4f}")
+            logger.info(f"  Calibration factor: {calibration_results['calibration_factor']:.4f}")
+            logger.info(f"  Low calibration factor: {calibration_results['low_calibration_factor']:.4f}")
             if 'global_bg_level' in calibration_results:
                 logger.info(f"  Background level: {calibration_results['global_bg_level']:.6f}")
-            if 'marker_specific_bg' in calibration_results and calibration_results['marker_specific_bg']:
-                logger.info(f"  Marker-specific background correction applied")
-                if 'marker_bg_stats' in calibration_results:
-                    stats = calibration_results['marker_bg_stats']
-                    logger.info(f"  Background stats - Mean: {stats['mean']:.6f}, Min: {stats['min']:.6f}, Max: {stats['max']:.6f}")
             
         except Exception as e:
             logger.error(f"× Error during calibration: {str(e)}")
@@ -1757,49 +1642,9 @@ def main():
     # Evaluate on test set
     logger.info("Evaluating final model on test set...")
     try:
-        # Use the validate_model function for evaluation
-        test_loss, test_metrics = validate_model(model, test_loader, device, args)
-        
-        logger.info(f"Test results:")
-        logger.info(f"  Loss: {test_loss:.6f}")
-        logger.info(f"  R²: {test_metrics['r2']:.4f}")
-        logger.info(f"  MAE: {test_metrics['mae']:.6f}")
-        logger.info(f"  Calibration error: {test_metrics['calibration_error']:.4f}")
-        
-        # Log clinical metrics
-        if 0.01 in test_metrics['clinical_metrics']:
-            metrics_1pct = test_metrics['clinical_metrics'][0.01]
-            logger.info(f"  At 1% threshold:")
-            logger.info(f"    Sensitivity: {metrics_1pct['sensitivity']:.4f}")
-            logger.info(f"    Specificity: {metrics_1pct['specificity']:.4f}")
-            logger.info(f"    AUC: {metrics_1pct['roc_auc']:.4f}")
-            logger.info(f"    Sens@95%Spec: {metrics_1pct['sens_at_95spec']:.4f}")
-        
-        # Save test results
-        test_results = {
-            'loss': float(test_loss),
-            'metrics': test_metrics
-        }
-        test_results_file = os.path.join(args.output_dir, 'test_results.json')
-        with open(test_results_file, 'w') as f:
-            def convert_to_serializable(obj):
-                if isinstance(obj, dict):
-                    return {k: convert_to_serializable(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return [convert_to_serializable(item) for item in obj]
-                elif isinstance(obj, (np.int32, np.int64)):
-                    return int(obj)
-                elif isinstance(obj, (np.float32, np.float64)):
-                    return float(obj)
-                elif obj is None:
-                    return None
-                else:
-                    return obj
-            
-            serializable_results = convert_to_serializable(test_results)
-            json.dump(serializable_results, f, indent=2)
-            
-        logger.info(f"Test results saved to {test_results_file}")
+        # Use the evaluate function for full test evaluation
+        test_results = evaluate(model, test_loader, args, device, split_name="test")
+        logger.info(f"Test evaluation completed successfully and saved to {args.output_dir}/test_results.json")
         
     except Exception as e:
         logger.error(f"× Error during test evaluation: {str(e)}")
