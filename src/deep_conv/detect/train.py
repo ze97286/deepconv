@@ -1582,8 +1582,6 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
     # 1. Calibrate confidence intervals - use fewer test factors for speed
     best_factor = 1.0
     best_error = float('inf')
-    best_low_factor = 1.0
-    best_low_error = float('inf')
     
     with torch.no_grad():
         # Test different calibration factors - simplified options
@@ -1625,14 +1623,11 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
             if avg_error < best_error:
                 best_error = avg_error
                 best_factor = factor
-        
-        # Use the same factor for low concentrations to simplify
-        best_low_factor = best_factor
     
-    # 2. Calibrate background level using controls - more aggressive
-    background_results = {}
+    # 2. Calibrate dynamic background correction using controls
+    bg_params = {}
     if control_loader is not None:
-        all_preds = []
+        all_raw_preds = []
         
         with torch.no_grad():
             for batch_data in control_loader:
@@ -1644,39 +1639,68 @@ def calibrate_model(model, val_loader, control_loader=None, device='cpu'):
                 marker_values = marker_values.to(device)
                 coverage = coverage.to(device)
                 
-                mu, _, _, _ = model(marker_values, coverage)
-                all_preds.append(mu.cpu().numpy())
-        
-        # Use 95th percentile instead of median for more conservative background correction
-        all_preds = np.concatenate(all_preds)
-        global_bg_level = float(np.percentile(all_preds, 95))
-        
-        # Make sure background level is at least 0.05
-        global_bg_level = max(global_bg_level, 0.05)
-        
-        # Update background level parameter
-        with torch.no_grad():
-            model.background_level.fill_(global_bg_level)
+                # Get features for raw predictions
+                value_features = model.value_embedding(marker_values.unsqueeze(-1))
+                log_coverage = torch.log1p(coverage).unsqueeze(-1)
+                coverage_features = model.coverage_embedding(log_coverage)
+                features = torch.cat([value_features, coverage_features], dim=-1)
+                features = model.feature_projection(features)
                 
-        background_results = {
-            'global_bg_level': global_bg_level
+                # Apply transformer with masking
+                mask_missing = (coverage == 0)
+                mask_low_cov = (coverage < model.min_reliable_coverage)
+                mask = mask_missing | mask_low_cov
+                transformer_output = model.transformer_encoder(features, src_key_padding_mask=mask)
+                
+                # Apply attention
+                attention_scores = model.attention(transformer_output).squeeze(-1)
+                reliability_weight = model.reliability_weight(log_coverage)
+                coverage_reliability = torch.pow(
+                    torch.clamp(coverage.unsqueeze(-1) / model.min_reliable_coverage, 0.0, 1.0), 2
+                )
+                reliability_weight = reliability_weight * coverage_reliability
+                attention_scores = attention_scores * reliability_weight.squeeze(-1)
+                attention_scores = attention_scores.masked_fill(mask, -1e9)
+                attention_weights = F.softmax(attention_scores, dim=1)
+                
+                # Get aggregated features
+                aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
+                
+                # Get raw predictions before background correction
+                raw_mu = model.mu_head(aggregated)
+                all_raw_preds.append(raw_mu.cpu())
+        
+        # Calculate optimal background parameters
+        all_raw_preds = torch.cat(all_raw_preds)
+        
+        # Set min_bg to median and max_bg to 95th percentile
+        min_bg = float(torch.quantile(all_raw_preds, 0.5))
+        max_bg = float(torch.quantile(all_raw_preds, 0.95))
+        
+        # Ensure min_bg is at least 0.001 and max_bg is at least min_bg + 0.01
+        min_bg = max(0.001, min_bg)
+        max_bg = max(min_bg + 0.01, max_bg)
+        
+        # Update background correction module parameters
+        with torch.no_grad():
+            model.bg_correction.min_bg = min_bg
+            model.bg_correction.max_bg = max_bg
+        
+        bg_params = {
+            'min_bg': min_bg,
+            'max_bg': max_bg
         }
     
     # Apply calibration factors to model
     with torch.no_grad():
-        # Update model parameters if they exist
         model.calibration.copy_(torch.tensor([best_factor]))
     
     # Return calibration parameters
     calibration_results = {
         'calibration_factor': best_factor,
-        'low_calibration_factor': best_low_factor,
         'coverage_error': float(best_error),
+        **bg_params
     }
-    
-    # Merge with background results if available
-    if background_results:
-        calibration_results.update(background_results)
     
     return calibration_results
 
@@ -1742,7 +1766,7 @@ def parse_excluded_markers(excluded_markers_str):
 
 
 # OAC
-# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log "cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train \
+# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train \
 # --name CpGenie_OAC \
 # --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell \
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ \
@@ -1760,7 +1784,7 @@ def parse_excluded_markers(excluded_markers_str):
 # --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ \
 # --calibrate \
 # --excluded_markers "44,58,111,133,77,95,127,38,108,115" \
-# --epochs 100 
+# --epochs 100' 
 
 def main():
     """

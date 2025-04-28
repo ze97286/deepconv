@@ -44,7 +44,6 @@ class DynamicBackgroundCorrection(nn.Module):
         
         return bg_level
 
-
 class EnhancedCancerDetectionModel(nn.Module):
     """
     Enhanced deep learning model for cancer detection from cfDNA methylation markers.
