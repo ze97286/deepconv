@@ -857,11 +857,11 @@ def plot_training_history(history, output_dir):
         rows=3, cols=2,
         subplot_titles=(
             'Training & Validation Loss', 
-            'Calibration Error', 
             'R² Score', 
             'Mean Absolute Error', 
             'Learning Rate', 
-            'R² vs Validation Loss'
+            'Concentration Loss',
+            'Detection Loss'
         )
     )
     
@@ -888,20 +888,7 @@ def plot_training_history(history, output_dir):
         row=1, col=1
     )
     
-    # 2. Calibration error
-    fig.add_trace(
-        go.Scatter(
-            x=epochs, 
-            y=history['calibration_error'], 
-            mode='lines+markers', 
-            name='Calibration Error',
-            line=dict(color='green', width=2),
-            showlegend=False
-        ),
-        row=1, col=2
-    )
-    
-    # 3. R² score
+    # 2. R² score
     fig.add_trace(
         go.Scatter(
             x=epochs, 
@@ -911,10 +898,10 @@ def plot_training_history(history, output_dir):
             line=dict(color='purple', width=2),
             showlegend=False
         ),
-        row=2, col=1
+        row=1, col=2
     )
     
-    # 4. Mean absolute error
+    # 3. Mean absolute error
     fig.add_trace(
         go.Scatter(
             x=epochs, 
@@ -924,10 +911,10 @@ def plot_training_history(history, output_dir):
             line=dict(color='orange', width=2),
             showlegend=False
         ),
-        row=2, col=2
+        row=2, col=1
     )
     
-    # 5. Learning rate
+    # 4. Learning rate
     if 'lr' in history:
         fig.add_trace(
             go.Scatter(
@@ -938,41 +925,39 @@ def plot_training_history(history, output_dir):
                 line=dict(color='cyan', width=2),
                 showlegend=False
             ),
-            row=3, col=1
+            row=2, col=2
         )
         
         # Set log scale for learning rate
-        fig.update_yaxes(type='log', row=3, col=1)
+        fig.update_yaxes(type='log', row=2, col=2)
     
-    # 6. R² vs Validation Loss
-    fig.add_trace(
-        go.Scatter(
-            x=history['val_loss'],
-            y=history['r2_score'],
-            mode='markers',
-            marker=dict(
-                size=8,
-                color=epochs,
-                colorscale='Viridis',
-                showscale=True,
-                colorbar=dict(title='Epoch')
+    # 5. Concentration loss
+    if 'concentration_loss' in history:
+        fig.add_trace(
+            go.Scatter(
+                x=epochs, 
+                y=history['concentration_loss'], 
+                mode='lines+markers', 
+                name='Concentration Loss',
+                line=dict(color='green', width=2),
+                showlegend=False
             ),
-            showlegend=False
-        ),
-        row=3, col=2
-    )
+            row=3, col=1
+        )
     
-    # Label selected epochs on the scatter plot
-    for i, epoch in enumerate(epochs):
-        if i % 5 == 0 or i == len(epochs) - 1:  # Label every 5th epoch and the last one
-            fig.add_annotation(
-                x=history['val_loss'][i],
-                y=history['r2_score'][i],
-                text=str(epoch),
-                showarrow=False,
-                font=dict(size=8),
-                row=3, col=2
-            )
+    # 6. Detection loss
+    if 'detection_loss' in history:
+        fig.add_trace(
+            go.Scatter(
+                x=epochs, 
+                y=history['detection_loss'], 
+                mode='lines+markers', 
+                name='Detection Loss',
+                line=dict(color='magenta', width=2),
+                showlegend=False
+            ),
+            row=3, col=2
+        )
     
     # Update layout for main figure
     fig.update_layout(
@@ -989,14 +974,14 @@ def plot_training_history(history, output_dir):
     fig.update_xaxes(title_text='Epoch', row=2, col=1)
     fig.update_xaxes(title_text='Epoch', row=2, col=2)
     fig.update_xaxes(title_text='Epoch', row=3, col=1)
-    fig.update_xaxes(title_text='Validation Loss', row=3, col=2)
+    fig.update_xaxes(title_text='Epoch', row=3, col=2)
     
     fig.update_yaxes(title_text='Loss', row=1, col=1)
-    fig.update_yaxes(title_text='Error', row=1, col=2)
-    fig.update_yaxes(title_text='R²', row=2, col=1, range=[0, 1])
-    fig.update_yaxes(title_text='MAE', row=2, col=2)
-    fig.update_yaxes(title_text='Learning Rate', row=3, col=1)
-    fig.update_yaxes(title_text='R² Score', row=3, col=2, range=[0, 1])
+    fig.update_yaxes(title_text='R²', row=1, col=2, range=[0, 1])
+    fig.update_yaxes(title_text='MAE', row=2, col=1)
+    fig.update_yaxes(title_text='Learning Rate', row=2, col=2)
+    fig.update_yaxes(title_text='Concentration Loss', row=3, col=1)
+    fig.update_yaxes(title_text='Detection Loss', row=3, col=2)
     
     # Save main figure
     fig.write_html(os.path.join(plots_dir, 'training_history.html'))
@@ -1111,70 +1096,6 @@ def plot_training_history(history, output_dir):
             # Save clinical metrics figure
             clinical_fig.write_html(os.path.join(plots_dir, 'clinical_metrics.html'))
             clinical_fig.write_image(os.path.join(plots_dir, 'clinical_metrics.png'), scale=2)
-    
-    # Create individual plots for better detail
-    metrics = [
-        ('loss', ['train_loss', 'val_loss'], ['Train Loss', 'Validation Loss'], ['blue', 'red']),
-        ('r2_score', ['r2_score'], ['R² Score'], ['purple']),
-        ('mae', ['mean_absolute_error'], ['Mean Absolute Error'], ['orange']),
-        ('calibration', ['calibration_error'], ['Calibration Error'], ['green'])
-    ]
-    
-    for name, keys, labels, colors in metrics:
-        detail_fig = go.Figure()
-        
-        for key, label, color in zip(keys, labels, colors):
-            detail_fig.add_trace(
-                go.Scatter(
-                    x=epochs,
-                    y=history[key],
-                    mode='lines+markers',
-                    name=label,
-                    line=dict(color=color, width=2)
-                )
-            )
-        
-        # Add reference lines for R² and calibration error
-        if name == 'r2_score':
-            detail_fig.add_shape(
-                type="line",
-                x0=min(epochs),
-                y0=0.9,
-                x1=max(epochs),
-                y1=0.9,
-                line=dict(color="green", dash="dash"),
-                name="0.9 R² Reference"
-            )
-        elif name == 'calibration':
-            detail_fig.add_shape(
-                type="line",
-                x0=min(epochs),
-                y0=0.05,
-                x1=max(epochs),
-                y1=0.05,
-                line=dict(color="purple", dash="dash"),
-                name="5% Calibration Error Target"
-            )
-        
-        detail_fig.update_layout(
-            title=f'{labels[0]}' if len(labels) == 1 else 'Loss Curves',
-            xaxis_title='Epoch',
-            yaxis_title=name.replace('_', ' ').title(),
-            template='plotly_white',
-            width=900,
-            height=600,
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-        )
-        
-        # Set y-axis range for R² and calibration error plots
-        if name == 'r2_score':
-            detail_fig.update_yaxes(range=[0, 1])
-        elif name == 'calibration':
-            detail_fig.update_yaxes(range=[0, max(history[key]) * 1.1])
-        
-        # Save individual figure
-        detail_fig.write_html(os.path.join(plots_dir, f'{name}_history.html'))
-        detail_fig.write_image(os.path.join(plots_dir, f'{name}_history.png'), scale=2)
 
 def visualise_results(predictions, ground_truth, output_subdir, ci_data=None, marker_importance=None, prefix=""):
     """

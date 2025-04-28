@@ -7,10 +7,9 @@ import numpy as np
 
 class DynamicBackgroundCorrection(nn.Module):
     """
-    Dynamic background correction module that predicts sample-specific
-    background levels based on feature representation.
+    Dynamic background correction module with conservative settings for low concentrations
     """
-    def __init__(self, feature_dim, min_bg=0.001, max_bg=0.05):
+    def __init__(self, feature_dim, min_bg=0.0005, max_bg=0.03):
         super().__init__()
         self.min_bg = min_bg
         self.max_bg = max_bg
@@ -24,22 +23,30 @@ class DynamicBackgroundCorrection(nn.Module):
             nn.Sigmoid()  # Output in [0,1] range
         )
         
-        # Initialize to predict low background initially
+        # Initialize to predict lower background initially
         with torch.no_grad():
-            self.bg_network[-2].bias.data.fill_(-3.0)  # Start with conservative bg
+            self.bg_network[-2].bias.data.fill_(-3.5)  # Start with more conservative bg
     
-    def forward(self, features):
+    def forward(self, features, concentration_hint=None):
         """
         Predict background level for each sample based on its features
         
         Args:
             features: Sample features [batch_size, feature_dim]
+            concentration_hint: Optional hint about concentration range [batch_size, 1]
             
         Returns:
             bg_level: Predicted background level [batch_size, 1]
         """
         # Scale sigmoid output to desired background range
         bg_scale = self.bg_network(features)
+        
+        # Apply concentration-dependent scaling if hint is provided
+        if concentration_hint is not None:
+            # Reduce background for samples predicted to be in 0.1-1% range
+            low_conc_mask = (concentration_hint >= 0.001) & (concentration_hint < 0.01)
+            bg_scale = torch.where(low_conc_mask, bg_scale * 0.7, bg_scale)
+        
         bg_level = self.min_bg + bg_scale * (self.max_bg - self.min_bg)
         
         return bg_level
@@ -147,7 +154,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         
     def forward(self, marker_values, coverage):
         """
-        Forward pass through the model.
+        Forward pass with improved background correction
         
         Args:
             marker_values: Tensor of shape [batch_size, num_markers] with methylation values
@@ -206,9 +213,18 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Predict raw concentration
         mu = self.mu_head(aggregated)
         
-        # Apply dynamic background correction
-        bg_level = self.bg_correction(aggregated)
-        mu_corrected = torch.clamp(mu - bg_level, min=0.0)
+        # Get initial concentration estimate to guide background correction
+        initial_mu = mu.detach()
+        
+        # Apply dynamic background correction with concentration hint
+        bg_level = self.bg_correction(aggregated, initial_mu)
+        
+        # Apply conservative adjustment for 0.1-1% range
+        critical_range_mask = (initial_mu >= 0.001) & (initial_mu < 0.01)
+        bg_adjusted = torch.where(critical_range_mask, bg_level * 0.8, bg_level)
+        
+        # Apply background correction with the adjusted level
+        mu_corrected = torch.clamp(mu - bg_adjusted, min=0.0)
         
         # Predict uncertainty
         uncertainty = self.uncertainty_head(aggregated)
@@ -218,10 +234,10 @@ class EnhancedCancerDetectionModel(nn.Module):
         detection_probs = [head(detection_features) for head in self.detection_heads]
         
         return mu_corrected, uncertainty, detection_probs, attention_weights
-    
+
     def compute_loss(self, mu, uncertainty, y_true, control_mask=None):
         """
-        Compute concentration-focused loss function
+        Compute concentration-focused loss function with improved weighting for critical ranges
         
         Args:
             mu: Predicted concentration values [batch_size, 1]
@@ -246,9 +262,26 @@ class EnhancedCancerDetectionModel(nn.Module):
         if non_zero_mask.sum() > 0:
             rel_error[non_zero_mask] = torch.abs(mu[non_zero_mask] - y_true[non_zero_mask]) / (y_true[non_zero_mask] + epsilon)
         
-        # Create concentration-based weights using log-scale
+        # Create concentration-specific weights
+        # 1. Higher weights for 0.1-1% range (critical range)
+        # 2. Moderate weights for 1-5% range
+        # 3. Lower weights for other ranges
+        range_weights = torch.ones_like(y_true)
+        
+        # 0.1-1% range - critical range with higher weight
+        critical_range_mask = (y_true >= 0.001) & (y_true < 0.01)
+        range_weights[critical_range_mask] = 3.0  # Increased from original
+        
+        # 1-5% range
+        mid_range_mask = (y_true >= 0.01) & (y_true < 0.05)
+        range_weights[mid_range_mask] = 2.0
+        
+        # Apply log-scale weighting on top of range weights
         log_weights = 1.0 / torch.log10(y_true * 1000 + 10.0)
         log_weights = torch.clamp(log_weights, 0.5, 2.0)
+        
+        # Combined weights
+        combined_weights = range_weights * log_weights
         
         # Zero-concentration specific penalty
         zero_mask = (y_true < epsilon)
@@ -259,9 +292,11 @@ class EnhancedCancerDetectionModel(nn.Module):
         if control_mask is not None and control_mask.sum() > 0:
             control_loss = 15.0 * mu[control_mask].mean()
         
-        # Combine MSE and relative error with log weighting
-        weighted_mse = (mse_loss * log_weights).mean()
-        weighted_rel = (rel_error * log_weights).mean() if non_zero_mask.sum() > 0 else 0.0
+        # Combine MSE and relative error with weights
+        weighted_mse = (mse_loss * combined_weights).mean()
+        
+        # Increase weight on relative error for accuracy at low concentrations
+        weighted_rel = (rel_error * combined_weights).mean() if non_zero_mask.sum() > 0 else 0.0
         
         # Add calibration component
         calibration_loss = 0.0
@@ -269,8 +304,9 @@ class EnhancedCancerDetectionModel(nn.Module):
             z_scores = torch.abs(mu - y_true) / (uncertainty + 1e-6)
             calibration_loss = F.smooth_l1_loss(z_scores, torch.ones_like(z_scores) * 1.96)
         
-        # Combine all loss components
-        total_loss = weighted_mse + 0.5 * weighted_rel + zero_penalty + control_loss + 0.1 * calibration_loss
+        # Combine all loss components with adjusted weights
+        # Increased weight on relative error component from 0.5 to 0.8
+        total_loss = weighted_mse + 0.8 * weighted_rel + zero_penalty + control_loss + 0.1 * calibration_loss
         
         return total_loss
     
@@ -305,7 +341,7 @@ class EnhancedCancerDetectionModel(nn.Module):
     
     def calibrate(self, val_loader, control_loader=None, device='cpu'):
         """
-        Calibrate model confidence intervals and dynamic background correction.
+        Calibrate model with concentration-specific settings
         
         Args:
             val_loader: DataLoader with validation data
@@ -320,6 +356,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         # 1. Calibrate confidence intervals
         all_errors = []
         all_uncertainties = []
+        all_concentrations = []
         
         with torch.no_grad():
             for batch_data in val_loader:
@@ -337,14 +374,36 @@ class EnhancedCancerDetectionModel(nn.Module):
                 errors = torch.abs(mu - y_true)
                 all_errors.append(errors.cpu())
                 all_uncertainties.append(uncertainty.cpu())
+                all_concentrations.append(y_true.cpu())
         
         # Calculate calibration factor
         all_errors = torch.cat(all_errors)
         all_uncertainties = torch.cat(all_uncertainties)
+        all_concentrations = torch.cat(all_concentrations)
         
+        # Stratify errors and calculate calibration factors by concentration range
+        critical_range_mask = (all_concentrations >= 0.001) & (all_concentrations < 0.01)
+        
+        # For the critical range (0.1-1%), use a higher percentile for better coverage
+        if critical_range_mask.sum() > 0:
+            critical_errors = all_errors[critical_range_mask]
+            critical_uncertainties = all_uncertainties[critical_range_mask]
+            critical_error_97_percentile = torch.quantile(critical_errors, 0.97)  # Higher percentile
+            critical_avg_uncertainty = critical_uncertainties.mean()
+            critical_calibration = critical_error_97_percentile / (1.96 * critical_avg_uncertainty)
+            
+            # Ensure calibration factor is at least 1.5 for critical range
+            critical_calibration = max(float(critical_calibration), 1.5)
+        else:
+            critical_calibration = 2.0  # Default if no samples in range
+        
+        # For other ranges, use the standard 95% percentile
         error_95_percentile = torch.quantile(all_errors, 0.95)
         avg_uncertainty = all_uncertainties.mean()
-        calibration_factor = error_95_percentile / (1.96 * avg_uncertainty)
+        standard_calibration = error_95_percentile / (1.96 * avg_uncertainty)
+        
+        # Use the larger of the two calibration factors to ensure good coverage
+        calibration_factor = max(float(standard_calibration), float(critical_calibration))
         
         # Update calibration parameter
         with torch.no_grad():
@@ -400,13 +459,15 @@ class EnhancedCancerDetectionModel(nn.Module):
             # Calculate optimal background parameters
             all_raw_preds = torch.cat(all_raw_preds)
             
-            # Set min_bg to median and max_bg to 95th percentile
-            min_bg = float(torch.quantile(all_raw_preds, 0.5))
-            max_bg = float(torch.quantile(all_raw_preds, 0.95))
+            # Use more conservative settings for background
+            # 40th percentile instead of median (50th) for min_bg
+            # 90th percentile instead of 95th for max_bg
+            min_bg = float(torch.quantile(all_raw_preds, 0.4))
+            max_bg = float(torch.quantile(all_raw_preds, 0.9))
             
-            # Ensure min_bg is at least 0.001 and max_bg is at least min_bg + 0.01
-            min_bg = max(0.001, min_bg)
-            max_bg = max(min_bg + 0.01, max_bg)
+            # Ensure min_bg is at most 0.0008 and max_bg is at most 0.03
+            min_bg = min(0.0008, max(0.0003, min_bg))
+            max_bg = min(0.03, max(min_bg + 0.005, max_bg))
             
             # Update background correction module parameters
             with torch.no_grad():
@@ -421,9 +482,10 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Return all calibration results
         return {
             'calibration_factor': float(calibration_factor),
+            'critical_calibration': float(critical_calibration),
+            'standard_calibration': float(standard_calibration),
             **bg_params
         }
-    
     def get_background_levels(self, data_loader, device='cpu'):
         """
         Get dynamic background levels for all samples in a dataset.
