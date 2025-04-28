@@ -1,15 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Beta
 import math
 import scipy.stats as stats
 import numpy as np
 
 class DynamicBackgroundCorrection(nn.Module):
     """
-    Context-aware background correction module that dynamically adjusts the
-    background level based on sample characteristics.
+    Dynamic background correction module that predicts sample-specific
+    background levels based on feature representation.
     """
     def __init__(self, feature_dim, min_bg=0.001, max_bg=0.05):
         super().__init__()
@@ -45,15 +44,16 @@ class DynamicBackgroundCorrection(nn.Module):
         
         return bg_level
 
+
 class EnhancedCancerDetectionModel(nn.Module):
     """
     Enhanced deep learning model for cancer detection from cfDNA methylation markers.
-    This model uses transformer architecture with attention mechanisms to estimate
-    cell type concentration and provide calibrated confidence intervals.
+    Uses transformer architecture with attention mechanisms and dynamic background
+    correction to estimate cell type concentration accurately across all ranges.
     """
     def __init__(self, num_markers, feature_dim=96, num_heads=6, num_layers=2, 
-             dropout_rate=0.2, detection_thresholds=(0.001, 0.005, 0.01, 0.05),
-             min_reliable_coverage=5.0):
+                 dropout_rate=0.2, detection_thresholds=(0.001, 0.005, 0.01, 0.05),
+                 min_reliable_coverage=5.0):
         """
         Initialize the EnhancedCancerDetectionModel.
         
@@ -64,12 +64,11 @@ class EnhancedCancerDetectionModel(nn.Module):
             num_layers: Number of transformer encoder layers
             dropout_rate: Dropout probability for regularization
             detection_thresholds: Concentration thresholds for binary detection
-            background_level: Initial background level for correction
             min_reliable_coverage: Minimum coverage to consider a marker reliable
         """
         super().__init__()
         
-        # Store configuration
+        # Store configuration parameters
         self.detection_thresholds = detection_thresholds
         self.num_markers = num_markers
         self.min_reliable_coverage = min_reliable_coverage
@@ -79,7 +78,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         self.coverage_embedding = nn.Linear(1, feature_dim // 2)
         self.feature_projection = nn.Linear(feature_dim, feature_dim)
         
-        # Transformer encoder
+        # Transformer encoder for learning marker interactions
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=feature_dim,
             nhead=num_heads,
@@ -91,7 +90,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Attention mechanism
+        # Attention mechanism for marker importance weighting
         self.attention = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
@@ -99,7 +98,7 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Linear(feature_dim // 2, 1)
         )
         
-        # Reliability weighting
+        # Coverage reliability weighting mechanism
         self.reliability_weight = nn.Sequential(
             nn.Linear(1, feature_dim // 4),
             nn.GELU(),
@@ -107,7 +106,7 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Sigmoid()
         )
         
-        # Concentration head
+        # Concentration estimation head (mu)
         self.mu_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
@@ -116,7 +115,10 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Sigmoid()
         )
         
-        # Uncertainty head
+        # Dynamic background correction module
+        self.bg_correction = DynamicBackgroundCorrection(feature_dim)
+        
+        # Uncertainty estimation head
         self.uncertainty_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
@@ -125,10 +127,7 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Softplus()
         )
         
-        # Dynamic background correction
-        self.bg_correction = DynamicBackgroundCorrection(feature_dim)
-        
-        # Detection heads
+        # Binary detection heads for different concentration thresholds
         self.detection_heads = nn.ModuleList()
         for _ in detection_thresholds:
             head = nn.Sequential(
@@ -140,14 +139,27 @@ class EnhancedCancerDetectionModel(nn.Module):
             )
             self.detection_heads.append(head)
         
-        # Calibration parameters
+        # Confidence interval calibration parameter
         self.register_buffer('calibration', torch.ones(1))
         
-        # Initialize with bias toward low predictions
+        # Initialize mu_head bias to predict low values initially
         with torch.no_grad():
             self.mu_head[-2].bias.data.fill_(-2.0)
-    
+        
     def forward(self, marker_values, coverage):
+        """
+        Forward pass through the model.
+        
+        Args:
+            marker_values: Tensor of shape [batch_size, num_markers] with methylation values
+            coverage: Tensor of shape [batch_size, num_markers] with read coverage
+            
+        Returns:
+            mu: Estimated cell type concentration
+            uncertainty: Uncertainty in the estimation
+            detection_probs: Probability of exceeding each detection threshold
+            attention_weights: Learned importance weights for each marker
+        """
         B, M = marker_values.shape
         
         # Create mask for missing/unreliable values
@@ -192,10 +204,10 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Compute weighted sum of features
         aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
         
-        # Predict concentration
+        # Predict raw concentration
         mu = self.mu_head(aggregated)
         
-        # Dynamic background correction (sample-specific)
+        # Apply dynamic background correction
         bg_level = self.bg_correction(aggregated)
         mu_corrected = torch.clamp(mu - bg_level, min=0.0)
         
@@ -210,7 +222,7 @@ class EnhancedCancerDetectionModel(nn.Module):
     
     def compute_loss(self, mu, uncertainty, y_true, control_mask=None):
         """
-        Compute concentration-focused loss with dynamic background handling
+        Compute concentration-focused loss function
         
         Args:
             mu: Predicted concentration values [batch_size, 1]
@@ -222,10 +234,9 @@ class EnhancedCancerDetectionModel(nn.Module):
             total_loss: Combined loss value for optimization
         """
         # Basic MSE loss
-        mse_loss = F.mse_loss(mu, y_true, reduction='none')  # [batch_size, 1]
+        mse_loss = F.mse_loss(mu, y_true, reduction='none')
         
         # Calculate relative error for non-zero targets
-        # This helps focus on percentage accuracy for higher concentrations
         epsilon = 1e-6
         non_zero_mask = (y_true > epsilon)
         
@@ -236,41 +247,34 @@ class EnhancedCancerDetectionModel(nn.Module):
         if non_zero_mask.sum() > 0:
             rel_error[non_zero_mask] = torch.abs(mu[non_zero_mask] - y_true[non_zero_mask]) / (y_true[non_zero_mask] + epsilon)
         
-        # Create concentration-based weights using log-scale approach
-        # Higher weights for lower concentrations, gradually decreasing for higher concentrations
-        log_weights = 1.0 / torch.log10(y_true * 1000 + 10.0)  # +10 to avoid log(0)
-        log_weights = torch.clamp(log_weights, 0.5, 2.0)  # Limit weight range
+        # Create concentration-based weights using log-scale
+        log_weights = 1.0 / torch.log10(y_true * 1000 + 10.0)
+        log_weights = torch.clamp(log_weights, 0.5, 2.0)
         
         # Zero-concentration specific penalty
-        # Critical for avoiding false positives in control samples
         zero_mask = (y_true < epsilon)
         zero_penalty = 10.0 * mu[zero_mask].mean() if zero_mask.sum() > 0 else 0.0
         
-        # Control sample penalty (extra strong penalty for any control samples)
+        # Control sample penalty
         control_loss = 0.0
         if control_mask is not None and control_mask.sum() > 0:
             control_loss = 15.0 * mu[control_mask].mean()
         
-        # Combine MSE and relative error components with log weighting
+        # Combine MSE and relative error with log weighting
         weighted_mse = (mse_loss * log_weights).mean()
         weighted_rel = (rel_error * log_weights).mean() if non_zero_mask.sum() > 0 else 0.0
         
-        # Add calibration component to encourage well-calibrated uncertainty
-        # This checks if predictions are within their claimed uncertainty ranges
+        # Add calibration component
         calibration_loss = 0.0
         if uncertainty is not None:
-            # Calculate z-scores: how many standard deviations away from the mean
             z_scores = torch.abs(mu - y_true) / (uncertainty + 1e-6)
-            
-            # For 95% confidence, z-scores should be around 1.96
-            # Penalize if too far from this target
             calibration_loss = F.smooth_l1_loss(z_scores, torch.ones_like(z_scores) * 1.96)
         
         # Combine all loss components
         total_loss = weighted_mse + 0.5 * weighted_rel + zero_penalty + control_loss + 0.1 * calibration_loss
         
         return total_loss
-
+    
     def get_estimate_and_ci(self, mu, uncertainty, ci_level=0.95):
         """
         Get point estimate and confidence interval for concentration.
@@ -286,47 +290,42 @@ class EnhancedCancerDetectionModel(nn.Module):
             scaled_uncertainty: Calibrated uncertainty values
         """
         # Scale uncertainty by calibration factor
-        # This ensures proper coverage of the confidence interval
-        scaled_uncertainty = uncertainty * self.calibration  # [batch_size, 1]
+        scaled_uncertainty = uncertainty * self.calibration
         
         # Calculate z-score for desired confidence level
-        # e.g., z_score=1.96 for 95% CI
-        z_score = stats.norm.ppf((1 + ci_level) / 2)  # scalar
+        z_score = stats.norm.ppf((1 + ci_level) / 2)
         
-        # Calculate lower bound of CI, clipped to valid range
-        lower = torch.clamp(mu - z_score * scaled_uncertainty, min=0.0)  # [batch_size, 1]
+        # Calculate CI bounds
+        lower = torch.clamp(mu - z_score * scaled_uncertainty, min=0.0)
+        upper = torch.clamp(mu + z_score * scaled_uncertainty, max=1.0)
         
-        # Calculate upper bound of CI, clipped to valid range
-        upper = torch.clamp(mu + z_score * scaled_uncertainty, max=1.0)  # [batch_size, 1]
-        
-        # Combine into single tensor
-        ci = torch.cat([lower, upper], dim=1)  # [batch_size, 2]
+        # Combine into tensor
+        ci = torch.cat([lower, upper], dim=1)
         
         return mu, ci, scaled_uncertainty
     
     def calibrate(self, val_loader, control_loader=None, device='cpu'):
         """
-        Calibrate model confidence intervals and background level.
+        Calibrate model confidence intervals and dynamic background correction.
         
         Args:
             val_loader: DataLoader with validation data
             control_loader: Optional DataLoader with control samples
-            device: Device to run calibration on ('cpu' or 'cuda')
+            device: Device to run calibration on
             
         Returns:
-            dict: Calibration results with calibration_factor and background_level
+            dict: Calibration results with calibration_factor and background parameters
         """
         self.eval()
         
-        # 1. Calibrate confidence intervals using validation data
+        # 1. Calibrate confidence intervals
         all_errors = []
         all_uncertainties = []
         
         with torch.no_grad():
             for batch_data in val_loader:
-                # Handle both 3-element and 4-element returns
                 if len(batch_data) == 4:
-                    marker_values, coverage, y_true, _ = batch_data  # Ignore control_mask
+                    marker_values, coverage, y_true, _ = batch_data
                 else:
                     marker_values, coverage, y_true = batch_data
                 
@@ -334,34 +333,29 @@ class EnhancedCancerDetectionModel(nn.Module):
                 coverage = coverage.to(device)
                 y_true = y_true.to(device)
                 
-                # Get model predictions
                 mu, uncertainty, _, _ = self(marker_values, coverage)
                 
-                # Calculate absolute errors
                 errors = torch.abs(mu - y_true)
-                
-                # Store results for later analysis
                 all_errors.append(errors.cpu())
                 all_uncertainties.append(uncertainty.cpu())
         
-        # Concatenate collected data
-        all_errors = torch.cat(all_errors)  # [total_samples, 1]
-        all_uncertainties = torch.cat(all_uncertainties)  # [total_samples, 1]
+        # Calculate calibration factor
+        all_errors = torch.cat(all_errors)
+        all_uncertainties = torch.cat(all_uncertainties)
         
-        # Calculate calibration factor based on empirical error distribution
-        # We aim for 95% of errors to be within the predicted uncertainty range
-        error_95_percentile = torch.quantile(all_errors, 0.95)  # scalar
-        avg_uncertainty = all_uncertainties.mean()  # scalar
+        error_95_percentile = torch.quantile(all_errors, 0.95)
+        avg_uncertainty = all_uncertainties.mean()
+        calibration_factor = error_95_percentile / (1.96 * avg_uncertainty)
         
-        # Scale factor to achieve desired CI coverage
-        # For 95% CI with normal distribution, z-score = 1.96
-        calibration_factor = error_95_percentile / (1.96 * avg_uncertainty)  # scalar
+        # Update calibration parameter
+        with torch.no_grad():
+            self.calibration.copy_(torch.tensor([calibration_factor]))
         
-        # 2. Calibrate background level using control samples if provided
-        bg_level = self.background_level.item()  # Start with current value
-        
+        # 2. Calibrate background correction parameters using control samples
+        bg_params = {}
         if control_loader is not None:
-            all_control_preds = []
+            # Extract raw predictions from control samples
+            all_raw_preds = []
             
             with torch.no_grad():
                 for batch_data in control_loader:
@@ -373,51 +367,123 @@ class EnhancedCancerDetectionModel(nn.Module):
                     marker_values = marker_values.to(device)
                     coverage = coverage.to(device)
                     
-                    # Get predictions for control samples
-                    mu, _, _, _ = self(marker_values, coverage)
-                    all_control_preds.append(mu.cpu())
+                    # Get features for raw predictions
+                    value_features = self.value_embedding(marker_values.unsqueeze(-1))
+                    log_coverage = torch.log1p(coverage).unsqueeze(-1)
+                    coverage_features = self.coverage_embedding(log_coverage)
+                    features = torch.cat([value_features, coverage_features], dim=-1)
+                    features = self.feature_projection(features)
+                    
+                    # Apply transformer with masking
+                    mask_missing = (coverage == 0)
+                    mask_low_cov = (coverage < self.min_reliable_coverage)
+                    mask = mask_missing | mask_low_cov
+                    transformer_output = self.transformer_encoder(features, src_key_padding_mask=mask)
+                    
+                    # Apply attention
+                    attention_scores = self.attention(transformer_output).squeeze(-1)
+                    reliability_weight = self.reliability_weight(log_coverage)
+                    coverage_reliability = torch.pow(
+                        torch.clamp(coverage.unsqueeze(-1) / self.min_reliable_coverage, 0.0, 1.0), 2
+                    )
+                    reliability_weight = reliability_weight * coverage_reliability
+                    attention_scores = attention_scores * reliability_weight.squeeze(-1)
+                    attention_scores = attention_scores.masked_fill(mask, -1e9)
+                    attention_weights = F.softmax(attention_scores, dim=1)
+                    
+                    # Get aggregated features
+                    aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
+                    
+                    # Get raw predictions before background correction
+                    raw_mu = self.mu_head(aggregated)
+                    all_raw_preds.append(raw_mu.cpu())
             
-            # Use 95th percentile for conservative background correction
-            # This helps avoid false positives in control samples
-            all_control_preds = torch.cat(all_control_preds)  # [total_control_samples, 1]
-            bg_level = float(torch.quantile(all_control_preds, 0.95))  # scalar
+            # Calculate optimal background parameters
+            all_raw_preds = torch.cat(all_raw_preds)
             
-            # Ensure minimum background level for stability
-            bg_level = max(bg_level, 0.05)
+            # Set min_bg to median and max_bg to 95th percentile
+            min_bg = float(torch.quantile(all_raw_preds, 0.5))
+            max_bg = float(torch.quantile(all_raw_preds, 0.95))
+            
+            # Ensure min_bg is at least 0.001 and max_bg is at least min_bg + 0.01
+            min_bg = max(0.001, min_bg)
+            max_bg = max(min_bg + 0.01, max_bg)
+            
+            # Update background correction module parameters
+            with torch.no_grad():
+                self.bg_correction.min_bg = min_bg
+                self.bg_correction.max_bg = max_bg
+            
+            bg_params = {
+                'min_bg': min_bg,
+                'max_bg': max_bg
+            }
         
-        # Apply calibration parameters to model
-        with torch.no_grad():
-            self.calibration.copy_(torch.tensor([calibration_factor]))
-            self.background_level.copy_(torch.tensor([bg_level]))
-        
-        # Return calibration results
+        # Return all calibration results
         return {
-            'calibration_factor': calibration_factor.item(),
-            'background_level': bg_level
+            'calibration_factor': float(calibration_factor),
+            **bg_params
         }
-        
-    def get_binary_prediction(self, mu, detection_probs, threshold_idx=1):
+    
+    def get_background_levels(self, data_loader, device='cpu'):
         """
-        Get binary prediction for cancer detection
+        Get dynamic background levels for all samples in a dataset.
+        Useful for analyzing background distribution.
         
         Args:
-            mu: Predicted concentration
-            detection_probs: List of detection probabilities from forward pass
-            threshold_idx: Which threshold to use (default: 1, which is 0.01 or 1%)
-        
+            data_loader: DataLoader with samples
+            device: Device to run inference on
+            
         Returns:
-            Binary prediction (1 = cancer detected, 0 = no cancer detected)
+            bg_levels: Numpy array of background levels for each sample
         """
-        # Convert predictions to detection score
-        # Use both concentration estimate and detection head
-        # This combines both approaches for more robust detection
-        detection_score = detection_probs[threshold_idx]
+        self.eval()
+        all_bg_levels = []
         
-        # Threshold for positive detection (can be calibrated)
-        detection_threshold = 0.5
+        with torch.no_grad():
+            for batch_data in data_loader:
+                # Handle different data formats
+                if len(batch_data) == 4:
+                    marker_values, coverage, _, _ = batch_data
+                else:
+                    marker_values, coverage, _ = batch_data
+                
+                marker_values = marker_values.to(device)
+                coverage = coverage.to(device)
+                
+                # Get features for background prediction
+                value_features = self.value_embedding(marker_values.unsqueeze(-1))
+                log_coverage = torch.log1p(coverage).unsqueeze(-1)
+                coverage_features = self.coverage_embedding(log_coverage)
+                features = torch.cat([value_features, coverage_features], dim=-1)
+                features = self.feature_projection(features)
+                
+                # Apply transformer with masking
+                mask_missing = (coverage == 0)
+                mask_low_cov = (coverage < self.min_reliable_coverage)
+                mask = mask_missing | mask_low_cov
+                transformer_output = self.transformer_encoder(features, src_key_padding_mask=mask)
+                
+                # Apply attention
+                attention_scores = self.attention(transformer_output).squeeze(-1)
+                reliability_weight = self.reliability_weight(log_coverage)
+                coverage_reliability = torch.pow(
+                    torch.clamp(coverage.unsqueeze(-1) / self.min_reliable_coverage, 0.0, 1.0), 2
+                )
+                reliability_weight = reliability_weight * coverage_reliability
+                attention_scores = attention_scores * reliability_weight.squeeze(-1)
+                attention_scores = attention_scores.masked_fill(mask, -1e9)
+                attention_weights = F.softmax(attention_scores, dim=1)
+                
+                # Get aggregated features
+                aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
+                
+                # Get background level
+                bg_levels = self.bg_correction(aggregated)
+                all_bg_levels.append(bg_levels.cpu().numpy())
         
-        return (detection_score >= detection_threshold).float()
-
+        return np.concatenate(all_bg_levels)
+   
 
 def compute_concentration_loss(mu, y_true):
     """

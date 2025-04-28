@@ -207,6 +207,9 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
     """
     logger = logging.getLogger('cancer_detection')
     
+    git_info = get_git_info()
+    git_commit = git_info['commit']
+    
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
@@ -385,7 +388,8 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                 'val_loss': val_loss,
                 'val_metrics': val_metrics,
                 'concentration_metrics': conc_metrics,
-                'args': vars(args)
+                'args': vars(args),
+                'git_commit': git_commit,
             }
             
             # Save best model
@@ -411,7 +415,8 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                 'scaler': scaler.state_dict(),
                 'epoch': epoch,
                 'args': vars(args),
-                'history': history
+                'history': history,
+                'git_comit': git_commit,
             }, checkpoint_path)
             logger.info(f"Checkpoint saved to {checkpoint_path}")
     
@@ -423,7 +428,8 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         'val_metrics': val_metrics,
         'concentration_metrics': conc_metrics,
         'args': vars(args),
-        'history': history
+        'history': history,
+        'git_commit': git_commit,
     }, final_model_path)
     logger.info(f"Final model saved to {final_model_path}")
     
@@ -531,10 +537,6 @@ def compute_concentration_aware_metrics(predictions, targets):
     predictions = predictions.flatten()
     targets = targets.flatten()
     
-    # Basic regression metrics
-    r2 = r2_score(targets, predictions)
-    mae = mean_absolute_error(targets, predictions)
-    
     # Define concentration ranges
     ranges = [
         (0, 0.001, "0-0.1%"),
@@ -546,10 +548,7 @@ def compute_concentration_aware_metrics(predictions, targets):
     
     # Initialize results dict
     results = {
-        'r2': r2,
-        'mae': mae,
         'stratified_metrics': {},
-        'ordering_metrics': {},
         'band_accuracy': {}
     }
     
@@ -583,17 +582,11 @@ def compute_concentration_aware_metrics(predictions, targets):
                 'within_50pct': float(within_50pct)
             }
     
-    # Calculate concentration ordering metrics
-    # This measures how well the model orders samples by concentration
-    # Specifically, can it distinguish between different concentration bands
-    correct_orders = 0
-    total_comparisons = 0
-    
-    # Create broader bands for clearer distinction
+    # Calculate concentration band accuracy
+    # This measures how well the model classifies samples into concentration bands
     bands = [(0, 0.001), (0.001, 0.01), (0.01, 0.1), (0.1, 1.0)]
     band_names = ["0-0.1%", "0.1-1%", "1-10%", ">10%"]
     
-    # Calculate in-band accuracy
     for i, (low, high) in enumerate(bands):
         mask = (targets >= low) & (targets < high)
         band_preds = predictions[mask]
@@ -607,45 +600,44 @@ def compute_concentration_aware_metrics(predictions, targets):
                 'count': int(total_in_band)
             }
     
-    # Calculate ordering accuracy between bands
-    for i in range(len(bands)):
-        for j in range(i+1, len(bands)):
-            low_i, high_i = bands[i]
-            low_j, high_j = bands[j]
-            
-            mask_i = (targets >= low_i) & (targets < high_i)
-            mask_j = (targets >= low_j) & (targets < high_j)
-            
-            for pred_i, pred_j in zip(predictions[mask_i], predictions[mask_j]):
-                if pred_i < pred_j:  # Correct ordering
-                    correct_orders += 1
-                total_comparisons += 1
+    # Calculate ordering accuracy
+    # This measures how well the model preserves the relative ordering of samples
+    # For example, if sample A has higher concentration than sample B, does the model predict this correctly?
+    n_samples = len(targets)
+    n_correct_orders = 0
+    n_total_comparisons = 0
     
-    if total_comparisons > 0:
-        ordering_accuracy = float(correct_orders) / float(total_comparisons) * 100
-        results['ordering_metrics']['accuracy'] = ordering_accuracy
-        results['ordering_metrics']['comparisons'] = total_comparisons
+    # Limit to a manageable number of comparisons for large datasets
+    max_comparisons = 100000
+    if n_samples > 1000:
+        # Sample random pairs for large datasets
+        import random
+        indices = list(range(n_samples))
+        random.shuffle(indices)
+        pairs = []
+        for _ in range(min(max_comparisons, n_samples * (n_samples - 1) // 2)):
+            i, j = random.sample(indices, 2)
+            if targets[i] != targets[j]:  # Only compare different concentration samples
+                pairs.append((i, j))
+    else:
+        # Use all pairs for smaller datasets
+        pairs = [(i, j) for i in range(n_samples) for j in range(i+1, n_samples) 
+                if targets[i] != targets[j]]
     
-    # Calculate background level adjustment optimality
-    # Find optimal background level that maximizes metrics
-    r2_scores = []
-    bg_levels = np.linspace(0, 0.05, 50)  # Test different background levels
+    for i, j in pairs:
+        n_total_comparisons += 1
+        
+        # Check if ordering is preserved
+        if (targets[i] < targets[j] and predictions[i] < predictions[j]) or \
+           (targets[i] > targets[j] and predictions[i] > predictions[j]):
+            n_correct_orders += 1
     
-    for bg in bg_levels:
-        adjusted_preds = np.maximum(predictions - bg, 0)
-        r2_bg = r2_score(targets, adjusted_preds)
-        r2_scores.append(r2_bg)
-    
-    optimal_bg_idx = np.argmax(r2_scores)
-    optimal_bg = bg_levels[optimal_bg_idx]
-    optimal_r2 = r2_scores[optimal_bg_idx]
-    
-    results['background_analysis'] = {
-        'current_r2': r2,
-        'optimal_bg': float(optimal_bg),
-        'optimal_r2': float(optimal_r2),
-        'improvement': float(optimal_r2 - r2)
-    }
+    if n_total_comparisons > 0:
+        ordering_accuracy = float(n_correct_orders) / float(n_total_comparisons) * 100
+        results['ordering_accuracy'] = {
+            'accuracy': ordering_accuracy,
+            'comparisons': n_total_comparisons
+        }
     
     return results
 
@@ -731,13 +723,8 @@ def validate_model(model, val_loader, device, args):
     # Calculate clinical metrics
     clinical_metrics = clinical_performance_metrics(all_preds, all_targets, args.detection_thresholds)
     
-    # Return validation loss and metrics
-    if 0.01 in clinical_metrics and clinical_metrics[0.01]['sensitivity'] < 0.01:
-        # If sensitivity is near zero, adjust background level
-        with torch.no_grad():
-            model.background_level.mul_(0.8)  # Reduce background by 20%
-        logger = logging.getLogger('cancer_detection')
-        logger.info("  Warning: Very low sensitivity detected. Reducing background level.")
+    # Calculate concentration metrics
+    concentration_metrics = compute_concentration_aware_metrics(all_preds, all_targets)
     
     # Return validation loss and metrics
     metrics = {
@@ -746,7 +733,8 @@ def validate_model(model, val_loader, device, args):
         'calibration_error': calibration_error,
         'r2': r2,
         'mae': mae,
-        'clinical_metrics': clinical_metrics
+        'clinical_metrics': clinical_metrics,
+        'concentration_metrics': concentration_metrics
     }
     
     return val_loss, metrics
@@ -1388,9 +1376,8 @@ def plot_marker_importance(marker_importance, output_dir):
     fig.write_html(os.path.join(plots_dir, 'marker_importance.html'))
     fig.write_image(os.path.join(plots_dir, 'marker_importance.png'), scale=2)
 
-
 def evaluate(model, data_loader, args, device, split_name="test"):
-    """Unified evaluation function for both validation and test sets"""
+    """Evaluation function for test sets with dynamic background support"""
     logger = logging.getLogger('cancer_detection')
     logger.info(f"Starting model evaluation on {split_name} set...")
     
@@ -1403,6 +1390,7 @@ def evaluate(model, data_loader, args, device, split_name="test"):
     all_upper_ci = []
     all_marker_attentions = []
     all_detection_probs = []
+    all_bg_levels = []
     
     # Create progress bar for evaluation
     eval_bar = tqdm(data_loader, desc=f"Evaluating {split_name} set", position=0)
@@ -1421,6 +1409,9 @@ def evaluate(model, data_loader, args, device, split_name="test"):
             mu, uncertainty, det_probs, attention_weights = model(marker_values, coverage)
             estimate, ci, _ = model.get_estimate_and_ci(mu, uncertainty)
         
+            # Get background levels
+            bg_levels = model.get_background_levels(data_loader, device)
+            
             all_preds.append(estimate.cpu().numpy())
             all_targets.append(y_true.cpu().numpy())
             all_lower_ci.append(ci[:, 0:1].cpu().numpy())
@@ -1446,6 +1437,9 @@ def evaluate(model, data_loader, args, device, split_name="test"):
     # Calculate average CI width
     ci_width = (all_upper_ci - all_lower_ci).mean()
     
+    # Calculate concentration metrics
+    concentration_metrics = compute_concentration_aware_metrics(all_preds, all_targets)
+    
     # Log basic results
     logger.info(f"\n{split_name.upper()} RESULTS:")
     logger.info(f"Number of {split_name} samples: {len(all_targets)}")
@@ -1454,17 +1448,38 @@ def evaluate(model, data_loader, args, device, split_name="test"):
     logger.info(f"Targets within CI: {in_ci * 100:.2f}%")
     logger.info(f"Average CI Width: {ci_width:.6f}")
     
-    # Calculate detection metrics
+    # Log concentration metrics
+    logger.info(f"\nCONCENTRATION METRICS:")
+    for range_name, metrics in concentration_metrics['stratified_metrics'].items():
+        logger.info(f"  {range_name} (n={metrics['count']}): "
+                   f"MAE={metrics['mae']:.6f}, "
+                   f"Within 25%={metrics.get('within_25pct', 0):.1f}%")
+    
+    # Log band accuracy
+    if 'band_accuracy' in concentration_metrics:
+        logger.info("\nCONCENTRATION BAND ACCURACY:")
+        for band, acc in concentration_metrics['band_accuracy'].items():
+            logger.info(f"  {band}: {acc['accuracy']:.2f}% (n={acc['count']})")
+    
+    # Log detection metrics
     analyser = MarkerImportanceAnalyser(model)
     detection_metrics = analyser.analyse_detection_performance(data_loader, thresholds=args.detection_thresholds)
     
-    # Log detection metrics
     logger.info(f"\n{split_name.upper()} DETECTION METRICS:")
     for threshold, metrics in detection_metrics.items():
         logger.info(f"At {threshold:.3%} threshold:")
         logger.info(f"  AUC: {metrics['auc']:.4f}")
         logger.info(f"  Sensitivity at 95% specificity: {metrics['sensitivity_at_95spec']:.4f}")
         logger.info(f"  Average precision: {metrics['average_precision']:.4f}")
+    
+    # Log background statistics
+    if bg_levels is not None:
+        logger.info(f"\nBACKGROUND CORRECTION STATISTICS:")
+        logger.info(f"  Mean Background: {np.mean(bg_levels):.6f}")
+        logger.info(f"  Median Background: {np.median(bg_levels):.6f}")
+        logger.info(f"  Min Background: {np.min(bg_levels):.6f}")
+        logger.info(f"  Max Background: {np.max(bg_levels):.6f}")
+        logger.info(f"  Background Range: {self.bg_correction.min_bg:.6f} - {self.bg_correction.max_bg:.6f}")
     
     # Save results
     results = {
@@ -1478,13 +1493,22 @@ def evaluate(model, data_loader, args, device, split_name="test"):
             'in_ci_percentage': float(in_ci * 100),
             'ci_width': float(ci_width)
         },
+        'concentration_metrics': concentration_metrics,
         'detection_metrics': {
             str(float(k)): {
                 'auc': float(v['auc']), 
                 'sensitivity_at_95spec': float(v['sensitivity_at_95spec']),
                 'average_precision': float(v['average_precision'])
             } for k, v in detection_metrics.items()
-        }
+        },
+        'background_stats': {
+            'mean': float(np.mean(bg_levels)),
+            'median': float(np.median(bg_levels)),
+            'min': float(np.min(bg_levels)),
+            'max': float(np.max(bg_levels)),
+            'range_min': float(model.bg_correction.min_bg),
+            'range_max': float(model.bg_correction.max_bg)
+        } if bg_levels is not None else {}
     }
     
     # Save to file
@@ -1497,14 +1521,31 @@ def evaluate(model, data_loader, args, device, split_name="test"):
     vis_dir = os.path.join(args.output_dir, 'visualisations')
     split_vis_dir = os.path.join(vis_dir, split_name)
     
-    visualise_results(
-        predictions=all_preds,
-        ground_truth=all_targets,
-        output_subdir=split_vis_dir,
-        ci_data=(all_lower_ci, all_upper_ci),
-        marker_importance=all_marker_attentions.mean(axis=0),
-        prefix=f"{split_name.capitalize()} "
-    )
+    # Create standard visualizations
+    try:
+        from deep_conv.detect.visualise import create_visualisations
+        
+        os.makedirs(split_vis_dir, exist_ok=True)
+        
+        logger.info(f"Creating visualisations for {split_name} data...")
+        
+        # Generate visualisations
+        metrics = create_visualisations(
+            predictions=all_preds.flatten(), 
+            ground_truth=all_targets.flatten(),
+            output_dir=split_vis_dir
+        )
+        
+        # Log key metrics
+        logger.info(f"{split_name} visualization metrics - "
+                   f"R²: {metrics['r2']:.4f}, "
+                   f"MAE: {metrics['mae']:.6f}, "
+                   f"Within 10%: {metrics['within_10pct']:.2f}%")
+        
+    except ImportError:
+        logger.warning("Visualisation module not found. Skipping visualisations.")
+    except Exception as e:
+        logger.error(f"Error creating visualisations: {str(e)}")
     
     # Analyse marker importance
     logger.info(f"Analysing marker importance for {split_name} set...")
@@ -1672,7 +1713,6 @@ def get_git_info():
     except subprocess.CalledProcessError:
         return {'commit': 'unknown', 'branch': 'unknown', 'clean': False}
 
-
 def parse_excluded_markers(excluded_markers_str):
     """Parse excluded markers string into a list of indices"""
     if not excluded_markers_str:
@@ -1831,8 +1871,7 @@ def main():
     if args.calibrate:
         logger.info("Performing final model calibration...")
         try:
-            calibration_results = calibrate_model(
-                model, 
+            calibration_results = model.calibrate(
                 val_loader, 
                 control_val_loader, 
                 device
@@ -1844,9 +1883,8 @@ def main():
             
             logger.info(f"✓ Model calibrated:")
             logger.info(f"  Calibration factor: {calibration_results['calibration_factor']:.4f}")
-            logger.info(f"  Low calibration factor: {calibration_results['low_calibration_factor']:.4f}")
-            if 'global_bg_level' in calibration_results:
-                logger.info(f"  Background level: {calibration_results['global_bg_level']:.6f}")
+            if 'min_bg' in calibration_results:
+                logger.info(f"  Background range: {calibration_results['min_bg']:.6f} - {calibration_results['max_bg']:.6f}")
             
         except Exception as e:
             logger.error(f"× Error during calibration: {str(e)}")
@@ -1870,7 +1908,6 @@ def main():
     logger.info("="*60 + "\n")
     
     return True
-
 
 if __name__ == "__main__":
     try:
