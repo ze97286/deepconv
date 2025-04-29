@@ -164,13 +164,13 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
         # Apply focal loss weighting for imbalanced detection
         pos_weight = torch.sum(1 - binary_y) / torch.sum(binary_y) if torch.sum(binary_y) > 0 else torch.tensor(1.0, device=mu.device)
         # For T-cells, use higher pos_weight to address extreme sensitivity issues
-        if hasattr(args, 'target_cell_type') and args.cell_type == 'T-cells':
+        if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells':
             pos_weight = torch.clamp(pos_weight * 1.5, 2.0, 15.0)  # Higher weight range for T-cells
         else:
             pos_weight = torch.clamp(pos_weight, 1.0, 10.0)
         
         # Focal loss component with higher gamma for T-cells to focus more on hard examples
-        gamma = 2.0 if hasattr(args, 'target_cell_type') and args.cell_type == 'T-cells' else 2.0
+        gamma = 2.0 if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells' else 2.0
         pt = binary_y * detection_probs[i] + (1 - binary_y) * (1 - detection_probs[i])
         focal_weight = torch.pow(1 - pt, gamma)
         
@@ -184,7 +184,7 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
             near_threshold_mask = (y_true >= threshold * 0.7) & (y_true <= threshold * 1.3)
             threshold_weight = torch.ones_like(weighted_loss, device=weighted_loss.device)
             # For T-cells, use even higher weight for near-threshold samples
-            near_threshold_multiplier = 3.0 if hasattr(args, 'target_cell_type') and args.cell_type == 'T-cells' else 2.0
+            near_threshold_multiplier = 3.0 if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells' else 2.0
             threshold_weight = torch.where(near_threshold_mask, 
                                           torch.ones_like(threshold_weight, device=threshold_weight.device) * near_threshold_multiplier,
                                           threshold_weight)
@@ -206,7 +206,7 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
             specificity = true_neg / total_neg
             
             # T-cells specific targets - more permissive sensitivity requirements
-            if hasattr(args, 'target_cell_type') and args.cell_type == 'T-cells':
+            if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells':
                 if threshold <= 0.001:
                     target_sensitivity = 0.70
                     target_specificity = 0.98
@@ -235,7 +235,7 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
             target_spec = torch.tensor(target_specificity, device=specificity.device)
             
             # For T-cells, use asymmetric loss that penalizes low sensitivity more than high sensitivity
-            if hasattr(args, 'target_cell_type') and args.cell_type == 'T-cells':
+            if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells':
                 # Asymmetric loss - penalize sensitivity < target more than sensitivity > target
                 sens_diff = target_sens - sensitivity
                 sens_loss = torch.where(sens_diff > 0, 
@@ -251,7 +251,7 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
             
             # Extreme penalty thresholds
             # For T-cells, lower minimum sensitivity requirement to avoid rejection of all models
-            min_sens_threshold = torch.tensor(0.4 if hasattr(args, 'target_cell_type') and args.cell_type == 'T-cells' else 0.6, 
+            min_sens_threshold = torch.tensor(0.4 if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells' else 0.6, 
                                            device=sensitivity.device)
             min_spec_threshold = torch.tensor(0.8, device=specificity.device)
             
@@ -266,13 +266,13 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
     # Use configurable detection loss weight
     # For T-cells, use higher weight for detection loss
     detection_loss_weight = args.detection_loss_weight
-    if hasattr(args, 'target_cell_type') and args.cell_type == 'T-cells' and not hasattr(args, 'detection_loss_weight'):
+    if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells' and not hasattr(args, 'detection_loss_weight'):
         detection_loss_weight = 0.5  # Higher default for T-cells
         
     combined_detection_loss = sum(detection_losses) / len(detection_losses)
     
     # Add sensitivity-specificity regularization with appropriate weight
-    sens_spec_reg_weight = detection_loss_weight * (0.9 if hasattr(args, 'target_cell_type') and args.cell_type == 'T-cells' else 0.8)
+    sens_spec_reg_weight = detection_loss_weight * (0.9 if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells' else 0.8)
     sens_spec_reg_loss = sum(sens_spec_reg_losses) / len(sens_spec_reg_losses) if sens_spec_reg_losses else torch.tensor(0.0, device=mu.device)
     
     # Calculate total loss
@@ -619,7 +619,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         # Check for improvement in sensitivity-specificity balance with a minimum threshold
         # Only consider balance if it's at least 0.7 (to avoid saving models with bad balance)
         balance_improvement_threshold = 0.03  # 3% improvement required
-        min_balance_score = 0.4 if hasattr(args, 'target_cell_type') and args.cell_type == 'T-cells' else 0.7
+        min_balance_score = 0.4 if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells' else 0.7
         if balance_score > min_balance_score and balance_score > best_balance_score * (1 + balance_improvement_threshold):
             improvement = True
             if improvement_msg:
@@ -650,7 +650,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                     best_stability_score = stability_score
         
         # Additional validation for extreme values - don't save models with extreme sens/spec
-        if hasattr(args, 'target_cell_type') and args.cell_type == 'T-cells':
+        if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells':
             # More lenient criteria for T-cells due to low SNR
             if current_sens < 0.3 or current_spec < 0.7:
                 logger.info(f"  ⚠️ Rejecting model save due to extreme sensitivity ({current_sens:.4f}) or specificity ({current_spec:.4f})")
