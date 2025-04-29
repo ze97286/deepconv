@@ -7,8 +7,7 @@ import numpy as np
 
 class DynamicBackgroundCorrection(nn.Module):
     """
-    Dynamic background correction module that predicts sample-specific
-    background levels based on feature representation.
+    Dynamic background correction module with more conservative settings
     """
     def __init__(self, feature_dim, min_bg=0.003, max_bg=0.04):
         super().__init__()
@@ -24,9 +23,9 @@ class DynamicBackgroundCorrection(nn.Module):
             nn.Sigmoid()  # Output in [0,1] range
         )
         
-        # Initialize to predict low background initially
+        # Initialize to predict conservative background level
         with torch.no_grad():
-            self.bg_network[-2].bias.data.fill_(-3.0)  # Start with conservative bg
+            self.bg_network[-2].bias.data.fill_(-3.0)
     
     def forward(self, features):
         """
@@ -43,7 +42,7 @@ class DynamicBackgroundCorrection(nn.Module):
         bg_level = self.min_bg + bg_scale * (self.max_bg - self.min_bg)
         
         return bg_level
-
+    
 class EnhancedCancerDetectionModel(nn.Module):
     """
     Enhanced deep learning model for cancer detection from cfDNA methylation markers.
