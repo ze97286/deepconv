@@ -63,35 +63,40 @@ class DynamicBackgroundCorrection(nn.Module):
       
 class AdaptiveDetectionThresholds(nn.Module):
     """
-    Adaptive detection thresholds module that adjusts based on SNR profile,
-    with constraints to prevent extreme adaptation
+    Adaptive detection thresholds module with highly constrained adaptation range
+    and gradient damping for stability
     """
-    def __init__(self, feature_dim, base_thresholds, min_factor=0.8, max_factor=1.2):
+    def __init__(self, feature_dim, base_thresholds, min_factor=0.95, max_factor=1.05,
+                gradient_scale=0.5):
         super().__init__()
         self.base_thresholds = base_thresholds
         self.num_thresholds = len(base_thresholds)
         self.min_factor = min_factor
         self.max_factor = max_factor
+        self.gradient_scale = gradient_scale
         
         # Network to adjust thresholds based on signal-to-noise characteristics
+        # Using smaller network with more regularization
         self.threshold_network = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
+            nn.Linear(feature_dim, feature_dim // 4),  # Smaller network
             nn.GELU(),
-            nn.Linear(feature_dim // 2, self.num_thresholds),
+            nn.Dropout(0.3),  # Higher dropout
+            nn.Linear(feature_dim // 4, self.num_thresholds),
             nn.Sigmoid()
         )
         
         # Initialise to produce base thresholds
         with torch.no_grad():
-            # Set bias to produce approximately base thresholds from sigmoid
-            for i, threshold in enumerate(base_thresholds):
-                # Inverse sigmoid: log(p/(1-p))
-                bias = -math.log(1.0/threshold - 1.0)
-                self.threshold_network[-2].bias.data[i] = bias
+            # Set bias to produce center of range
+            # This pushes the network to start with minimal adaptation
+            # For sigmoid, 0 bias = 0.5 output = midpoint between min and max factors
+            self.threshold_network[-2].bias.data.fill_(0.0)
+            # Initialize weights with small values
+            self.threshold_network[-2].weight.data.mul_(0.01)
     
     def forward(self, features):
         """
-        Compute adaptive thresholds for each sample
+        Compute adaptive thresholds for each sample with gradient damping
         
         Args:
             features: Sample features [batch_size, feature_dim]
@@ -99,18 +104,45 @@ class AdaptiveDetectionThresholds(nn.Module):
         Returns:
             thresholds: Adjusted thresholds [batch_size, num_thresholds]
         """
-        # Get adjustment factors with constrained range
-        # Instead of 0.5 to 1.5, use min_factor to max_factor
-        threshold_factors = self.min_factor + self.threshold_network(features) * (self.max_factor - self.min_factor)
+        # Use gradient damping for stability during training
+        if self.training and self.gradient_scale < 1.0:
+            with torch.no_grad():
+                network_output = self.threshold_network(features)
+            # Scale gradients - this trains the network slower for stability
+            network_output_with_grad = network_output + self.gradient_scale * (self.threshold_network(features) - network_output.detach())
+            threshold_factors = self.min_factor + network_output_with_grad * (self.max_factor - self.min_factor)
+        else:
+            # Standard forward in evaluation mode or without gradient scaling
+            network_output = self.threshold_network(features)
+            threshold_factors = self.min_factor + network_output * (self.max_factor - self.min_factor)
+        
+        # Apply temporal smoothing during training (simple EMA)
+        if hasattr(self, '_last_factors') and self.training:
+            # Smooth factors with a decay of 0.9
+            smoothing_factor = 0.9
+            threshold_factors = smoothing_factor * self._last_factors + (1 - smoothing_factor) * threshold_factors
+        
+        # Save factors for next iteration
+        if self.training:
+            with torch.no_grad():
+                self._last_factors = threshold_factors.clone()
         
         # Apply to base thresholds
         base = torch.tensor(self.base_thresholds, device=features.device).unsqueeze(0)
         
-        # Apply constrained adjustment
+        # Further constrain thresholds for ultra-low concentration detection
+        # This gives even less flexibility for the most important thresholds
         adjusted_thresholds = base * threshold_factors
+        for i, threshold in enumerate(self.base_thresholds):
+            if threshold <= 0.001:  # Ultra-low concentration thresholds
+                # Even more constrained (±2%) for critical thresholds
+                const_min = threshold * 0.98
+                const_max = threshold * 1.02
+                adjusted_thresholds[:, i:i+1] = torch.clamp(adjusted_thresholds[:, i:i+1], 
+                                                           min=const_min, max=const_max)
         
         return adjusted_thresholds
-     
+    
 class ConcentrationFocusedLoss(nn.Module):
     """
     Enhanced concentration-focused loss function with range-specific weighting
@@ -325,19 +357,23 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Adaptive detection thresholds (optional)
         self.enable_adaptive_thresholds = enable_adaptive_thresholds
         if enable_adaptive_thresholds:
-            # Define min and max adaptation factors based on SNR profile
+            # Even tighter constraints based on SNR profile
             if snr_profile == "high":
-                min_factor, max_factor = 0.9, 1.1  # Less adaptation for high SNR
+                min_factor, max_factor = 0.95, 1.05  # Very narrow adaptation for high SNR
+                gradient_scale = 0.5
             elif snr_profile == "medium":
-                min_factor, max_factor = 0.85, 1.15  # Moderate adaptation for medium SNR
+                min_factor, max_factor = 0.93, 1.07  # Slightly wider for medium SNR
+                gradient_scale = 0.6
             else:  # "low"
-                min_factor, max_factor = 0.8, 1.2  # More adaptation for low SNR
+                min_factor, max_factor = 0.90, 1.10  # Wider for low SNR, but still constrained
+                gradient_scale = 0.7
                 
             self.adaptive_thresholds = AdaptiveDetectionThresholds(
                 feature_dim, 
                 detection_thresholds,
                 min_factor=min_factor,
-                max_factor=max_factor
+                max_factor=max_factor,
+                gradient_scale=gradient_scale
             )
         
         # Binary detection heads for different concentration thresholds
@@ -453,21 +489,47 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Get detection probabilities
         detection_features = torch.cat([aggregated, uncertainty], dim=1)
         detection_probs = []
-        
+
+        # Calculate a dynamic temperature based on training progress
+        # Start with high temperature (more smoothing) and anneal to 1.0
+        if hasattr(self, 'epoch') and self.training:
+            max_epochs = 200  # Approximate max epochs
+            min_temp = 1.0
+            max_temp = 2.0
+            temperature = max(min_temp, max_temp - (max_temp - min_temp) * self.epoch / max_epochs)
+        else:
+            temperature = 1.0  # No scaling during evaluation
+
         for i, head in enumerate(self.detection_heads):
-            prob = head(detection_features)
-            # If using adaptive thresholds, adjust probability with constraints
+            # Get logits (pre-sigmoid output)
+            logits = head(detection_features)
+            
+            # Apply temperature scaling before sigmoid
+            # Higher temperature makes probabilities less extreme
+            if temperature != 1.0:
+                scaled_logits = torch.logit(torch.sigmoid(logits)) / temperature
+                prob = torch.sigmoid(scaled_logits)
+            else:
+                prob = torch.sigmoid(logits)
+            
+            # If using adaptive thresholds, adjust probability with stronger constraints
             if self.enable_adaptive_thresholds:
-                # Simple interpolation between base probabilities
                 base_prob = prob
                 threshold_ratio = thresholds[:, i:i+1] / self.detection_thresholds[i]
                 
-                # Constrain the threshold ratio more strictly
-                threshold_ratio = torch.clamp(threshold_ratio, 0.9, 1.1)
+                # Ultra-tight constraint for threshold ratio
+                threshold_ratio = torch.clamp(threshold_ratio, 0.95, 1.05)
                 
-                # Adjust probability based on threshold changes with dampening
-                adj_factor = torch.pow(threshold_ratio, 0.3)
+                # Even more dampened effect
+                adj_factor = torch.pow(threshold_ratio, 0.2)  # Greatly reduced power (0.2) for minimal effect
                 prob = torch.clamp(base_prob * adj_factor, 0.0, 1.0)
+            
+            # Add special treatment for critical thresholds (ultra-low concentration)
+            if self.detection_thresholds[i] <= 0.001 and self.training:
+                # For these thresholds, push probabilities away from extremes
+                # This creates a "dead zone" near 0 and 1 to avoid extreme predictions
+                buffer = 0.02  # 2% buffer from extremes
+                prob = torch.clamp(prob, buffer, 1.0 - buffer)
             
             detection_probs.append(prob)
 
