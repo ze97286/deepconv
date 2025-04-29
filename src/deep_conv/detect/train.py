@@ -160,12 +160,12 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
         
         # Apply focal loss weighting for imbalanced detection
         # This gives higher weight to the minority class (usually positives)
-        pos_weight = torch.sum(1 - binary_y) / torch.sum(binary_y) if torch.sum(binary_y) > 0 else torch.tensor(1.0)
+        pos_weight = torch.sum(1 - binary_y) / torch.sum(binary_y) if torch.sum(binary_y) > 0 else torch.tensor(1.0, device=mu.device)
         pos_weight = torch.clamp(pos_weight, 1.0, 10.0)  # Limit max weight
         
         # Focal loss component to focus on hard examples
         pt = binary_y * detection_probs[i] + (1 - binary_y) * (1 - detection_probs[i])
-        focal_weight = (1 - pt) ** 2  # Square for stronger effect on hard examples
+        focal_weight = torch.pow(1 - pt, 2)  # Square for stronger effect on hard examples
         
         # Weighted BCE loss
         bce_loss = F.binary_cross_entropy(detection_probs[i], binary_y, reduction='none')
@@ -175,13 +175,17 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
         if threshold < 0.01:  # Give extra attention to ultra-low concentration detection
             # Add extra weight to samples near the threshold
             near_threshold_mask = (y_true >= threshold * 0.7) & (y_true <= threshold * 1.3)
-            threshold_weight = torch.ones_like(weighted_loss)
-            threshold_weight[near_threshold_mask] = 2.0  # Double weight for samples near threshold
+            threshold_weight = torch.ones_like(weighted_loss, device=weighted_loss.device)
+            # Set weights without in-place operations
+            threshold_weight = torch.where(near_threshold_mask, 
+                                          torch.ones_like(threshold_weight, device=threshold_weight.device) * 2.0,
+                                          threshold_weight)
             weighted_loss = weighted_loss * threshold_weight
             
         det_loss = weighted_loss.mean()
         detection_losses.append(det_loss)
         
+        # Add direct sensitivity-specificity regularization
         if torch.sum(binary_y) > 0 and torch.sum(1 - binary_y) > 0:  # Only if we have both positive and negative samples
             # Calculate batch-level sensitivity and specificity
             true_pos = torch.sum(detection_probs[i] * binary_y)
@@ -206,20 +210,25 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
             
             # Calculate regularization loss - penalize deviations from targets
             # Use smooth L1 loss for better stability 
-            sens_loss = F.smooth_l1_loss(sensitivity, torch.tensor(target_sensitivity, device=sensitivity.device))
-            spec_loss = F.smooth_l1_loss(specificity, torch.tensor(target_specificity, device=specificity.device))
+            target_sens = torch.tensor(target_sensitivity, device=sensitivity.device)
+            target_spec = torch.tensor(target_specificity, device=specificity.device)
+            sens_loss = F.smooth_l1_loss(sensitivity, target_sens)
+            spec_loss = F.smooth_l1_loss(specificity, target_spec)
             
             # Penalize extreme values more severely using squared penalty for large deviations
-            sens_diff = torch.abs(sensitivity - target_sensitivity)
-            spec_diff = torch.abs(specificity - target_specificity)
+            sens_diff = torch.abs(sensitivity - target_sens)
+            spec_diff = torch.abs(specificity - target_spec)
             
-            # Quadratic penalty for large deviations
+            # Quadratic penalty for large deviations (avoid in-place operations)
             extreme_sens_penalty = torch.pow(torch.clamp(sens_diff - 0.10, min=0.0), 2) * 10.0
             extreme_spec_penalty = torch.pow(torch.clamp(spec_diff - 0.05, min=0.0), 2) * 15.0
             
-            # Heavily penalize sensitivity < 0.6 or specificity < 0.9
-            min_sens_penalty = torch.pow(torch.clamp(0.6 - sensitivity, min=0.0), 2) * 25.0
-            min_spec_penalty = torch.pow(torch.clamp(0.9 - specificity, min=0.0), 2) * 25.0
+            # Heavily penalize sensitivity < 0.6 or specificity < 0.9 (avoid in-place operations)
+            min_sens_threshold = torch.tensor(0.6, device=sensitivity.device)
+            min_spec_threshold = torch.tensor(0.9, device=specificity.device)
+            
+            min_sens_penalty = torch.pow(torch.clamp(min_sens_threshold - sensitivity, min=0.0), 2) * 25.0
+            min_spec_penalty = torch.pow(torch.clamp(min_spec_threshold - specificity, min=0.0), 2) * 25.0
             
             # Weighted sum of sensitivity and specificity losses
             balance_loss = sens_weight * sens_loss + spec_loss + extreme_sens_penalty + extreme_spec_penalty + min_sens_penalty + min_spec_penalty
@@ -2242,7 +2251,7 @@ def parse_excluded_markers(excluded_markers_str):
 
 # OAC
 # qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train \
-# --name CpGenie_OAC \
+# --name deepCpGenie_OAC \
 # --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell \
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ \
 # --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed \
