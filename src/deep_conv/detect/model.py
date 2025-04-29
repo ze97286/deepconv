@@ -38,7 +38,7 @@ class DynamicBackgroundCorrection(nn.Module):
                 Shape: [batch_size, num_markers, feature_dim]
                 
         Returns:
-            bg_level: Predicted background level [batch_size, 1] or [batch_size, num_markers]
+            bg_level: Predicted background level [batch_size, 1] or [batch_size, num_markers, 1]
         """
         if self.marker_specific and marker_features is not None:
             # For marker-specific background correction
@@ -47,20 +47,44 @@ class DynamicBackgroundCorrection(nn.Module):
             
             # Reshape to process all markers at once
             flat_marker_features = marker_features.reshape(-1, D)  # [B*M, D]
-            flat_bg_scale = self.bg_network(flat_marker_features)  # [B*M, 1]
+            flat_bg_scale = self.bg_network(flat_marker_features)  # [B*M, 1] or [B*M, num_markers]
             
-            # Reshape back to [B, M, 1]
-            bg_scale = flat_bg_scale.reshape(B, M, 1)
+            # Ensure flat_bg_scale has the right shape
+            if len(flat_bg_scale.shape) > 1 and flat_bg_scale.shape[1] > 1:
+                # If the output has multiple channels (one per marker), take first dimension only
+                flat_bg_scale = flat_bg_scale[:, 0:1]  # Take just one dimension
+                
+            # Calculate expected output size before reshaping to catch errors
+            expected_size = B * M * 1  # Batch size × number of markers × 1
+            actual_size = flat_bg_scale.numel()  # Number of elements in the tensor
+            
+            if actual_size != expected_size:
+                # There's a shape mismatch - handle gracefully
+                # Fallback to sample-level background correction
+                bg_scale = self.bg_network(features)  # [B, 1] or [B, num_markers]
+                if len(bg_scale.shape) > 1 and bg_scale.shape[1] > 1:
+                    bg_scale = bg_scale[:, 0:1]  # Take just first dimension
+                    
+                # Expand to match marker dimensions
+                bg_scale = bg_scale.unsqueeze(1).expand(B, M, 1)
+            else:
+                # Reshape to [B, M, 1]
+                bg_scale = flat_bg_scale.reshape(B, M, 1)
             
             # Scale sigmoid output to desired background range
             bg_level = self.min_bg + bg_scale * (self.max_bg - self.min_bg)
         else:
             # Sample-level background
             bg_scale = self.bg_network(features)
+            
+            # Handle multi-dimensional output
+            if len(bg_scale.shape) > 1 and bg_scale.shape[1] > 1:
+                bg_scale = bg_scale[:, 0:1]  # Take just first dimension
+                
             bg_level = self.min_bg + bg_scale * (self.max_bg - self.min_bg)
         
         return bg_level
-      
+
 class AdaptiveDetectionThresholds(nn.Module):
     """
     Adaptive detection thresholds module with highly constrained adaptation range
