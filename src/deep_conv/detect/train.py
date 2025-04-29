@@ -2299,6 +2299,8 @@ def main():
     logger.info(f"Starting improved cancer detection training pipeline")
     logger.info(f"Using device: {device}")
     logger.info(f"Output directory: {args.output_dir}")
+
+    logger.info(f"git info: {get_git_info()}")
     
     # Save arguments
     args_file = os.path.join(args.output_dir, 'args.json')
