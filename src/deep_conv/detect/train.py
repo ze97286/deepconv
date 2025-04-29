@@ -207,7 +207,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
     logger = logging.getLogger('cancer_detection')
     
     git_info = get_git_info()
-    git_commit = git_info['git_commit']
+    git_commit = git_info['commit']
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -2077,7 +2077,6 @@ def parse_excluded_markers(excluded_markers_str):
 # --target_cell_idx 9 \
 # --snr_profile high \
 # --dropout_rate 0.2 \
-# --l2_weight 0.05 \
 # --feature_dim 128 \
 # --num_heads 8 \
 # --num_layers 3 \
