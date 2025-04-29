@@ -187,11 +187,32 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
     # Calculate total loss
     total_loss = concentration_loss + detection_loss_weight * combined_detection_loss
     
+    spec_sensitivity_tradeoff_losses = []
+    for i, threshold in enumerate(args.detection_thresholds):
+        binary_y = (y_true >= threshold).float()
+        
+        # Calculate sensitivity and specificity values
+        pos_samples = binary_y.sum()
+        neg_samples = (1 - binary_y).sum()
+        
+        if pos_samples > 0 and neg_samples > 0:
+            sensitivity = (detection_probs[i] * binary_y).sum() / pos_samples
+            specificity = ((1 - detection_probs[i]) * (1 - binary_y)).sum() / neg_samples
+            
+            # Penalty for imbalance between sensitivity and specificity
+            # This will encourage balanced sensitivity/specificity
+            imbalance = torch.abs(sensitivity - 0.9 * specificity)
+            spec_sensitivity_tradeoff_losses.append(imbalance)
+    
+    if spec_sensitivity_tradeoff_losses:
+        ss_tradeoff_loss = sum(spec_sensitivity_tradeoff_losses) / len(spec_sensitivity_tradeoff_losses)
+        total_loss += 0.5 * ss_tradeoff_loss  # Add weight as needed
+    
     return total_loss, concentration_loss, combined_detection_loss
 
 def train_model(model, train_loader, val_loader, control_loader, args, device):
     """
-    Enhanced training with focused optimization for low concentrations
+    Enhanced training with focused optimization for low concentrations and sensitivity-specificity balance
     
     Args:
         model: The improved cancer detection model to train
@@ -243,6 +264,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
     # Initialize tracking variables
     best_val_loss = float('inf')
     best_val_low_conc_error = float('inf')  # Track error in low concentration range
+    best_balance_score = 0.0
     best_model_state = None
     patience_counter = 0
     history = {
@@ -253,6 +275,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         'r2_score': [],
         'mean_absolute_error': [],
         'low_conc_error': [],  # Track error in critical low concentration range
+        'balance_score': [],   # Track sensitivity-specificity balance
         'concentration_metrics': [],
         'clinical_metrics': [],
         'lr': []
@@ -366,6 +389,24 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         if total_low_conc_samples > 0:
             low_conc_error /= total_low_conc_samples
         
+        # Calculate sensitivity-specificity balance score for key threshold
+        balance_score = 0.0
+        if key_low_threshold in val_metrics['clinical_metrics']:
+            metrics_key = val_metrics['clinical_metrics'][key_low_threshold]
+            sens = metrics_key['sensitivity']
+            spec = metrics_key['specificity']
+            
+            # Use F-beta score with beta=2 to give more weight to sensitivity while maintaining specificity
+            # This formula gives more weight to sensitivity (which is important for cancer detection)
+            # while still penalizing poor specificity
+            beta = 2 
+            beta_squared = beta ** 2
+            if sens > 0 and spec > 0:
+                balance_score = (1 + beta_squared) * (sens * spec) / (beta_squared * sens + spec)
+            
+            # Log the balance score
+            logger.info(f"  Sensitivity-Specificity Balance (F{beta}): {balance_score:.4f}")
+        
         # Periodic calibration
         if args.calibrate and (epoch % args.calibrate_every == 0 or epoch == args.epochs - 1):
             logger.info(f"Calibrating model...")
@@ -383,6 +424,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         history['r2_score'].append(val_metrics['r2'])
         history['mean_absolute_error'].append(val_metrics['mae'])
         history['low_conc_error'].append(low_conc_error)
+        history['balance_score'].append(balance_score)
         history['clinical_metrics'].append(val_metrics['clinical_metrics'])
         history['concentration_metrics'].append(conc_metrics)
         history['lr'].append(scheduler.get_last_lr()[0])
@@ -420,10 +462,8 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                            f"MAE={range_metrics['mae']:.6f}, "
                            f"Within 25%={range_metrics.get('within_25pct', 0):.1f}%")
         
-        # Check for improvement - using a combination of validation loss and low concentration error
-        # This puts more emphasis on improving performance in the critical low concentration range
-        combined_metric = val_loss + (low_conc_error * 2)  # Weight low concentration error more
-        
+        # Check for improvement - using a combination of validation loss, low concentration error,
+        # and sensitivity-specificity balance
         improvement = False
         improvement_msg = ""
         
@@ -441,7 +481,26 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
             improvement_msg += f"Low conc. error improved: {(best_val_low_conc_error - low_conc_error) / best_val_low_conc_error * 100:.2f}%"
             best_val_low_conc_error = low_conc_error
         
-        # If there's improvement in either metric, save the model
+        # Check for improvement in sensitivity-specificity balance
+        # Only save if balance score significantly improves (by at least 3%)
+        # This helps prevent oscillations by requiring meaningful improvements
+        balance_improvement_threshold = 0.03  # 3% improvement required
+        if balance_score > best_balance_score and (best_balance_score == 0 or 
+                                                    balance_score > best_balance_score * (1 + balance_improvement_threshold)):
+            improvement = True
+            if improvement_msg:
+                improvement_msg += " and "
+            
+            # Calculate improvement percentage safely
+            if best_balance_score > 0:
+                improvement_pct = (balance_score - best_balance_score) / best_balance_score * 100
+            else:
+                improvement_pct = 100.0  # First non-zero balance score
+                
+            improvement_msg += f"Sens/Spec balance improved: {improvement_pct:.2f}%"
+            best_balance_score = balance_score
+        
+        # If there's improvement in any metric, save the model
         if improvement:
             best_model_state = {
                 'model': model.state_dict(),
@@ -449,6 +508,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                 'val_loss': val_loss,
                 'val_metrics': val_metrics,
                 'low_conc_error': low_conc_error,
+                'balance_score': balance_score,  # Store balance score
                 'concentration_metrics': conc_metrics,
                 'args': vars(args),
                 'git_commit': git_commit,
@@ -531,7 +591,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
     if best_model_state is not None:
         model.load_state_dict(best_model_state['model'])
     
-    # Evaluate on validation set to get predictions
+     # Evaluate on validation set to get predictions
     val_preds = []
     val_targets = []
     val_lower_ci = []

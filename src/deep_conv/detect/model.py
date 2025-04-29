@@ -63,12 +63,15 @@ class DynamicBackgroundCorrection(nn.Module):
       
 class AdaptiveDetectionThresholds(nn.Module):
     """
-    Adaptive detection thresholds module that adjusts based on SNR profile
+    Adaptive detection thresholds module that adjusts based on SNR profile,
+    with constraints to prevent extreme adaptation
     """
-    def __init__(self, feature_dim, base_thresholds):
+    def __init__(self, feature_dim, base_thresholds, min_factor=0.8, max_factor=1.2):
         super().__init__()
         self.base_thresholds = base_thresholds
         self.num_thresholds = len(base_thresholds)
+        self.min_factor = min_factor
+        self.max_factor = max_factor
         
         # Network to adjust thresholds based on signal-to-noise characteristics
         self.threshold_network = nn.Sequential(
@@ -96,17 +99,18 @@ class AdaptiveDetectionThresholds(nn.Module):
         Returns:
             thresholds: Adjusted thresholds [batch_size, num_thresholds]
         """
-        # Get adjustment factors (0.5 to 1.5 range)
-        threshold_factors = 0.5 + self.threshold_network(features)
+        # Get adjustment factors with constrained range
+        # Instead of 0.5 to 1.5, use min_factor to max_factor
+        threshold_factors = self.min_factor + self.threshold_network(features) * (self.max_factor - self.min_factor)
         
         # Apply to base thresholds
         base = torch.tensor(self.base_thresholds, device=features.device).unsqueeze(0)
         
-        # Limit adjustment based on SNR
+        # Apply constrained adjustment
         adjusted_thresholds = base * threshold_factors
         
         return adjusted_thresholds
-        
+     
 class ConcentrationFocusedLoss(nn.Module):
     """
     Enhanced concentration-focused loss function with range-specific weighting
@@ -321,7 +325,20 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Adaptive detection thresholds (optional)
         self.enable_adaptive_thresholds = enable_adaptive_thresholds
         if enable_adaptive_thresholds:
-            self.adaptive_thresholds = AdaptiveDetectionThresholds(feature_dim, detection_thresholds)
+            # Define min and max adaptation factors based on SNR profile
+            if snr_profile == "high":
+                min_factor, max_factor = 0.9, 1.1  # Less adaptation for high SNR
+            elif snr_profile == "medium":
+                min_factor, max_factor = 0.85, 1.15  # Moderate adaptation for medium SNR
+            else:  # "low"
+                min_factor, max_factor = 0.8, 1.2  # More adaptation for low SNR
+                
+            self.adaptive_thresholds = AdaptiveDetectionThresholds(
+                feature_dim, 
+                detection_thresholds,
+                min_factor=min_factor,
+                max_factor=max_factor
+            )
         
         # Binary detection heads for different concentration thresholds
         self.detection_heads = nn.ModuleList()
@@ -439,17 +456,21 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         for i, head in enumerate(self.detection_heads):
             prob = head(detection_features)
-            # If using adaptive thresholds, adjust probability
+            # If using adaptive thresholds, adjust probability with constraints
             if self.enable_adaptive_thresholds:
                 # Simple interpolation between base probabilities
                 base_prob = prob
                 threshold_ratio = thresholds[:, i:i+1] / self.detection_thresholds[i]
-                # Adjust probability based on threshold changes
-                adj_factor = torch.pow(threshold_ratio, 0.5)  # Square root to dampen effect
+                
+                # Constrain the threshold ratio more strictly
+                threshold_ratio = torch.clamp(threshold_ratio, 0.9, 1.1)
+                
+                # Adjust probability based on threshold changes with dampening
+                adj_factor = torch.pow(threshold_ratio, 0.3)
                 prob = torch.clamp(base_prob * adj_factor, 0.0, 1.0)
             
             detection_probs.append(prob)
-        
+
         return mu_corrected, uncertainty, detection_probs, attention_weights
     
     def compute_loss(self, mu, uncertainty, y_true, control_mask=None):
