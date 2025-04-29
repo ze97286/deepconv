@@ -100,11 +100,14 @@ def parse_args():
     else:
         # Use default ranges based on SNR profile
         if args.snr_profile == "high":
-            args.critical_ranges = [(0.0005, 0.001, 2.0), (0.001, 0.01, 1.5), (0.01, 0.05, 1.2)]
+            args.critical_ranges = [(0.0005, 0.001, 2.0), (0.001, 0.005, 3.0), (0.005, 0.01, 1.5), (0.01, 0.05, 1.2)]
         elif args.snr_profile == "medium":
-            args.critical_ranges = [(0.001, 0.005, 2.0), (0.005, 0.02, 1.5), (0.02, 0.1, 1.2)]
+            args.critical_ranges = [(0.001, 0.005, 3.0), (0.005, 0.02, 1.5), (0.02, 0.1, 1.2)]
         else:  # "low"
-            args.critical_ranges = [(0.001, 0.01, 2.0), (0.01, 0.05, 1.8), (0.05, 0.2, 1.5)]
+            args.critical_ranges = [(0.001, 0.01, 3.0), (0.01, 0.05, 1.8), (0.05, 0.2, 1.5)]
+
+    args.lr = args.lr * 0.8
+    args.early_stopping = max(args.early_stopping, 20)
 
     return args
 
@@ -691,7 +694,18 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                 for epoch_metrics in values:
                     serializable_epoch = {}
                     for threshold, metrics in epoch_metrics.items():
-                        serializable_epoch[str(threshold)] = {k: float(v) for k, v in metrics.items() if v is not None}
+                        serializable_metrics_dict = {}
+                        for k, v in metrics.items():
+                            if v is not None:
+                                if isinstance(v, dict):
+                                    # Handle nested dictionaries
+                                    serializable_metrics_dict[k] = {
+                                        sk: float(sv) if isinstance(sv, (int, float)) else sv 
+                                        for sk, sv in v.items()
+                                    }
+                                else:
+                                    serializable_metrics_dict[k] = float(v)
+                        serializable_epoch[str(threshold)] = serializable_metrics_dict
                     serializable_metrics.append(serializable_epoch)
                 serializable_history[key] = serializable_metrics
             elif key == 'concentration_metrics':
@@ -700,7 +714,10 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                 for epoch_metrics in values:
                     serializable_epoch = {}
                     for range_name, metrics in epoch_metrics.get('stratified_metrics', {}).items():
-                        serializable_epoch[range_name] = {k: float(v) if v is not None else None for k, v in metrics.items()}
+                        serializable_epoch[range_name] = {
+                            k: float(v) if v is not None and not isinstance(v, dict) else None 
+                            for k, v in metrics.items()
+                        }
                     serializable_metrics.append(serializable_epoch)
                 serializable_history[key] = serializable_metrics
         

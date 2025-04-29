@@ -176,6 +176,7 @@ class AdaptiveDetectionThresholds(nn.Module):
 class ConcentrationFocusedLoss(nn.Module):
     """
     Enhanced concentration-focused loss function with range-specific weighting
+    and improved handling of the 0.1-0.5% range
     """
     def __init__(self, critical_ranges=None, zero_penalty=10.0, control_penalty=20.0):
         super().__init__()
@@ -204,45 +205,77 @@ class ConcentrationFocusedLoss(nn.Module):
         non_zero_mask = (y_true > epsilon)
         
         # Initialise relative error tensor
-        rel_error = torch.zeros_like(mse_loss)
+        rel_error = torch.zeros_like(mse_loss, device=mse_loss.device)
         
         # Compute relative error only for non-zero targets
         if non_zero_mask.sum() > 0:
-            rel_error[non_zero_mask] = torch.abs(mu[non_zero_mask] - y_true[non_zero_mask]) / (y_true[non_zero_mask] + epsilon)
+            rel_error = torch.where(
+                non_zero_mask,
+                torch.abs(mu - y_true) / (y_true + epsilon),
+                rel_error
+            )
         
         # Apply log-scale weighting - but adjust it for critical ranges
         log_weights = 1.0 / torch.log10(y_true * 1000 + 10.0)
         log_weights = torch.clamp(log_weights, 0.5, 2.0)
         
         # Apply additional weights for critical ranges
+        range_weights = torch.ones_like(log_weights, device=log_weights.device)
         for low, high, weight in self.critical_ranges:
             range_mask = (y_true >= low) & (y_true < high)
-            log_weights = torch.where(range_mask, log_weights * weight, log_weights)
+            range_weights = torch.where(range_mask, torch.ones_like(range_weights, device=range_weights.device) * weight, range_weights)
+        
+        # Special focus on 0.1-0.5% range
+        ultra_focused_range = (y_true >= 0.001) & (y_true < 0.005)
+        if ultra_focused_range.sum() > 0:
+            # Add extra weight to relative error for this range
+            # This puts more emphasis on getting the relative error right
+            ultra_range_weight = 2.0  # Extra multiplier for relative error in this range
+            rel_error = torch.where(
+                ultra_focused_range,
+                rel_error * ultra_range_weight,
+                rel_error
+            )
+            
+            # Add special "within 25%" loss component for this range
+            if non_zero_mask.sum() > 0:
+                within_25pct = torch.where(
+                    ultra_focused_range & (rel_error <= 0.25),
+                    torch.zeros_like(rel_error, device=rel_error.device),
+                    torch.where(
+                        ultra_focused_range,
+                        torch.pow(rel_error - 0.25, 2),  # Quadratic penalty for > 25% error
+                        torch.zeros_like(rel_error, device=rel_error.device)
+                    )
+                )
+                # Add this penalty to the rel_error
+                rel_error = rel_error + within_25pct
+        
+        # Apply weights to MSE and relative error
+        log_weights = log_weights * range_weights
+        weighted_mse = (mse_loss * log_weights).mean()
+        weighted_rel = (rel_error * log_weights).mean() if non_zero_mask.sum() > 0 else torch.tensor(0.0, device=mse_loss.device)
         
         # Zero-concentration specific penalty - stronger for false positives
         zero_mask = (y_true < epsilon)
-        zero_penalty = self.zero_penalty * mu[zero_mask].mean() if zero_mask.sum() > 0 else 0.0
+        zero_penalty = self.zero_penalty * mu[zero_mask].mean() if zero_mask.sum() > 0 else torch.tensor(0.0, device=mse_loss.device)
         
         # Control sample penalty - even stronger for known negatives
-        control_loss = 0.0
+        control_loss = torch.tensor(0.0, device=mse_loss.device)
         if control_mask is not None and control_mask.sum() > 0:
             control_loss = self.control_penalty * mu[control_mask].mean()
         
-        # Apply weights to MSE and relative error
-        weighted_mse = (mse_loss * log_weights).mean()
-        weighted_rel = (rel_error * log_weights).mean() if non_zero_mask.sum() > 0 else 0.0
-        
         # Add calibration component for uncertainty estimates
-        calibration_loss = 0.0
+        calibration_loss = torch.tensor(0.0, device=mse_loss.device)
         if uncertainty is not None:
             z_scores = torch.abs(mu - y_true) / (uncertainty + 1e-6)
-            calibration_loss = F.smooth_l1_loss(z_scores, torch.ones_like(z_scores) * 1.96)
+            calibration_loss = F.smooth_l1_loss(z_scores, torch.ones_like(z_scores, device=z_scores.device) * 1.96)
         
         # Combine all components with adjusted weights
         total_loss = weighted_mse + 0.7 * weighted_rel + zero_penalty + control_loss + 0.2 * calibration_loss
         
         return total_loss
-    
+       
 class EnhancedCancerDetectionModel(nn.Module):
     """
     Enhanced deep learning model for cancer detection from cfDNA methylation markers.
