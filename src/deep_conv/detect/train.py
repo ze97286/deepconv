@@ -227,18 +227,9 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
                     target_specificity = 0.93
                     sens_weight = 2.0
             else:
-                if threshold <= 0.001:  # 0.1% threshold 
-                    target_sensitivity = 0.80  # Increased from 0.82
-                    target_specificity = 0.93  # Reduced from 0.94
-                    sens_weight = 1.3  # Increased from 1.0
-                elif threshold <= 0.005:  # 0.1-0.5% range
-                    target_sensitivity = 0.82  # Increased from 0.80
-                    target_specificity = 0.92  # Reduced from 0.93
-                    sens_weight = 1.5  # Unchanged
-                else:
-                    target_sensitivity = 0.80  # Increased from 0.78
-                    target_specificity = 0.94  # Reduced from 0.96
-                    sens_weight = 1.2  # Increased from 1.0
+                # Standard smooth L1 loss for OAC
+                sens_loss = F.smooth_l1_loss(sensitivity, target_sens)
+                spec_loss = F.smooth_l1_loss(specificity, target_spec)
             
             # Calculate regularization loss
             target_sens = torch.tensor(target_sensitivity, device=sensitivity.device)
