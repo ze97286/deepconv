@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import math
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
+from deep_conv.detect.visualise import *
 
 from deep_conv.detect.preprocess import prepare_data_for_training, load_train_with_contrastive_data
 from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyser
@@ -150,9 +151,25 @@ def setup_logging(output_dir):
     return logger
 
 def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, control_mask=None):
-    """Calculate combined loss with specialized handling for T-cells low SNR data"""
+    """Calculate combined loss with specialized handling for T-cells and OAC"""
+    is_tcells = hasattr(args, 'target_cell_type') and args.target_cell_type.lower() == 't-cells'
+    is_oac = hasattr(args, 'target_cell_type') and args.target_cell_type.lower() == 'oac'
+    
     # Get concentration loss using model's compute_loss method
     concentration_loss = model.compute_loss(mu, uncertainty, y_true, control_mask)
+    
+    # Add special loss component for the 0.1-0.5% range for OAC
+    if is_oac:
+        # Identify samples in the critical 0.1-0.5% range
+        oac_focused_range = (y_true >= 0.001) & (y_true < 0.005)  # 0.1-0.5% range
+        if oac_focused_range.sum() > 0:
+            # MSE for this range with very high weight
+            oac_range_pred = mu[oac_focused_range]
+            oac_range_true = y_true[oac_focused_range]
+            oac_range_mse = F.mse_loss(oac_range_pred, oac_range_true, reduction='mean')
+            
+            # Add specially weighted term to concentration_loss
+            concentration_loss = concentration_loss + oac_range_mse * 5.0  # High weight
     
     # Calculate detection losses
     detection_losses = []
@@ -163,14 +180,17 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
         
         # Apply focal loss weighting for imbalanced detection
         pos_weight = torch.sum(1 - binary_y) / torch.sum(binary_y) if torch.sum(binary_y) > 0 else torch.tensor(1.0, device=mu.device)
-        # For T-cells, use higher pos_weight to address extreme sensitivity issues
-        if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells':
+        
+        # Different positive weighting based on cell type
+        if is_tcells:
             pos_weight = torch.clamp(pos_weight * 1.5, 2.0, 15.0)  # Higher weight range for T-cells
+        elif is_oac and threshold <= 0.005:  # Special handling for OAC at low thresholds
+            pos_weight = torch.clamp(pos_weight * 1.2, 1.5, 12.0)  # Moderate boost for OAC
         else:
             pos_weight = torch.clamp(pos_weight, 1.0, 10.0)
         
-        # Focal loss component with higher gamma for T-cells to focus more on hard examples
-        gamma = 2.0 if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells' else 2.0
+        # Focal loss component with different gamma based on cell type
+        gamma = 2.5 if is_tcells else (2.0 if is_oac else 2.0)
         pt = binary_y * detection_probs[i] + (1 - binary_y) * (1 - detection_probs[i])
         focal_weight = torch.pow(1 - pt, gamma)
         
@@ -183,8 +203,15 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
             # Add extra weight to samples near the threshold
             near_threshold_mask = (y_true >= threshold * 0.7) & (y_true <= threshold * 1.3)
             threshold_weight = torch.ones_like(weighted_loss, device=weighted_loss.device)
-            # For T-cells, use even higher weight for near-threshold samples
-            near_threshold_multiplier = 3.0 if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells' else 2.0
+            
+            # Different weighting based on cell type
+            if is_tcells:
+                near_threshold_multiplier = 3.0  # Higher for T-cells
+            elif is_oac and threshold <= 0.005:  # Special handling for OAC 0.1-0.5%
+                near_threshold_multiplier = 2.5  # Boosted for OAC in critical range
+            else:
+                near_threshold_multiplier = 2.0
+                
             threshold_weight = torch.where(near_threshold_mask, 
                                           torch.ones_like(threshold_weight, device=threshold_weight.device) * near_threshold_multiplier,
                                           threshold_weight)
@@ -193,7 +220,7 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
         det_loss = weighted_loss.mean()
         detection_losses.append(det_loss)
         
-        # Sensitivity-specificity regularization with specialized T-cells targets
+        # Sensitivity-specificity regularization with cell-type-specific targets
         if torch.sum(binary_y) > 0 and torch.sum(1 - binary_y) > 0:
             # Calculate batch-level sensitivity and specificity
             true_pos = torch.sum(detection_probs[i] * binary_y)
@@ -205,37 +232,51 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
             sensitivity = true_pos / total_pos
             specificity = true_neg / total_neg
             
-            # T-cells specific targets - more permissive sensitivity requirements
-            if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells':
+            # T-cells specific targets
+            if is_tcells:
                 if threshold <= 0.001:
                     target_sensitivity = 0.70
                     target_specificity = 0.98
-                    sens_weight = 2.5  # Higher weight for sensitivity to combat low sensitivity issue
+                    sens_weight = 2.5  # Higher weight for sensitivity for T-cells
                 elif threshold <= 0.01:
                     target_sensitivity = 0.75  # Target for 1% concentration
                     target_specificity = 0.95
-                    sens_weight = 3.0  # Even more emphasis at the key 1% threshold
+                    sens_weight = 3.0  # Even higher at key 1% T-cells threshold
                 else:
                     target_sensitivity = 0.80
                     target_specificity = 0.93
                     sens_weight = 2.0
+            # OAC specific targets
+            elif is_oac:
+                if threshold <= 0.001:  # 0.1% threshold
+                    target_sensitivity = 0.85
+                    target_specificity = 0.92  # Lowered to prevent extreme specificity
+                    sens_weight = 2.0
+                elif threshold <= 0.005:  # 0.1-0.5% range
+                    target_sensitivity = 0.87  # Higher target for critical range
+                    target_specificity = 0.90
+                    sens_weight = 2.5  # Higher weight for critical range
+                else:
+                    target_sensitivity = 0.82
+                    target_specificity = 0.95
+                    sens_weight = 1.5
             else:
                 # Standard targets for other cell types
                 if threshold <= 0.001:
-                    target_sensitivity = 0.85  # Lower from 0.90
-                    target_specificity = 0.95  # Keep the same
-                    sens_weight = 1.5  # Lower weight to reduce extreme sensitivity 
+                    target_sensitivity = 0.90
+                    target_specificity = 0.95
+                    sens_weight = 2.0
                 else:
-                    target_sensitivity = 0.80  # Lower from 0.85
-                    target_specificity = 0.97  # Keep the same
-                    sens_weight = 1.0  # Lower weight to reduce extreme sensitivity
-                        
+                    target_sensitivity = 0.85
+                    target_specificity = 0.97
+                    sens_weight = 1.5
+            
             # Calculate regularization loss
             target_sens = torch.tensor(target_sensitivity, device=sensitivity.device)
             target_spec = torch.tensor(target_specificity, device=specificity.device)
             
-            # For T-cells, use asymmetric loss that penalizes low sensitivity more than high sensitivity
-            if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells':
+            # For T-cells, use asymmetric loss
+            if is_tcells:
                 # Asymmetric loss - penalize sensitivity < target more than sensitivity > target
                 sens_diff = target_sens - sensitivity
                 sens_loss = torch.where(sens_diff > 0, 
@@ -244,35 +285,58 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
                 
                 # For specificity, use normal L1 loss
                 spec_loss = F.smooth_l1_loss(specificity, target_spec)
+            # For OAC, also use asymmetric loss but with different parameters
+            elif is_oac:
+                # For OAC, we want to strongly penalize both low sensitivity and extremely high specificity
+                sens_diff = target_sens - sensitivity
+                # Stronger penalty for low sensitivity
+                sens_loss = torch.where(sens_diff > 0,
+                                       sens_diff * sens_diff * 2.5,
+                                       sens_diff * sens_diff * 0.7)
+                
+                # For specificity, penalize both too low and too high values
+                spec_diff = specificity - target_spec
+                spec_loss = torch.where(spec_diff > 0.03,  # Penalize specificity significantly above target
+                                       (spec_diff - 0.03) * (spec_diff - 0.03) * 2.0,  # Quadratic penalty for high specificity
+                                       torch.where(spec_diff < -0.02,  # Also penalize low specificity
+                                                 (-spec_diff - 0.02) * (-spec_diff - 0.02) * 1.5,
+                                                 torch.tensor(0.0, device=spec_diff.device)))
             else:
                 # Standard smooth L1 loss for other cell types
                 sens_loss = F.smooth_l1_loss(sensitivity, target_sens)
                 spec_loss = F.smooth_l1_loss(specificity, target_spec)
             
-            # Extreme penalty thresholds
-            # For T-cells, lower minimum sensitivity requirement to avoid rejection of all models
-            min_sens_threshold = torch.tensor(0.4 if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells' else 0.6, 
+            # Different extreme penalty thresholds based on cell type
+            min_sens_threshold = torch.tensor(0.4 if is_tcells else 0.6, 
                                            device=sensitivity.device)
             min_spec_threshold = torch.tensor(0.8, device=specificity.device)
+            
+            # For OAC, also add a max specificity threshold to prevent extreme specificity
+            if is_oac:
+                max_spec_threshold = torch.tensor(0.98, device=specificity.device)
+                max_spec_penalty = torch.pow(torch.clamp(specificity - max_spec_threshold, min=0.0), 2) * 20.0
+            else:
+                max_spec_penalty = torch.tensor(0.0, device=specificity.device)
             
             # Quadratic penalties for extreme deviations
             extreme_sens_penalty = torch.pow(torch.clamp(min_sens_threshold - sensitivity, min=0.0), 2) * 25.0
             extreme_spec_penalty = torch.pow(torch.clamp(min_spec_threshold - specificity, min=0.0), 2) * 25.0
             
             # Combined loss with appropriate weights
-            balance_loss = sens_weight * sens_loss + spec_loss + extreme_sens_penalty + extreme_spec_penalty
+            balance_loss = sens_weight * sens_loss + spec_loss + extreme_sens_penalty + extreme_spec_penalty + max_spec_penalty
             sens_spec_reg_losses.append(balance_loss)
     
-    # Use configurable detection loss weight
-    # For T-cells, use higher weight for detection loss
+    # Use configurable detection loss weight with cell-type adjustments
     detection_loss_weight = args.detection_loss_weight
-    if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells' and not hasattr(args, 'detection_loss_weight'):
+    if is_tcells and not hasattr(args, 'detection_loss_weight'):
         detection_loss_weight = 0.5  # Higher default for T-cells
+    elif is_oac and not hasattr(args, 'detection_loss_weight'):
+        detection_loss_weight = 0.4  # Moderate default for OAC
         
     combined_detection_loss = sum(detection_losses) / len(detection_losses)
     
-    # Add sensitivity-specificity regularization with appropriate weight
-    sens_spec_reg_weight = detection_loss_weight * (0.9 if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells' else 0.8)
+    # Add sensitivity-specificity regularization
+    sens_spec_reg_weight = detection_loss_weight * (0.9 if is_tcells else (0.8 if is_oac else 0.8))
     sens_spec_reg_loss = sum(sens_spec_reg_losses) / len(sens_spec_reg_losses) if sens_spec_reg_losses else torch.tensor(0.0, device=mu.device)
     
     # Calculate total loss
@@ -587,11 +651,30 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         # Log concentration metrics for key ranges
         # Adjust ranges based on SNR profile
         if args.snr_profile == "high":
-            key_ranges = ['0.05-0.1%', '0.1-0.5%', '0.5-1%']
+            key_ranges = [
+                '0.05-0.1%',   # 0.0005-0.001
+                '0.1-0.5%',    # 0.001-0.005
+                '0.5-1%',      # 0.005-0.01
+                '1-2.5%',      # 0.01-0.025 (new)
+                '2.5-5%',      # 0.025-0.05 (new)
+                '5-10%'        # 0.05-0.1 (new)
+            ]
         elif args.snr_profile == "medium":
-            key_ranges = ['0.1-0.5%', '0.5-1%', '1-5%']
+            key_ranges = [
+                '0.1-0.5%',    # 0.001-0.005
+                '0.5-1%',      # 0.005-0.01
+                '1-2.5%',      # 0.01-0.025 (new)
+                '2.5-5%',      # 0.025-0.05 (new)
+                '5-10%'        # 0.05-0.1 (new)
+            ]
         else:  # "low"
-            key_ranges = ['0.5-1%', '1-5%', '5-10%']
+            key_ranges = [
+                '0.5-1%',      # 0.005-0.01
+                '1-2.5%',      # 0.01-0.025 (new)
+                '2.5-5%',      # 0.025-0.05 (new)
+                '5-10%',       # 0.05-0.1 (new)
+                '10-20%'       # 0.1-0.2 (new)
+            ]
             
         for range_name in key_ranges:
             if range_name in conc_metrics['stratified_metrics']:
@@ -913,9 +996,11 @@ def compute_concentration_aware_metrics(predictions, targets):
         (0.0005, 0.001, "0.05-0.1%"),
         (0.001, 0.005, "0.1-0.5%"),
         (0.005, 0.01, "0.5-1%"),
-        (0.01, 0.05, "1-5%"),
+        (0.01, 0.025, "1-2.5%"),  
+        (0.025, 0.05, "2.5-5%"),  
         (0.05, 0.1, "5-10%"),
-        (0.1, 1.0, ">10%")
+        (0.1, 0.2, "10-20%"),     
+        (0.2, 1.0, ">20%")        
     ]
     
     # Initialize results dict
@@ -1650,6 +1735,8 @@ def visualise_results(predictions, ground_truth, output_subdir, ci_data=None, ma
         marker_importance: Optional marker importance data
         prefix: Optional prefix for output files
     """
+    import pandas as pd
+    import numpy as np
     logger = logging.getLogger('cancer_detection')
     
     # Create visualisation directory
@@ -1657,8 +1744,6 @@ def visualise_results(predictions, ground_truth, output_subdir, ci_data=None, ma
     
     # Try to import visualisation module
     try:
-        from deep_conv.detect.visualise import create_visualisations
-        
         logger.info(f"Creating visualisations for {prefix}data...")
         
         # Generate visualisations
@@ -1673,6 +1758,30 @@ def visualise_results(predictions, ground_truth, output_subdir, ci_data=None, ma
         logger.info(f"{prefix}MAE: {metrics['mae']:.6f}")
         logger.info(f"{prefix}% Within 10% error: {metrics['within_10pct']:.2f}%")
         
+        df = pd.DataFrame({
+            'true_value': np.array(ground_truth).flatten(),
+            'predicted_value': np.array(predictions).flatten()
+        })
+
+        # Calculate errors
+        df['error'] = df['predicted_value'] - df['true_value']
+        df['abs_error'] = np.abs(df['error'])
+        rel_error = np.full_like(df['true_value'], np.nan, dtype=float)
+        non_zero_mask = df['true_value'] > 0
+        rel_error[non_zero_mask] = np.abs(df['predicted_value'][non_zero_mask] - df['true_value'][non_zero_mask]) / df['true_value'][non_zero_mask] * 100
+        df['rel_error'] = rel_error
+
+        # Define thresholds
+        clinical_thresholds = [0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1]
+        specific_thresholds = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1]
+
+        # Add clinical metrics
+        clinical_metrics = create_clinical_decision_metrics(df, clinical_thresholds, output_subdir)
+        create_threshold_specific_analysis(df, specific_thresholds, output_subdir)
+
+        # Update returned metrics
+        metrics['clinical_decision_metrics'] = clinical_metrics
+
         # If confidence interval data is provided, create additional plots
         if ci_data is not None:
             lower_ci, upper_ci = ci_data
@@ -2332,34 +2441,10 @@ def parse_excluded_markers(excluded_markers_str):
 
 
 # OAC
-# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train \
-# --name balanced_CpGenie_OAC \
-# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell \
-# --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ \
-# --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed \
-# --target_cell_type OAC \
-# --target_cell_idx 9 \
-# --snr_profile high \
-# --dropout_rate 0.25 \
-# --feature_dim 144 \
-# --num_heads 8 \
-# --num_layers 3 \
-# --detection_thresholds 0.0005,0.001,0.005,0.01,0.05 \
-# --critical_ranges "0.0005,0.001,2.5;0.001,0.005,3.5;0.005,0.01,2.5;0.01,0.05,1.5" \
-# --detection_loss_weight 0.3 \
-# --min_reliable_coverage 5.0 \
-# --enable_adaptive_thresholds \
-# --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ \
-# --calibrate \
-# --calibrate_every 5 \
-# --early_stopping 20 \
-# --grad_accum_steps 4 \
-# --batch_size 32 \
-# --weight_decay 0.035 \
-# --excluded_markers "44,58,111,133,77,95,127,38,108,115" \
-# --epochs 250 \
-# --lr 2.5e-4 \
-# --save_interval 10'
+# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name balanced_CpGenie_OAC --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --snr_profile high --dropout_rate 0.25 --feature_dim 144 --detection_thresholds 0.0005,0.001,0.005,0.01,0.05 --critical_ranges "0.0005,0.001,2.5;0.001,0.005,3.5;0.005,0.01,2.5;0.01,0.05,1.5" --detection_loss_weight 0.3 --min_reliable_coverage 5.0 --enable_adaptive_thresholds \
+# --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 5 \
+# --early_stopping 20 --grad_accum_steps 4 --weight_decay 0.035 --excluded_markers "44,58,111,133,77,95,127,38,108,115" --epochs 250 \
+# --lr 2.5e-4 --save_interval 10'
 
 def main():
     """

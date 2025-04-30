@@ -719,19 +719,588 @@ def visualize_test_results(results_file, output_dir):
     return create_visualisations(predictions, targets, output_dir)
 
 
-if __name__ == "__main__":
-    import argparse
+def create_clinical_decision_metrics(df, thresholds, output_dir):
+    """
+    Create metrics specifically focused on clinical decision making.
+    For each concentration threshold, calculate the PPV, NPV, and likelihood ratios.
+    
+    Args:
+        df: DataFrame with 'true_value' and 'predicted_value' columns
+        thresholds: List of concentration thresholds to evaluate
+        output_dir: Directory to save visualizations
+    
+    Returns:
+        Dictionary of clinical decision metrics
+    """
+    import numpy as np
+    import pandas as pd
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    import os
+    import json
+    
+    # Initialize results dictionary
+    clinical_metrics = {}
+    
+    # For each concentration threshold
+    for threshold in thresholds:
+        # Create contingency table
+        true_positive = ((df['true_value'] >= threshold) & (df['predicted_value'] >= threshold)).sum()
+        false_positive = ((df['true_value'] < threshold) & (df['predicted_value'] >= threshold)).sum()
+        true_negative = ((df['true_value'] < threshold) & (df['predicted_value'] < threshold)).sum()
+        false_negative = ((df['true_value'] >= threshold) & (df['predicted_value'] < threshold)).sum()
+        
+        # Calculate primary metrics
+        sensitivity = true_positive / (true_positive + false_negative) if (true_positive + false_negative) > 0 else 0
+        specificity = true_negative / (true_negative + false_positive) if (true_negative + false_positive) > 0 else 0
+        
+        # Calculate positive predictive value (PPV) - critical for clinical question
+        ppv = true_positive / (true_positive + false_positive) if (true_positive + false_positive) > 0 else 0
+        
+        # Calculate negative predictive value (NPV)
+        npv = true_negative / (true_negative + false_negative) if (true_negative + false_negative) > 0 else 0
+        
+        # Calculate likelihood ratios
+        positive_lr = sensitivity / (1 - specificity) if (1 - specificity) > 0 else float('inf')
+        negative_lr = (1 - sensitivity) / specificity if specificity > 0 else float('inf')
+        
+        # Store metrics
+        clinical_metrics[threshold] = {
+            'sensitivity': float(sensitivity),
+            'specificity': float(specificity),
+            'ppv': float(ppv),  # This answers "If test is positive, what's the probability it's truly positive?"
+            'npv': float(npv),  # This answers "If test is negative, what's the probability it's truly negative?"
+            'positive_lr': float(positive_lr),
+            'negative_lr': float(negative_lr),
+            'true_positive': int(true_positive),
+            'false_positive': int(false_positive),
+            'true_negative': int(true_negative),
+            'false_negative': int(false_negative),
+            'prevalence': float((true_positive + false_negative) / len(df))
+        }
+    
+    # Save metrics
+    os.makedirs(output_dir, exist_ok=True)
+    with open(os.path.join(output_dir, 'clinical_decision_metrics.json'), 'w') as f:
+        json.dump(clinical_metrics, f, indent=2)
+    
+    # Create visualization for key metrics
+    create_clinical_decision_plot(clinical_metrics, output_dir)
+    
+    return clinical_metrics
+
+def create_clinical_decision_plot(clinical_metrics, output_dir):
+    """
+    Create a plot showing key clinical decision metrics (PPV, NPV) across thresholds
+    """
+    import plotly.graph_objects as go
+    import numpy as np
     import os
     
-    parser = argparse.ArgumentParser(description='Create enhanced visualizations for model evaluation')
-    parser.add_argument('--results_file', type=str, help='Path to test_results.json file')
-    parser.add_argument('--output_dir', type=str, default='enhanced_visualizations', help='Output directory')
+    # Extract thresholds and metrics
+    thresholds = sorted(float(t) for t in clinical_metrics.keys())
+    sensitivity = [clinical_metrics[t]['sensitivity'] for t in thresholds]
+    specificity = [clinical_metrics[t]['specificity'] for t in thresholds]
+    ppv = [clinical_metrics[t]['ppv'] for t in thresholds]  # This is key for clinical question
+    npv = [clinical_metrics[t]['npv'] for t in thresholds]
+    prevalence = [clinical_metrics[t]['prevalence'] for t in thresholds]
     
-    args = parser.parse_args()
+    # Create figure
+    fig = go.Figure()
     
-    if args.results_file:
-        metrics = visualize_test_results(args.results_file, args.output_dir)
-        print("Enhanced visualizations saved to", args.output_dir)
-        print(f"Key metrics: R² = {metrics['r2']:.4f}, MAE = {metrics['mae']:.6f}")
-    else:
-        print("Please provide a results file with --results_file")
+    # Add metric lines
+    fig.add_trace(
+        go.Scatter(
+            x=[t*100 for t in thresholds],
+            y=sensitivity,
+            mode='lines+markers',
+            name='Sensitivity',
+            line=dict(color='blue', width=2)
+        )
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=[t*100 for t in thresholds],
+            y=specificity,
+            mode='lines+markers',
+            name='Specificity',
+            line=dict(color='red', width=2)
+        )
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=[t*100 for t in thresholds],
+            y=ppv,
+            mode='lines+markers',
+            name='PPV (If predicted ≥ threshold, how likely true?)',
+            line=dict(color='green', width=3)  # Highlight PPV with thicker line
+        )
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=[t*100 for t in thresholds],
+            y=npv,
+            mode='lines+markers',
+            name='NPV (If predicted < threshold, how likely true?)',
+            line=dict(color='purple', width=2)
+        )
+    )
+    
+    # Add prevalence line on secondary y-axis
+    fig.add_trace(
+        go.Scatter(
+            x=[t*100 for t in thresholds],
+            y=prevalence,
+            mode='lines+markers',
+            name='Prevalence (% of samples ≥ threshold)',
+            line=dict(color='gray', width=2, dash='dot'),
+            yaxis='y2'
+        )
+    )
+    
+    # Create table with key metrics for 1% threshold
+    key_threshold = 0.01  # 1%
+    if key_threshold in clinical_metrics:
+        metrics = clinical_metrics[key_threshold]
+        
+        table_text = [
+            ["Metric", "Value"],
+            ["PPV at 1%", f"{metrics['ppv']:.2f}"],
+            ["NPV at 1%", f"{metrics['npv']:.2f}"],
+            ["Sensitivity at 1%", f"{metrics['sensitivity']:.2f}"],
+            ["Specificity at 1%", f"{metrics['specificity']:.2f}"],
+            ["Prevalence at 1%", f"{metrics['prevalence']:.2f}"]
+        ]
+        
+        # Add table
+        fig.add_trace(
+            go.Table(
+                domain=dict(x=[0.7, 1.0], y=[0.0, 0.3]),
+                header=dict(
+                    values=["<b>Metric</b>", "<b>Value</b>"],
+                    line_color='darkslategray',
+                    fill_color='lightgrey',
+                    align='center',
+                    font=dict(color='black', size=12)
+                ),
+                cells=dict(
+                    values=list(zip(*table_text))[1:],
+                    line_color='darkslategray',
+                    fill_color='white',
+                    align='left',
+                    font=dict(color='black', size=11)
+                )
+            )
+        )
+    
+    # Update layout
+    fig.update_layout(
+        title="Clinical Decision Metrics by Concentration Threshold",
+        xaxis=dict(
+            title="Concentration Threshold (%)",
+            type="log"
+        ),
+        yaxis=dict(
+            title="Metric Value",
+            range=[0, 1]
+        ),
+        yaxis2=dict(
+            title="Prevalence",
+            range=[0, 1],
+            overlaying='y',
+            side='right',
+            showgrid=False
+        ),
+        template='plotly_white',
+        height=700,
+        width=1000,
+        hovermode='x unified',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="center",
+            x=0.5
+        )
+    )
+    
+    # Save the figure
+    os.makedirs(output_dir, exist_ok=True)
+    fig.write_html(os.path.join(output_dir, 'clinical_decision_metrics.html'))
+    fig.write_image(os.path.join(output_dir, 'clinical_decision_metrics.png'), scale=2)
+
+
+def create_threshold_specific_analysis(df, specific_thresholds, output_dir):
+    """
+    Create detailed analysis for specific thresholds (0.1%, 0.5%, 1%, 2%, 5%, 10%)
+    showing error distributions and confusion matrices
+    
+    Args:
+        df: DataFrame with 'true_value' and 'predicted_value' columns
+        specific_thresholds: List of specific concentration thresholds to analyze
+        output_dir: Directory to save visualizations
+    """
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    import numpy as np
+    import os
+    import pandas as pd
+    
+    for threshold in specific_thresholds:
+        # Create a subdirectory for each threshold
+        threshold_dir = os.path.join(output_dir, f"threshold_{threshold:.4f}")
+        os.makedirs(threshold_dir, exist_ok=True)
+        
+        # Binary classification based on this threshold
+        y_true_binary = (df['true_value'] >= threshold).astype(int)
+        y_pred_binary = (df['predicted_value'] >= threshold).astype(int)
+        
+        # Calculate confusion matrix
+        true_positive = ((df['true_value'] >= threshold) & (df['predicted_value'] >= threshold)).sum()
+        false_positive = ((df['true_value'] < threshold) & (df['predicted_value'] >= threshold)).sum()
+        true_negative = ((df['true_value'] < threshold) & (df['predicted_value'] < threshold)).sum()
+        false_negative = ((df['true_value'] >= threshold) & (df['predicted_value'] < threshold)).sum()
+        
+        # Calculate metrics
+        sensitivity = true_positive / (true_positive + false_negative) if (true_positive + false_negative) > 0 else 0
+        specificity = true_negative / (true_negative + false_positive) if (true_negative + false_positive) > 0 else 0
+        ppv = true_positive / (true_positive + false_positive) if (true_positive + false_positive) > 0 else 0
+        npv = true_negative / (true_negative + false_negative) if (true_negative + false_negative) > 0 else 0
+        prevalence = (true_positive + false_negative) / len(df)
+        accuracy = (true_positive + true_negative) / len(df)
+        f1 = 2 * true_positive / (2 * true_positive + false_positive + false_negative) if (2 * true_positive + false_positive + false_negative) > 0 else 0
+        
+        # Create confusion matrix visualization
+        fig_cm = go.Figure(data=go.Heatmap(
+            z=[[true_negative, false_positive], 
+               [false_negative, true_positive]],
+            x=['Predicted < ' + str(threshold*100) + '%', 'Predicted ≥ ' + str(threshold*100) + '%'],
+            y=['True < ' + str(threshold*100) + '%', 'True ≥ ' + str(threshold*100) + '%'],
+            hoverongaps = False,
+            colorscale='Blues',
+            showscale=False,
+            text=[[true_negative, false_positive], 
+                  [false_negative, true_positive]],
+            texttemplate="%{text}",
+            textfont={"size":20}
+        ))
+        
+        # Add title and annotations
+        fig_cm.update_layout(
+            title=f"Confusion Matrix for {threshold*100:.1f}% Threshold",
+            xaxis_title="Predicted",
+            yaxis_title="True",
+            height=600,
+            width=700
+        )
+        
+        # Add metrics annotations
+        annotation_text = (
+            f"<b>Key Metrics:</b><br>"
+            f"Sensitivity: {sensitivity:.3f}<br>"
+            f"Specificity: {specificity:.3f}<br>"
+            f"PPV: {ppv:.3f}<br>"
+            f"NPV: {npv:.3f}<br>"
+            f"Accuracy: {accuracy:.3f}<br>"
+            f"F1 Score: {f1:.3f}<br>"
+            f"Prevalence: {prevalence:.3f}"
+        )
+        
+        fig_cm.add_annotation(
+            x=1.2,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            text=annotation_text,
+            showarrow=False,
+            font=dict(size=14),
+            align="left",
+            bgcolor="white",
+            bordercolor="black",
+            borderwidth=1
+        )
+        
+        # Save confusion matrix
+        fig_cm.write_html(os.path.join(threshold_dir, 'confusion_matrix.html'))
+        fig_cm.write_image(os.path.join(threshold_dir, 'confusion_matrix.png'), scale=2)
+        
+        # Create error distribution analysis for this threshold
+        # Separate samples by classification result
+        tp_df = df[(df['true_value'] >= threshold) & (df['predicted_value'] >= threshold)]
+        fp_df = df[(df['true_value'] < threshold) & (df['predicted_value'] >= threshold)]
+        tn_df = df[(df['true_value'] < threshold) & (df['predicted_value'] < threshold)]
+        fn_df = df[(df['true_value'] >= threshold) & (df['predicted_value'] < threshold)]
+        
+        # Create figure for error distributions
+        fig_err = make_subplots(rows=2, cols=2, 
+                               subplot_titles=('True Positives Error Distribution', 
+                                              'False Positives Error Distribution',
+                                              'False Negatives Error Distribution',
+                                              'True Negatives Error Distribution'))
+        
+        # Add TP error histogram
+        if len(tp_df) > 0:
+            fig_err.add_trace(
+                go.Histogram(
+                    x=tp_df['rel_error'],
+                    nbinsx=20,
+                    name='TP Rel. Error',
+                    marker_color='green',
+                    opacity=0.7
+                ),
+                row=1, col=1
+            )
+            
+            # Add vertical lines at median and mean
+            median_tp_err = tp_df['rel_error'].median()
+            mean_tp_err = tp_df['rel_error'].mean()
+            
+            fig_err.add_vline(x=median_tp_err, line=dict(color="red", dash="dash"), 
+                           annotation_text=f"Median: {median_tp_err:.1f}%", row=1, col=1)
+            fig_err.add_vline(x=mean_tp_err, line=dict(color="blue", dash="dash"), 
+                           annotation_text=f"Mean: {mean_tp_err:.1f}%", row=1, col=1)
+        
+        # Add FP error histogram
+        if len(fp_df) > 0:
+            # For false positives, we're showing how much they exceed the threshold
+            fp_df['threshold_error'] = (fp_df['predicted_value'] - threshold) / threshold * 100
+            
+            fig_err.add_trace(
+                go.Histogram(
+                    x=fp_df['threshold_error'],
+                    nbinsx=20,
+                    name='FP Threshold Error',
+                    marker_color='red',
+                    opacity=0.7
+                ),
+                row=1, col=2
+            )
+            
+            # Add vertical lines at median and mean
+            median_fp_err = fp_df['threshold_error'].median()
+            mean_fp_err = fp_df['threshold_error'].mean()
+            
+            fig_err.add_vline(x=median_fp_err, line=dict(color="red", dash="dash"), 
+                           annotation_text=f"Median: {median_fp_err:.1f}%", row=1, col=2)
+            fig_err.add_vline(x=mean_fp_err, line=dict(color="blue", dash="dash"), 
+                           annotation_text=f"Mean: {mean_fp_err:.1f}%", row=1, col=2)
+        
+        # Add FN error histogram
+        if len(fn_df) > 0:
+            # For false negatives, we're showing how far they are below the threshold
+            fn_df['threshold_error'] = (fn_df['predicted_value'] - threshold) / threshold * 100
+            
+            fig_err.add_trace(
+                go.Histogram(
+                    x=fn_df['threshold_error'],
+                    nbinsx=20,
+                    name='FN Threshold Error',
+                    marker_color='orange',
+                    opacity=0.7
+                ),
+                row=2, col=1
+            )
+            
+            # Add vertical lines at median and mean
+            median_fn_err = fn_df['threshold_error'].median()
+            mean_fn_err = fn_df['threshold_error'].mean()
+            
+            fig_err.add_vline(x=median_fn_err, line=dict(color="red", dash="dash"), 
+                           annotation_text=f"Median: {median_fn_err:.1f}%", row=2, col=1)
+            fig_err.add_vline(x=mean_fn_err, line=dict(color="blue", dash="dash"), 
+                           annotation_text=f"Mean: {mean_fn_err:.1f}%", row=2, col=1)
+        
+        # Add TN error histogram
+        if len(tn_df) > 0:
+            fig_err.add_trace(
+                go.Histogram(
+                    x=tn_df['rel_error'],
+                    nbinsx=20,
+                    name='TN Rel. Error',
+                    marker_color='blue',
+                    opacity=0.7
+                ),
+                row=2, col=2
+            )
+            
+            # Add vertical lines at median and mean
+            median_tn_err = tn_df['rel_error'].median()
+            mean_tn_err = tn_df['rel_error'].mean()
+            
+            fig_err.add_vline(x=median_tn_err, line=dict(color="red", dash="dash"), 
+                           annotation_text=f"Median: {median_tn_err:.1f}%", row=2, col=2)
+            fig_err.add_vline(x=mean_tn_err, line=dict(color="blue", dash="dash"), 
+                           annotation_text=f"Mean: {mean_tn_err:.1f}%", row=2, col=2)
+        
+        # Update layout
+        fig_err.update_layout(
+            title=f"Error Distributions by Classification Category at {threshold*100:.1f}% Threshold",
+            template='plotly_white',
+            height=800,
+            width=1000,
+            showlegend=False
+        )
+        
+        # Update axis titles
+        fig_err.update_xaxes(title_text="Relative Error (%)", row=1, col=1, range=[-100, 100])
+        fig_err.update_xaxes(title_text="Error Above Threshold (%)", row=1, col=2)
+        fig_err.update_xaxes(title_text="Error Below Threshold (%)", row=2, col=1)
+        fig_err.update_xaxes(title_text="Relative Error (%)", row=2, col=2, range=[-100, 100])
+        
+        # Update y-axis titles
+        fig_err.update_yaxes(title_text="Count", row=1, col=1)
+        fig_err.update_yaxes(title_text="Count", row=1, col=2)
+        fig_err.update_yaxes(title_text="Count", row=2, col=1)
+        fig_err.update_yaxes(title_text="Count", row=2, col=2)
+        
+        # Save error distribution figure
+        fig_err.write_html(os.path.join(threshold_dir, 'error_distributions.html'))
+        fig_err.write_image(os.path.join(threshold_dir, 'error_distributions.png'), scale=2)
+        
+        # Create a detailed scatter plot focused just on this threshold
+        fig_scatter = go.Figure()
+        
+        # Add scatter plot with different colors based on classification
+        fig_scatter.add_trace(
+            go.Scatter(
+                x=tp_df['true_value'],
+                y=tp_df['predicted_value'],
+                mode='markers',
+                name='True Positive',
+                marker=dict(color='green', size=8),
+                opacity=0.7
+            )
+        )
+        
+        fig_scatter.add_trace(
+            go.Scatter(
+                x=fp_df['true_value'],
+                y=fp_df['predicted_value'],
+                mode='markers',
+                name='False Positive',
+                marker=dict(color='red', size=8),
+                opacity=0.7
+            )
+        )
+        
+        fig_scatter.add_trace(
+            go.Scatter(
+                x=fn_df['true_value'],
+                y=fn_df['predicted_value'],
+                mode='markers',
+                name='False Negative',
+                marker=dict(color='orange', size=8),
+                opacity=0.7
+            )
+        )
+        
+        fig_scatter.add_trace(
+            go.Scatter(
+                x=tn_df['true_value'],
+                y=tn_df['predicted_value'],
+                mode='markers',
+                name='True Negative',
+                marker=dict(color='blue', size=8),
+                opacity=0.7
+            )
+        )
+        
+        # Add identity line
+        fig_scatter.add_trace(
+            go.Scatter(
+                x=[0, max(df['true_value'].max(), df['predicted_value'].max())],
+                y=[0, max(df['true_value'].max(), df['predicted_value'].max())],
+                mode='lines',
+                name='Identity Line',
+                line=dict(color='gray', dash='dash')
+            )
+        )
+        
+        # Add threshold lines
+        fig_scatter.add_hline(y=threshold, line=dict(color='red', dash='dot'), 
+                            annotation_text=f"Threshold = {threshold*100:.1f}%")
+        fig_scatter.add_vline(x=threshold, line=dict(color='red', dash='dot'))
+        
+        # Update layout
+        fig_scatter.update_layout(
+            title=f"Prediction Analysis at {threshold*100:.1f}% Threshold",
+            xaxis=dict(
+                title="True Concentration (%)",
+                type="log"
+            ),
+            yaxis=dict(
+                title="Predicted Concentration (%)",
+                type="log"
+            ),
+            template='plotly_white',
+            height=800,
+            width=1000,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="center",
+                x=0.5
+            )
+        )
+        
+        # Save scatter plot
+        fig_scatter.write_html(os.path.join(threshold_dir, 'threshold_scatter.html'))
+        fig_scatter.write_image(os.path.join(threshold_dir, 'threshold_scatter.png'), scale=2)
+
+
+def add_clinical_metrics_to_visualisations(create_visualisations_func):
+    """
+    Wrapper function to add clinical metrics to the existing create_visualisations function
+    
+    Args:
+        create_visualisations_func: The original create_visualisations function to wrap
+        
+    Returns:
+        Enhanced function that also creates clinical metrics
+    """
+    def enhanced_visualisations(predictions, ground_truth, output_dir, threshold=0.01, model_name=None):
+        # Call the original function first
+        metrics = create_visualisations_func(predictions, ground_truth, output_dir, threshold, model_name)
+        
+        # Create dataframe for our metrics
+        import pandas as pd
+        import numpy as np
+        
+        # Convert to numpy arrays if not already
+        y_pred = np.array(predictions).flatten()
+        y_true = np.array(ground_truth).flatten()
+        
+        # Create dataframe
+        df = pd.DataFrame({
+            'true_value': y_true,
+            'predicted_value': y_pred,
+            'error': y_pred - y_true,
+            'abs_error': np.abs(y_pred - y_true),
+        })
+        
+        # Calculate relative error
+        rel_error = np.full_like(y_true, np.nan, dtype=float)
+        non_zero_mask = y_true > 0
+        rel_error[non_zero_mask] = np.abs(y_pred[non_zero_mask] - y_true[non_zero_mask]) / y_true[non_zero_mask] * 100
+        df['rel_error'] = rel_error
+        
+        # Define thresholds for clinical metrics
+        clinical_thresholds = [0.0005, 0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1]  # 0.05% to 10%
+        specific_thresholds = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1]  # 0.1%, 0.5%, 1%, 2%, 5%, 10%
+        
+        # Create clinical decision metrics
+        clinical_metrics = create_clinical_decision_metrics(df, clinical_thresholds, output_dir)
+        
+        # Create threshold-specific detailed analysis
+        create_threshold_specific_analysis(df, specific_thresholds, output_dir)
+        
+        # Add clinical metrics to the returned metrics
+        metrics['clinical_decision_metrics'] = clinical_metrics
+        
+        return metrics
+    
+    return enhanced_visualisations
