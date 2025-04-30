@@ -222,14 +222,14 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
             else:
                 # Standard targets for other cell types
                 if threshold <= 0.001:
-                    target_sensitivity = 0.90
-                    target_specificity = 0.95
-                    sens_weight = 2.0
+                    target_sensitivity = 0.85  # Lower from 0.90
+                    target_specificity = 0.95  # Keep the same
+                    sens_weight = 1.5  # Lower weight to reduce extreme sensitivity 
                 else:
-                    target_sensitivity = 0.85
-                    target_specificity = 0.97
-                    sens_weight = 1.5
-            
+                    target_sensitivity = 0.80  # Lower from 0.85
+                    target_specificity = 0.97  # Keep the same
+                    sens_weight = 1.0  # Lower weight to reduce extreme sensitivity
+                        
             # Calculate regularization loss
             target_sens = torch.tensor(target_sensitivity, device=sensitivity.device)
             target_spec = torch.tensor(target_specificity, device=specificity.device)
@@ -361,7 +361,13 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
     
     # Get key low concentration threshold for monitoring
     # This is the key threshold we care most about improving
-    key_low_threshold = min(t for t in args.detection_thresholds if t >= 0.001)
+    if hasattr(args, 'target_cell_type') and args.target_cell_type.lower() == 't-cells':
+        # For T-cells, use 1% (0.01) as the key threshold, NOT 0.1%
+        key_low_threshold = min(t for t in args.detection_thresholds if t >= 0.01)
+        logger.info(f"Using {key_low_threshold} as key threshold for T-cells evaluation")
+    else:
+        # For other cell types like OAC, use 0.1% (0.001) as before
+        key_low_threshold = min(t for t in args.detection_thresholds if t >= 0.001)
     
     # Detection stability tracking
     previous_sens = None
@@ -485,6 +491,11 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         
         if key_low_threshold in val_metrics['clinical_metrics']:
             metrics_key = val_metrics['clinical_metrics'][key_low_threshold]
+            cell_type_str = "T-cells" if (hasattr(args, 'target_cell_type') and args.target_cell_type.lower() == 't-cells') else "cell"
+            logger.info(f"  At {key_low_threshold*100:.3f}% threshold ({cell_type_str} detection) - "
+                    f"Sensitivity: {metrics_key['sensitivity']:.4f}, "
+                    f"Specificity: {metrics_key['specificity']:.4f}, "
+                    f"AUC: {metrics_key.get('roc_auc', 0):.4f}")
             current_sens = metrics_key['sensitivity']
             current_spec = metrics_key['specificity']
             
@@ -650,9 +661,18 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                     best_stability_score = stability_score
         
         # Additional validation for extreme values - don't save models with extreme sens/spec
-        if hasattr(args, 'target_cell_type') and args.target_cell_type == 'T-cells':
+        is_tcells = hasattr(args, 'target_cell_type') and args.target_cell_type.lower() == 't-cells'
+        is_oac = hasattr(args, 'target_cell_type') and args.target_cell_type.lower() == 'oac'
+
+        if is_tcells:
             # More lenient criteria for T-cells due to low SNR
             if current_sens < 0.3 or current_spec < 0.7:
+                logger.info(f"  ⚠️ Rejecting model save due to extreme sensitivity ({current_sens:.4f}) or specificity ({current_spec:.4f})")
+                improvement = False
+                improvement_msg = ""
+        elif is_oac:
+            # Special criteria for OAC to prevent extreme specificity bias
+            if current_sens < 0.5 or current_spec < 0.8 or current_spec > 0.995:
                 logger.info(f"  ⚠️ Rejecting model save due to extreme sensitivity ({current_sens:.4f}) or specificity ({current_spec:.4f})")
                 improvement = False
                 improvement_msg = ""
@@ -2286,7 +2306,7 @@ def parse_excluded_markers(excluded_markers_str):
 
 
 # qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_t -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_t.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train \
-# --name deeper_CpGenie_T-cells \
+# --name optimised_CpGenie_T-cells_1pct \
 # --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell \
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/T-cells/ \
 # --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed \
@@ -2298,8 +2318,8 @@ def parse_excluded_markers(excluded_markers_str):
 # --num_heads 8 \
 # --num_layers 3 \
 # --detection_thresholds "0.001,0.005,0.01,0.02,0.05" \
-# --critical_ranges "0.005,0.01,3.0;0.01,0.02,5.0;0.02,0.05,3.0;0.05,0.1,2.0" \
-# --detection_loss_weight 0.35 \
+# --critical_ranges "0.01,0.02,6.0;0.02,0.05,4.0;0.05,0.1,2.5" \
+# --detection_loss_weight 0.4 \
 # --min_reliable_coverage 3.0 \
 # --enable_adaptive_thresholds \
 # --early_stopping 30 \
@@ -2307,35 +2327,39 @@ def parse_excluded_markers(excluded_markers_str):
 # --batch_size 32 \
 # --weight_decay 0.02 \
 # --epochs 300 \
-# --lr 5e-4 \
+# --lr 3.5e-4 \
 # --save_interval 10'
 
 
 # OAC
 # qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train \
-# --name deepCpGenie_OAC \
+# --name balanced_CpGenie_OAC \
 # --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell \
 # --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ \
 # --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed \
 # --target_cell_type OAC \
 # --target_cell_idx 9 \
 # --snr_profile high \
-# --dropout_rate 0.2 \
-# --feature_dim 128 \
+# --dropout_rate 0.25 \
+# --feature_dim 144 \
 # --num_heads 8 \
 # --num_layers 3 \
 # --detection_thresholds 0.0005,0.001,0.005,0.01,0.05 \
-# --critical_ranges "0.0005,0.001,2.0;0.001,0.01,1.5;0.01,0.05,1.2" \
+# --critical_ranges "0.0005,0.001,2.5;0.001,0.005,3.5;0.005,0.01,2.5;0.01,0.05,1.5" \
 # --detection_loss_weight 0.3 \
 # --min_reliable_coverage 5.0 \
 # --enable_adaptive_thresholds \
 # --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ \
 # --calibrate \
 # --calibrate_every 5 \
-# --early_stopping 15 \
+# --early_stopping 20 \
 # --grad_accum_steps 4 \
+# --batch_size 32 \
+# --weight_decay 0.035 \
 # --excluded_markers "44,58,111,133,77,95,127,38,108,115" \
-# --epochs 200'
+# --epochs 250 \
+# --lr 2.5e-4 \
+# --save_interval 10'
 
 def main():
     """
