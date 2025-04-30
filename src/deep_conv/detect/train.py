@@ -171,10 +171,10 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
         if is_tcells:
             pos_weight = torch.clamp(pos_weight * 1.5, 2.0, 15.0)  # Higher weight range for T-cells
         else:
-            pos_weight = torch.clamp(pos_weight, 1.0, 10.0)
+            pos_weight = torch.clamp(pos_weight, 1.0, 3.0)  # Lower max weight for OAC
         
         # Focal loss component
-        gamma = 2.5 if is_tcells else 2.0
+        gamma = 2.5 if is_tcells else 1.5
         pt = binary_y * detection_probs[i] + (1 - binary_y) * (1 - detection_probs[i])
         focal_weight = torch.pow(1 - pt, gamma)
         
@@ -227,13 +227,13 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
                     sens_weight = 2.0
             else:  # Standard targets for all other cell types
                 if threshold <= 0.001:
+                    target_sensitivity = 0.85
+                    target_specificity = 0.90
+                    sens_weight = 0.8
+                else:
                     target_sensitivity = 0.80
                     target_specificity = 0.90
-                    sens_weight = 1.0
-                else:
-                    target_sensitivity = 0.75
-                    target_specificity = 0.90
-                    sens_weight = 1.0
+                    sens_weight = 0.8
             
             # Convert targets to tensors
             target_sens = torch.tensor(target_sensitivity, device=sensitivity.device)
@@ -2375,7 +2375,7 @@ def parse_excluded_markers(excluded_markers_str):
 
 
 # OAC
-# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name balanced_CpGenie_OAC --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --snr_profile high --dropout_rate 0.15 --feature_dim 128 --detection_thresholds 0.0005,0.001,0.005,0.01,0.05 --critical_ranges "0.0005,0.001,2.0;0.001,0.005,3.0;0.005,0.01,2.0;0.01,0.05,1.0" --detection_loss_weight 0.2 --min_reliable_coverage 5.0 --enable_adaptive_thresholds --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 10 --early_stopping 20 --excluded_markers "44,58,111,133,77,95,127,38,108,115" --epochs 300'
+# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name balanced_CpGenie_OAC --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --snr_profile high --dropout_rate 0.15 --feature_dim 128 --detection_thresholds 0.0005,0.001,0.005,0.01,0.05 --critical_ranges "0.0005,0.001,1.5;0.001,0.005,2.0;0.005,0.01,1.5;0.01,0.05,1.0" --detection_loss_weight 0.1 --min_reliable_coverage 5.0 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 5 --early_stopping 30 --excluded_markers "44,58,111,133,77,95,127,38,108,115" --epochs 300'
 
 def main():
     """
