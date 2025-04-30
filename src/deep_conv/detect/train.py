@@ -754,7 +754,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                 improvement_msg = ""
         elif is_oac:
             # Moderate criteria for OAC
-            if current_sens < 0.6 or current_spec < 0.6 or current_sens > 0.95 or current_spec > 0.95:
+            if (current_sens < 0.4 and current_spec < 0.95) or current_sens < 0.3:
                 logger.info(f"  ⚠️ Rejecting model save due to extreme sensitivity ({current_sens:.4f}) or specificity ({current_spec:.4f})")
                 improvement = False
                 improvement_msg = ""
@@ -2440,7 +2440,7 @@ def parse_excluded_markers(excluded_markers_str):
 
 
 # OAC
-# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name balanced_CpGenie_OAC --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --snr_profile high --dropout_rate 0.15 --feature_dim 128 --detection_thresholds 0.0005,0.001,0.005,0.01,0.05 --critical_ranges "0.0005,0.001,1.5;0.001,0.005,2.0;0.005,0.01,1.5;0.01,0.05,1.0" --detection_loss_weight 0.1 --min_reliable_coverage 5.0 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 5 --early_stopping 30 --excluded_markers "44,58,111,133,77,95,127,38,108,115" --epochs 300'
+# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_conc_focused --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --snr_profile high --dropout_rate 0.15 --feature_dim 128 --detection_thresholds 0.001,0.01 --critical_ranges "0.001,0.005,1.0;0.005,0.01,1.0" --detection_loss_weight 0.03 --min_reliable_coverage 5.0 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --excluded_markers "44,58,111,133,77,95,127,38,108,115" --epochs 200 --weight_decay 0.01'
 
 def main():
     """
