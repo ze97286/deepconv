@@ -248,18 +248,18 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
                     sens_weight = 2.0
             # OAC specific targets
             elif is_oac:
-                if threshold <= 0.001:  # 0.1% threshold
-                    target_sensitivity = 0.85
-                    target_specificity = 0.92  # Lowered to prevent extreme specificity
-                    sens_weight = 2.0
+                if threshold <= 0.001:  # 0.1% threshold 
+                    target_sensitivity = 0.82  
+                    target_specificity = 0.94  
+                    sens_weight = 1.0  
                 elif threshold <= 0.005:  # 0.1-0.5% range
-                    target_sensitivity = 0.87  # Higher target for critical range
-                    target_specificity = 0.90
-                    sens_weight = 2.5  # Higher weight for critical range
+                    target_sensitivity = 0.80 
+                    target_specificity = 0.93 
+                    sens_weight = 1.5  
                 else:
-                    target_sensitivity = 0.82
-                    target_specificity = 0.95
-                    sens_weight = 1.5
+                    target_sensitivity = 0.78 
+                    target_specificity = 0.96 
+                    sens_weight = 1.0  
             else:
                 # Standard targets for other cell types
                 if threshold <= 0.001:
@@ -289,18 +289,18 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
             elif is_oac:
                 # For OAC, we want to strongly penalize both low sensitivity and extremely high specificity
                 sens_diff = target_sens - sensitivity
-                # Stronger penalty for low sensitivity
+                # More balanced penalties for sensitivity
                 sens_loss = torch.where(sens_diff > 0,
-                                       sens_diff * sens_diff * 2.5,
-                                       sens_diff * sens_diff * 0.7)
+                                    sens_diff * sens_diff * 1.8,
+                                    sens_diff * sens_diff * 1.0)
                 
-                # For specificity, penalize both too low and too high values
+                # For specificity, penalize both too low and too high values but with more emphasis on low specificity
                 spec_diff = specificity - target_spec
                 spec_loss = torch.where(spec_diff > 0.03,  # Penalize specificity significantly above target
-                                       (spec_diff - 0.03) * (spec_diff - 0.03) * 2.0,  # Quadratic penalty for high specificity
-                                       torch.where(spec_diff < -0.02,  # Also penalize low specificity
-                                                 (-spec_diff - 0.02) * (-spec_diff - 0.02) * 1.5,
-                                                 torch.tensor(0.0, device=spec_diff.device)))
+                                    (spec_diff - 0.03) * (spec_diff - 0.03) * 1.0,  
+                                    torch.where(spec_diff < -0.02,  # Also penalize low specificity
+                                                (-spec_diff - 0.02) * (-spec_diff - 0.02) * 2.5, 
+                                                torch.tensor(0.0, device=spec_diff.device)))
             else:
                 # Standard smooth L1 loss for other cell types
                 sens_loss = F.smooth_l1_loss(sensitivity, target_sens)
@@ -313,8 +313,8 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
             
             # For OAC, also add a max specificity threshold to prevent extreme specificity
             if is_oac:
-                max_spec_threshold = torch.tensor(0.98, device=specificity.device)
-                max_spec_penalty = torch.pow(torch.clamp(specificity - max_spec_threshold, min=0.0), 2) * 20.0
+                max_spec_threshold = torch.tensor(0.99, device=specificity.device)  # Increased from 0.98
+                max_spec_penalty = torch.pow(torch.clamp(specificity - max_spec_threshold, min=0.0), 2) * 10.0  # Reduced from 20.0
             else:
                 max_spec_penalty = torch.tensor(0.0, device=specificity.device)
             
@@ -2441,10 +2441,7 @@ def parse_excluded_markers(excluded_markers_str):
 
 
 # OAC
-# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name balanced_CpGenie_OAC --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --snr_profile high --dropout_rate 0.25 --feature_dim 144 --detection_thresholds 0.0005,0.001,0.005,0.01,0.05 --critical_ranges "0.0005,0.001,2.5;0.001,0.005,3.5;0.005,0.01,2.5;0.01,0.05,1.5" --detection_loss_weight 0.3 --min_reliable_coverage 5.0 --enable_adaptive_thresholds \
-# --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 5 \
-# --early_stopping 20 --grad_accum_steps 4 --weight_decay 0.035 --excluded_markers "44,58,111,133,77,95,127,38,108,115" --epochs 250 \
-# --lr 2.5e-4 --save_interval 10'
+# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name balanced_CpGenie_OAC --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --snr_profile high --dropout_rate 0.25 --feature_dim 128 --detection_thresholds 0.0005,0.001,0.005,0.01,0.05 --critical_ranges "0.0005,0.001,2.0;0.001,0.005,3.0;0.005,0.01,2.5;0.01,0.05,1.5" --detection_loss_weight 0.35 --min_reliable_coverage 5.0 --enable_adaptive_thresholds --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 5 --early_stopping 25 --grad_accum_steps 4 --weight_decay 0.03 --excluded_markers "44,58,111,133,77,95,127,38,108,115" --epochs 300 --lr 2e-4 --save_interval 10'
 
 def main():
     """
