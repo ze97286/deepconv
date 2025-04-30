@@ -728,7 +728,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                 improvement_msg = ""
         elif is_oac:
             # Moderate criteria for OAC
-            if current_sens < 0.6 or current_spec < 0.85 or current_spec > 0.98:
+            if current_sens < 0.6 or current_spec < 0.6 or current_sens > 0.95 or current_spec > 0.95:
                 logger.info(f"  ⚠️ Rejecting model save due to extreme sensitivity ({current_sens:.4f}) or specificity ({current_spec:.4f})")
                 improvement = False
                 improvement_msg = ""
