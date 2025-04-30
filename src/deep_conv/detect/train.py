@@ -107,7 +107,6 @@ def parse_args():
         else:  # "low"
             args.critical_ranges = [(0.001, 0.01, 3.0), (0.01, 0.05, 1.8), (0.05, 0.2, 1.5)]
 
-    args.lr = args.lr * 0.8
     args.early_stopping = max(args.early_stopping, 20)
 
     return args
@@ -151,7 +150,7 @@ def setup_logging(output_dir):
     return logger
 
 def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, control_mask=None):
-    """Calculate combined loss with specialized handling for different cell types"""
+    """Calculate combined loss with specialized handling for T-cells only"""
     # Check if we're dealing with T-cells
     is_tcells = hasattr(args, 'target_cell_type') and args.target_cell_type.lower() == 't-cells'
     
@@ -200,7 +199,7 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
         det_loss = weighted_loss.mean()
         detection_losses.append(det_loss)
         
-        # Sensitivity-specificity regularization with cell-type-specific targets
+        # Sensitivity-specificity regularization
         if torch.sum(binary_y) > 0 and torch.sum(1 - binary_y) > 0:
             # Calculate batch-level sensitivity and specificity
             true_pos = torch.sum(detection_probs[i] * binary_y)
@@ -212,72 +211,66 @@ def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, contro
             sensitivity = true_pos / total_pos
             specificity = true_neg / total_neg
             
-            # T-cells specific targets
+            # Set targets based on cell type and threshold
             if is_tcells:
                 if threshold <= 0.001:
                     target_sensitivity = 0.70
                     target_specificity = 0.98
-                    sens_weight = 2.5  # Higher weight for sensitivity for T-cells
+                    sens_weight = 2.5
                 elif threshold <= 0.01:
-                    target_sensitivity = 0.75  # Target for 1% concentration
+                    target_sensitivity = 0.75
                     target_specificity = 0.95
-                    sens_weight = 3.0  # Even higher at key 1% T-cells threshold
+                    sens_weight = 3.0
                 else:
                     target_sensitivity = 0.80
                     target_specificity = 0.93
                     sens_weight = 2.0
-            else:
-                # Standard targets for other cell types
+            else:  # Standard targets for all other cell types
                 if threshold <= 0.001:
-                    target_sensitivity = 0.85
-                    target_specificity = 0.95
-                    sens_weight = 1.5
-                else:
                     target_sensitivity = 0.80
-                    target_specificity = 0.95
+                    target_specificity = 0.90
+                    sens_weight = 1.0
+                else:
+                    target_sensitivity = 0.75
+                    target_specificity = 0.90
                     sens_weight = 1.0
             
-            # Calculate regularization loss
+            # Convert targets to tensors
             target_sens = torch.tensor(target_sensitivity, device=sensitivity.device)
             target_spec = torch.tensor(target_specificity, device=specificity.device)
             
-            # For T-cells, use asymmetric loss
+            # Standard L1 loss for everyone except T-cells
             if is_tcells:
-                # Asymmetric loss - penalize sensitivity < target more than sensitivity > target
+                # Special asymmetric loss for T-cells
                 sens_diff = target_sens - sensitivity
                 sens_loss = torch.where(sens_diff > 0, 
-                                       sens_diff * sens_diff * 3.0,  # Higher penalty for low sensitivity
-                                       sens_diff * sens_diff * 0.5)  # Lower penalty for high sensitivity
+                                      sens_diff * sens_diff * 3.0,
+                                      sens_diff * sens_diff * 0.5)
                 
-                # For specificity, use normal L1 loss
                 spec_loss = F.smooth_l1_loss(specificity, target_spec)
             else:
-                # Standard smooth L1 loss for other cell types
-                sens_loss = F.smooth_l1_loss(sensitivity, target_sens)
-                spec_loss = F.smooth_l1_loss(specificity, target_spec)
+                # Simple L1 loss for everything else
+                sens_loss = F.l1_loss(sensitivity, target_sens)
+                spec_loss = F.l1_loss(specificity, target_spec)
             
-            # Different extreme penalty thresholds based on cell type
-            min_sens_threshold = torch.tensor(0.4 if is_tcells else 0.6, 
-                                           device=sensitivity.device)
-            min_spec_threshold = torch.tensor(0.8, device=specificity.device)
+            # Minimal extreme penalties
+            min_sens_threshold = torch.tensor(0.4 if is_tcells else 0.5, device=sensitivity.device)
+            min_spec_threshold = torch.tensor(0.7, device=specificity.device)
             
-            # Quadratic penalties for extreme deviations
-            extreme_sens_penalty = torch.pow(torch.clamp(min_sens_threshold - sensitivity, min=0.0), 2) * 25.0
-            extreme_spec_penalty = torch.pow(torch.clamp(min_spec_threshold - specificity, min=0.0), 2) * 25.0
+            extreme_sens_penalty = torch.pow(torch.clamp(min_sens_threshold - sensitivity, min=0.0), 2) * 5.0
+            extreme_spec_penalty = torch.pow(torch.clamp(min_spec_threshold - specificity, min=0.0), 2) * 5.0
             
-            # Combined loss with appropriate weights
+            # Combined loss with simplified weights
             balance_loss = sens_weight * sens_loss + spec_loss + extreme_sens_penalty + extreme_spec_penalty
             sens_spec_reg_losses.append(balance_loss)
     
-    # Use configurable detection loss weight with cell-type adjustments
-    detection_loss_weight = args.detection_loss_weight
-    if is_tcells and not hasattr(args, 'detection_loss_weight'):
-        detection_loss_weight = 0.5  # Higher default for T-cells
-        
+    # Use moderate detection loss weight
+    detection_loss_weight = args.detection_loss_weight if hasattr(args, 'detection_loss_weight') else 0.2
+    
     combined_detection_loss = sum(detection_losses) / len(detection_losses)
     
-    # Add sensitivity-specificity regularization
-    sens_spec_reg_weight = detection_loss_weight * (0.9 if is_tcells else 0.8)
+    # Add sensitivity-specificity regularization with reduced weight
+    sens_spec_reg_weight = detection_loss_weight * (0.9 if is_tcells else 0.5)  # Reduced for non-T-cells
     sens_spec_reg_loss = sum(sens_spec_reg_losses) / len(sens_spec_reg_losses) if sens_spec_reg_losses else torch.tensor(0.0, device=mu.device)
     
     # Calculate total loss
@@ -702,11 +695,11 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                 improvement_msg = ""
         else:
             # Standard criteria for all other cell types (including OAC)
-            if current_sens < 0.5 or current_spec < 0.8 or current_sens > 0.99 or current_spec > 0.99:
+            if current_sens < 0.5 or current_sens > 0.95 or current_spec < 0.5 or current_spec > 0.95:
                 logger.info(f"  ⚠️ Rejecting model save due to extreme sensitivity ({current_sens:.4f}) or specificity ({current_spec:.4f})")
                 improvement = False
                 improvement_msg = ""
-        
+                    
         # If there's improvement in any metric, save the model
         if improvement:
             best_model_state = {
