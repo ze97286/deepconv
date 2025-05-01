@@ -256,7 +256,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Setup optimizer with weight decay for regularisation
+    # Setup optimizer with weight decay for regularization
     optimizer = torch.optim.AdamW(
         model.parameters(), 
         lr=args.lr,
@@ -433,8 +433,12 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         # Periodic calibration (if enabled)
         if args.calibrate and (epoch % args.calibrate_every == 0 or epoch == args.epochs - 1):
             logger.info("Calibrating model...")
-            calibration_results = model.calibrate(val_loader, device)
-            logger.info(f"  Calibration factor: {calibration_results['calibration_factor']:.4f}")
+            try:
+                calibration_results = model.calibrate(val_loader, device)
+                logger.info(f"  Calibration factor: {calibration_results['calibration_factor']:.4f}")
+            except Exception as e:
+                logger.error(f"× Error during calibration: {str(e)}")
+                logger.info("  Skipping calibration for this epoch")
         
         # Early stopping
         if patience_counter >= args.early_stopping:
@@ -503,7 +507,7 @@ def validate_model(model, val_loader, device):
         for batch_data in val_loader:
             # Handle both dataset types
             if len(batch_data) == 4:
-                marker_values, coverage, y_true, _ = batch_data  # Ignore control_mask for validation
+                marker_values, coverage, y_true, control_mask = batch_data
             else:
                 marker_values, coverage, y_true = batch_data
             
@@ -514,8 +518,13 @@ def validate_model(model, val_loader, device):
             # Forward pass
             mu, uncertainty, _ = model(marker_values, coverage)
             
-            # Compute loss
-            batch_loss = compute_loss(mu, uncertainty, y_true)
+            # Compute loss - handle control_mask if present
+            if len(batch_data) == 4:
+                control_mask = control_mask.to(device)
+                batch_loss = compute_loss(mu, uncertainty, y_true, control_mask)
+            else:
+                batch_loss = compute_loss(mu, uncertainty, y_true)
+                
             val_loss += batch_loss.item()
             
             # Store predictions and targets for metrics
@@ -532,7 +541,6 @@ def validate_model(model, val_loader, device):
     uncertainties = np.concatenate(all_uncertainties)
     
     # Calculate regression metrics
-    from sklearn.metrics import r2_score, mean_absolute_error
     r2 = r2_score(targets, predictions)
     mae = mean_absolute_error(targets, predictions)
     
