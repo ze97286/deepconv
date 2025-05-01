@@ -92,14 +92,14 @@ def load_model(model_dir, device='cpu'):
         if not args:
             logger.warning(f"No args.json found in {model_dir}. Using default parameters.")
             args = {}
-    
+
     # Standard single model
     # Get model parameters
     model_state = checkpoint.get('model', None)
     if model_state is None:
         # Some checkpoints store the model state directly
         model_state = checkpoint
-    
+
     # Get num_markers from the first layer weights if not in args
     if isinstance(model_state, dict):
         # Check for background_level dimension
@@ -109,7 +109,7 @@ def load_model(model_dir, device='cpu'):
                 # This is a marker-specific background, extract the number of markers
                 args['num_markers'] = bg_shape[1]
                 args['marker_specific_bg'] = True
-        
+
         # If still not found, try to infer from value_embedding or other layers
         if 'num_markers' not in args:
             for key in model_state:
@@ -125,7 +125,7 @@ def load_model(model_dir, device='cpu'):
                             if dim > 50:  # Likely the marker dimension
                                 args['num_markers'] = dim
                                 break
-    
+
     # Set defaults with fallbacks
     detection_thresholds = args.get('detection_thresholds', [0.001, 0.01, 0.05])
     # Convert from string if needed
@@ -134,23 +134,22 @@ def load_model(model_dir, device='cpu'):
             detection_thresholds = json.loads(detection_thresholds)
         except:
             detection_thresholds = [0.001, 0.01, 0.05]
-    
+
     # Create and load model
     try:
         model = EnhancedCancerDetectionModel(
-            num_markers=args.get('num_markers', 136),  # Default to 136 as a fallback
-            feature_dim=args.get('feature_dim', 128),
-            num_heads=args.get('num_heads', 8),
-            num_layers=args.get('num_layers', 3),
-            dropout_rate=args.get('dropout_rate', 0.2),
+            num_markers=args.get("num_markers", 136),
+            feature_dim=args.get("feature_dim", 128),
+            num_heads=args.get("num_heads", 8),
+            num_layers=args.get("num_layers", 3),
+            dropout_rate=args.get("dropout_rate", 0.2),
             detection_thresholds=detection_thresholds,
-            focal_weight_factor=args.get('focal_weight_factor', 50),
-            low_concentration_threshold=args.get('low_concentration_threshold', 0.01),
-            marker_specific_bg=args.get('marker_specific_bg', True),  # Default to True if we have evidence of it
-            l2_weight=args.get('l2_weight', 0.05),
-            min_reliable_coverage=args.get('min_reliable_coverage', 5.0)
+            clinical_ranges = args.get("clinical_ranges", [(0.001,0.005,1.0),(0.005,0.01,1.0)]),
+            marker_specific_bg=args.get("marker_specific_bg", True),
+            min_reliable_coverage=args.get("min_reliable_coverage", 5.0),
+            enable_adaptive_thresholds=args.get("enable_adaptive_thresholds", False)
         )
-        
+
         # First try strict loading
         try:
             model.load_state_dict(model_state, strict=True)
@@ -159,13 +158,13 @@ def load_model(model_dir, device='cpu'):
             # Try non-strict loading
             model.load_state_dict(model_state, strict=False)
             logger.info("Used non-strict loading instead")
-        
+
         # Apply calibration values if available
         if 'calibration' in checkpoint:
             with torch.no_grad():
                 if hasattr(model, 'calibration'):
                     model.calibration.fill_(checkpoint['calibration'].get('calibration_factor', 1.0))
-                
+
                 # Handle background level properly
                 if hasattr(model, 'background_level'):
                     if 'global_bg_level' in checkpoint['calibration']:
@@ -186,18 +185,18 @@ def load_model(model_dir, device='cpu'):
                             else:
                                 # Default fallback
                                 model.background_level.fill_(0.05)
-                
+
                 if hasattr(model, 'low_calibration'):
                     model.low_calibration.fill_(checkpoint['calibration'].get('low_calibration_factor', 1.0))
-        
+
     except Exception as e:
         logger.error(f"Error creating model: {e}")
         raise
-    
+
     # Move model to device
     model = model.to(device)
     model.eval()
-    
+
     logger.info(f"Model loaded successfully")
     return model, args
 
@@ -352,9 +351,9 @@ def run_predict(model_dir, input_dir, output_dir=None, device=None):
         return None
 
 # python -m deep_conv.detect.predict \
-# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/CpGenie_OAC/ \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_conc_focused/ \
 # --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA/ \
-# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/CpGenie_OAC
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/oac_conc_focused
 
 # python -m deep_conv.detect.predict \
 # --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/CpGenie_T-cells/ \
