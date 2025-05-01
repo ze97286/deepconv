@@ -254,7 +254,13 @@ class EnhancedCancerDetectionModel(nn.Module):
                 coverage_error = 0
                 n_batches = 0
                 
-                for marker_values, coverage, y_true in val_loader:
+                for batch_data in val_loader:
+                    # Handle both dataset types (with or without control_mask)
+                    if len(batch_data) == 4:
+                        marker_values, coverage, y_true, _ = batch_data  # Ignore control_mask
+                    else:
+                        marker_values, coverage, y_true = batch_data
+                    
                     marker_values = marker_values.to(device)
                     coverage = coverage.to(device)
                     y_true = y_true.to(device)
