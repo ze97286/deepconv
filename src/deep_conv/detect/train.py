@@ -123,7 +123,7 @@ def setup_logging(output_dir):
     console_handler.setFormatter(formatter)
     
     # Setup logger
-    logger = logging.getLogger('cancer_detection')
+    logger = logging.getLogger('cell_detection')
     logger.setLevel(logging.INFO)
     # Clear any existing handlers
     if logger.handlers:
@@ -497,7 +497,6 @@ def validate_model(model, val_loader, device):
     Returns:
         Dictionary of validation metrics
     """
-    print("Validating model...")
     logger = logging.getLogger('cell_detection')
     model.eval()
     val_loss = 0
