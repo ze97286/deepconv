@@ -909,7 +909,6 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         return np.concatenate(all_bg_levels)
 
-
 class MarkerImportanceAnalyser:
     """
     Enhanced utility class to analyse marker importance with SNR considerations

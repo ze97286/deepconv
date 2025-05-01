@@ -149,6 +149,45 @@ def setup_logging(output_dir):
     
     return logger
 
+def get_git_info():
+    """Retrieve information about the current Git repository state.
+
+    This function extracts the commit hash, branch name, and repository cleanliness status
+    using Git commands. It is used to track the codebase version during training for
+    reproducibility and debugging.
+
+    Returns:
+        dict: Dictionary containing:
+            - commit (str): Short hash of the current commit.
+            - branch (str): Name of the current branch.
+            - clean (bool): True if the repository has no uncommitted changes, False otherwise.
+    """
+    import subprocess
+
+    try:
+        commit_hash = subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD']
+        ).strip().decode('utf-8')
+        branch = subprocess.check_output(
+            ['git', 'rev-parse', '--abbrev-ref', 'HEAD']
+        ).strip().decode('utf-8')
+        status = subprocess.check_output(
+            ['git', 'status', '--porcelain']
+        ).strip().decode('utf-8')
+        return {
+            'commit': commit_hash,
+            'branch': branch,
+            'clean': len(status) == 0
+        }
+    except subprocess.CalledProcessError:
+        return {'commit': 'unknown', 'branch': 'unknown', 'clean': False}
+
+def parse_excluded_markers(excluded_markers_str):
+    """Parse excluded markers string into a list of indices"""
+    if not excluded_markers_str:
+        return []
+    return [int(idx.strip()) for idx in excluded_markers_str.split(',')]# T-cells
+
 def calculate_loss(model, mu, uncertainty, detection_probs, y_true, args, control_mask=None):
     """Calculate combined loss with specialized handling for T-cells and OAC"""
     # Check if we're dealing with T-cells or OAC
@@ -400,9 +439,9 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
     
     # Initialize tracking variables
     best_val_loss = float('inf')
-    best_val_low_conc_error = float('inf')  # Track error in low concentration range
-    best_balance_score = 0.0  # Track sensitivity-specificity balance
-    best_stability_score = 0.0  # NEW: Track detection stability
+    best_val_low_conc_error = float('inf') 
+    best_balance_score = 0.0  
+    best_stability_score = 0.0  
     best_model_state = None
     patience_counter = 0
     history = {
@@ -412,11 +451,11 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         'detection_loss': [],
         'r2_score': [],
         'mean_absolute_error': [],
-        'low_conc_error': [],  # Track error in critical low concentration range
-        'balance_score': [],   # Track sensitivity-specificity balance
-        'stability_score': [], # NEW: Track detection stability
-        'sensitivity': [],     # NEW: Track actual sensitivity values
-        'specificity': [],     # NEW: Track actual specificity values
+        'low_conc_error': [],  
+        'balance_score': [],   
+        'stability_score': [], 
+        'sensitivity': [],     
+        'specificity': [],     
         'concentration_metrics': [],
         'clinical_metrics': [],
         'lr': []
@@ -2372,46 +2411,6 @@ def create_evaluation_visualizations(predictions, targets, lower_ci, upper_ci,
     
     except Exception as e:
         print(f"Error creating evaluation visualizations: {e}")
-
-def get_git_info():
-    """Retrieve information about the current Git repository state.
-
-    This function extracts the commit hash, branch name, and repository cleanliness status
-    using Git commands. It is used to track the codebase version during training for
-    reproducibility and debugging.
-
-    Returns:
-        dict: Dictionary containing:
-            - commit (str): Short hash of the current commit.
-            - branch (str): Name of the current branch.
-            - clean (bool): True if the repository has no uncommitted changes, False otherwise.
-    """
-    import subprocess
-
-    try:
-        commit_hash = subprocess.check_output(
-            ['git', 'rev-parse', '--short', 'HEAD']
-        ).strip().decode('utf-8')
-        branch = subprocess.check_output(
-            ['git', 'rev-parse', '--abbrev-ref', 'HEAD']
-        ).strip().decode('utf-8')
-        status = subprocess.check_output(
-            ['git', 'status', '--porcelain']
-        ).strip().decode('utf-8')
-        return {
-            'commit': commit_hash,
-            'branch': branch,
-            'clean': len(status) == 0
-        }
-    except subprocess.CalledProcessError:
-        return {'commit': 'unknown', 'branch': 'unknown', 'clean': False}
-
-def parse_excluded_markers(excluded_markers_str):
-    """Parse excluded markers string into a list of indices"""
-    if not excluded_markers_str:
-        return []
-    return [int(idx.strip()) for idx in excluded_markers_str.split(',')]# T-cells
-
 
 # qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_t -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_t.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train \
 # --name optimised_CpGenie_T-cells_1pct \
