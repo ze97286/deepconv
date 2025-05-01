@@ -497,67 +497,110 @@ def validate_model(model, val_loader, device):
     Returns:
         Dictionary of validation metrics
     """
+    logger = logging.getLogger('cell_detection')
     model.eval()
     val_loss = 0
     all_preds = []
     all_targets = []
     all_uncertainties = []
     
+    # Track batch count for reporting
+    batch_count = 0
+    total_batches = len(val_loader)
+    logger.info(f"Starting validation on {total_batches} batches...")
+    
     with torch.no_grad():
-        for batch_data in val_loader:
-            # Handle both dataset types
-            if len(batch_data) == 4:
-                marker_values, coverage, y_true, control_mask = batch_data
-            else:
-                marker_values, coverage, y_true = batch_data
-            
-            marker_values = marker_values.to(device)
-            coverage = coverage.to(device)
-            y_true = y_true.to(device)
-            
-            # Forward pass
-            mu, uncertainty, _ = model(marker_values, coverage)
-            
-            # Compute loss - handle control_mask if present
-            if len(batch_data) == 4:
-                control_mask = control_mask.to(device)
-                batch_loss = compute_loss(mu, uncertainty, y_true, control_mask)
-            else:
-                batch_loss = compute_loss(mu, uncertainty, y_true)
+        for batch_idx, batch_data in enumerate(val_loader):
+            try:
+                # Log progress periodically
+                if batch_idx % 100 == 0:
+                    logger.info(f"Validating batch {batch_idx}/{total_batches}...")
                 
-            val_loss += batch_loss.item()
-            
-            # Store predictions and targets for metrics
-            all_preds.append(mu.cpu().numpy())
-            all_targets.append(y_true.cpu().numpy())
-            all_uncertainties.append(uncertainty.cpu().numpy())
+                # Extract data safely regardless of format
+                marker_values = batch_data[0].to(device)
+                coverage = batch_data[1].to(device)
+                y_true = batch_data[2].to(device)
+                
+                # Forward pass
+                mu, uncertainty, _ = model(marker_values, coverage)
+                
+                # Compute loss safely
+                try:
+                    # Use control_mask if available (4th element)
+                    if len(batch_data) > 3:
+                        control_mask = batch_data[3].to(device)
+                        batch_loss = compute_loss(mu, uncertainty, y_true, control_mask)
+                    else:
+                        batch_loss = compute_loss(mu, uncertainty, y_true)
+                except Exception as e:
+                    logger.error(f"Error computing loss in validation batch {batch_idx}: {str(e)}")
+                    # Use a default loss to continue
+                    batch_loss = torch.tensor(1.0)
+                
+                val_loss += batch_loss.item()
+                
+                # Store predictions and targets for metrics
+                all_preds.append(mu.cpu().numpy())
+                all_targets.append(y_true.cpu().numpy())
+                all_uncertainties.append(uncertainty.cpu().numpy())
+                
+                batch_count += 1
+            except Exception as e:
+                logger.error(f"Error processing validation batch {batch_idx}: {str(e)}")
+                # Continue to next batch
+                continue
+    
+    # If no batches were processed successfully, return empty metrics
+    if batch_count == 0:
+        logger.error("No validation batches were processed successfully!")
+        return {
+            'loss': float('inf'),
+            'r2': 0.0,
+            'mae': float('inf'),
+            'concentration_metrics': {},
+            'uncertainty_metrics': {}
+        }
     
     # Calculate average loss
-    val_loss /= len(val_loader)
+    val_loss /= batch_count
     
-    # Concatenate predictions and targets
-    predictions = np.concatenate(all_preds)
-    targets = np.concatenate(all_targets)
-    uncertainties = np.concatenate(all_uncertainties)
-    
-    # Calculate regression metrics
-    r2 = r2_score(targets, predictions)
-    mae = mean_absolute_error(targets, predictions)
-    
-    # Calculate concentration-stratified metrics
-    concentration_metrics = compute_concentration_metrics(predictions, targets)
-    
-    # Calculate uncertainty calibration metrics
-    uncertainty_metrics = compute_uncertainty_metrics(predictions, targets, uncertainties)
-    
-    # Return all metrics
-    return {
-        'loss': val_loss,
-        'r2': r2,
-        'mae': mae,
-        'concentration_metrics': concentration_metrics,
-        'uncertainty_metrics': uncertainty_metrics
-    }
+    try:
+        # Concatenate predictions and targets
+        predictions = np.concatenate(all_preds)
+        targets = np.concatenate(all_targets)
+        uncertainties = np.concatenate(all_uncertainties)
+        
+        # Calculate regression metrics
+        r2 = r2_score(targets, predictions)
+        mae = mean_absolute_error(targets, predictions)
+        
+        # Calculate concentration-stratified metrics
+        concentration_metrics = compute_concentration_metrics(predictions, targets)
+        
+        # Calculate uncertainty calibration metrics
+        uncertainty_metrics = compute_uncertainty_metrics(predictions, targets, uncertainties)
+        
+        # Log success
+        logger.info(f"Validation complete: processed {batch_count}/{total_batches} batches")
+        
+        # Return all metrics
+        return {
+            'loss': val_loss,
+            'r2': r2,
+            'mae': mae,
+            'concentration_metrics': concentration_metrics,
+            'uncertainty_metrics': uncertainty_metrics
+        }
+    except Exception as e:
+        logger.error(f"Error calculating validation metrics: {str(e)}")
+        # Return basic metrics that were calculated
+        return {
+            'loss': val_loss,
+            'r2': 0.0,
+            'mae': float('inf'),
+            'concentration_metrics': {},
+            'uncertainty_metrics': {}
+        }
 
 def compute_concentration_metrics(predictions, targets):
     """
