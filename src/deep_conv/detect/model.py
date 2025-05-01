@@ -5,198 +5,6 @@ import math
 import scipy.stats as stats
 import numpy as np
 
-class DynamicBackgroundCorrection(nn.Module):
-    """
-    Dynamic background correction module with customisable settings
-    """
-    def __init__(self, feature_dim, min_bg=0.001, max_bg=0.04, marker_specific=False, num_markers=None):
-        super().__init__()
-        self.min_bg = min_bg
-        self.max_bg = max_bg
-        self.marker_specific = marker_specific
-        
-        # Network to predict sample-specific background level
-        self.bg_network = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
-            nn.GELU(),
-            nn.Dropout(0.2),
-            nn.Linear(feature_dim // 2, 1 if not marker_specific else num_markers),
-            nn.Sigmoid()  # Output in [0,1] range
-        )
-        
-        # Initialise to predict conservative background level
-        with torch.no_grad():
-            self.bg_network[-2].bias.data.fill_(-3.0)
-    
-    def forward(self, features, marker_features=None):
-        """
-        Predict background level for each sample based on its features
-        
-        Args:
-            features: Sample features [batch_size, feature_dim]
-            marker_features: Optional marker features for marker-specific correction
-                Shape: [batch_size, num_markers, feature_dim]
-                
-        Returns:
-            bg_level: Predicted background level [batch_size, 1] or [batch_size, num_markers, 1]
-        """
-        if self.marker_specific and marker_features is not None:
-            # For marker-specific background correction
-            # Process each marker separately
-            B, M, D = marker_features.shape
-            
-            # Reshape to process all markers at once
-            flat_marker_features = marker_features.reshape(-1, D)  # [B*M, D]
-            flat_bg_scale = self.bg_network(flat_marker_features)  # [B*M, 1] or [B*M, num_markers]
-            
-            # Ensure flat_bg_scale has the right shape
-            if len(flat_bg_scale.shape) > 1 and flat_bg_scale.shape[1] > 1:
-                # If the output has multiple channels (one per marker), take first dimension only
-                flat_bg_scale = flat_bg_scale[:, 0:1]  # Take just one dimension
-                
-            # Calculate expected output size before reshaping to catch errors
-            expected_size = B * M * 1  # Batch size × number of markers × 1
-            actual_size = flat_bg_scale.numel()  # Number of elements in the tensor
-            
-            if actual_size != expected_size:
-                # There's a shape mismatch - handle gracefully
-                # Fallback to sample-level background correction
-                bg_scale = self.bg_network(features)  # [B, 1] or [B, num_markers]
-                if len(bg_scale.shape) > 1 and bg_scale.shape[1] > 1:
-                    bg_scale = bg_scale[:, 0:1]  # Take just first dimension
-                    
-                # Expand to match marker dimensions
-                bg_scale = bg_scale.unsqueeze(1).expand(B, M, 1)
-            else:
-                # Reshape to [B, M, 1]
-                bg_scale = flat_bg_scale.reshape(B, M, 1)
-            
-            # Scale sigmoid output to desired background range
-            bg_level = self.min_bg + bg_scale * (self.max_bg - self.min_bg)
-        else:
-            # Sample-level background
-            bg_scale = self.bg_network(features)
-            
-            # Handle multi-dimensional output
-            if len(bg_scale.shape) > 1 and bg_scale.shape[1] > 1:
-                bg_scale = bg_scale[:, 0:1]  # Take just first dimension
-                
-            bg_level = self.min_bg + bg_scale * (self.max_bg - self.min_bg)
-        
-        return bg_level
-
-class AdaptiveDetectionThresholds(nn.Module):
-    """
-    Adaptive detection thresholds module with highly constrained adaptation range
-    and gradient damping for stability (fixed to avoid in-place operations)
-    """
-    def __init__(self, feature_dim, base_thresholds, min_factor=0.95, max_factor=1.05,
-                gradient_scale=0.5):
-        super().__init__()
-        self.base_thresholds = base_thresholds
-        self.num_thresholds = len(base_thresholds)
-        self.min_factor = min_factor
-        self.max_factor = max_factor
-        self.gradient_scale = gradient_scale  # Scale factor for gradients
-        
-        # Network to adjust thresholds based on signal-to-noise characteristics
-        # Using smaller network with more regularization
-        self.threshold_network = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 4),  # Smaller network
-            nn.GELU(),
-            nn.Dropout(0.3),  # Higher dropout
-            nn.Linear(feature_dim // 4, self.num_thresholds),
-            nn.Sigmoid()
-        )
-        
-        # Register a buffer for the last factors (instead of using instance attribute)
-        self.register_buffer('_last_factors', torch.zeros(1, self.num_thresholds))
-        self.register_buffer('_has_last_factors', torch.tensor(0))  # Boolean flag as tensor
-        
-        # Initialise to produce base thresholds
-        with torch.no_grad():
-            # Set bias to produce center of range
-            # This pushes the network to start with minimal adaptation
-            # For sigmoid, 0 bias = 0.5 output = midpoint between min and max factors
-            self.threshold_network[-2].bias.data.fill_(0.0)
-            # Initialize weights with small values
-            self.threshold_network[-2].weight.data.mul_(0.01)
-    
-    def forward(self, features):
-        """
-        Compute adaptive thresholds for each sample with gradient damping
-        
-        Args:
-            features: Sample features [batch_size, feature_dim]
-            
-        Returns:
-            thresholds: Adjusted thresholds [batch_size, num_thresholds]
-        """
-        batch_size = features.shape[0]
-        
-        # Use gradient damping for stability during training
-        if self.training and self.gradient_scale < 1.0:
-            with torch.no_grad():
-                network_output = self.threshold_network(features)
-            # Scale gradients - this trains the network slower for stability
-            network_output_with_grad = network_output + self.gradient_scale * (self.threshold_network(features) - network_output.detach())
-            threshold_factors = self.min_factor + network_output_with_grad * (self.max_factor - self.min_factor)
-        else:
-            # Standard forward in evaluation mode or without gradient scaling
-            network_output = self.threshold_network(features)
-            threshold_factors = self.min_factor + network_output * (self.max_factor - self.min_factor)
-        
-        # Apply temporal smoothing during training using registered buffers (no in-place operations)
-        if self._has_last_factors.item() > 0 and self.training:
-            # Smooth factors with a decay of 0.9
-            smoothing_factor = 0.9
-            # Expand last_factors to match batch size if needed
-            if self._last_factors.shape[0] == 1 and batch_size > 1:
-                expanded_last_factors = self._last_factors.expand(batch_size, -1)
-            else:
-                expanded_last_factors = self._last_factors
-                
-            # Use smoothed factors (no in-place operations)
-            threshold_factors = smoothing_factor * expanded_last_factors + (1 - smoothing_factor) * threshold_factors
-        
-        # Save factors for next iteration (no in-place operations)
-        if self.training:
-            with torch.no_grad():
-                # Update the buffer - note we only store the first batch item for simplicity
-                self._last_factors = threshold_factors[0:1].detach().clone()
-                self._has_last_factors = torch.tensor(1, device=features.device)
-        
-        # Apply to base thresholds
-        base = torch.tensor(self.base_thresholds, device=features.device).unsqueeze(0)
-        if base.shape[0] == 1 and batch_size > 1:
-            base = base.expand(batch_size, -1)
-            
-        # Apply constrained adjustment (no in-place operations)
-        adjusted_thresholds = base * threshold_factors
-        
-        # Further constrain thresholds for ultra-low concentration detection
-        # This gives even less flexibility for the most important thresholds
-        # Create a new tensor instead of modifying in-place
-        for i, threshold in enumerate(self.base_thresholds):
-            if threshold <= 0.001:  # Ultra-low concentration thresholds
-                # Even more constrained (±2%) for critical thresholds
-                const_min = threshold * 0.98
-                const_max = threshold * 1.02
-                # Clamp without in-place operations
-                # Extract the column, clamp it, and put it back
-                col = adjusted_thresholds[:, i:i+1]
-                clamped_col = torch.clamp(col, min=const_min, max=const_max)
-                adjusted_thresholds = torch.cat([
-                    adjusted_thresholds[:, :i],
-                    clamped_col,
-                    adjusted_thresholds[:, i+1:]
-                ], dim=1) if i < adjusted_thresholds.shape[1] - 1 else torch.cat([
-                    adjusted_thresholds[:, :i],
-                    clamped_col
-                ], dim=1)
-        
-        return adjusted_thresholds
-    
 class ConcentrationFocusedLoss(nn.Module):
     """
     Enhanced concentration-focused loss function with range-specific weighting
@@ -301,66 +109,23 @@ class ConcentrationFocusedLoss(nn.Module):
         return total_loss
        
 class EnhancedCancerDetectionModel(nn.Module):
-    """
-    Enhanced deep learning model for cancer detection from cfDNA methylation markers.
-    Enhancements focused on lower concentration ranges and adaptive behavior.
-    """
-    def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
-                 dropout_rate=0.2, detection_thresholds=(0.0005, 0.001, 0.005, 0.01, 0.05),
-                 min_reliable_coverage=5.0, marker_specific_bg=False, 
-                 critical_ranges=None, enable_adaptive_thresholds=True,
-                 snr_profile="high"):
-        """
-        Initialise the ImprovedCancerDetectionModel.
-        
-        Args:
-            num_markers: Number of methylation markers in input
-            feature_dim: Dimension of feature representations
-            num_heads: Number of attention heads in transformer
-            num_layers: Number of transformer encoder layers
-            dropout_rate: Dropout probability for regularization
-            detection_thresholds: Concentration thresholds for binary detection
-            min_reliable_coverage: Minimum coverage to consider a marker reliable
-            marker_specific_bg: Whether to use marker-specific background correction
-            critical_ranges: Ranges to emphasize in loss function
-            enable_adaptive_thresholds: Whether to use adaptive detection thresholds
-            snr_profile: Profile indicating signal-to-noise characteristics
-        """
+    def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, dropout_rate=0.2, min_reliable_coverage=3.0):
         super().__init__()
         
-        # Store configuration parameters
-        self.detection_thresholds = detection_thresholds
+        # Store parameters
         self.num_markers = num_markers
+        self.feature_dim = feature_dim
         self.min_reliable_coverage = min_reliable_coverage
-        self.marker_specific_bg = marker_specific_bg
-        self.snr_profile = snr_profile
         
-        # Adjust settings based on SNR profile
-        if snr_profile == "high":
-            # For OAC and other high SNR cases
-            min_bg, max_bg = 0.001, 0.02
-            init_mu_bias = -2.5
-            critical_ranges = critical_ranges or [(0.0005, 0.001, 2.0), (0.001, 0.01, 1.5), (0.01, 0.05, 1.2)]
-        elif snr_profile == "medium":
-            # Default for most cell types
-            min_bg, max_bg = 0.002, 0.03
-            init_mu_bias = -2.0
-            critical_ranges = critical_ranges or [(0.001, 0.005, 2.0), (0.005, 0.02, 1.5), (0.02, 0.1, 1.2)]
-        else:  # "low"
-            # For T-cells and other challenging cell types
-            min_bg, max_bg = 0.003, 0.05
-            init_mu_bias = -1.5
-            critical_ranges = critical_ranges or [(0.001, 0.01, 2.0), (0.01, 0.05, 1.8), (0.05, 0.2, 1.5)]
-            
-        # Separate embeddings for marker values and coverage
+        # Input embeddings
         self.value_embedding = nn.Linear(1, feature_dim // 2)
         self.coverage_embedding = nn.Linear(1, feature_dim // 2)
         self.feature_projection = nn.Linear(feature_dim, feature_dim)
         
-        # Add positional embeddings for markers to help model understand marker positions
+        # Position embeddings for markers
         self.marker_pos_embedding = nn.Parameter(torch.randn(1, num_markers, feature_dim) * 0.02)
         
-        # Transformer encoder for learning marker interactions
+        # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=feature_dim,
             nhead=num_heads,
@@ -372,156 +137,50 @@ class EnhancedCancerDetectionModel(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Two-level attention mechanism for marker importance weighting
-        # First level - base importance
-        self.attention_base = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim // 2, 1)
-        )
-        
-        # Second level - concentration-dependent importance
-        self.attention_conc = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim // 2, 1)
-        )
-        
-        # Coverage reliability weighting mechanism - enhanced version
+        # Coverage reliability weighting
         self.reliability_weight = nn.Sequential(
             nn.Linear(1, feature_dim // 4),
             nn.GELU(),
-            nn.Linear(feature_dim // 4, feature_dim // 8),
-            nn.GELU(),
-            nn.Linear(feature_dim // 8, 1),
+            nn.Linear(feature_dim // 4, 1),
             nn.Sigmoid()
         )
         
-        # Concentration estimation head (mu) with residual connection for fine tuning
-        self.mu_pre = nn.Sequential(
+        # Simplified attention mechanism
+        self.attention = nn.Linear(feature_dim, 1)
+        
+        # Concentration prediction head
+        self.concentration_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim // 2, feature_dim // 4),
-            nn.GELU()
-        )
-        
-        self.mu_head = nn.Sequential(
-            nn.Linear(feature_dim // 4, 1),
+            nn.Linear(feature_dim // 2, 1),
             nn.Sigmoid()
         )
         
-        # Fine-tuning residual connection for mu
-        self.mu_residual = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 4),
-            nn.Tanh(),
-            nn.Linear(feature_dim // 4, 1),
-            nn.Tanh()  # Outputs small adjustments centered around 0
-        )
-        
-        # Dynamic background correction module
-        self.bg_correction = DynamicBackgroundCorrection(
-            feature_dim, 
-            min_bg=min_bg, 
-            max_bg=max_bg,
-            marker_specific=marker_specific_bg,
-            num_markers=num_markers if marker_specific_bg else None
-        )
-        
-        # Uncertainty estimation head with enhanced architecture
+        # Uncertainty estimation head
         self.uncertainty_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim // 2, feature_dim // 4),
-            nn.GELU(),
-            nn.Linear(feature_dim // 4, 1),
+            nn.Linear(feature_dim // 2, 1),
             nn.Softplus()
         )
         
-        # Adaptive detection thresholds (optional)
-        self.enable_adaptive_thresholds = enable_adaptive_thresholds
-        if enable_adaptive_thresholds:
-            # Even tighter constraints based on SNR profile
-            if snr_profile == "high":
-                min_factor, max_factor = 0.95, 1.05  # Very narrow adaptation for high SNR
-                gradient_scale = 0.5
-            elif snr_profile == "medium":
-                min_factor, max_factor = 0.93, 1.07  # Slightly wider for medium SNR
-                gradient_scale = 0.6
-            else:  # "low"
-                min_factor, max_factor = 0.90, 1.10  # Wider for low SNR, but still constrained
-                gradient_scale = 0.7
-                
-            self.adaptive_thresholds = AdaptiveDetectionThresholds(
-                feature_dim, 
-                detection_thresholds,
-                min_factor=min_factor,
-                max_factor=max_factor,
-                gradient_scale=gradient_scale
-            )
-        
-        # Binary detection heads for different concentration thresholds
-        self.detection_heads = nn.ModuleList()
-        for _ in detection_thresholds:
-            head = nn.Sequential(
-                nn.Linear(feature_dim + 1, feature_dim // 2),
-                nn.GELU(),
-                nn.Dropout(dropout_rate),
-                nn.Linear(feature_dim // 2, feature_dim // 4),
-                nn.GELU(),
-                nn.Linear(feature_dim // 4, 1),
-                nn.Sigmoid()
-            )
-            self.detection_heads.append(head)
-        
-        # Concentration-focused loss module
-        self.concentration_loss = ConcentrationFocusedLoss(critical_ranges=critical_ranges)
-        
-        # Confidence interval calibration parameter
+        # Calibration parameter
         self.register_buffer('calibration', torch.ones(1))
         
-        # Initialise mu_head bias to predict low values initially
-        with torch.no_grad():
-            self.mu_head[0].bias.data.fill_(init_mu_bias)
-
     def forward(self, marker_values, coverage):
-        """
-        Forward pass through the model with enhanced attention and background correction
-        
-        Args:
-            marker_values: Tensor of shape [batch_size, num_markers] with methylation values
-            coverage: Tensor of shape [batch_size, num_markers] with read coverage
-            
-        Returns:
-            mu: Estimated cell type concentration
-            uncertainty: Uncertainty in the estimation
-            detection_probs: Probability of exceeding each detection threshold
-            attention_weights: Learned importance weights for each marker
-        """
-        B, M = marker_values.shape
-        
         # Create mask for missing/unreliable values
-        mask_missing = (coverage == 0)
-        mask_low_cov = (coverage < self.min_reliable_coverage)
-        mask = mask_missing | mask_low_cov
-        
-        # Calculate reliability weights with smoother cutoff function
-        log_coverage = torch.log1p(coverage).unsqueeze(-1)
-        reliability_weight = self.reliability_weight(log_coverage)
-        
-        # Apply enhanced coverage reliability using sigmoid function
-        # This creates a smoother transition between unreliable and reliable
-        coverage_reliability = torch.sigmoid((coverage.unsqueeze(-1) - self.min_reliable_coverage) / 2)
-        reliability_weight = reliability_weight * coverage_reliability
+        missing_mask = (coverage == 0)
+        unreliable_mask = (coverage < self.min_reliable_coverage)
+        combined_mask = missing_mask | unreliable_mask
         
         # Handle NaN values
         marker_values = torch.nan_to_num(marker_values, nan=0.0)
         
         # Embed marker values and coverage
         value_features = self.value_embedding(marker_values.unsqueeze(-1))
+        log_coverage = torch.log1p(coverage).unsqueeze(-1)
         coverage_features = self.coverage_embedding(log_coverage)
         
         # Combine features and add positional embeddings
@@ -532,137 +191,31 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Apply transformer with masking
         transformer_output = self.transformer_encoder(
             features, 
-            src_key_padding_mask=mask
+            src_key_padding_mask=combined_mask
         )
         
-        # Apply two-level attention with reliability weighting
-        attention_base = self.attention_base(transformer_output).squeeze(-1)
-        attention_conc = self.attention_conc(transformer_output).squeeze(-1)
+        # Calculate reliability weights based on coverage
+        reliability = self.reliability_weight(log_coverage)
         
-        # Combine attentions and apply reliability weighting
-        attention_scores = attention_base + attention_conc
-        attention_scores = attention_scores * reliability_weight.squeeze(-1)
-        attention_scores = attention_scores.masked_fill(mask, -1e9)
+        # Apply attention with reliability weighting
+        attention_scores = self.attention(transformer_output).squeeze(-1)
+        attention_scores = attention_scores * reliability.squeeze(-1)
+        attention_scores = attention_scores.masked_fill(combined_mask, -1e9)
         attention_weights = F.softmax(attention_scores, dim=1)
         
         # Compute weighted sum of features
         aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
         
-        # Predict raw concentration with residual fine-tuning
-        mu_features = self.mu_pre(aggregated)
-        mu_base = self.mu_head(mu_features)
-        mu_adj = 0.05 * self.mu_residual(aggregated)  # Small residual adjustment
-        mu = torch.clamp(mu_base + mu_adj, 0.0, 1.0)
-        
-        # Apply dynamic background correction
-        if self.marker_specific_bg:
-            # For marker-specific background (more complex)
-            marker_bg = self.bg_correction(aggregated, marker_features=transformer_output)
-            # Apply attention-weighted background correction
-            bg_level = torch.sum(attention_weights.unsqueeze(-1) * marker_bg, dim=1)
-        else:
-            # Sample-level background
-            bg_level = self.bg_correction(aggregated)
-        
-        mu_corrected = torch.clamp(mu - bg_level, min=0.0)
+        # Predict concentration
+        concentration = self.concentration_head(aggregated)
         
         # Predict uncertainty
         uncertainty = self.uncertainty_head(aggregated)
         
-        # Get adaptive detection thresholds if enabled
-        if self.enable_adaptive_thresholds:
-            thresholds = self.adaptive_thresholds(aggregated)
-        
-        # Get detection probabilities with advanced stabilization
-        detection_features = torch.cat([aggregated, uncertainty], dim=1)
-        detection_probs = []
-
-        # Calculate a dynamic temperature based on training progress
-        # Start with high temperature (more smoothing) and anneal to 1.0
-        if hasattr(self, 'epoch') and self.training:
-            max_epochs = 200  # Approximate max epochs
-            min_temp = 1.0
-            max_temp = 2.0
-            temperature = max(min_temp, max_temp - (max_temp - min_temp) * self.epoch / max_epochs)
-        else:
-            temperature = 1.0  # No scaling during evaluation
-
-        for i, head in enumerate(self.detection_heads):
-            # Get logits before sigmoid
-            pre_sigmoid = head(detection_features)
-            
-            # Apply temperature scaling
-            if temperature != 1.0 and self.training:
-                # Convert to logits if already sigmoid-ed
-                if torch.max(pre_sigmoid) <= 1.0 and torch.min(pre_sigmoid) >= 0.0:
-                    # Add small epsilon to avoid numerical issues
-                    epsilon = 1e-6
-                    pre_sigmoid_clamped = torch.clamp(pre_sigmoid, epsilon, 1-epsilon)
-                    logits = torch.log(pre_sigmoid_clamped / (1 - pre_sigmoid_clamped))
-                    # Apply temperature scaling to logits
-                    scaled_logits = logits / temperature
-                    # Apply sigmoid
-                    prob = torch.sigmoid(scaled_logits)
-                else:
-                    # If already in logit space
-                    scaled_logits = pre_sigmoid / temperature
-                    prob = torch.sigmoid(scaled_logits)
-            else:
-                # No temperature scaling
-                prob = torch.sigmoid(pre_sigmoid)
-            
-            # If using adaptive thresholds, adjust probability with stronger constraints
-            if self.enable_adaptive_thresholds:
-                base_prob = prob
-                threshold_ratio = thresholds[:, i:i+1] / self.detection_thresholds[i]
-                
-                # Ultra-tight constraint for threshold ratio (without in-place operation)
-                threshold_ratio = torch.clamp(threshold_ratio, 0.95, 1.05)
-                
-                # Even more dampened effect
-                adj_factor = torch.pow(threshold_ratio, 0.2)  # Greatly reduced power (0.2) for minimal effect
-                prob = torch.clamp(base_prob * adj_factor, 0.0, 1.0)
-            
-            # Add special treatment for critical thresholds (ultra-low concentration)
-            if self.detection_thresholds[i] <= 0.001 and self.training:
-                # For these thresholds, push probabilities away from extremes
-                # This creates a "dead zone" near 0 and 1 to avoid extreme predictions
-                buffer = 0.02  # 2% buffer from extremes
-                prob = torch.clamp(prob, buffer, 1.0 - buffer)
-            
-            detection_probs.append(prob)
-
-        return mu_corrected, uncertainty, detection_probs, attention_weights
-    
-    def compute_loss(self, mu, uncertainty, y_true, control_mask=None):
-        """
-        Compute concentration-focused loss using the dedicated loss module
-        
-        Args:
-            mu: Predicted concentration values [batch_size, 1]
-            uncertainty: Predicted uncertainty values [batch_size, 1]
-            y_true: Ground truth concentration values [batch_size, 1]
-            control_mask: Optional boolean mask identifying control samples
-            
-        Returns:
-            total_loss: Combined loss value for optimization
-        """
-        return self.concentration_loss(mu, uncertainty, y_true, control_mask)
+        return concentration, uncertainty, attention_weights
     
     def get_estimate_and_ci(self, mu, uncertainty, ci_level=0.95):
-        """
-        Get point estimate and confidence interval for concentration.
-        
-        Args:
-            mu: Predicted concentration values [batch_size, 1]
-            uncertainty: Predicted uncertainty values [batch_size, 1]
-            ci_level: Confidence interval level (default: 0.95 for 95% CI)
-            
-        Returns:
-            mu: Point estimate of concentration
-            ci: Lower and upper bounds of confidence interval [batch_size, 2]
-            scaled_uncertainty: Calibrated uncertainty values
-        """
+        """Get point estimate and confidence interval"""
         # Scale uncertainty by calibration factor
         scaled_uncertainty = uncertainty * self.calibration
         
@@ -677,52 +230,43 @@ class EnhancedCancerDetectionModel(nn.Module):
         ci = torch.cat([lower, upper], dim=1)
         
         return mu, ci, scaled_uncertainty
-
-    def calibrate(self, val_loader, control_loader=None, device='cpu'):
+    
+    def calibrate(self, val_loader, device='cpu'):
         """
-        Calibrate model confidence intervals and background level
+        Calibrate the model's uncertainty estimates
         
         Args:
             val_loader: DataLoader for validation data
-            control_loader: Optional DataLoader for control samples
             device: Device to run calibration on
             
         Returns:
             dict: Dictionary containing calibration parameters
         """
-        from scipy import stats
-        import numpy as np
-        
         self.eval()
         
-        # 1. Calibrate confidence intervals with more options
+        # Test different calibration factors
         best_factor = 1.0
         best_error = float('inf')
         
         with torch.no_grad():
-            # Test different calibration factors with finer granularity
+            # Try different calibration factors
             for factor in [0.5, 0.7, 1.0, 1.3, 1.7, 2.0, 2.5]:
                 coverage_error = 0
                 n_batches = 0
                 
-                for batch_data in val_loader:
-                    # Handle both 3-element and 4-element returns
-                    if len(batch_data) == 4:
-                        marker_values, coverage, y_true, _ = batch_data  # Ignore control_mask
-                    else:
-                        marker_values, coverage, y_true = batch_data
-                    
+                for marker_values, coverage, y_true in val_loader:
                     marker_values = marker_values.to(device)
                     coverage = coverage.to(device)
                     y_true = y_true.to(device)
                     
-                    mu, uncertainty, _, _ = self(marker_values, coverage)
+                    # Forward pass
+                    mu, uncertainty, _ = self(marker_values, coverage)
                     
                     # Apply test calibration factor
                     uncertainty_calibrated = uncertainty * factor
                     
                     # Calculate CI
-                    z_score = 1.96  # for 95% CI
+                    z_score = 1.96  # For 95% CI
                     lower = torch.clamp(mu - z_score * uncertainty_calibrated, min=0.0)
                     upper = torch.clamp(mu + z_score * uncertainty_calibrated, max=1.0)
                     
@@ -740,221 +284,41 @@ class EnhancedCancerDetectionModel(nn.Module):
                     best_error = avg_error
                     best_factor = factor
         
-        # 2. Calibrate dynamic background correction using controls
-        bg_params = {}
-        if control_loader is not None:
-            all_raw_preds = []
-            
-            with torch.no_grad():
-                for batch_data in control_loader:
-                    if len(batch_data) == 4:
-                        marker_values, coverage, _, _ = batch_data
-                    else:
-                        marker_values, coverage, _ = batch_data
-                    
-                    marker_values = marker_values.to(device)
-                    coverage = coverage.to(device)
-                    
-                    # Extract features for background estimation
-                    mask_missing = (coverage == 0)
-                    mask_low_cov = (coverage < self.min_reliable_coverage)
-                    mask = mask_missing | mask_low_cov
-                    
-                    # Embed marker values and coverage
-                    value_features = self.value_embedding(marker_values.unsqueeze(-1))
-                    log_coverage = torch.log1p(coverage).unsqueeze(-1)
-                    coverage_features = self.coverage_embedding(log_coverage)
-                    
-                    # Combine features
-                    features = torch.cat([value_features, coverage_features], dim=-1)
-                    features = self.feature_projection(features)
-                    features = features + self.marker_pos_embedding
-                    
-                    # Process through transformer
-                    transformer_output = self.transformer_encoder(
-                        features, 
-                        src_key_padding_mask=mask
-                    )
-                    
-                    # Calculate attention weights
-                    attention_base = self.attention_base(transformer_output).squeeze(-1)
-                    attention_conc = self.attention_conc(transformer_output).squeeze(-1)
-                    
-                    # Calculate reliability
-                    reliability_weight = self.reliability_weight(log_coverage)
-                    coverage_reliability = torch.sigmoid((coverage.unsqueeze(-1) - self.min_reliable_coverage) / 2)
-                    reliability_weight = reliability_weight * coverage_reliability
-                    
-                    # Combine attentions and apply reliability
-                    attention_scores = attention_base + attention_conc
-                    attention_scores = attention_scores * reliability_weight.squeeze(-1)
-                    attention_scores = attention_scores.masked_fill(mask, -1e9)
-                    attention_weights = F.softmax(attention_scores, dim=1)
-                    
-                    # Get aggregated features
-                    aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
-                    
-                    # Get raw predictions before background correction
-                    mu_features = self.mu_pre(aggregated)
-                    mu_base = self.mu_head(mu_features)
-                    mu_adj = 0.05 * self.mu_residual(aggregated)
-                    mu = torch.clamp(mu_base + mu_adj, 0.0, 1.0)
-                    
-                    all_raw_preds.append(mu.cpu())
-            
-            # Calculate background level from controls
-            all_raw_preds = torch.cat(all_raw_preds)
-            
-            # Use 90th percentile for more conservative background
-            global_bg_level = float(torch.quantile(all_raw_preds, 0.9))
-            
-            # Ensure minimum and maximum are reasonable for the SNR profile
-            if self.snr_profile == "high":
-                global_bg_level = max(0.001, min(global_bg_level, 0.02))
-            elif self.snr_profile == "medium":
-                global_bg_level = max(0.002, min(global_bg_level, 0.03))
-            else:  # "low"
-                global_bg_level = max(0.003, min(global_bg_level, 0.05))
-            
-            # Update background correction module parameters
-            with torch.no_grad():
-                self.bg_correction.min_bg = global_bg_level * 0.75
-                self.bg_correction.max_bg = global_bg_level * 1.25
-                
-            bg_params = {
-                'global_bg_level': global_bg_level,
-                'min_bg': self.bg_correction.min_bg,
-                'max_bg': self.bg_correction.max_bg
-            }
-        
-        # Apply calibration factors to model
+        # Apply calibration factor to model
         with torch.no_grad():
             self.calibration.copy_(torch.tensor([best_factor]))
         
-        # Return calibration parameters
-        calibration_results = {
+        return {
             'calibration_factor': best_factor,
-            'coverage_error': float(best_error),
-            **bg_params
+            'coverage_error': float(best_error)
         }
     
-        return calibration_results
-    
-    def get_background_levels(self, data_loader, device='cpu'):
-        """
-        Get dynamic background levels for all samples in a dataset.
-        
-        Args:
-            data_loader: DataLoader with samples
-            device: Device to run inference on
-            
-        Returns:
-            bg_levels: Numpy array of background levels for each sample
-        """
-        self.eval()
-        all_bg_levels = []
-        
-        with torch.no_grad():
-            for batch_data in data_loader:
-                # Handle different data formats
-                if len(batch_data) == 4:
-                    marker_values, coverage, _, _ = batch_data
-                else:
-                    marker_values, coverage, _ = batch_data
-                
-                marker_values = marker_values.to(device)
-                coverage = coverage.to(device)
-                
-                # Process through first part of model to get aggregated features
-                mask_missing = (coverage == 0)
-                mask_low_cov = (coverage < self.min_reliable_coverage)
-                mask = mask_missing | mask_low_cov
-                
-                # Embed marker values and coverage
-                value_features = self.value_embedding(marker_values.unsqueeze(-1))
-                log_coverage = torch.log1p(coverage).unsqueeze(-1)
-                coverage_features = self.coverage_embedding(log_coverage)
-                
-                # Combine features
-                features = torch.cat([value_features, coverage_features], dim=-1)
-                features = self.feature_projection(features)
-                features = features + self.marker_pos_embedding
-                
-                # Process through transformer
-                transformer_output = self.transformer_encoder(
-                    features, 
-                    src_key_padding_mask=mask
-                )
-                
-                # Calculate attention weights
-                attention_base = self.attention_base(transformer_output).squeeze(-1)
-                attention_conc = self.attention_conc(transformer_output).squeeze(-1)
-                
-                # Combine attentions and apply reliability
-                reliability_weight = self.reliability_weight(log_coverage)
-                coverage_reliability = torch.sigmoid((coverage.unsqueeze(-1) - self.min_reliable_coverage) / 2)
-                reliability_weight = reliability_weight * coverage_reliability
-                
-                attention_scores = attention_base + attention_conc
-                attention_scores = attention_scores * reliability_weight.squeeze(-1)
-                attention_scores = attention_scores.masked_fill(mask, -1e9)
-                attention_weights = F.softmax(attention_scores, dim=1)
-                
-                # Get aggregated features
-                aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
-                
-                # Get background level
-                bg_levels = self.bg_correction(aggregated)
-                all_bg_levels.append(bg_levels.cpu().numpy())
-        
-        return np.concatenate(all_bg_levels)
-
 class MarkerImportanceAnalyser:
-    """
-    Enhanced utility class to analyse marker importance with SNR considerations
-    """
+    """Utility class to analyse marker importance"""
     def __init__(self, model):
         self.model = model
     
     def get_marker_importance(self, dataloader, top_k=20, stratify_by_concentration=True):
-        """
-        Analyse marker importance across the dataset with optional stratification
-        
-        Args:
-            dataloader: DataLoader with samples to analyse
-            top_k: Number of top markers to return
-            stratify_by_concentration: Whether to stratify importance by concentration
-            
-        Returns:
-            top_indices: Indices of top markers
-            top_weights: Weights of top markers
-            conc_stratified: Optional dictionary of stratified results
-        """
+        """Analyse marker importance across the dataset with optional stratification"""
         self.model.eval()
         all_attentions = []
         all_concentrations = []
         
         with torch.no_grad():
-            for batch_data in dataloader:
-                # Handle both 3-element and 4-element returns
-                if len(batch_data) == 4:
-                    marker_values, coverage, y_true, _ = batch_data
-                else:
-                    marker_values, coverage, y_true = batch_data
-                
+            for marker_values, coverage, y_true in dataloader:
                 # Get predictions and attention weights
-                mu, _, _, attention_weights = self.model(marker_values, coverage)
+                _, _, attention_weights = self.model(marker_values, coverage)
                 
                 # Store results
                 all_attentions.append(attention_weights)
                 all_concentrations.append(y_true)
         
         # Concatenate results
-        attention_weights = torch.cat(all_attentions, dim=0)  # [N, M]
-        concentrations = torch.cat(all_concentrations, dim=0)  # [N, 1]
+        attention_weights = torch.cat(all_attentions, dim=0)
+        concentrations = torch.cat(all_concentrations, dim=0)
         
         # Average attention weights across all samples
-        avg_attention = attention_weights.mean(dim=0)  # [M]
+        avg_attention = attention_weights.mean(dim=0)
         
         # Get top-k markers by attention weight
         top_k_indices = torch.topk(avg_attention, k=min(top_k, len(avg_attention))).indices
@@ -995,164 +359,3 @@ class MarkerImportanceAnalyser:
                 }
         
         return top_k_indices.cpu().numpy(), top_k_weights.cpu().numpy(), conc_stratified
-    
-    def analyse_detection_performance(self, dataloader, thresholds=None, min_samples_per_bin=20):
-        """
-        Analyse detection performance with enhanced concentration-specific metrics
-        
-        Args:
-            dataloader: DataLoader with samples to analyse
-            thresholds: Optional concentration thresholds to analyse
-            min_samples_per_bin: Minimum samples required for concentration bin analysis
-            
-        Returns:
-            Dictionary of metrics for each threshold
-        """
-        model_thresholds = self.model.detection_thresholds
-                
-        if thresholds is None:
-            thresholds = model_thresholds
-        
-        self.model.eval()
-        predictions = []
-        ground_truth = []
-        detection_probs = []
-        uncertainties = []
-        
-        with torch.no_grad():
-            for batch_data in dataloader:
-                # Handle both 3-element and 4-element returns
-                if len(batch_data) == 4:
-                    marker_values, coverage, y_true, _ = batch_data
-                else:
-                    marker_values, coverage, y_true = batch_data
-                
-                # Get model outputs
-                mu, uncertainty, det_probs, _ = self.model(marker_values, coverage)
-                
-                # Store results
-                predictions.append(mu.cpu().numpy())
-                ground_truth.append(y_true.cpu().numpy())
-                detection_probs.append([dp.cpu().numpy() for dp in det_probs])
-                uncertainties.append(uncertainty.cpu().numpy())
-        
-        # Concatenate results
-        predictions = np.concatenate(predictions)
-        ground_truth = np.concatenate(ground_truth).flatten()
-        detection_probs = [np.concatenate([dp[i] for dp in detection_probs]) for i in range(len(model_thresholds))]
-        uncertainties = np.concatenate(uncertainties).flatten()
-        
-        # Calculate detection metrics for each threshold
-        from sklearn.metrics import roc_curve, auc, precision_recall_curve, average_precision_score
-        
-        results = {}
-        for i, threshold in enumerate(thresholds):
-            if i >= len(detection_probs):
-                continue  # Skip if threshold not in model_thresholds
-                
-            # Binary ground truth
-            y_binary = (ground_truth >= threshold).astype(int)
-            
-            # ROC curve and AUC
-            fpr, tpr, roc_thresholds = roc_curve(y_binary, detection_probs[i])
-            roc_auc = auc(fpr, tpr)
-            
-            # Find sensitivity at various specificity levels
-            spec_levels = [0.95, 0.98, 0.99]
-            sens_at_spec = {}
-            
-            for spec_level in spec_levels:
-                fpr_target = 1.0 - spec_level
-                idx = np.argmin(np.abs(fpr - fpr_target))
-                sens_at_spec[f"{spec_level:.2f}"] = {
-                    "sensitivity": float(tpr[idx]),
-                    "threshold": float(roc_thresholds[idx]) if idx < len(roc_thresholds) else None
-                }
-            
-            # Precision-recall curve and average precision
-            precision, recall, pr_thresholds = precision_recall_curve(y_binary, detection_probs[i])
-            ap = average_precision_score(y_binary, detection_probs[i])
-            
-            # Add concentration-specific analysis
-            conc_bins = [
-                (0.0, 0.0005, "0-0.05%"),
-                (0.0005, 0.001, "0.05-0.1%"),
-                (0.001, 0.005, "0.1-0.5%"),
-                (0.005, 0.01, "0.5-1%"),
-                (0.01, 0.05, "1-5%"),
-                (0.05, 0.1, "5-10%"),
-                (0.1, 1.0, ">10%")
-            ]
-            
-            bin_performance = {}
-            for low, high, name in conc_bins:
-                # Create mask for this bin
-                bin_mask = (ground_truth >= low) & (ground_truth < high)
-                bin_count = np.sum(bin_mask)
-                
-                # Skip if not enough samples
-                if bin_count < min_samples_per_bin:
-                    continue
-                
-                # Calculate bin-specific metrics
-                bin_pred = predictions[bin_mask]
-                bin_gt = ground_truth[bin_mask]
-                bin_uncertainty = uncertainties[bin_mask]
-                
-                # Basic metrics
-                bin_mae = np.mean(np.abs(bin_pred - bin_gt))
-                bin_rmse = np.sqrt(np.mean((bin_pred - bin_gt)**2))
-                
-                # Relative error (for non-zero targets)
-                bin_rel_errors = []
-                non_zero_mask = bin_gt > 0
-                if np.sum(non_zero_mask) > 0:
-                    bin_rel_errors = np.abs(bin_pred[non_zero_mask] - bin_gt[non_zero_mask]) / bin_gt[non_zero_mask]
-                    bin_mape = np.mean(bin_rel_errors) * 100
-                    bin_within_25pct = np.mean(bin_rel_errors <= 0.25) * 100
-                else:
-                    bin_mape = None
-                    bin_within_25pct = None
-                
-                # Detection accuracy if threshold within this bin
-                if low <= threshold < high:
-                    bin_detection_probs = detection_probs[i][bin_mask]
-                    bin_y_binary = (bin_gt >= threshold).astype(int)
-                    
-                    # Only calculate if we have both positive and negative examples
-                    if np.sum(bin_y_binary) > 0 and np.sum(bin_y_binary) < len(bin_y_binary):
-                        try:
-                            bin_fpr, bin_tpr, _ = roc_curve(bin_y_binary, bin_detection_probs)
-                            bin_auc = auc(bin_fpr, bin_tpr)
-                        except:
-                            bin_auc = None
-                    else:
-                        bin_auc = None
-                else:
-                    bin_auc = None
-                
-                # Store bin results
-                bin_performance[name] = {
-                    "count": int(bin_count),
-                    "mae": float(bin_mae),
-                    "rmse": float(bin_rmse),
-                    "mean_uncertainty": float(np.mean(bin_uncertainty)),
-                    "mape": float(bin_mape) if bin_mape is not None else None,
-                    "within_25pct": float(bin_within_25pct) if bin_within_25pct is not None else None,
-                    "auc": float(bin_auc) if bin_auc is not None else None
-                }
-            
-            # Store all results for this threshold
-            results[threshold] = {
-                'auc': float(roc_auc),
-                'sensitivity_at_specificity': sens_at_spec,
-                'average_precision': float(ap),
-                'precision_recall_data': {
-                    'precision': precision.tolist(),
-                    'recall': recall.tolist(),
-                    'thresholds': pr_thresholds.tolist() if len(pr_thresholds) > 0 else []
-                },
-                'concentration_bins': bin_performance
-            }
-        
-        return results
