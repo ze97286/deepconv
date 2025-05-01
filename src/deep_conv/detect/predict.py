@@ -142,7 +142,7 @@ def load_model(model_dir, device='cpu'):
 
         model = EnhancedCancerDetectionModel(
             num_markers=args.get("num_markers", 136),
-            feature_dim=args.get("feature_dim", 128),
+            feature_dim=128,
             num_heads=args.get("num_heads", 8),
             num_layers=args.get("num_layers", 3),
             dropout_rate=args.get("dropout_rate", 0.2),
