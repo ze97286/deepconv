@@ -497,6 +497,7 @@ def validate_model(model, val_loader, device):
     Returns:
         Dictionary of validation metrics
     """
+    print("Validating model...")
     logger = logging.getLogger('cell_detection')
     model.eval()
     val_loss = 0
