@@ -511,7 +511,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                     print(mu)
                     print(uncertainty)
                     print(detection_probs)
-                    print(marker_values.iloc[9])
+                    print(marker_values.cpu().numpy()[9])
                     
                     # Calculate combined loss
                     loss, conc_loss, det_loss = calculate_loss(
