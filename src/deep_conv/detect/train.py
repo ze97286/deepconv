@@ -508,12 +508,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                 # Get model predictions
                 with autocast():
                     mu, uncertainty, detection_probs, _ = model(marker_values, coverage)
-                    print(mu)
-                    print(uncertainty)
-                    print(detection_probs)
-                    print(marker_values.cpu().numpy()[9])
-                    print(coverage.cpu().numpy()[9])
-                    
+                
                     # Calculate combined loss
                     loss, conc_loss, det_loss = calculate_loss(
                         model, mu, uncertainty, detection_probs, y_true, args, control_mask
