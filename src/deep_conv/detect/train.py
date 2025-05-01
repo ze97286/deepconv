@@ -510,6 +510,8 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
                     mu, uncertainty, detection_probs, _ = model(marker_values, coverage)
                     if i==0:
                         print(mu)
+                        print(uncertainty)
+                        print(detection_probs)
                     
                     # Calculate combined loss
                     loss, conc_loss, det_loss = calculate_loss(
