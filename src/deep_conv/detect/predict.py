@@ -137,6 +137,9 @@ def load_model(model_dir, device='cpu'):
 
     # Create and load model
     try:
+        from pprint import pprint
+        pprint(args)
+
         model = EnhancedCancerDetectionModel(
             num_markers=args.get("num_markers", 136),
             feature_dim=args.get("feature_dim", 128),
