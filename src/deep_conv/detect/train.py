@@ -621,7 +621,7 @@ def validate_model(model, val_loader, device):
     
 def compute_concentration_metrics(predictions, targets):
     """
-    Compute concentration-stratified metrics with debugging
+    Compute concentration-stratified metrics
     """
     ranges = [
         (0, 0.0005, "0-0.05%"),
@@ -643,27 +643,15 @@ def compute_concentration_metrics(predictions, targets):
         if len(range_targets) == 0:
             continue
             
-        # Calculate MAE
         mae = np.mean(np.abs(range_preds - range_targets))
         
-        # Debug: Check actual values
-        print(f"\nDebug {name}:")
-        print(f"  Target range: {range_targets.min():.6f} - {range_targets.max():.6f}")
-        print(f"  Pred range: {range_preds.min():.6f} - {range_preds.max():.6f}")
-        print(f"  MAE: {mae:.6f}")
-        
-        # Calculate percentage within error bands
         within_pct = {}
         non_zero_mask = range_targets > 0
         if np.sum(non_zero_mask) > 0:
             rel_errors = np.abs(range_preds[non_zero_mask] - range_targets[non_zero_mask]) / range_targets[non_zero_mask]
             
-            print(f"  Relative errors - min: {rel_errors.min():.3f}, median: {np.median(rel_errors):.3f}, max: {rel_errors.max():.3f}")
-            
-            for threshold in [0.1, 0.25, 0.5]:  # 10%, 25%, 50%
-                within_count = np.sum(rel_errors <= threshold)
-                within_pct[f"{int(threshold*100)}pct"] = float(within_count / len(rel_errors) * 100)
-                print(f"  Within {int(threshold*100)}%: {within_count}/{len(rel_errors)} = {within_pct[f'{int(threshold*100)}pct']:.1f}%")
+            for threshold in [0.1, 0.25, 0.5]:
+                within_pct[f"{int(threshold*100)}pct"] = float(np.mean(rel_errors <= threshold) * 100)
         
         results[name] = {
             'count': int(np.sum(mask)),
