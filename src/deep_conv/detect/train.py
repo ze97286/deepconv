@@ -244,12 +244,11 @@ def train_model(model, train_loader, val_loader, args, device):
         optimizer,
         max_lr=args.lr,
         total_steps=total_steps,
-        pct_start=0.1,  # 10% warmup
+        pct_start=0.1,
         anneal_strategy='cos',
         div_factor=25.0,
-        final_div_factor=1000.0
+        final_div_factor=10000.0
     )
-    
     # Initialise tracking variables
     best_val_loss = float('inf')
     best_low_conc_error = float('inf')
@@ -504,10 +503,6 @@ def validate_model(model, val_loader, device):
     with torch.no_grad():
         for batch_idx, batch_data in enumerate(val_loader):
             try:
-                # Log progress periodically
-                if batch_idx % 100 == 0:
-                    logger.info(f"Validating batch {batch_idx}/{total_batches}...")
-                
                 # Extract data safely regardless of format
                 marker_values = batch_data[0].to(device)
                 coverage = batch_data[1].to(device)

@@ -8,15 +8,11 @@ import numpy as np
 class ConcentrationFocusedLoss(nn.Module):
     def __init__(self, critical_ranges=None, zero_penalty=10.0, control_penalty=20.0):
         super().__init__()
-        self.critical_ranges = critical_ranges or [(0.0001, 0.001, 1.8), (0.001, 0.01, 1.5), (0.01, 0.05, 1.2)]
+        self.critical_ranges = critical_ranges or [(0.001, 0.005, 2.0), (0.005, 0.01, 1.5), (0.01, 0.05, 1.2)]
         self.zero_penalty = zero_penalty
         self.control_penalty = control_penalty
     
     def forward(self, mu, uncertainty, y_true, control_mask=None):
-        """
-        Compute concentration-focused loss with enhanced range-specific weighting
-        and monotonicity regularization
-        """
         # Basic MSE loss
         mse_loss = F.mse_loss(mu, y_true, reduction='none')
         
@@ -39,7 +35,7 @@ class ConcentrationFocusedLoss(nn.Module):
         log_weights = 1.0 / torch.log10(y_true * 1000 + 10.0)
         log_weights = torch.clamp(log_weights, 0.5, 2.0)
         
-        # Apply additional weights for critical ranges
+        # Apply range-specific weights
         range_weights = torch.ones_like(log_weights, device=log_weights.device)
         for low, high, weight in self.critical_ranges:
             range_mask = (y_true >= low) & (y_true < high)
@@ -49,7 +45,7 @@ class ConcentrationFocusedLoss(nn.Module):
         ultra_focused_range = (y_true >= 0.001) & (y_true < 0.005)
         if ultra_focused_range.sum() > 0:
             # Extra weight for relative error in this range
-            ultra_range_weight = 2.0
+            ultra_range_weight = 2.5
             rel_error = torch.where(
                 ultra_focused_range,
                 rel_error * ultra_range_weight,
@@ -67,19 +63,13 @@ class ConcentrationFocusedLoss(nn.Module):
                 )
             )
             rel_error = rel_error + within_25pct
-            
-            # Additional penalty for errors in this critical range
-            critical_error = torch.abs(mu[ultra_focused_range] - y_true[ultra_focused_range])
-            critical_penalty = torch.mean(critical_error * torch.log10(1.0 / (y_true[ultra_focused_range] + epsilon)))
-        else:
-            critical_penalty = torch.tensor(0.0, device=mse_loss.device)
         
-        # Apply weights to MSE and relative error
-        log_weights = log_weights * range_weights
-        weighted_mse = (mse_loss * log_weights).mean()
-        weighted_rel = (rel_error * log_weights).mean() if non_zero_mask.sum() > 0 else torch.tensor(0.0, device=mse_loss.device)
+        # Apply weights
+        combined_weights = log_weights * range_weights
+        weighted_mse = (mse_loss * combined_weights).mean()
+        weighted_rel = (rel_error * combined_weights).mean() if non_zero_mask.sum() > 0 else torch.tensor(0.0, device=mse_loss.device)
         
-        # Zero-concentration specific penalty
+        # Zero-concentration penalty
         zero_mask = (y_true < epsilon)
         zero_penalty = self.zero_penalty * mu[zero_mask].mean() if zero_mask.sum() > 0 else torch.tensor(0.0, device=mse_loss.device)
         
@@ -88,7 +78,7 @@ class ConcentrationFocusedLoss(nn.Module):
         if control_mask is not None and control_mask.sum() > 0:
             control_loss = self.control_penalty * mu[control_mask].mean()
         
-        # Add calibration component for uncertainty estimates
+        # Calibration loss
         calibration_loss = torch.tensor(0.0, device=mse_loss.device)
         if uncertainty is not None:
             z_scores = torch.abs(mu - y_true) / (uncertainty + epsilon)
@@ -105,12 +95,12 @@ class ConcentrationFocusedLoss(nn.Module):
         else:
             monotonicity_penalty = torch.tensor(0.0, device=mse_loss.device)
         
-        # Combine all components
-        total_loss = (weighted_mse + 0.7 * weighted_rel + zero_penalty + control_loss + 
-                     0.2 * calibration_loss + 2.0 * critical_penalty + 0.5 * monotonicity_penalty)
+        # Total loss with all components
+        total_loss = (weighted_mse + 1.5 * weighted_rel + zero_penalty + control_loss + 
+                     0.2 * calibration_loss + 0.5 * monotonicity_penalty)
         
         return total_loss
-     
+    
 class EnhancedCancerDetectionModel(nn.Module):
     def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
                  dropout_rate=0.2, min_reliable_coverage=3.0):
@@ -173,6 +163,22 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Calibration parameter
         self.register_buffer('calibration', torch.ones(1))
         self.register_buffer('clinical_threshold', torch.tensor(0.001))
+
+        self.low_concentration_head = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(feature_dim // 2, 1),
+            nn.Sigmoid()
+        )
+        
+        # Simple concentration-based gating
+        self.concentration_gate = nn.Sequential(
+            nn.Linear(feature_dim, 16),
+            nn.GELU(),
+            nn.Linear(16, 1),
+            nn.Sigmoid()
+        )
     
     def forward(self, marker_values, coverage):
         # Use original forward pass
@@ -204,7 +210,19 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
         
-        concentration = self.concentration_head(aggregated)
+        # Get predictions from both heads
+        standard_pred = self.concentration_head(aggregated)
+        low_conc_pred = self.low_concentration_head(aggregated) * 0.02  # Scale to max 2%
+        
+        # Simple gating based on predicted concentration
+        gate = self.concentration_gate(aggregated)
+        
+        # Blend predictions - use low_conc_pred more when gate is low
+        concentration = gate * standard_pred + (1 - gate) * low_conc_pred
+        
+        # Ensure concentration stays within valid range
+        concentration = torch.clamp(concentration, 0.0, 1.0)
+        
         uncertainty = self.uncertainty_head(aggregated)
         
         return concentration, uncertainty, attention_weights
