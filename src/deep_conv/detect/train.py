@@ -178,13 +178,7 @@ def parse_excluded_markers(excluded_markers_str):
 
 def compute_loss(mu, uncertainty, y_true, control_mask=None):
     """
-    Compute concentration-focused loss with enhanced range-specific weighting
-    
-    Args:
-        mu: Predicted concentration values [batch_size, 1]
-        uncertainty: Predicted uncertainty values [batch_size, 1]
-        y_true: Ground truth concentration values [batch_size, 1]
-        control_mask: Optional boolean mask identifying control samples
+    Simplified loss function focused on relative error
     """
     # Base MSE loss
     mse_loss = F.mse_loss(mu, y_true, reduction='none')
@@ -193,49 +187,27 @@ def compute_loss(mu, uncertainty, y_true, control_mask=None):
     epsilon = 1e-6
     non_zero_mask = (y_true > epsilon)
     
-    # Initialise relative error tensor
-    rel_error = torch.zeros_like(mse_loss)
-    
-    # Compute relative error only for non-zero targets
     if non_zero_mask.sum() > 0:
-        rel_error[non_zero_mask] = torch.abs(mu[non_zero_mask] - y_true[non_zero_mask]) / y_true[non_zero_mask]
+        # Relative error
+        rel_error = torch.abs(mu[non_zero_mask] - y_true[non_zero_mask]) / (y_true[non_zero_mask] + epsilon)
+        rel_loss = rel_error.mean()
+    else:
+        rel_loss = torch.tensor(0.0, device=mu.device)
     
-    # Apply concentration-aware weighting
-    # Higher weight for lower concentrations (on log scale)
-    log_weights = 1.0 / torch.log10(y_true * 1000 + 10.0)
-    log_weights = torch.clamp(log_weights, 0.5, 2.0)
-    
-    # Apply range-specific weights
-    critical_ranges = [
-        (0.0005, 0.001, 2.0),  # 0.05-0.1%
-        (0.001, 0.005, 1.8),   # 0.1-0.5%
-        (0.005, 0.01, 1.5),    # 0.5-1%
-        (0.01, 0.05, 1.2)      # 1-5%
-    ]
-    
-    range_weights = torch.ones_like(log_weights)
-    for low, high, weight in critical_ranges:
-        range_mask = (y_true >= low) & (y_true < high)
-        range_weights[range_mask] = weight
-    
-    # Combine weights
-    combined_weights = log_weights * range_weights
-    
-    # Weight both MSE and relative error
-    weighted_mse = (mse_loss * combined_weights).mean()
-    weighted_rel = (rel_error * combined_weights).mean() if non_zero_mask.sum() > 0 else torch.tensor(0.0)
-    
-    # Add control sample penalty (if provided)
-    control_loss = torch.tensor(0.0)
+    # Control sample penalty
+    control_loss = torch.tensor(0.0, device=mu.device)
     if control_mask is not None and control_mask.sum() > 0:
         control_loss = 10.0 * mu[control_mask].mean()
     
-    # Add uncertainty calibration term
-    z_scores = torch.abs(mu - y_true) / (uncertainty + epsilon)
-    calibration_loss = F.smooth_l1_loss(z_scores, torch.ones_like(z_scores) * 1.96)
+    # Uncertainty calibration
+    if uncertainty is not None:
+        z_scores = torch.abs(mu - y_true) / (uncertainty + epsilon)
+        calibration_loss = F.smooth_l1_loss(z_scores, torch.ones_like(z_scores) * 1.96)
+    else:
+        calibration_loss = torch.tensor(0.0, device=mu.device)
     
-    # Combine all components
-    total_loss = weighted_mse + 0.7 * weighted_rel + control_loss + 0.2 * calibration_loss
+    # Combine losses - increase weight on relative error
+    total_loss = mse_loss.mean() + 2.0 * rel_loss + control_loss + 0.2 * calibration_loss
     
     return total_loss
 
@@ -649,16 +621,8 @@ def validate_model(model, val_loader, device):
     
 def compute_concentration_metrics(predictions, targets):
     """
-    Compute concentration-stratified metrics
-    
-    Args:
-        predictions: Predicted concentrations (numpy array)
-        targets: Ground truth concentrations (numpy array)
-        
-    Returns:
-        Dictionary of concentration-stratified metrics
+    Compute concentration-stratified metrics with debugging
     """
-    # Define concentration ranges
     ranges = [
         (0, 0.0005, "0-0.05%"),
         (0.0005, 0.001, "0.05-0.1%"),
@@ -669,31 +633,38 @@ def compute_concentration_metrics(predictions, targets):
         (0.1, 1.0, ">10%")
     ]
     
-    # Initialise results dictionary
     results = {}
     
-    # Calculate metrics for each range
     for low, high, name in ranges:
         mask = (targets >= low) & (targets < high)
         range_preds = predictions[mask]
         range_targets = targets[mask]
         
-        # Skip ranges with no samples
         if len(range_targets) == 0:
             continue
-        
+            
         # Calculate MAE
         mae = np.mean(np.abs(range_preds - range_targets))
+        
+        # Debug: Check actual values
+        print(f"\nDebug {name}:")
+        print(f"  Target range: {range_targets.min():.6f} - {range_targets.max():.6f}")
+        print(f"  Pred range: {range_preds.min():.6f} - {range_preds.max():.6f}")
+        print(f"  MAE: {mae:.6f}")
         
         # Calculate percentage within error bands
         within_pct = {}
         non_zero_mask = range_targets > 0
         if np.sum(non_zero_mask) > 0:
             rel_errors = np.abs(range_preds[non_zero_mask] - range_targets[non_zero_mask]) / range_targets[non_zero_mask]
+            
+            print(f"  Relative errors - min: {rel_errors.min():.3f}, median: {np.median(rel_errors):.3f}, max: {rel_errors.max():.3f}")
+            
             for threshold in [0.1, 0.25, 0.5]:  # 10%, 25%, 50%
-                within_pct[f"{int(threshold*100)}pct"] = float(np.mean(rel_errors <= threshold) * 100)
+                within_count = np.sum(rel_errors <= threshold)
+                within_pct[f"{int(threshold*100)}pct"] = float(within_count / len(rel_errors) * 100)
+                print(f"  Within {int(threshold*100)}%: {within_count}/{len(rel_errors)} = {within_pct[f'{int(threshold*100)}pct']:.1f}%")
         
-        # Store metrics
         results[name] = {
             'count': int(np.sum(mask)),
             'mae': float(mae),
@@ -701,7 +672,6 @@ def compute_concentration_metrics(predictions, targets):
         }
     
     return results
-
 def compute_uncertainty_metrics(predictions, targets, uncertainties):
     """
     Compute metrics for uncertainty estimates
@@ -2076,7 +2046,7 @@ def generate_clinical_report(evaluation_results):
 
 
 # OAC
-# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_simplified --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --feature_dim 128 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --excluded_markers "44,58,111,133,77,95,127,38,108,115" --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical'
+# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_simplified --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --feature_dim 128 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --excluded_markers "44,58,111,133,77,95,127,38,108,115" --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
 
 
 def main():

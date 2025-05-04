@@ -116,7 +116,7 @@ class EnhancedCancerDetectionModel(nn.Module):
                  dropout_rate=0.2, min_reliable_coverage=3.0):
         super().__init__()
         
-        # Store parameters
+        # Keep the original architecture
         self.num_markers = num_markers
         self.feature_dim = feature_dim
         self.min_reliable_coverage = min_reliable_coverage
@@ -128,9 +128,6 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         # Position embeddings for markers
         self.marker_pos_embedding = nn.Parameter(torch.randn(1, num_markers, feature_dim) * 0.02)
-        
-        # Uncertain marker embedding for very low coverage
-        self.uncertain_marker_embedding = nn.Parameter(torch.randn(1, 1, feature_dim) * 0.02)
         
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
@@ -155,29 +152,12 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Simplified attention mechanism
         self.attention = nn.Linear(feature_dim, 1)
         
-        # Standard concentration prediction head
+        # Single concentration prediction head (remove dual-head)
         self.concentration_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
             nn.Dropout(dropout_rate),
             nn.Linear(feature_dim // 2, 1),
-            nn.Sigmoid()
-        )
-        
-        # Specialized head for low concentration detection
-        self.low_concentration_head = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim // 2, 1),
-            nn.Sigmoid()
-        )
-        
-        # Gating mechanism to blend predictions
-        self.concentration_gate = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 4),
-            nn.GELU(),
-            nn.Linear(feature_dim // 4, 1),
             nn.Sigmoid()
         )
         
@@ -190,76 +170,41 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Softplus()
         )
         
-        # Calibration parameters
+        # Calibration parameter
         self.register_buffer('calibration', torch.ones(1))
-        self.register_buffer('clinical_threshold', torch.tensor(0.001))  # Default 0.1% threshold
-        
+        self.register_buffer('clinical_threshold', torch.tensor(0.001))
+    
     def forward(self, marker_values, coverage):
-        # Create mask for missing/unreliable values
+        # Use original forward pass
         missing_mask = (coverage == 0)
         unreliable_mask = (coverage < self.min_reliable_coverage)
         combined_mask = missing_mask | unreliable_mask
         
-        # Handle NaN values
         marker_values = torch.nan_to_num(marker_values, nan=0.0)
         
-        # Embed marker values and coverage
         value_features = self.value_embedding(marker_values.unsqueeze(-1))
         log_coverage = torch.log1p(coverage).unsqueeze(-1)
         coverage_features = self.coverage_embedding(log_coverage)
         
-        # Combine features and add positional embeddings
         features = torch.cat([value_features, coverage_features], dim=-1)
         features = self.feature_projection(features)
         features = features + self.marker_pos_embedding
         
-        # Create sophisticated reliability weights
-        reliability = torch.sigmoid((coverage - self.min_reliable_coverage) / 2.0)
-        
-        # Use reliability to modulate the input features
-        weighted_features = features * reliability.unsqueeze(-1)
-        
-        # For very low coverage, use a default "uncertain" embedding
-        low_coverage_mask = coverage < 1.0
-        if low_coverage_mask.any():
-            uncertain_embedding = self.uncertain_marker_embedding.expand(
-                features.shape[0], features.shape[1], -1
-            )
-            features = torch.where(
-                low_coverage_mask.unsqueeze(-1),
-                uncertain_embedding,
-                weighted_features
-            )
-        else:
-            features = weighted_features
-        
-        # Apply transformer with masking
         transformer_output = self.transformer_encoder(
             features, 
             src_key_padding_mask=combined_mask
         )
         
-        # Calculate reliability weights based on coverage
-        reliability_scores = self.reliability_weight(log_coverage)
+        reliability = self.reliability_weight(log_coverage)
         
-        # Apply attention with reliability weighting
         attention_scores = self.attention(transformer_output).squeeze(-1)
-        attention_scores = attention_scores * reliability_scores.squeeze(-1)
+        attention_scores = attention_scores * reliability.squeeze(-1)
         attention_scores = attention_scores.masked_fill(combined_mask, -1e9)
         attention_weights = F.softmax(attention_scores, dim=1)
         
-        # Compute weighted sum of features
         aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
         
-        # Get predictions from both heads
-        standard_pred = self.concentration_head(aggregated)
-        low_conc_pred = self.low_concentration_head(aggregated) * 0.01  # Scale to low concentration range
-        
-        # Use gating to blend predictions
-        gate = self.concentration_gate(aggregated)
-        concentration = gate * standard_pred + (1 - gate) * low_conc_pred
-        
-        # Predict uncertainty
+        concentration = self.concentration_head(aggregated)
         uncertainty = self.uncertainty_head(aggregated)
         
         return concentration, uncertainty, attention_weights
