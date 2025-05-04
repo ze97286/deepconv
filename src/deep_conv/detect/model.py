@@ -44,7 +44,6 @@ class ConcentrationFocusedLoss(nn.Module):
         # Special focus on 0.1-0.5% range
         ultra_focused_range = (y_true >= 0.001) & (y_true < 0.005)
         if ultra_focused_range.sum() > 0:
-            # Extra weight for relative error in this range
             ultra_range_weight = 2.5
             rel_error = torch.where(
                 ultra_focused_range,
@@ -58,7 +57,7 @@ class ConcentrationFocusedLoss(nn.Module):
                 torch.zeros_like(rel_error, device=rel_error.device),
                 torch.where(
                     ultra_focused_range,
-                    torch.pow(rel_error - 0.25, 2),  # Quadratic penalty for > 25% error
+                    torch.pow(rel_error - 0.25, 2),
                     torch.zeros_like(rel_error, device=rel_error.device)
                 )
             )
@@ -68,6 +67,30 @@ class ConcentrationFocusedLoss(nn.Module):
         combined_weights = log_weights * range_weights
         weighted_mse = (mse_loss * combined_weights).mean()
         weighted_rel = (rel_error * combined_weights).mean() if non_zero_mask.sum() > 0 else torch.tensor(0.0, device=mse_loss.device)
+        
+        # Add log-space loss component
+        log_mse = torch.tensor(0.0, device=mu.device)
+        slope_penalty = torch.tensor(0.0, device=mu.device)
+        
+        non_zero_mask_both = (y_true > epsilon) & (mu > epsilon)
+        if non_zero_mask_both.sum() > 0:
+            log_pred = torch.log10(mu[non_zero_mask_both])
+            log_true = torch.log10(y_true[non_zero_mask_both])
+            
+            # MSE in log space
+            log_mse = F.mse_loss(log_pred, log_true)
+            
+            # Penalize deviation from slope=1 in log space
+            if non_zero_mask_both.sum() > 1:
+                # Simple linear regression coefficients
+                x_mean = log_true.mean()
+                y_mean = log_pred.mean()
+                
+                numerator = ((log_true - x_mean) * (log_pred - y_mean)).sum()
+                denominator = ((log_true - x_mean) ** 2).sum() + epsilon
+                
+                slope = numerator / denominator
+                slope_penalty = (slope - 1.0) ** 2
         
         # Zero-concentration penalty
         zero_mask = (y_true < epsilon)
@@ -84,29 +107,33 @@ class ConcentrationFocusedLoss(nn.Module):
             z_scores = torch.abs(mu - y_true) / (uncertainty + epsilon)
             calibration_loss = F.smooth_l1_loss(z_scores, torch.ones_like(z_scores, device=z_scores.device) * 1.96)
         
-        # Add monotonicity regularization
+        # Monotonicity regularization
         batch_size = y_true.shape[0]
+        monotonicity_penalty = torch.tensor(0.0, device=mse_loss.device)
         if batch_size > 1:
             sorted_targets, indices = torch.sort(y_true.squeeze(), dim=0)
             sorted_preds = mu.squeeze()[indices]
             
             # Only penalize when predictions decrease as targets increase
             monotonicity_penalty = torch.clamp(sorted_preds[:-1] - sorted_preds[1:], min=0).mean()
-        else:
-            monotonicity_penalty = torch.tensor(0.0, device=mse_loss.device)
         
-        # Total loss with all components
-        total_loss = (weighted_mse + 1.5 * weighted_rel + zero_penalty + control_loss + 
-                     0.2 * calibration_loss + 0.5 * monotonicity_penalty)
+        # Total loss with strong weight on log-space accuracy
+        total_loss = (weighted_mse + 
+                     1.5 * weighted_rel + 
+                     3.0 * log_mse +  # Strong weight on log-space MSE
+                     2.0 * slope_penalty +  # Penalize deviation from slope=1
+                     zero_penalty + 
+                     control_loss + 
+                     0.2 * calibration_loss + 
+                     0.5 * monotonicity_penalty)
         
         return total_loss
-    
+     
 class EnhancedCancerDetectionModel(nn.Module):
     def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
                  dropout_rate=0.2, min_reliable_coverage=3.0):
         super().__init__()
         
-        # Keep the original architecture
         self.num_markers = num_markers
         self.feature_dim = feature_dim
         self.min_reliable_coverage = min_reliable_coverage
@@ -139,15 +166,29 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Sigmoid()
         )
         
-        # Simplified attention mechanism
+        # Attention mechanism
         self.attention = nn.Linear(feature_dim, 1)
         
-        # Single concentration prediction head (remove dual-head)
         self.concentration_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim // 2, 1),
+            nn.Linear(feature_dim // 2, 1)
+        )
+        
+        # Low concentration head predicts in log space
+        self.low_concentration_head = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(feature_dim // 2, 1)
+        )
+        
+        # Concentration-based gating
+        self.concentration_gate = nn.Sequential(
+            nn.Linear(feature_dim, 16),
+            nn.GELU(),
+            nn.Linear(16, 1),
             nn.Sigmoid()
         )
         
@@ -160,28 +201,11 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Softplus()
         )
         
-        # Calibration parameter
+        # Calibration parameters
         self.register_buffer('calibration', torch.ones(1))
         self.register_buffer('clinical_threshold', torch.tensor(0.001))
-
-        self.low_concentration_head = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim // 2, 1),
-            nn.Sigmoid()
-        )
-        
-        # Simple concentration-based gating
-        self.concentration_gate = nn.Sequential(
-            nn.Linear(feature_dim, 16),
-            nn.GELU(),
-            nn.Linear(16, 1),
-            nn.Sigmoid()
-        )
     
     def forward(self, marker_values, coverage):
-        # Use original forward pass
         missing_mask = (coverage == 0)
         unreliable_mask = (coverage < self.min_reliable_coverage)
         combined_mask = missing_mask | unreliable_mask
@@ -210,23 +234,28 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
         
-        # Get predictions from both heads
+        # Standard head predicts directly (no sigmoid)
         standard_pred = self.concentration_head(aggregated)
-        low_conc_pred = self.low_concentration_head(aggregated) * 0.02  # Scale to max 2%
         
-        # Simple gating based on predicted concentration
+        # Low concentration head predicts in log space
+        log_low_pred = self.low_concentration_head(aggregated)
+        low_conc_pred = torch.pow(10, log_low_pred)  # Convert from log space
+        
+        # Ensure predictions are non-negative using softplus
+        standard_pred = F.softplus(standard_pred) * 0.1  # Scale to reasonable range
+        low_conc_pred = torch.clamp(low_conc_pred, 1e-6, 0.1)  # Limit range
+        
+        # Use gating to blend predictions
         gate = self.concentration_gate(aggregated)
-        
-        # Blend predictions - use low_conc_pred more when gate is low
         concentration = gate * standard_pred + (1 - gate) * low_conc_pred
         
-        # Ensure concentration stays within valid range
+        # Final clamp to valid range [0, 1]
         concentration = torch.clamp(concentration, 0.0, 1.0)
         
         uncertainty = self.uncertainty_head(aggregated)
         
         return concentration, uncertainty, attention_weights
-    
+
     def get_estimate_and_ci(self, mu, uncertainty, ci_level=0.95):
         """Get point estimate and confidence interval"""
         # Scale uncertainty by calibration factor

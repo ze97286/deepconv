@@ -78,8 +78,6 @@ def parse_args():
     # Clinical evaluation parameters (these were in the main function)
     parser.add_argument('--clinical_eval', action='store_true',
                        help='Enable comprehensive clinical evaluation metrics')
-    parser.add_argument('--blank_samples_path', type=str, default=None,
-                       help='Path to numpy array of blank sample predictions for LoB/LoD calculation')
     parser.add_argument('--generate_clinical_report', action='store_true',
                        help='Generate clinical interpretation report')
     parser.add_argument('--visualise_clinical', action='store_true',
@@ -363,9 +361,10 @@ def train_model(model, train_loader, val_loader, args, device):
         for range_name in ['0.1-0.5%', '0.5-1%', '1-5%']:
             if range_name in val_metrics['concentration_metrics']:
                 metrics = val_metrics['concentration_metrics'][range_name]
+                within_25 = metrics.get('25pct', 0.0) 
                 logger.info(f"  {range_name} (n={metrics['count']}): "
-                           f"MAE={metrics['mae']:.6f}, "
-                           f"Within 25%={metrics.get('within_25pct', 0):.1f}%")
+                        f"MAE={metrics['mae']:.6f}, "
+                        f"Within 25%={within_25:.1f}%")
         
         # Check for improvement
         improvement = False
@@ -1377,8 +1376,6 @@ def visualise_results(predictions, ground_truth, output_dir, ci_data=None, marke
         fig_markers.write_html(os.path.join(output_dir, 'marker_importance.html'))
         fig_markers.write_image(os.path.join(output_dir, 'marker_importance.png'), scale=2)
     
-    # CLINICAL ASSESSMENT visualisATIONS
-    
     # 1. Error distribution analysis
     fig_err = make_subplots(rows=2, cols=1, 
                           subplot_titles=('Absolute Error Distribution', 'Relative Error Distribution'))
@@ -1546,13 +1543,288 @@ def visualise_results(predictions, ground_truth, output_dir, ci_data=None, marke
             }
             for name, stats in zip(range_df['range'], range_df.to_dict('records'))
         },
-        # Add log-space metrics
         'log_space': {
             'r2': float(log_r2),
             'slope': float(slope),
             'intercept': float(intercept)
         }
     }
+
+
+    # Stratified log-space analysis
+    def stratified_log_space_analysis(predictions, ground_truth):
+        """
+        Calculate log-space R² for different concentration ranges
+        to see if the poor performance is localized
+        """
+        ranges = [
+            (0, 0.001, "Ultra-low (<0.1%)"),
+            (0.001, 0.01, "Low (0.1-1%)"),
+            (0.01, 0.1, "Medium (1-10%)"),
+            (0.1, 1.0, "High (>10%)")
+        ]
+        
+        epsilon = 1e-10
+        results = []
+        
+        for low, high, name in ranges:
+            mask = (ground_truth >= low) & (ground_truth < high)
+            if mask.sum() > 10:  # Need enough points
+                log_true = np.log10(ground_truth[mask] + epsilon)
+                log_pred = np.log10(predictions[mask] + epsilon)
+                
+                # Linear regression in log space
+                slope, intercept, r_value, _, _ = stats.linregress(log_true, log_pred)
+                
+                results.append({
+                    'range': name,
+                    'n_samples': mask.sum(),
+                    'log_r2': r_value**2,
+                    'slope': slope,
+                    'intercept': intercept
+                })
+        
+        return pd.DataFrame(results)
+    
+    # Create stratified log-space analysis
+    stratified_results = stratified_log_space_analysis(preds, targets)
+    
+    # Plot stratified log-space results
+    fig_stratified_log = go.Figure()
+    
+    # Bar chart for R² values
+    fig_stratified_log.add_trace(
+        go.Bar(
+            x=stratified_results['range'],
+            y=stratified_results['log_r2'],
+            text=[f"R²={r2:.3f}<br>n={n}" for r2, n in zip(stratified_results['log_r2'], stratified_results['n_samples'])],
+            textposition='auto',
+            name='Log-space R²'
+        )
+    )
+    
+    # Add reference line at R²=0.9
+    fig_stratified_log.add_hline(y=0.9, line_dash="dash", line_color="red", 
+                                annotation_text="Target R²=0.9", annotation_position="right")
+    
+    fig_stratified_log.update_layout(
+        title=f'{prefix}Stratified Log-Space R² Analysis',
+        xaxis_title='Concentration Range',
+        yaxis_title='Log-Space R²',
+        template='plotly_white',
+        height=600,
+        yaxis=dict(range=[0, 1])
+    )
+    
+    fig_stratified_log.write_html(os.path.join(clinical_dir, 'stratified_log_space_analysis.html'))
+    fig_stratified_log.write_image(os.path.join(clinical_dir, 'stratified_log_space_analysis.png'), scale=2)
+    
+    # Clinical performance dashboard
+    fig_clinical = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=(
+            'Prediction Error vs Concentration',
+            'Relative Error by Range',
+            'Cumulative Error Distribution',
+            'Prediction vs Truth (sorted)'
+        ),
+        vertical_spacing=0.12,
+        horizontal_spacing=0.1
+    )
+    
+    # Calculate relative errors
+    non_zero_mask = targets > 0
+    rel_error = np.zeros_like(targets)
+    rel_error[non_zero_mask] = np.abs(preds[non_zero_mask] - targets[non_zero_mask]) / targets[non_zero_mask]
+    
+    # Error vs concentration (log scale)
+    fig_clinical.add_trace(
+        go.Scatter(
+            x=targets[non_zero_mask],
+            y=rel_error[non_zero_mask] * 100,
+            mode='markers',
+            marker=dict(size=4, opacity=0.5, color='blue'),
+            name='Relative Error',
+            showlegend=False
+        ),
+        row=1, col=1
+    )
+    fig_clinical.update_xaxes(type="log", title="True Concentration", row=1, col=1, tickformat='.2%')
+    fig_clinical.update_yaxes(title="Relative Error (%)", row=1, col=1, range=[0, 200])
+    
+    # Box plot of relative errors by range
+    ranges = [(0.0001, 0.001), (0.001, 0.01), (0.01, 0.1), (0.1, 1.0)]
+    range_names = ['0.01-0.1%', '0.1-1%', '1-10%', '>10%']
+    
+    for i, ((low, high), name) in enumerate(zip(ranges, range_names)):
+        mask = (targets >= low) & (targets < high)
+        if mask.sum() > 0:
+            fig_clinical.add_trace(
+                go.Box(
+                    y=rel_error[mask] * 100,
+                    name=name,
+                    boxpoints='outliers',
+                    showlegend=False
+                ),
+                row=1, col=2
+            )
+    
+    fig_clinical.update_yaxes(title="Relative Error (%)", row=1, col=2, range=[0, 200])
+    fig_clinical.update_xaxes(title="Concentration Range", row=1, col=2)
+    
+    # Cumulative distribution of errors
+    sorted_rel_error = np.sort(rel_error[non_zero_mask] * 100)
+    cumulative = np.arange(1, len(sorted_rel_error) + 1) / len(sorted_rel_error)
+    
+    fig_clinical.add_trace(
+        go.Scatter(
+            x=sorted_rel_error,
+            y=cumulative * 100,
+            mode='lines',
+            name='Cumulative %',
+            line=dict(color='green'),
+            showlegend=False
+        ),
+        row=2, col=1
+    )
+    
+    # Add reference lines
+    fig_clinical.add_vline(x=25, line_dash="dash", line_color="red", 
+                          annotation_text="25% error", row=2, col=1)
+    fig_clinical.add_vline(x=50, line_dash="dash", line_color="orange", 
+                          annotation_text="50% error", row=2, col=1)
+    
+    fig_clinical.update_xaxes(title="Relative Error (%)", row=2, col=1, range=[0, 100])
+    fig_clinical.update_yaxes(title="Cumulative Percentage", row=2, col=1)
+    
+    # Prediction vs Truth (sorted)
+    sorted_idx = np.argsort(targets)
+    sorted_truth = targets[sorted_idx]
+    sorted_pred = preds[sorted_idx]
+    
+    fig_clinical.add_trace(
+        go.Scatter(
+            x=np.arange(len(sorted_truth)),
+            y=sorted_truth,
+            mode='lines',
+            name='True',
+            line=dict(color='black', width=2)
+        ),
+        row=2, col=2
+    )
+    
+    fig_clinical.add_trace(
+        go.Scatter(
+            x=np.arange(len(sorted_truth)),
+            y=sorted_pred,
+            mode='lines',
+            name='Predicted',
+            line=dict(color='blue', width=2)
+        ),
+        row=2, col=2
+    )
+    
+    fig_clinical.update_yaxes(type="log", title="Concentration", row=2, col=2, tickformat='.2%')
+    fig_clinical.update_xaxes(title="Sample Index (sorted)", row=2, col=2)
+    
+    fig_clinical.update_layout(
+        height=800, 
+        width=1000, 
+        title_text=f'{prefix}Clinical Performance Dashboard',
+        showlegend=True
+    )
+    
+    fig_clinical.write_html(os.path.join(clinical_dir, 'clinical_performance_dashboard.html'))
+    fig_clinical.write_image(os.path.join(clinical_dir, 'clinical_performance_dashboard.png'), scale=2)
+    
+    # 3. Clinical reliability score
+    def calculate_clinical_reliability_score(predictions, ground_truth):
+        """
+        Calculate a single score that captures clinical reliability
+        based on your specific requirements
+        """
+        ranges = [
+            (0.001, 0.005, 0.50, 3.0),  # 0.1-0.5%: 50% error acceptable, weight=3
+            (0.005, 0.01, 0.25, 2.0),   # 0.5-1%: 25% error acceptable, weight=2
+            (0.01, 0.05, 0.10, 1.0),    # 1-5%: 10% error acceptable, weight=1
+            (0.05, 1.0, 0.05, 1.0)      # >5%: 5% error acceptable, weight=1
+        ]
+        
+        scores = []
+        weights = []
+        detailed_results = []
+        
+        for low, high, tolerance, weight in ranges:
+            mask = (ground_truth >= low) & (ground_truth < high)
+            if mask.sum() > 0:
+                rel_error = np.abs(predictions[mask] - ground_truth[mask]) / ground_truth[mask]
+                within_tolerance = np.mean(rel_error <= tolerance)
+                
+                scores.append(within_tolerance)
+                weights.append(weight)
+                
+                detailed_results.append({
+                    'range': f'{low*100:.1f}-{high*100:.1f}%',
+                    'tolerance': f'{tolerance*100:.0f}%',
+                    'within_tolerance': within_tolerance * 100,
+                    'weight': weight,
+                    'n_samples': mask.sum()
+                })
+        
+        # Weighted average
+        overall_score = np.average(scores, weights=weights) if scores else 0.0
+        
+        return overall_score, pd.DataFrame(detailed_results)
+    
+    # Calculate clinical reliability score
+    reliability_score, reliability_details = calculate_clinical_reliability_score(preds, targets)
+    
+    # Create visualization for clinical reliability
+    fig_reliability = go.Figure()
+    
+    fig_reliability.add_trace(
+        go.Bar(
+            x=reliability_details['range'],
+            y=reliability_details['within_tolerance'],
+            text=[f"{pct:.1f}%<br>n={n}<br>w={w}" for pct, n, w in 
+                  zip(reliability_details['within_tolerance'], 
+                      reliability_details['n_samples'],
+                      reliability_details['weight'])],
+            textposition='auto',
+            marker_color=['red' if pct < 50 else 'orange' if pct < 75 else 'green' 
+                         for pct in reliability_details['within_tolerance']]
+        )
+    )
+    
+    # Add tolerance lines
+    for i, (range_name, tolerance) in enumerate(zip(reliability_details['range'], 
+                                                   reliability_details['tolerance'])):
+        fig_reliability.add_shape(
+            type="line",
+            x0=i-0.4, x1=i+0.4,
+            y0=float(tolerance.strip('%')), y1=float(tolerance.strip('%')),
+            line=dict(color="black", width=2, dash="dash"),
+        )
+    
+    fig_reliability.update_layout(
+        title=f'{prefix}Clinical Reliability Score: {reliability_score:.3f}',
+        xaxis_title='Concentration Range',
+        yaxis_title='% Within Tolerance',
+        template='plotly_white',
+        height=600,
+        yaxis=dict(range=[0, 100])
+    )
+    
+    fig_reliability.write_html(os.path.join(clinical_dir, 'clinical_reliability_score.html'))
+    fig_reliability.write_image(os.path.join(clinical_dir, 'clinical_reliability_score.png'), scale=2)
+    
+    # Update metrics dictionary to include new analyses
+    metrics['stratified_log_space']=stratified_results.to_dict('records')
+    metrics['clinical_reliability']={
+            'overall_score': float(reliability_score),
+            'details': reliability_details.to_dict('records')
+    }
+    
     
     # Add CI metrics if available
     if ci_data is not None:
@@ -2248,10 +2520,10 @@ def main():
         try:
             # Load blank samples if provided
             blank_samples = None
-            if args.blank_samples_path:
-                logger.info(f"Loading blank samples from {args.blank_samples_path}...")
+            if args.control_data_dir:
+                logger.info(f"Loading blank samples from {args.control_data_dir}...")
                 try:
-                    blank_samples = np.load(args.blank_samples_path)
+                    blank_samples = np.load(args.control_data_dir)
                     logger.info(f"✓ Loaded {len(blank_samples)} blank samples")
                 except Exception as e:
                     logger.error(f"× Error loading blank samples: {str(e)}")
