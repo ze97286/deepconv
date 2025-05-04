@@ -66,6 +66,10 @@ def parse_args():
     
     parser.add_argument('--control_data_dir', type=str, default=None, 
                    help='Directory containing control data for contrastive learning')
+    parser.add_argument('--calibrate_clinical_threshold', action='store_true',
+                        help='Calibrate clinical decision threshold in addition to uncertainty')
+    parser.add_argument('--target_specificity', type=float, default=0.95,
+                        help='Target specificity for clinical threshold calibration')
     parser.add_argument('--calibrate', action='store_true', 
                     help='Calibrate confidence intervals')
     parser.add_argument('--calibrate_every', type=int, default=5,
@@ -235,7 +239,7 @@ def compute_loss(mu, uncertainty, y_true, control_mask=None):
     
     return total_loss
 
-def train_model(model, train_loader, val_loader, control_loader, args, device):
+def train_model(model, train_loader, val_loader, args, device):
     """
     Train the model with a simplified approach
     
@@ -243,7 +247,6 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         model: The model to train
         train_loader: DataLoader for training data
         val_loader: DataLoader for validation data
-        control_loader: DataLoader for control samples (can be None)
         args: Training arguments
         device: Device to run training on
     """
@@ -252,7 +255,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
     git_info = get_git_info()
     git_commit = git_info['commit']
 
-    
+
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
@@ -361,7 +364,6 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         val_loss = val_metrics['loss']
         
         # Calculate low concentration error
-        # Focus on 0.1-1% range which is often critical
         low_conc_error = 0
         count = 0
         for range_name, metrics in val_metrics['concentration_metrics'].items():
@@ -432,10 +434,27 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
         
         # Periodic calibration (if enabled)
         if args.calibrate and (epoch % args.calibrate_every == 0 or epoch == args.epochs - 1):
-            logger.info("Calibrating model...")
+            logger.info("Calibrating model uncertainty estimates...")
             try:
                 calibration_results = model.calibrate(val_loader, device)
                 logger.info(f"  Calibration factor: {calibration_results['calibration_factor']:.4f}")
+                
+                # Also calibrate clinical threshold if enabled
+                if hasattr(args, 'calibrate_clinical_threshold') and args.calibrate_clinical_threshold:
+                    logger.info("Calibrating clinical decision threshold...")
+                    clinical_calibration = model.calibrate_clinical_threshold(
+                        val_loader,
+                        device,
+                        target_metric='concentration_aware'
+                    )
+                    
+                    if clinical_calibration:
+                        logger.info(f"  Clinical threshold: {clinical_calibration['threshold']:.6f}")
+                        logger.info(f"  Specificity: {clinical_calibration['specificity']:.2f}")
+                        logger.info(f"  Sensitivity: {clinical_calibration['sensitivity']:.2f}")
+                    else:
+                        logger.warning("  Failed to calibrate clinical threshold")
+                
             except Exception as e:
                 logger.error(f"× Error during calibration: {str(e)}")
                 logger.info("  Skipping calibration for this epoch")
@@ -487,7 +506,7 @@ def train_model(model, train_loader, val_loader, control_loader, args, device):
 
 def validate_model(model, val_loader, device):
     """
-    Validate model performance with concentration-focused metrics
+    Validate model performance with concentration-focused metrics and clinical threshold support
     
     Args:
         model: The model to validate
@@ -503,6 +522,7 @@ def validate_model(model, val_loader, device):
     all_preds = []
     all_targets = []
     all_uncertainties = []
+    all_clinical_detections = []
     
     # Track batch count for reporting
     batch_count = 0
@@ -521,8 +541,14 @@ def validate_model(model, val_loader, device):
                 coverage = batch_data[1].to(device)
                 y_true = batch_data[2].to(device)
                 
-                # Forward pass
-                mu, uncertainty, _ = model(marker_values, coverage)
+                # Forward pass with clinical threshold if available
+                if hasattr(model, 'predict_with_clinical_threshold'):
+                    mu, uncertainty, _, is_detected = model.predict_with_clinical_threshold(
+                        marker_values, coverage
+                    )
+                    all_clinical_detections.append(is_detected.cpu().numpy())
+                else:
+                    mu, uncertainty, _ = model(marker_values, coverage)
                 
                 # Compute loss safely
                 try:
@@ -558,7 +584,8 @@ def validate_model(model, val_loader, device):
             'r2': 0.0,
             'mae': float('inf'),
             'concentration_metrics': {},
-            'uncertainty_metrics': {}
+            'uncertainty_metrics': {},
+            'clinical_metrics': {}
         }
     
     # Calculate average loss
@@ -580,6 +607,22 @@ def validate_model(model, val_loader, device):
         # Calculate uncertainty calibration metrics
         uncertainty_metrics = compute_uncertainty_metrics(predictions, targets, uncertainties)
         
+        # Clinical detection metrics if available
+        clinical_metrics = {}
+        if len(all_clinical_detections) > 0:
+            clinical_detections = np.concatenate(all_clinical_detections)
+            true_positives = (clinical_detections & (targets >= 0.001)).sum()
+            false_positives = (clinical_detections & (targets < 0.001)).sum()
+            true_negatives = ((~clinical_detections) & (targets < 0.001)).sum()
+            false_negatives = ((~clinical_detections) & (targets >= 0.001)).sum()
+            
+            clinical_metrics = {
+                'sensitivity': true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0,
+                'specificity': true_negatives / (true_negatives + false_positives) if (true_negatives + false_positives) > 0 else 0,
+                'ppv': true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0,
+                'npv': true_negatives / (true_negatives + false_negatives) if (true_negatives + false_negatives) > 0 else 0
+            }
+        
         # Log success
         logger.info(f"Validation complete: processed {batch_count}/{total_batches} batches")
         
@@ -589,7 +632,8 @@ def validate_model(model, val_loader, device):
             'r2': r2,
             'mae': mae,
             'concentration_metrics': concentration_metrics,
-            'uncertainty_metrics': uncertainty_metrics
+            'uncertainty_metrics': uncertainty_metrics,
+            'clinical_metrics': clinical_metrics
         }
     except Exception as e:
         logger.error(f"Error calculating validation metrics: {str(e)}")
@@ -599,9 +643,10 @@ def validate_model(model, val_loader, device):
             'r2': 0.0,
             'mae': float('inf'),
             'concentration_metrics': {},
-            'uncertainty_metrics': {}
+            'uncertainty_metrics': {},
+            'clinical_metrics': {}
         }
-
+    
 def compute_concentration_metrics(predictions, targets):
     """
     Compute concentration-stratified metrics
@@ -860,7 +905,7 @@ def plot_training_history(history, output_dir):
 
 def evaluate(model, data_loader, args, device, split_name="test"):
     """
-    Enhanced evaluation function focused on regression metrics
+    Enhanced evaluation function focused on regression metrics with clinical threshold evaluation
     
     Args:
         model: The model to evaluate
@@ -882,6 +927,7 @@ def evaluate(model, data_loader, args, device, split_name="test"):
     all_targets = []
     all_uncertainties = []
     all_marker_attentions = []
+    all_clinical_detections = []
     
     # Create progress bar for evaluation
     eval_bar = tqdm(data_loader, desc=f"Evaluating {split_name} set", position=0)
@@ -898,8 +944,14 @@ def evaluate(model, data_loader, args, device, split_name="test"):
             coverage = coverage.to(device)
             y_true = y_true.to(device)
             
-            # Forward pass
-            mu, uncertainty, attention_weights = model(marker_values, coverage)
+            # Forward pass with clinical threshold if available
+            if hasattr(model, 'predict_with_clinical_threshold'):
+                mu, uncertainty, attention_weights, is_detected = model.predict_with_clinical_threshold(
+                    marker_values, coverage
+                )
+                all_clinical_detections.append(is_detected.cpu().numpy())
+            else:
+                mu, uncertainty, attention_weights = model(marker_values, coverage)
             
             # Store results
             all_preds.append(mu.cpu().numpy())
@@ -935,6 +987,32 @@ def evaluate(model, data_loader, args, device, split_name="test"):
     
     # Calculate uncertainty metrics
     uncertainty_metrics = compute_uncertainty_metrics(predictions, targets, uncertainties)
+    
+    # Clinical detection metrics if available
+    clinical_metrics = {}
+    if len(all_clinical_detections) > 0:
+        clinical_detections = np.concatenate(all_clinical_detections)
+        true_positives = (clinical_detections & (targets >= 0.001)).sum()
+        false_positives = (clinical_detections & (targets < 0.001)).sum()
+        true_negatives = ((~clinical_detections) & (targets < 0.001)).sum()
+        false_negatives = ((~clinical_detections) & (targets >= 0.001)).sum()
+        
+        clinical_metrics = {
+            'sensitivity': true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0,
+            'specificity': true_negatives / (true_negatives + false_positives) if (true_negatives + false_positives) > 0 else 0,
+            'ppv': true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0,
+            'npv': true_negatives / (true_negatives + false_negatives) if (true_negatives + false_negatives) > 0 else 0,
+            'true_positives': int(true_positives),
+            'false_positives': int(false_positives),
+            'true_negatives': int(true_negatives),
+            'false_negatives': int(false_negatives)
+        }
+        
+        logger.info(f"\nCLINICAL DETECTION METRICS:")
+        logger.info(f"  Sensitivity: {clinical_metrics['sensitivity']:.2f}")
+        logger.info(f"  Specificity: {clinical_metrics['specificity']:.2f}")
+        logger.info(f"  PPV: {clinical_metrics['ppv']:.2f}")
+        logger.info(f"  NPV: {clinical_metrics['npv']:.2f}")
     
     # Log basic results
     logger.info(f"\n{split_name.upper()} RESULTS:")
@@ -975,6 +1053,7 @@ def evaluate(model, data_loader, args, device, split_name="test"):
         },
         'concentration_metrics': concentration_metrics,
         'uncertainty_metrics': uncertainty_metrics,
+        'clinical_metrics': clinical_metrics,
         'marker_importance': {
             'top_indices': top_indices.tolist(),
             'top_weights': top_weights.tolist()
@@ -987,7 +1066,7 @@ def evaluate(model, data_loader, args, device, split_name="test"):
         json.dump(results, f, indent=2)
     logger.info(f"{split_name} results saved to {results_file}")
     
-    # Create visualisations using visualise_results instead of create_evaluation_visualisations
+    # Create visualisations
     vis_dir = os.path.join(args.output_dir, 'visualisations', split_name)
     try:
         visualise_results(
@@ -2097,7 +2176,6 @@ def main():
             model, 
             train_loader, 
             val_loader, 
-            control_val_loader, 
             args, 
             device
         )
@@ -2110,17 +2188,34 @@ def main():
     if args.calibrate:
         logger.info("Performing final model calibration...")
         try:
+            # Calibrate uncertainty estimates
             calibration_results = model.calibrate(val_loader, device)
+            
+            # Calibrate clinical threshold
+            clinical_calibration = None
+            if hasattr(args, 'calibrate_clinical_threshold') and args.calibrate_clinical_threshold:
+                clinical_calibration = model.calibrate_clinical_threshold(
+                    val_loader,
+                    device,
+                    target_metric='concentration_aware'
+                )
             
             # Update best model state with calibration results
             if best_model_state is not None:
                 best_model_state['calibration'] = calibration_results
+                if clinical_calibration:
+                    best_model_state['clinical_calibration'] = clinical_calibration
             
             # Save updated best model
             torch.save(best_model_state, os.path.join(args.output_dir, 'best_model_calibrated.pt'))
             
             logger.info(f"✓ Model calibrated:")
-            logger.info(f"  Calibration factor: {calibration_results['calibration_factor']:.4f}")
+            logger.info(f"  Uncertainty calibration factor: {calibration_results['calibration_factor']:.4f}")
+            
+            if clinical_calibration:
+                logger.info(f"  Clinical threshold: {clinical_calibration['threshold']:.6f}")
+                logger.info(f"  Specificity: {clinical_calibration['specificity']:.2f}")
+                logger.info(f"  Sensitivity: {clinical_calibration['sensitivity']:.2f}")
             
         except Exception as e:
             logger.error(f"× Error during calibration: {str(e)}")

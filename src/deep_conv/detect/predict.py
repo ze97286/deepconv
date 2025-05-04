@@ -93,107 +93,63 @@ def load_model(model_dir, device='cpu'):
             logger.warning(f"No args.json found in {model_dir}. Using default parameters.")
             args = {}
 
-    # Standard single model
     # Get model parameters
     model_state = checkpoint.get('model', None)
     if model_state is None:
         # Some checkpoints store the model state directly
         model_state = checkpoint
 
-    # Get num_markers from the first layer weights if not in args
-    if isinstance(model_state, dict):
-        # Check for background_level dimension
-        if 'background_level' in model_state:
-            bg_shape = model_state['background_level'].shape
-            if len(bg_shape) > 1 and bg_shape[1] > 1:
-                # This is a marker-specific background, extract the number of markers
-                args['num_markers'] = bg_shape[1]
-                args['marker_specific_bg'] = True
-
-        # If still not found, try to infer from value_embedding or other layers
-        if 'num_markers' not in args:
-            for key in model_state:
-                if 'value_embedding.weight' in key:
-                    feature_dim = model_state[key].shape[1]
-                    args['feature_dim'] = feature_dim * 2  # Assuming feature_dim//2 in the embedding
-                    break
-                elif 'embedding' in key and 'weight' in key:
-                    # Try to infer from embedding dimensions
-                    shape = model_state[key].shape
-                    if len(shape) > 1:
-                        for dim in shape:
-                            if dim > 50:  # Likely the marker dimension
-                                args['num_markers'] = dim
-                                break
+    # Get num_markers from the model state if not in args
+    if 'num_markers' not in args:
+        # Try to infer from marker_pos_embedding parameter size
+        for key in model_state:
+            if 'marker_pos_embedding' in key:
+                args['num_markers'] = model_state[key].shape[1]
+                break
+            elif 'value_embedding.weight' in key:
+                # Can also try to infer from other layer dimensions if needed
+                pass
 
     # Set defaults with fallbacks
-    detection_thresholds = args.get('detection_thresholds', [0.001, 0.01, 0.05])
-    # Convert from string if needed
-    if isinstance(detection_thresholds, str):
-        try:
-            detection_thresholds = json.loads(detection_thresholds)
-        except:
-            detection_thresholds = [0.001, 0.01, 0.05]
+    defaults = {
+        'num_markers': 136,
+        'feature_dim': 128,
+        'num_heads': 8,
+        'num_layers': 3,
+        'dropout_rate': 0.2,
+        'min_reliable_coverage': 3.0
+    }
+    
+    for key, default_value in defaults.items():
+        if key not in args:
+            args[key] = default_value
 
     # Create and load model
     try:
-        from pprint import pprint
-        pprint(args)
+        logger.info(f"Creating model with parameters: {args}")
 
         model = EnhancedCancerDetectionModel(
-            num_markers=args.get("num_markers", 136),
-            feature_dim=128,
-            num_heads=args.get("num_heads", 8),
-            num_layers=args.get("num_layers", 3),
-            dropout_rate=args.get("dropout_rate", 0.2),
-            detection_thresholds=detection_thresholds,
-            critical_ranges = args.get("critical_ranges", [(0.001,0.005,1.0),(0.005,0.01,1.0)]),
-            marker_specific_bg=args.get("marker_specific_bg", True),
-            min_reliable_coverage=args.get("min_reliable_coverage", 5.0),
-            enable_adaptive_thresholds=args.get("enable_adaptive_thresholds", False)
+            num_markers=args['num_markers'],
+            feature_dim=args['feature_dim'],
+            num_heads=args['num_heads'],
+            num_layers=args['num_layers'],
+            dropout_rate=args['dropout_rate'],
+            min_reliable_coverage=args.get('min_reliable_coverage', 3.0)
         )
 
-        # First try strict loading
-        try:
-            model.load_state_dict(model_state, strict=True)
-        except Exception as e:
-            logger.warning(f"Strict loading failed: {e}")
-            # Try non-strict loading
-            model.load_state_dict(model_state, strict=False)
-            logger.info("Used non-strict loading instead")
+        # Load model state
+        model.load_state_dict(model_state, strict=True)
 
-        # Apply calibration values if available
-        if 'calibration' in checkpoint:
+        # Apply calibration if available
+        if 'calibration' in checkpoint and isinstance(checkpoint['calibration'], dict):
             with torch.no_grad():
                 if hasattr(model, 'calibration'):
-                    model.calibration.fill_(checkpoint['calibration'].get('calibration_factor', 1.0))
-
-                # Handle background level properly
-                if hasattr(model, 'background_level'):
-                    if 'global_bg_level' in checkpoint['calibration']:
-                        # Single background level
-                        bg_level = checkpoint['calibration'].get('global_bg_level', 0.05)
-                        model.background_level.fill_(bg_level)
-                    elif model.marker_specific_bg and 'marker_bg_levels' in checkpoint['calibration']:
-                        # Marker-specific background levels (if shape matches)
-                        bg_levels = checkpoint['calibration']['marker_bg_levels']
-                        if isinstance(bg_levels, torch.Tensor) and bg_levels.shape == model.background_level.shape:
-                            model.background_level.copy_(bg_levels)
-                        else:
-                            # Fall back to global stats if available
-                            if 'marker_bg_stats' in checkpoint['calibration']:
-                                stats = checkpoint['calibration']['marker_bg_stats']
-                                median_val = stats.get('median', 0.05)
-                                model.background_level.fill_(median_val)
-                            else:
-                                # Default fallback
-                                model.background_level.fill_(0.05)
-
-                if hasattr(model, 'low_calibration'):
-                    model.low_calibration.fill_(checkpoint['calibration'].get('low_calibration_factor', 1.0))
+                    calibration_factor = checkpoint['calibration'].get('calibration_factor', 1.0)
+                    model.calibration.fill_(calibration_factor)
+                    logger.info(f"Applied calibration factor: {calibration_factor}")
 
     except Exception as e:
-        logger.error(f"Error creating model: {e}")
+        logger.error(f"Error creating/loading model: {e}")
         raise
 
     # Move model to device
@@ -203,22 +159,23 @@ def load_model(model_dir, device='cpu'):
     logger.info(f"Model loaded successfully")
     return model, args
 
-def predict(model, marker_values, coverage, sample_ids, output_dir=None, thresholds=None, device='cpu'):
+def predict(model, marker_values, coverage, sample_ids, output_dir=None, device='cpu'):
     """
     Predict using a trained model on a dataset and save the results to the output dir
     
     Args:
         model: Trained model
-        data_loader: DataLoader with evaluation data
+        marker_values: Marker values tensor
+        coverage: Coverage tensor
+        sample_ids: Sample IDs list
         output_dir: Directory to save results
-        thresholds: Detection thresholds
         device: Device to run evaluation on
         
     Returns:
         results: Dictionary of evaluation results
     """
     logger = logging.getLogger('cancer_detection')
-    logger.info("Starting model evaluation with enhanced metrics...")
+    logger.info("Starting model evaluation...")
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -226,48 +183,38 @@ def predict(model, marker_values, coverage, sample_ids, output_dir=None, thresho
     model = model.to(device)
     model.eval()
 
-    if thresholds is None:
-        # Get thresholds from model if available
-        if hasattr(model, 'detection_thresholds'):
-            thresholds = model.detection_thresholds
-        else:
-            thresholds = [0.001, 0.01, 0.05]
-
     all_preds = []
     all_lower_ci = []
     all_upper_ci = []
-    all_sample_ids = []
     all_uncertainties = []
 
-    # Create progress bar for evaluation
+    # Process predictions
     with torch.no_grad():
         marker_values = marker_values.to(device)
         coverage = coverage.to(device)
-        if hasattr(model, 'forward_with_detection'):
-            # Enhanced model with detection
-            mu, phi, det_probs, _ = model.forward_with_detection(marker_values, coverage)
-        else:
-            # Standard model
-            mu, phi, det_probs, _ = model(marker_values, coverage)
-        estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
+        
+        # Forward pass - the simplified model returns (concentration, uncertainty, attention_weights)
+        concentration, uncertainty, _ = model(marker_values, coverage)
+        
+        # Get estimate and confidence intervals
+        estimate, ci, scaled_uncertainty = model.get_estimate_and_ci(concentration, uncertainty)
+        
         # Store predictions
         all_preds.append(estimate.cpu().numpy())
         all_lower_ci.append(ci[:, 0:1].cpu().numpy())
         all_upper_ci.append(ci[:, 1:2].cpu().numpy())
-        all_uncertainties.append(uncertainty.cpu().numpy())
-
+        all_uncertainties.append(scaled_uncertainty.cpu().numpy())
 
     # Concatenate results
     all_preds = np.concatenate(all_preds)
     all_lower_ci = np.concatenate(all_lower_ci)
     all_upper_ci = np.concatenate(all_upper_ci)
     all_uncertainties = np.concatenate(all_uncertainties)
-    all_sample_ids = sample_ids
     
     # Save results
     predictions_df = pd.DataFrame(
         {
-            "sample_id": all_sample_ids,
+            "sample_id": sample_ids,
             "estimated": all_preds.flatten(),
             "lower_ci": all_lower_ci.flatten(),
             "upper_ci": all_upper_ci.flatten(),
@@ -277,7 +224,25 @@ def predict(model, marker_values, coverage, sample_ids, output_dir=None, thresho
 
     predictions_file = os.path.join(output_dir, 'predictions.csv')
     predictions_df.to_csv(predictions_file, index=False)
-    logger.info(f"Detailed predictions saved to {predictions_file}")
+    logger.info(f"Predictions saved to {predictions_file}")
+    
+    # Save summary statistics
+    summary = {
+        'num_samples': len(sample_ids),
+        'mean_prediction': float(all_preds.mean()),
+        'std_prediction': float(all_preds.std()),
+        'mean_uncertainty': float(all_uncertainties.mean()),
+        'predictions_above_0.001': int((all_preds > 0.001).sum()),
+        'predictions_above_0.01': int((all_preds > 0.01).sum()),
+        'predictions_above_0.05': int((all_preds > 0.05).sum()),
+    }
+    
+    summary_file = os.path.join(output_dir, 'summary.json')
+    with open(summary_file, 'w') as f:
+        json.dump(summary, f, indent=2)
+    logger.info(f"Summary saved to {summary_file}")
+    
+    return predictions_df
 
 def run_predict(model_dir, input_dir, output_dir=None, device=None):
     """
@@ -286,11 +251,11 @@ def run_predict(model_dir, input_dir, output_dir=None, device=None):
     Args:
         model_dir: Directory containing the trained model
         input_dir: Directory containing the data to evaluate
-        output_dir: Directory to save evaluation results (defaults to model_dir/evaluation)
+        output_dir: Directory to save evaluation results
         device: Device to run evaluation on (defaults to CUDA if available)
         
     Returns:
-        results: Dictionary of evaluation results
+        results: DataFrame of prediction results
     """
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -311,57 +276,42 @@ def run_predict(model_dir, input_dir, output_dir=None, device=None):
         # Load model
         model, args = load_model(model_dir, device)
         
-        # Get thresholds from model or args
-        if hasattr(model, 'detection_thresholds'):
-            thresholds = model.detection_thresholds
-        elif 'detection_thresholds' in args:
-            thresholds = args['detection_thresholds']
-        else:
-            thresholds = [0.001, 0.01, 0.05]
-            
         # Load dataset
         logger.info(f"Loading data from {input_dir}")
-        if 'atlas_path' in args:
-            atlas_path = args['atlas_path']
+        atlas_path = args.get('atlas_path', None)
+        if atlas_path:
             logger.info(f"Using atlas from training: {atlas_path}")
         else:
-            # Try to find atlas in the model directory
-            atlas_files = [f for f in os.listdir(model_dir) if f.endswith('.bed')]
-            if atlas_files:
-                atlas_path = os.path.join(model_dir, atlas_files[0])
-                logger.info(f"Found atlas in model directory: {atlas_path}")
-            else:
-                atlas_path = None
-                logger.warning("No atlas file specified or found in model directory")
+            logger.warning("No atlas file specified in model args")
         
         target_cell_type = args.get('target_cell_type', None)
+        target_cell_idx = args.get('target_cell_idx', None)
+        excluded_markers = args.get('excluded_markers', [])
+        
+        # Parse excluded markers if it's a string
+        if isinstance(excluded_markers, str) and excluded_markers:
+            excluded_markers = [int(x.strip()) for x in excluded_markers.split(',')]
         
         # Load dataset
         marker_values, coverage, sample_ids = prepare_data_for_predict(
             data_dir=input_dir,
             atlas_path=atlas_path,
             target_cell_type=target_cell_type,
+            target_cell_idx=target_cell_idx,
+            excluded_markers=excluded_markers
         )
         
-        # Evaluate model
-        predict(model, marker_values, coverage, sample_ids, output_dir, thresholds, device)        
+        # Make predictions
+        results_df = predict(model, marker_values, coverage, sample_ids, output_dir, device)        
         logger.info("Evaluation completed successfully")
+        
+        return results_df
         
     except Exception as e:
         logger.error(f"Error during prediction: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
         return None
-
-# python -m deep_conv.detect.predict \
-# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_conc_focused/ \
-# --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA/ \
-# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/oac_conc_focused
-
-# python -m deep_conv.detect.predict \
-# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/CpGenie_T-cells/ \
-# --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA/ \
-# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/CpGenie_T-cells
 
 if __name__ == '__main__':
     args = parse_args()

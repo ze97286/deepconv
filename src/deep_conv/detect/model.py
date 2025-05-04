@@ -6,10 +6,6 @@ import scipy.stats as stats
 import numpy as np
 
 class ConcentrationFocusedLoss(nn.Module):
-    """
-    Enhanced concentration-focused loss function with range-specific weighting
-    and improved handling of the 0.1-0.5% range
-    """
     def __init__(self, critical_ranges=None, zero_penalty=10.0, control_penalty=20.0):
         super().__init__()
         self.critical_ranges = critical_ranges or [(0.0001, 0.001, 1.8), (0.001, 0.01, 1.5), (0.01, 0.05, 1.2)]
@@ -19,15 +15,7 @@ class ConcentrationFocusedLoss(nn.Module):
     def forward(self, mu, uncertainty, y_true, control_mask=None):
         """
         Compute concentration-focused loss with enhanced range-specific weighting
-        
-        Args:
-            mu: Predicted concentration values [batch_size, 1]
-            uncertainty: Predicted uncertainty values [batch_size, 1]
-            y_true: Ground truth concentration values [batch_size, 1]
-            control_mask: Optional boolean mask identifying control samples
-            
-        Returns:
-            total_loss: Combined loss value for optimization
+        and monotonicity regularization
         """
         # Basic MSE loss
         mse_loss = F.mse_loss(mu, y_true, reduction='none')
@@ -36,7 +24,7 @@ class ConcentrationFocusedLoss(nn.Module):
         epsilon = 1e-6
         non_zero_mask = (y_true > epsilon)
         
-        # Initialise relative error tensor
+        # Initialize relative error tensor
         rel_error = torch.zeros_like(mse_loss, device=mse_loss.device)
         
         # Compute relative error only for non-zero targets
@@ -47,7 +35,7 @@ class ConcentrationFocusedLoss(nn.Module):
                 rel_error
             )
         
-        # Apply log-scale weighting - but adjust it for critical ranges
+        # Apply log-scale weighting
         log_weights = 1.0 / torch.log10(y_true * 1000 + 10.0)
         log_weights = torch.clamp(log_weights, 0.5, 2.0)
         
@@ -60,9 +48,8 @@ class ConcentrationFocusedLoss(nn.Module):
         # Special focus on 0.1-0.5% range
         ultra_focused_range = (y_true >= 0.001) & (y_true < 0.005)
         if ultra_focused_range.sum() > 0:
-            # Add extra weight to relative error for this range
-            # This puts more emphasis on getting the relative error right
-            ultra_range_weight = 2.0  # Extra multiplier for relative error in this range
+            # Extra weight for relative error in this range
+            ultra_range_weight = 2.0
             rel_error = torch.where(
                 ultra_focused_range,
                 rel_error * ultra_range_weight,
@@ -70,29 +57,33 @@ class ConcentrationFocusedLoss(nn.Module):
             )
             
             # Add special "within 25%" loss component for this range
-            if non_zero_mask.sum() > 0:
-                within_25pct = torch.where(
-                    ultra_focused_range & (rel_error <= 0.25),
-                    torch.zeros_like(rel_error, device=rel_error.device),
-                    torch.where(
-                        ultra_focused_range,
-                        torch.pow(rel_error - 0.25, 2),  # Quadratic penalty for > 25% error
-                        torch.zeros_like(rel_error, device=rel_error.device)
-                    )
+            within_25pct = torch.where(
+                ultra_focused_range & (rel_error <= 0.25),
+                torch.zeros_like(rel_error, device=rel_error.device),
+                torch.where(
+                    ultra_focused_range,
+                    torch.pow(rel_error - 0.25, 2),  # Quadratic penalty for > 25% error
+                    torch.zeros_like(rel_error, device=rel_error.device)
                 )
-                # Add this penalty to the rel_error
-                rel_error = rel_error + within_25pct
+            )
+            rel_error = rel_error + within_25pct
+            
+            # Additional penalty for errors in this critical range
+            critical_error = torch.abs(mu[ultra_focused_range] - y_true[ultra_focused_range])
+            critical_penalty = torch.mean(critical_error * torch.log10(1.0 / (y_true[ultra_focused_range] + epsilon)))
+        else:
+            critical_penalty = torch.tensor(0.0, device=mse_loss.device)
         
         # Apply weights to MSE and relative error
         log_weights = log_weights * range_weights
         weighted_mse = (mse_loss * log_weights).mean()
         weighted_rel = (rel_error * log_weights).mean() if non_zero_mask.sum() > 0 else torch.tensor(0.0, device=mse_loss.device)
         
-        # Zero-concentration specific penalty - stronger for false positives
+        # Zero-concentration specific penalty
         zero_mask = (y_true < epsilon)
         zero_penalty = self.zero_penalty * mu[zero_mask].mean() if zero_mask.sum() > 0 else torch.tensor(0.0, device=mse_loss.device)
         
-        # Control sample penalty - even stronger for known negatives
+        # Control sample penalty
         control_loss = torch.tensor(0.0, device=mse_loss.device)
         if control_mask is not None and control_mask.sum() > 0:
             control_loss = self.control_penalty * mu[control_mask].mean()
@@ -100,16 +91,29 @@ class ConcentrationFocusedLoss(nn.Module):
         # Add calibration component for uncertainty estimates
         calibration_loss = torch.tensor(0.0, device=mse_loss.device)
         if uncertainty is not None:
-            z_scores = torch.abs(mu - y_true) / (uncertainty + 1e-6)
+            z_scores = torch.abs(mu - y_true) / (uncertainty + epsilon)
             calibration_loss = F.smooth_l1_loss(z_scores, torch.ones_like(z_scores, device=z_scores.device) * 1.96)
         
-        # Combine all components with adjusted weights
-        total_loss = weighted_mse + 0.7 * weighted_rel + zero_penalty + control_loss + 0.2 * calibration_loss
+        # Add monotonicity regularization
+        batch_size = y_true.shape[0]
+        if batch_size > 1:
+            sorted_targets, indices = torch.sort(y_true.squeeze(), dim=0)
+            sorted_preds = mu.squeeze()[indices]
+            
+            # Only penalize when predictions decrease as targets increase
+            monotonicity_penalty = torch.clamp(sorted_preds[:-1] - sorted_preds[1:], min=0).mean()
+        else:
+            monotonicity_penalty = torch.tensor(0.0, device=mse_loss.device)
+        
+        # Combine all components
+        total_loss = (weighted_mse + 0.7 * weighted_rel + zero_penalty + control_loss + 
+                     0.2 * calibration_loss + 2.0 * critical_penalty + 0.5 * monotonicity_penalty)
         
         return total_loss
-       
+     
 class EnhancedCancerDetectionModel(nn.Module):
-    def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, dropout_rate=0.2, min_reliable_coverage=3.0):
+    def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
+                 dropout_rate=0.2, min_reliable_coverage=3.0):
         super().__init__()
         
         # Store parameters
@@ -124,6 +128,9 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         # Position embeddings for markers
         self.marker_pos_embedding = nn.Parameter(torch.randn(1, num_markers, feature_dim) * 0.02)
+        
+        # Uncertain marker embedding for very low coverage
+        self.uncertain_marker_embedding = nn.Parameter(torch.randn(1, 1, feature_dim) * 0.02)
         
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
@@ -148,12 +155,29 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Simplified attention mechanism
         self.attention = nn.Linear(feature_dim, 1)
         
-        # Concentration prediction head
+        # Standard concentration prediction head
         self.concentration_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
             nn.Dropout(dropout_rate),
             nn.Linear(feature_dim // 2, 1),
+            nn.Sigmoid()
+        )
+        
+        # Specialized head for low concentration detection
+        self.low_concentration_head = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(feature_dim // 2, 1),
+            nn.Sigmoid()
+        )
+        
+        # Gating mechanism to blend predictions
+        self.concentration_gate = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim // 4),
+            nn.GELU(),
+            nn.Linear(feature_dim // 4, 1),
             nn.Sigmoid()
         )
         
@@ -166,8 +190,9 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Softplus()
         )
         
-        # Calibration parameter
+        # Calibration parameters
         self.register_buffer('calibration', torch.ones(1))
+        self.register_buffer('clinical_threshold', torch.tensor(0.001))  # Default 0.1% threshold
         
     def forward(self, marker_values, coverage):
         # Create mask for missing/unreliable values
@@ -188,6 +213,26 @@ class EnhancedCancerDetectionModel(nn.Module):
         features = self.feature_projection(features)
         features = features + self.marker_pos_embedding
         
+        # Create sophisticated reliability weights
+        reliability = torch.sigmoid((coverage - self.min_reliable_coverage) / 2.0)
+        
+        # Use reliability to modulate the input features
+        weighted_features = features * reliability.unsqueeze(-1)
+        
+        # For very low coverage, use a default "uncertain" embedding
+        low_coverage_mask = coverage < 1.0
+        if low_coverage_mask.any():
+            uncertain_embedding = self.uncertain_marker_embedding.expand(
+                features.shape[0], features.shape[1], -1
+            )
+            features = torch.where(
+                low_coverage_mask.unsqueeze(-1),
+                uncertain_embedding,
+                weighted_features
+            )
+        else:
+            features = weighted_features
+        
         # Apply transformer with masking
         transformer_output = self.transformer_encoder(
             features, 
@@ -195,19 +240,24 @@ class EnhancedCancerDetectionModel(nn.Module):
         )
         
         # Calculate reliability weights based on coverage
-        reliability = self.reliability_weight(log_coverage)
+        reliability_scores = self.reliability_weight(log_coverage)
         
         # Apply attention with reliability weighting
         attention_scores = self.attention(transformer_output).squeeze(-1)
-        attention_scores = attention_scores * reliability.squeeze(-1)
+        attention_scores = attention_scores * reliability_scores.squeeze(-1)
         attention_scores = attention_scores.masked_fill(combined_mask, -1e9)
         attention_weights = F.softmax(attention_scores, dim=1)
         
         # Compute weighted sum of features
         aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
         
-        # Predict concentration
-        concentration = self.concentration_head(aggregated)
+        # Get predictions from both heads
+        standard_pred = self.concentration_head(aggregated)
+        low_conc_pred = self.low_concentration_head(aggregated) * 0.01  # Scale to low concentration range
+        
+        # Use gating to blend predictions
+        gate = self.concentration_gate(aggregated)
+        concentration = gate * standard_pred + (1 - gate) * low_conc_pred
         
         # Predict uncertainty
         uncertainty = self.uncertainty_head(aggregated)
@@ -298,6 +348,150 @@ class EnhancedCancerDetectionModel(nn.Module):
             'calibration_factor': best_factor,
             'coverage_error': float(best_error)
         }
+    
+    def calibrate_clinical_threshold(self, val_loader, device='cpu', target_metric='concentration_aware', target_value=0.95):
+        """
+        Calibrate decision threshold for clinical use with multiple metric options
+        
+        Args:
+            val_loader: DataLoader containing validation data
+            device: Device to run calibration on
+            target_metric: Which metric to optimize ('specificity', 'ppv', 'balanced', 'concentration_aware')
+            target_value: Target value for the chosen metric
+        """
+        self.eval()
+        all_preds = []
+        all_targets = []
+        
+        with torch.no_grad():
+            for batch_data in val_loader:
+                if len(batch_data) == 4:
+                    marker_values, coverage, y_true, _ = batch_data
+                else:
+                    marker_values, coverage, y_true = batch_data
+                
+                marker_values = marker_values.to(device)
+                coverage = coverage.to(device)
+                y_true = y_true.to(device)
+                
+                mu, _, _ = self(marker_values, coverage)
+                
+                all_preds.extend(mu.cpu().numpy().flatten())
+                all_targets.extend(y_true.cpu().numpy().flatten())
+        
+        all_preds = np.array(all_preds)
+        all_targets = np.array(all_targets)
+        
+        if target_metric == 'specificity':
+            # Original approach - optimize for specificity
+            negatives = all_targets < 0.001
+            if negatives.sum() > 0:
+                negative_preds = all_preds[negatives]
+                threshold = np.percentile(negative_preds, target_value * 100)
+        
+        elif target_metric == 'concentration_aware':
+            # New approach - consider both detection AND concentration accuracy
+            thresholds = np.linspace(0.0001, 0.01, 100)
+            best_score = -np.inf
+            best_threshold = 0.001
+            
+            for threshold in thresholds:
+                # Classification metrics
+                detected = all_preds >= threshold
+                true_positives = detected & (all_targets >= 0.001)
+                true_negatives = ~detected & (all_targets < 0.001)
+                
+                sensitivity = true_positives.sum() / (all_targets >= 0.001).sum()
+                specificity = true_negatives.sum() / (all_targets < 0.001).sum()
+                
+                # Concentration accuracy for true positives
+                if true_positives.sum() > 0:
+                    tp_preds = all_preds[true_positives]
+                    tp_targets = all_targets[true_positives]
+                    
+                    # Calculate concentration accuracy metrics
+                    rel_errors = np.abs(tp_preds - tp_targets) / tp_targets
+                    within_25_pct = (rel_errors <= 0.25).mean()
+                    within_50_pct = (rel_errors <= 0.50).mean()
+                    
+                    # Log-space correlation
+                    log_corr = np.corrcoef(np.log10(tp_preds + 1e-6), 
+                                        np.log10(tp_targets + 1e-6))[0, 1]
+                else:
+                    within_25_pct = 0
+                    within_50_pct = 0
+                    log_corr = 0
+                
+                # Combined score
+                score = (
+                    0.3 * specificity +  # Avoid false positives
+                    0.2 * sensitivity +  # Detect true cases
+                    0.3 * within_25_pct +  # Accurate concentration estimates
+                    0.2 * log_corr  # Good correlation in log space
+                )
+                
+                if score > best_score:
+                    best_score = score
+                    best_threshold = threshold
+            
+            threshold = best_threshold
+        
+        # Evaluate the chosen threshold
+        detected = all_preds >= threshold
+        true_positives = detected & (all_targets >= 0.001)
+        false_positives = detected & (all_targets < 0.001)
+        true_negatives = ~detected & (all_targets < 0.001)
+        false_negatives = ~detected & (all_targets >= 0.001)
+        
+        sensitivity = true_positives.sum() / (all_targets >= 0.001).sum()
+        specificity = true_negatives.sum() / (all_targets < 0.001).sum()
+        
+        # Calculate concentration accuracy for detected samples
+        concentration_metrics = {}
+        if detected.sum() > 0:
+            detected_preds = all_preds[detected]
+            detected_targets = all_targets[detected]
+            
+            # Overall MAE for detected samples
+            concentration_metrics['mae'] = np.mean(np.abs(detected_preds - detected_targets))
+            
+            # Relative error metrics for true positives
+            tp_mask = detected_targets >= 0.001
+            if tp_mask.sum() > 0:
+                tp_preds = detected_preds[tp_mask]
+                tp_targets = detected_targets[tp_mask]
+                rel_errors = np.abs(tp_preds - tp_targets) / tp_targets
+                
+                concentration_metrics['tp_within_25_pct'] = float((rel_errors <= 0.25).mean())
+                concentration_metrics['tp_within_50_pct'] = float((rel_errors <= 0.50).mean())
+                concentration_metrics['tp_median_rel_error'] = float(np.median(rel_errors))
+        
+        # Update model's clinical threshold
+        self.clinical_threshold.copy_(torch.tensor(threshold))
+        
+        return {
+            'threshold': float(threshold),
+            'sensitivity': float(sensitivity),
+            'specificity': float(specificity),
+            'ppv': float(true_positives.sum() / detected.sum()) if detected.sum() > 0 else 0,
+            'npv': float(true_negatives.sum() / (~detected).sum()) if (~detected).sum() > 0 else 0,
+            'concentration_metrics': concentration_metrics
+        }
+
+    def predict_with_clinical_threshold(self, marker_values, coverage):
+        """
+        Make predictions with clinical threshold applied
+        
+        Returns:
+            concentration: Predicted concentration
+            uncertainty: Prediction uncertainty
+            attention_weights: Attention weights
+            is_detected: Boolean indicating if concentration exceeds clinical threshold
+        """
+        concentration, uncertainty, attention_weights = self.forward(marker_values, coverage)
+        is_detected = concentration >= self.clinical_threshold
+        
+        return concentration, uncertainty, attention_weights, is_detected
     
 class MarkerImportanceAnalyser:
     """Utility class to analyse marker importance"""
