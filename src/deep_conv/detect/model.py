@@ -119,13 +119,13 @@ class ConcentrationFocusedLoss(nn.Module):
         
         # Total loss with strong weight on log-space accuracy
         total_loss = (weighted_mse + 
-                     1.5 * weighted_rel + 
-                     3.0 * log_mse +  # Strong weight on log-space MSE
-                     2.0 * slope_penalty +  # Penalize deviation from slope=1
-                     zero_penalty + 
-                     control_loss + 
-                     0.2 * calibration_loss + 
-                     0.5 * monotonicity_penalty)
+             1.0 * weighted_rel +  
+             5.0 * log_mse +       
+             3.0 * slope_penalty + 
+             zero_penalty + 
+             control_loss + 
+             0.2 * calibration_loss + 
+             0.5 * monotonicity_penalty)
         
         return total_loss
   

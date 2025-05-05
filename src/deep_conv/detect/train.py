@@ -211,7 +211,7 @@ def compute_loss(mu, uncertainty, y_true, control_mask=None):
 
 def train_model(model, train_loader, val_loader, args, device):
     """
-    Train the model with a simplified approach
+    Train the model with log-space metrics to improve performance at low concentrations
     
     Args:
         model: The model to train
@@ -224,7 +224,6 @@ def train_model(model, train_loader, val_loader, args, device):
     logger = logging.getLogger('cell_detection')
     git_info = get_git_info()
     git_commit = git_info['commit']
-
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
@@ -247,9 +246,15 @@ def train_model(model, train_loader, val_loader, args, device):
         div_factor=25.0,
         final_div_factor=10000.0
     )
+    
     # Initialise tracking variables
     best_val_loss = float('inf')
     best_low_conc_error = float('inf')
+    
+    # Add log-space tracking variables
+    best_log_r2 = 0.0
+    best_log_slope = 0.0  # Ideally close to 1.0
+    
     best_model_state = None
     patience_counter = 0
     history = {
@@ -257,7 +262,10 @@ def train_model(model, train_loader, val_loader, args, device):
         'val_loss': [],
         'mae': [],
         'r2_score': [],
-        'low_conc_error': []
+        'low_conc_error': [],
+        'log_r2_score': [],
+        'log_slope': [],
+        'log_intercept': []
     }
     
     # Training loop
@@ -350,23 +358,30 @@ def train_model(model, train_loader, val_loader, args, device):
         history['r2_score'].append(val_metrics['r2'])
         history['low_conc_error'].append(low_conc_error)
         
-        # Log validation results
+        # Add log-space metrics to history
+        history['log_r2_score'].append(val_metrics.get('log_r2', 0.0))
+        history['log_slope'].append(val_metrics.get('log_slope', 0.0))
+        history['log_intercept'].append(val_metrics.get('log_intercept', 0.0))
+        
+        # Log validation results with added log-space metrics
         logger.info(f"Epoch {epoch+1}/{args.epochs} - "
                    f"Train Loss: {train_loss:.4f}, "
                    f"Val Loss: {val_loss:.4f}, "
                    f"MAE: {val_metrics['mae']:.6f}, "
-                   f"R²: {val_metrics['r2']:.4f}")
+                   f"R²: {val_metrics['r2']:.4f}, "
+                   f"Log-R²: {val_metrics.get('log_r2', 0.0):.4f}, "
+                   f"Log-Slope: {val_metrics.get('log_slope', 0.0):.4f}")
         
         # Log concentration-specific metrics for critical ranges
         for range_name in ['0.1-0.5%', '0.5-1%', '1-5%']:
             if range_name in val_metrics['concentration_metrics']:
                 metrics = val_metrics['concentration_metrics'][range_name]
-                within_25 = metrics.get('25pct', 0.0) 
+                within_25 = metrics.get('within_25pct', 0.0) 
                 logger.info(f"  {range_name} (n={metrics['count']}): "
                         f"MAE={metrics['mae']:.6f}, "
                         f"Within 25%={within_25:.1f}%")
         
-        # Check for improvement
+        # Check for improvement - now including log-space metrics
         improvement = False
         improvement_msg = ""
         
@@ -383,6 +398,24 @@ def train_model(model, train_loader, val_loader, args, device):
             improvement = True
             improvement_msg += f"Low conc. error: {best_low_conc_error:.6f} → {low_conc_error:.6f}"
             best_low_conc_error = low_conc_error
+        
+        # Check improvement in log-space R² (higher is better)
+        log_r2 = val_metrics.get('log_r2', 0.0)
+        if log_r2 > best_log_r2 and log_r2 > 0:
+            if improvement:
+                improvement_msg += " and "
+            improvement = True
+            improvement_msg += f"Log-R²: {best_log_r2:.4f} → {log_r2:.4f}"
+            best_log_r2 = log_r2
+        
+        # Check improvement in log-space slope (closer to 1.0 is better)
+        log_slope = val_metrics.get('log_slope', 0.0)
+        if abs(log_slope - 1.0) < abs(best_log_slope - 1.0):
+            if improvement:
+                improvement_msg += " and "
+            improvement = True
+            improvement_msg += f"Log-Slope: {best_log_slope:.4f} → {log_slope:.4f}"
+            best_log_slope = log_slope
         
         # If there's improvement, save the model
         if improvement:
@@ -476,7 +509,8 @@ def train_model(model, train_loader, val_loader, args, device):
 
 def validate_model(model, val_loader, device):
     """
-    Validate model performance with concentration-focused metrics and clinical threshold support
+    Validate model performance with concentration-focused metrics, clinical threshold support,
+    and log-space metrics for better low concentration evaluation
     
     Args:
         model: The model to validate
@@ -484,7 +518,7 @@ def validate_model(model, val_loader, device):
         device: Device to run validation on
         
     Returns:
-        Dictionary of validation metrics
+        Dictionary of validation metrics including log-space metrics
     """
     logger = logging.getLogger('cell_detection')
     model.eval()
@@ -551,7 +585,10 @@ def validate_model(model, val_loader, device):
             'mae': float('inf'),
             'concentration_metrics': {},
             'uncertainty_metrics': {},
-            'clinical_metrics': {}
+            'clinical_metrics': {},
+            'log_r2': 0.0,
+            'log_slope': 0.0,
+            'log_intercept': 0.0
         }
     
     # Calculate average loss
@@ -563,12 +600,73 @@ def validate_model(model, val_loader, device):
         targets = np.concatenate(all_targets)
         uncertainties = np.concatenate(all_uncertainties)
         
-        # Calculate regression metrics
+        # Calculate standard regression metrics
         r2 = r2_score(targets, predictions)
         mae = mean_absolute_error(targets, predictions)
         
+        # Calculate log-space metrics
+        epsilon = 1e-6
+        non_zero_mask = (targets > epsilon) & (predictions > epsilon)
+        
+        # Default values in case there are no valid points
+        log_r2 = 0.0
+        log_slope = 0.0
+        log_intercept = 0.0
+        
+        if non_zero_mask.sum() > 1:
+            # Log-transform the non-zero values
+            log_pred = np.log10(predictions[non_zero_mask])
+            log_true = np.log10(targets[non_zero_mask])
+            
+            # Calculate R² in log space
+            log_r2 = r2_score(log_true, log_pred)
+            
+            # Calculate slope and intercept in log space using linear regression
+            try:
+                slope, intercept, r_value, p_value, std_err = scipy.stats.linregress(log_true, log_pred)
+                log_slope = slope
+                log_intercept = intercept
+            except Exception as e:
+                logger.error(f"Error calculating log-space regression: {str(e)}")
+        
         # Calculate concentration-stratified metrics
         concentration_metrics = compute_concentration_metrics(predictions, targets)
+        
+        # Add log-space metrics for each concentration range
+        for range_name, stats in concentration_metrics.items():
+            # Extract concentration range bounds
+            range_parts = range_name.replace('%', '').split('-')
+            if len(range_parts) == 2:
+                try:
+                    low = float(range_parts[0]) / 100.0
+                    high = float(range_parts[1]) / 100.0 if range_parts[1] != '' else float('inf')
+                    
+                    # Get predictions and targets in this range
+                    range_mask = (targets >= low) & (targets < high)
+                    range_targets = targets[range_mask]
+                    range_preds = predictions[range_mask]
+                    
+                    # Calculate log-space metrics for this range
+                    range_non_zero = (range_targets > epsilon) & (range_preds > epsilon)
+                    if range_non_zero.sum() > 1:
+                        range_log_pred = np.log10(range_preds[range_non_zero])
+                        range_log_true = np.log10(range_targets[range_non_zero])
+                        
+                        range_log_r2 = r2_score(range_log_true, range_log_pred)
+                        
+                        try:
+                            range_slope, range_intercept, _, _, _ = scipy.stats.linregress(
+                                range_log_true, range_log_pred
+                            )
+                            
+                            # Add to metrics
+                            concentration_metrics[range_name]['log_r2'] = range_log_r2
+                            concentration_metrics[range_name]['log_slope'] = range_slope
+                            concentration_metrics[range_name]['log_intercept'] = range_intercept
+                        except Exception as e:
+                            logger.warning(f"Could not calculate log metrics for range {range_name}: {str(e)}")
+                except Exception as e:
+                    logger.warning(f"Error parsing range {range_name}: {str(e)}")
         
         # Calculate uncertainty calibration metrics
         uncertainty_metrics = compute_uncertainty_metrics(predictions, targets, uncertainties)
@@ -592,14 +690,20 @@ def validate_model(model, val_loader, device):
         # Log success
         logger.info(f"Validation complete: processed {batch_count}/{total_batches} batches")
         
-        # Return all metrics
+        # Log log-space metrics
+        logger.info(f"Log-space metrics - R²: {log_r2:.4f}, Slope: {log_slope:.4f}, Intercept: {log_intercept:.4f}")
+        
+        # Return all metrics including log-space metrics
         return {
             'loss': val_loss,
             'r2': r2,
             'mae': mae,
             'concentration_metrics': concentration_metrics,
             'uncertainty_metrics': uncertainty_metrics,
-            'clinical_metrics': clinical_metrics
+            'clinical_metrics': clinical_metrics,
+            'log_r2': log_r2,
+            'log_slope': log_slope,
+            'log_intercept': log_intercept
         }
     except Exception as e:
         logger.error(f"Error calculating validation metrics: {str(e)}")
@@ -610,7 +714,10 @@ def validate_model(model, val_loader, device):
             'mae': float('inf'),
             'concentration_metrics': {},
             'uncertainty_metrics': {},
-            'clinical_metrics': {}
+            'clinical_metrics': {},
+            'log_r2': 0.0,
+            'log_slope': 0.0,
+            'log_intercept': 0.0
         }
     
 def compute_concentration_metrics(predictions, targets):
