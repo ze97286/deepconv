@@ -613,7 +613,7 @@ def validate_model(model, val_loader, device):
         log_slope = 0.0
         log_intercept = 0.0
         
-        if non_zero_mask.sum() > 1:
+        if non_zero_mask.sum() > 10:
             # Log-transform the non-zero values
             log_pred = np.log10(predictions[non_zero_mask])
             log_true = np.log10(targets[non_zero_mask])
@@ -621,18 +621,31 @@ def validate_model(model, val_loader, device):
             # Calculate R² in log space
             log_r2 = r2_score(log_true, log_pred)
             
-            # Calculate slope and intercept in log space using linear regression
+            # Calculate slope and intercept in log space using numpy polyfit
             try:
-                slope, intercept, r_value, p_value, std_err = scipy.stats.linregress(log_true, log_pred)
-                log_slope = slope
-                log_intercept = intercept
+                poly_coeffs = np.polyfit(log_true, log_pred, 1)
+                log_slope = poly_coeffs[0]
+                log_intercept = poly_coeffs[1]
             except Exception as e:
-                logger.error(f"Error calculating log-space regression: {str(e)}")
+                logger.error(f"Error calculating log-space regression with polyfit: {str(e)}")
+                # Fall back to manual calculation
+                try:
+                    x_mean = np.mean(log_true)
+                    y_mean = np.mean(log_pred)
+                    
+                    numerator = np.sum((log_true - x_mean) * (log_pred - y_mean))
+                    denominator = np.sum((log_true - x_mean) ** 2)
+                    
+                    if denominator > epsilon:
+                        log_slope = numerator / denominator
+                        log_intercept = y_mean - log_slope * x_mean
+                except Exception as e:
+                    logger.error(f"Error calculating manual log-space regression: {str(e)}")
         
         # Calculate concentration-stratified metrics
         concentration_metrics = compute_concentration_metrics(predictions, targets)
         
-        # Add log-space metrics for each concentration range
+        # Update within 25% calculation for each range to ensure it's consistent
         for range_name, stats in concentration_metrics.items():
             # Extract concentration range bounds
             range_parts = range_name.replace('%', '').split('-')
@@ -646,23 +659,30 @@ def validate_model(model, val_loader, device):
                     range_targets = targets[range_mask]
                     range_preds = predictions[range_mask]
                     
+                    # Calculate within 25% metric
+                    rel_errors = np.abs(range_preds - range_targets) / (range_targets + epsilon)
+                    within_25pct = 100.0 * np.mean(rel_errors <= 0.25)
+                    
+                    # Ensure the key is consistent
+                    concentration_metrics[range_name]['within_25pct'] = within_25pct
+                    
                     # Calculate log-space metrics for this range
                     range_non_zero = (range_targets > epsilon) & (range_preds > epsilon)
-                    if range_non_zero.sum() > 1:
+                    if range_non_zero.sum() > 10:
                         range_log_pred = np.log10(range_preds[range_non_zero])
                         range_log_true = np.log10(range_targets[range_non_zero])
                         
                         range_log_r2 = r2_score(range_log_true, range_log_pred)
                         
                         try:
-                            range_slope, range_intercept, _, _, _ = scipy.stats.linregress(
-                                range_log_true, range_log_pred
-                            )
+                            range_poly_coeffs = np.polyfit(range_log_true, range_log_pred, 1)
+                            range_log_slope = range_poly_coeffs[0]
+                            range_log_intercept = range_poly_coeffs[1]
                             
                             # Add to metrics
                             concentration_metrics[range_name]['log_r2'] = range_log_r2
-                            concentration_metrics[range_name]['log_slope'] = range_slope
-                            concentration_metrics[range_name]['log_intercept'] = range_intercept
+                            concentration_metrics[range_name]['log_slope'] = range_log_slope
+                            concentration_metrics[range_name]['log_intercept'] = range_log_intercept
                         except Exception as e:
                             logger.warning(f"Could not calculate log metrics for range {range_name}: {str(e)}")
                 except Exception as e:
