@@ -138,16 +138,14 @@ class EnhancedCancerDetectionModel(nn.Module):
         self.feature_dim = feature_dim
         self.min_reliable_coverage = min_reliable_coverage
         
-        # Input embeddings
         self.value_embedding = nn.Linear(1, feature_dim // 2)
         self.coverage_embedding = nn.Linear(1, feature_dim // 2)
         
-        # Concatenating these creates feature_dim dimensions, so projection should accept feature_dim
-        # and output feature_dim to maintain compatible dimensions
-        self.feature_projection = nn.Linear(feature_dim, feature_dim)
-
-        # Update feature projection to handle the additional features
-        self.feature_projection = nn.Linear(feature_dim, feature_dim)
+        # Add log-value embedding with same dimension
+        self.log_value_embedding = nn.Linear(1, feature_dim // 2)
+        
+        # Adjust feature projection to accommodate additional features
+        self.feature_projection = nn.Linear(feature_dim * 3 // 2, feature_dim)
         
         # Position embeddings for markers
         self.marker_pos_embedding = nn.Parameter(torch.randn(1, num_markers, feature_dim) * 0.02)
@@ -175,19 +173,22 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Attention mechanism
         self.attention = nn.Linear(feature_dim, 1)
         
+        # Change: Remove sigmoid from concentration head
         self.concentration_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
             nn.Dropout(dropout_rate),
             nn.Linear(feature_dim // 2, 1)
+            # No sigmoid!
         )
         
-        # Low concentration head predicts in log space
+        # Add: Low concentration head predicts in log space
         self.low_concentration_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
             nn.Dropout(dropout_rate),
             nn.Linear(feature_dim // 2, 1)
+            # Predicts log concentration
         )
         
         # Concentration-based gating
@@ -248,10 +249,10 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
         
-        # Standard head predicts directly (no sigmoid)
+        # Change: Standard head predicts directly (no sigmoid)
         standard_pred = self.concentration_head(aggregated)
         
-        # Low concentration head predicts in log space
+        # Add: Low concentration head predicts in log space
         log_low_pred = self.low_concentration_head(aggregated)
         low_conc_pred = torch.pow(10, log_low_pred)  # Convert from log space
         
@@ -269,7 +270,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         uncertainty = self.uncertainty_head(aggregated)
         
         return concentration, uncertainty, attention_weights
-
+    
     def get_estimate_and_ci(self, mu, uncertainty, ci_level=0.95):
         """Get point estimate and confidence interval"""
         # Scale uncertainty by calibration factor
