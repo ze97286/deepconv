@@ -139,12 +139,13 @@ class EnhancedCancerDetectionModel(nn.Module):
         self.min_reliable_coverage = min_reliable_coverage
         
         # Input embeddings
-        self.value_embedding = nn.Linear(1, feature_dim // 3)
-        self.coverage_embedding = nn.Linear(1, feature_dim // 3)
+        self.value_embedding = nn.Linear(1, feature_dim // 2)
+        self.coverage_embedding = nn.Linear(1, feature_dim // 2)
         
-        # Add log-value embedding for better performance at low concentrations
-        self.log_value_embedding = nn.Linear(1, feature_dim // 3)
-        
+        # Concatenating these creates feature_dim dimensions, so projection should accept feature_dim
+        # and output feature_dim to maintain compatible dimensions
+        self.feature_projection = nn.Linear(feature_dim, feature_dim)
+
         # Update feature projection to handle the additional features
         self.feature_projection = nn.Linear(feature_dim, feature_dim)
         
