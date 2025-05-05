@@ -128,7 +128,7 @@ class ConcentrationFocusedLoss(nn.Module):
                      0.5 * monotonicity_penalty)
         
         return total_loss
-     
+  
 class EnhancedCancerDetectionModel(nn.Module):
     def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
                  dropout_rate=0.2, min_reliable_coverage=3.0):
@@ -139,8 +139,13 @@ class EnhancedCancerDetectionModel(nn.Module):
         self.min_reliable_coverage = min_reliable_coverage
         
         # Input embeddings
-        self.value_embedding = nn.Linear(1, feature_dim // 2)
-        self.coverage_embedding = nn.Linear(1, feature_dim // 2)
+        self.value_embedding = nn.Linear(1, feature_dim // 3)
+        self.coverage_embedding = nn.Linear(1, feature_dim // 3)
+        
+        # Add log-value embedding for better performance at low concentrations
+        self.log_value_embedding = nn.Linear(1, feature_dim // 3)
+        
+        # Update feature projection to handle the additional features
         self.feature_projection = nn.Linear(feature_dim, feature_dim)
         
         # Position embeddings for markers
@@ -212,11 +217,19 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         marker_values = torch.nan_to_num(marker_values, nan=0.0)
         
+        # Original value features
         value_features = self.value_embedding(marker_values.unsqueeze(-1))
+        
+        # Log-transformed value features for better low concentration representation
+        log_values = torch.log1p(marker_values * 1000)  # log(1 + value*1000) to avoid log(0)
+        log_features = self.log_value_embedding(log_values.unsqueeze(-1))
+        
+        # Coverage features
         log_coverage = torch.log1p(coverage).unsqueeze(-1)
         coverage_features = self.coverage_embedding(log_coverage)
         
-        features = torch.cat([value_features, coverage_features], dim=-1)
+        # Concatenate all features
+        features = torch.cat([value_features, coverage_features, log_features], dim=-1)
         features = self.feature_projection(features)
         features = features + self.marker_pos_embedding
         
