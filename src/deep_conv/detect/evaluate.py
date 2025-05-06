@@ -284,19 +284,7 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
                     mu, phi, det_probs, _ = model.forward_with_detection(marker_values, coverage)
                 else:
                     # Standard model - handle different return formats
-                    model_output = model(marker_values, coverage)
-                    
-                    # Check if the output is compatible with our expected format
-                    if len(model_output) == 3:
-                        # Standard model returns (concentration, uncertainty, attention_weights)
-                        mu = model_output[0]  # concentration
-                        phi = model_output[1]  # uncertainty
-                        det_probs = []  # No detection probs available
-                    elif len(model_output) == 4:
-                        # Model with detection returns (mu, phi, det_probs, _)
-                        mu, phi, det_probs, _ = model_output
-                    else:
-                        raise ValueError(f"Unexpected model output format with {len(model_output)} elements")
+                    mu, phi, _, _ = model(marker_values, coverage)
                 
                 # If the model has a specialized method to get estimates and CI, use it
                 if hasattr(model, 'get_estimate_and_ci'):
@@ -1820,9 +1808,9 @@ def parse_args():
 
 
 # python -m deep_conv.detect.evaluate \
-# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_unbias/ \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_unbias_with_controls/ \
 # --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/ \
-# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/oac_unbias
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/oac_unbias_with_controls
 
 # python -m deep_conv.detect.evaluate \
 # --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/CpGenie_T-cells/ \

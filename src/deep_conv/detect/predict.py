@@ -261,16 +261,9 @@ def predict(model, marker_values, coverage, sample_ids, output_dir=None, device=
     with torch.no_grad():
         marker_values = marker_values.to(device)
         coverage = coverage.to(device)
-        
        
         # Standard model - handle different return formats
-        model_output = model(marker_values, coverage)
-        
-        
-        # Standard model returns (concentration, uncertainty, attention_weights)
-        mu = model_output[0]  # concentration
-        phi = model_output[1]  # uncertainty
-        
+        mu, phi, _, _ = model(marker_values, coverage)  
         estimate, ci, scaled_uncertainty = model.get_estimate_and_ci(mu, phi)
         
         # Store predictions
@@ -387,14 +380,14 @@ def run_predict(model_dir, input_dir, output_dir=None, device=None):
         return None
 
 # python -m deep_conv.detect.predict \
-# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_unbias/ \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_unbias_with_controls/ \
 # --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA/ \
-# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/oac_unbias/
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/oac_unbias_with_controls/
 
 # python -m deep_conv.detect.predict \
-# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_unbias/ \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_unbias_with_controls/ \
 # --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/cfDNA/ \
-# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/CD/cfDNA/oac_unbias/
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/CD/cfDNA/oac_unbias_with_controls/
 
 if __name__ == '__main__':
     args = parse_args()
