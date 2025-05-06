@@ -16,16 +16,12 @@ import torch.nn.functional as F
 import math
 import torch.optim as optim
 from scipy import stats
-import plotly.graph_objects as go
 import plotly.subplots as sp
-import plotly.express as px
-from sklearn.metrics import mean_absolute_error, mean_squared_error, confusion_matrix
-from sklearn.metrics import precision_score, recall_score
-import plotly.graph_objects as go
+from sklearn.metrics import r2_score, mean_absolute_error, roc_curve, auc, precision_recall_curve, average_precision_score, precision_score, mean_squared_error, confusion_matrix
 import plotly.subplots as sp
-import plotly.express as px
 import pickle
 from sklearn.metrics import confusion_matrix
+from plotly.subplots import make_subplots
 
 from deep_conv.detect.preprocess import prepare_data_for_training, load_train_with_contrastive_data
 from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyser
@@ -792,10 +788,6 @@ def compute_uncertainty_metrics(predictions, targets, uncertainties):
 
 def plot_training_history(history, output_dir):
     """Create plots of training history with Plotly"""
-    import os
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    
     # Create plots directory
     plots_dir = os.path.join(output_dir, 'plots')
     os.makedirs(plots_dir, exist_ok=True)
@@ -1191,14 +1183,6 @@ def visualise_results(predictions, ground_truth, output_dir, ci_data=None, marke
         marker_importance: Optional marker importance data
         prefix: Optional prefix for output files
     """
-    import os
-    import numpy as np
-    import pandas as pd
-    import plotly.graph_objects as go
-    import plotly.express as px
-    from plotly.subplots import make_subplots
-    from sklearn.metrics import r2_score, mean_absolute_error, roc_curve, auc, precision_recall_curve, average_precision_score
-    
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
     
