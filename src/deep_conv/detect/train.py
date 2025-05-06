@@ -2009,6 +2009,60 @@ def visualise_results(predictions, ground_truth, output_dir, ci_data=None, marke
             'details': reliability_details.to_dict('records')
     }
     
+    df = pd.DataFrame({
+        'true_value': targets.flatten(),
+        'predicted_value': preds.flatten(),
+        'error': preds.flatten() - targets.flatten(),
+        'abs_error': np.abs(preds.flatten() - targets.flatten()),
+    })
+    
+    rel_error = np.full_like(targets.flatten(), np.nan, dtype=float)
+    non_zero_mask = targets.flatten() > 0
+    rel_error[non_zero_mask] = np.abs(preds[non_zero_mask] - targets[non_zero_mask]) / targets[non_zero_mask] * 100
+    df['rel_error'] = rel_error
+    
+    # 3. Add ROC curve analysis for detection at various thresholds
+    detection_thresholds = [0.001, 0.005, 0.01, 0.05, 0.1]
+    detection_metrics = {}
+    
+    for thresh in detection_thresholds:
+        y_true_binary = (targets >= thresh).astype(int)
+        
+        # Skip if no positive examples
+        if sum(y_true_binary) == 0:
+            continue
+            
+        # ROC curve and AUC
+        fpr, tpr, roc_thresholds = roc_curve(y_true_binary, preds)
+        roc_auc = auc(fpr, tpr)
+        
+        # Find sensitivity at 95% specificity (5% FPR)
+        idx_95spec = np.argmin(np.abs(fpr - 0.05))
+        sens_at_95spec = tpr[idx_95spec]
+        
+        # Precision-recall curve and average precision
+        precision, recall, pr_thresholds = precision_recall_curve(y_true_binary, preds)
+        ap = average_precision_score(y_true_binary, preds)
+        
+        detection_metrics[thresh] = {
+            'auc': float(roc_auc),
+            'sensitivity_at_95spec': float(sens_at_95spec),
+            'average_precision': float(ap),
+            'fpr': fpr.tolist(),
+            'tpr': tpr.tolist(),
+            'precision': precision.tolist(),
+            'recall': recall.tolist()
+        }
+    
+    create_enhanced_roc_curve(detection_metrics, clinical_dir, title_prefix=prefix)
+    
+    create_magnitude_aware_metrics(df, detection_thresholds, clinical_dir)
+    
+    create_clinical_decision_metrics(df, detection_thresholds, clinical_dir)
+    
+    specific_thresholds = [0.001, 0.005, 0.01, 0.05]  # Key clinical thresholds
+    create_threshold_specific_analysis(df, specific_thresholds, clinical_dir)
+
     
     # Add CI metrics if available
     if ci_data is not None:
