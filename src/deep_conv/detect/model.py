@@ -72,6 +72,7 @@ class ConcentrationFocusedLoss(nn.Module):
         # Add log-space loss component
         log_mse = torch.tensor(0.0, device=mu.device)
         slope_penalty = torch.tensor(0.0, device=mu.device)
+        intercept_penalty = torch.tensor(0.0, device=mu.device)
         
         non_zero_mask_both = (y_true > epsilon) & (mu > epsilon)
         if non_zero_mask_both.sum() > 0:
@@ -81,7 +82,7 @@ class ConcentrationFocusedLoss(nn.Module):
             # MSE in log space
             log_mse = F.mse_loss(log_pred, log_true)
             
-            # Penalize deviation from slope=1 in log space
+            # Penalize deviation from slope=1 and intercept=0 in log space
             if non_zero_mask_both.sum() > 1:
                 # Simple linear regression coefficients
                 x_mean = log_true.mean()
@@ -91,7 +92,11 @@ class ConcentrationFocusedLoss(nn.Module):
                 denominator = ((log_true - x_mean) ** 2).sum() + epsilon
                 
                 slope = numerator / denominator
+                intercept = y_mean - slope * x_mean  # Calculate the intercept
+                
+                # Penalties for slope and intercept
                 slope_penalty = (slope - 1.0) ** 2 * 4.0
+                intercept_penalty = intercept ** 2 * 5.0  # Penalize deviation from zero
                 
                 # Calculate residuals in log space
                 residuals = log_pred - log_true
@@ -138,15 +143,16 @@ class ConcentrationFocusedLoss(nn.Module):
             # Only penalize when predictions decrease as targets increase
             monotonicity_penalty = torch.clamp(sorted_preds[:-1] - sorted_preds[1:], min=0).mean() * 2.0
         
-        # Total loss with strong weight on log-space accuracy
+        # Total loss with strong weight on log-space accuracy and explicit intercept penalty
         total_loss = (weighted_mse + 
-             1.5 * weighted_rel +  
-             self.log_space_weight * log_mse +       
-             slope_penalty + 
-             zero_penalty + 
-             control_loss + 
-             0.2 * calibration_loss + 
-             0.8 * monotonicity_penalty)
+            1.5 * weighted_rel +  
+            self.log_space_weight * log_mse +       
+            slope_penalty + 
+            intercept_penalty +  # Added explicit intercept penalty
+            zero_penalty + 
+            control_loss + 
+            0.2 * calibration_loss + 
+            0.8 * monotonicity_penalty)
         
         return total_loss
     

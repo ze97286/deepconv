@@ -222,14 +222,14 @@ def train_model(model, train_loader, val_loader, args, device):
 
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
     # Setup optimizer with weight decay for regularization
     optimizer = torch.optim.AdamW(
         model.parameters(), 
         lr=args.lr,
         weight_decay=args.weight_decay
     )
-    
+
     # Learning rate scheduler
     total_steps = len(train_loader) * args.epochs
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -241,15 +241,11 @@ def train_model(model, train_loader, val_loader, args, device):
         div_factor=25.0,
         final_div_factor=10000.0
     )
-    
+
     # Initialise tracking variables
-    best_val_loss = float('inf')
-    best_low_conc_error = float('inf')
-    
-    # Add log-space tracking variables
-    best_log_r2 = 0.0
-    best_log_slope = 0.0  # Ideally close to 1.0
-    
+    best_composite = float('inf')
+    best_composite_components = {}
+
     best_model_state = None
     patience_counter = 0
     history = {
@@ -262,22 +258,22 @@ def train_model(model, train_loader, val_loader, args, device):
         'log_slope': [],
         'log_intercept': []
     }
-    
+
     # Training loop
     for epoch in range(args.epochs):
         # Update epoch counter in model if it exists
         if hasattr(model, 'epoch'):
             model.epoch = epoch
-        
+
         # Training phase
         model.train()
         train_loss = 0
-        
+
         # Progress bar for training
         train_bar = tqdm(enumerate(train_loader), 
                          desc=f"Epoch {epoch+1}/{args.epochs} [Train]", 
                          total=len(train_loader))
-        
+
         for i, batch_data in train_bar:
             # Handle dataset with control_mask
             if len(batch_data) == 4:
@@ -286,55 +282,55 @@ def train_model(model, train_loader, val_loader, args, device):
                 coverage = coverage.to(device)
                 y_true = y_true.to(device)
                 control_mask = control_mask.to(device)
-                
+
                 # Forward pass
                 mu, uncertainty, _ = model(marker_values, coverage)
-                
+
                 # Calculate loss with control mask
                 loss = compute_loss(mu, uncertainty, y_true, control_mask)
-                
+
             else:  # Standard dataset without control_mask
                 marker_values, coverage, y_true = batch_data
                 marker_values = marker_values.to(device)
                 coverage = coverage.to(device)
                 y_true = y_true.to(device)
-                
+
                 # Forward pass
                 mu, uncertainty, _ = model(marker_values, coverage)
-                
+
                 # Calculate loss without control mask
                 loss = compute_loss(mu, uncertainty, y_true)
-            
+
             # Scale for gradient accumulation
             if args.grad_accum_steps > 1:
                 loss = loss / args.grad_accum_steps
-            
+
             # Backward pass
             loss.backward()
-            
+
             # Update metrics
             train_loss += loss.item() * (args.grad_accum_steps if args.grad_accum_steps > 1 else 1)
-            
+
             # Gradient accumulation and optimizer step
             if (i + 1) % args.grad_accum_steps == 0 or (i + 1) == len(train_loader):
                 # Gradient clipping
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                
+
                 # Optimizer step
                 optimizer.step()
                 optimizer.zero_grad()
                 scheduler.step()
-            
+
             # Update progress bar
             train_bar.set_postfix({"loss": f"{loss.item():.4f}", "lr": f"{scheduler.get_last_lr()[0]:.6f}"})
-        
+
         # Calculate average training loss
         train_loss /= len(train_loader)
-        
+
         # Validation phase
         val_metrics = validate_model(model, val_loader, device)
         val_loss = val_metrics['loss']
-        
+
         # Calculate low concentration error
         low_conc_error = 0
         count = 0
@@ -342,22 +338,22 @@ def train_model(model, train_loader, val_loader, args, device):
             if range_name in ['0.1-0.5%', '0.5-1%']:  # Critical low concentration range
                 low_conc_error += metrics['mae'] * metrics['count']
                 count += metrics['count']
-        
+
         if count > 0:
             low_conc_error /= count
-        
+
         # Add to history
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
         history['mae'].append(val_metrics['mae'])
         history['r2_score'].append(val_metrics['r2'])
         history['low_conc_error'].append(low_conc_error)
-        
+
         # Add log-space metrics to history
         history['log_r2_score'].append(val_metrics.get('log_r2', 0.0))
         history['log_slope'].append(val_metrics.get('log_slope', 0.0))
         history['log_intercept'].append(val_metrics.get('log_intercept', 0.0))
-        
+
         # Log validation results with added log-space metrics
         logger.info(f"Epoch {epoch+1}/{args.epochs} - "
                    f"Train Loss: {train_loss:.4f}, "
@@ -367,7 +363,7 @@ def train_model(model, train_loader, val_loader, args, device):
                    f"Log-R²: {val_metrics.get('log_r2', 0.0):.4f}, "
                    f"Log-Slope: {val_metrics.get('log_slope', 0.0):.4f}, "
                    f"Log-Intercept: {val_metrics.get('log_intercept', 0.0):.4f}")
-        
+
         # Log concentration-specific metrics for critical ranges
         for range_name in ['0.1-0.5%', '0.5-1%', '1-5%']:
             if range_name in val_metrics['concentration_metrics']:
@@ -380,38 +376,41 @@ def train_model(model, train_loader, val_loader, args, device):
         # Check for improvement - now including log-space metrics
         improvement = False
         improvement_msg = ""
-        
-        # Check improvement in validation loss
-        if val_loss < best_val_loss:
-            improvement = True
-            improvement_msg = f"New best model (loss)! {best_val_loss:.4f} → {val_loss:.4f}"
-            best_val_loss = val_loss
-        
-        # Check improvement in low concentration error
-        if low_conc_error < best_low_conc_error and count > 0:
-            if improvement:
-                improvement_msg += " and "
-            improvement = True
-            improvement_msg += f"Low conc. error: {best_low_conc_error:.6f} → {low_conc_error:.6f}"
-            best_low_conc_error = low_conc_error
-        
-        # Check improvement in log-space R² (higher is better)
-        log_r2 = val_metrics.get('log_r2', 0.0)
-        if log_r2 > best_log_r2 and log_r2 > 0:
-            if improvement:
-                improvement_msg += " and "
-            improvement = True
-            improvement_msg += f"Log-R²: {best_log_r2:.4f} → {log_r2:.4f}"
-            best_log_r2 = log_r2
-        
-        # Check improvement in log-space slope (closer to 1.0 is better)
+
         log_slope = val_metrics.get('log_slope', 0.0)
-        if abs(log_slope - 1.0) < abs(best_log_slope - 1.0):
-            if improvement:
-                improvement_msg += " and "
+        log_intercept = val_metrics.get('log_intercept', 0.0)
+        log_r2 = val_metrics.get('log_r2', 0.0)
+
+        composite_score = (
+            -0.5 * val_loss +                      # Lower loss is better (negative weight)
+            0.2 * log_r2 +                         # Higher log-R² is better
+            -1.0 * abs(log_slope - 1.0) +          # Closer to slope=1 is better
+            -1.0 * abs(log_intercept) +            # Closer to intercept=0 is better
+            -0.3 * low_conc_error                  # Lower error in 0.1-1% range is better
+        )
+
+        composite_score_components = {
+            "val_loss": val_loss,
+            "log_r2": log_r2,   
+            "log_slope": log_slope,
+            "log_intercept": log_intercept,
+            "low_conc_error": low_conc_error
+        }
+
+        # Check improvement in validation loss
+        if composite_score < best_composite:
             improvement = True
-            improvement_msg += f"Log-Slope: {best_log_slope:.4f} → {log_slope:.4f}"
-            best_log_slope = log_slope
+            improvement_msg = f"New best model (composite)!"+\
+                  f"\nloss: {best_composite_components.get('val_loss',float('inf')):.4f} → {val_loss:.4f}"+\
+                  f"\nlog_r2: {best_composite_components.get('log_r2',0):.4f} → {log_r2:.4f}"+\
+                  f"\nlog_slope: {best_composite_components.get('log_slope',0):.4f} → {log_slope:.4f}"+\
+                  f"\nlog_intercept: {best_composite_components.get('log_intercept',0):.4f} → {log_intercept:.4f}"+\
+                  f"\nlow_conc_error: {best_composite_components.get('low_conc_error',0):.4f} → {low_conc_error:.4f}"                  
+            
+            best_composite  = composite_score
+            best_composite_components = composite_score_components
+        
+       
         
         # If there's improvement, save the model
         if improvement:
