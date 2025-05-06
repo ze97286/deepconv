@@ -145,7 +145,7 @@ def load_model(model_dir, device='cpu'):
             min_reliable_coverage=args.get('min_reliable_coverage', 3.0)
         )
 
-        # Try strict loading first
+        # Try loading with strict mode first
         try:
             model.load_state_dict(model_state, strict=True)
             logger.info("Model loaded with strict=True")
@@ -156,15 +156,57 @@ def load_model(model_dir, device='cpu'):
             model.load_state_dict(model_state, strict=False)
             logger.info("Model loaded with strict=False")
 
-        # Apply calibration if available
-        if 'calibration' in checkpoint and isinstance(checkpoint['calibration'], dict):
+        # Manually check for and apply clinical_threshold
+        # First, check if the buffer exists in the model state
+        clinical_threshold_key = 'clinical_threshold'
+        if clinical_threshold_key in model_state:
             with torch.no_grad():
-                if hasattr(model, 'calibration'):
-                    calibration_factor = checkpoint['calibration'].get('calibration_factor', 1.0)
-                    model.calibration.fill_(calibration_factor)
-                    logger.info(f"Applied calibration factor: {calibration_factor}")
-                else:
-                    logger.warning("Model has no calibration attribute, skipping calibration")
+                # Load the threshold as a tensor
+                threshold_value = model_state[clinical_threshold_key].item()
+                model.clinical_threshold.fill_(threshold_value)
+                logger.info(f"Loaded clinical threshold from state dict: {threshold_value}")
+        # If not in the state dict, check if it's elsewhere in the checkpoint
+        elif 'clinical_threshold' in checkpoint:
+            threshold_value = checkpoint['clinical_threshold']
+            # Handle different types of threshold values
+            if isinstance(threshold_value, (torch.Tensor, np.ndarray)):
+                threshold_value = float(threshold_value.item() if hasattr(threshold_value, 'item') else threshold_value)
+            elif isinstance(threshold_value, (float, int)):
+                threshold_value = float(threshold_value)
+            else:
+                logger.warning(f"Unexpected type for clinical_threshold: {type(threshold_value)}")
+                threshold_value = 0.001  # Default value
+            
+            with torch.no_grad():
+                model.clinical_threshold.fill_(threshold_value)
+                logger.info(f"Loaded clinical threshold from checkpoint: {threshold_value}")
+        else:
+            logger.warning("Clinical threshold not found in checkpoint. Using default value of 0.001.")
+
+        # Similarly check for calibration
+        calibration_key = 'calibration'
+        if calibration_key in model_state:
+            with torch.no_grad():
+                calibration_value = model_state[calibration_key].item()
+                model.calibration.fill_(calibration_value)
+                logger.info(f"Loaded calibration factor from state dict: {calibration_value}")
+        elif 'calibration' in checkpoint:
+            calibration_data = checkpoint['calibration']
+            if isinstance(calibration_data, dict) and 'calibration_factor' in calibration_data:
+                calibration_value = calibration_data['calibration_factor']
+            elif isinstance(calibration_data, (torch.Tensor, np.ndarray)):
+                calibration_value = float(calibration_data.item() if hasattr(calibration_data, 'item') else calibration_data)
+            elif isinstance(calibration_data, (float, int)):
+                calibration_value = float(calibration_data)
+            else:
+                logger.warning(f"Unexpected type for calibration: {type(calibration_data)}")
+                calibration_value = 1.0  # Default value
+            
+            with torch.no_grad():
+                model.calibration.fill_(calibration_value)
+                logger.info(f"Loaded calibration factor from checkpoint: {calibration_value}")
+        else:
+            logger.warning("Calibration factor not found in checkpoint. Using default value of 1.0.")
 
     except Exception as e:
         logger.error(f"Error creating/loading model: {e}")
@@ -175,6 +217,9 @@ def load_model(model_dir, device='cpu'):
     model.eval()
 
     logger.info(f"Model loaded successfully")
+    logger.info(f"Clinical threshold: {model.clinical_threshold.item()}")
+    logger.info(f"Calibration factor: {model.calibration.item()}")
+    
     return model, args
 
 def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device='cuda'):
