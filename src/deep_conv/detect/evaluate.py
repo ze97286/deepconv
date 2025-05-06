@@ -238,10 +238,33 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
                     # Enhanced model with detection
                     mu, phi, det_probs, _ = model.forward_with_detection(marker_values, coverage)
                 else:
-                    # Standard model
-                    mu, phi, det_probs, _ = model(marker_values, coverage)
+                    # Standard model - handle different return formats
+                    model_output = model(marker_values, coverage)
+                    
+                    # Check if the output is compatible with our expected format
+                    if len(model_output) == 3:
+                        # Standard model returns (concentration, uncertainty, attention_weights)
+                        mu = model_output[0]  # concentration
+                        phi = model_output[1]  # uncertainty
+                        det_probs = []  # No detection probs available
+                    elif len(model_output) == 4:
+                        # Model with detection returns (mu, phi, det_probs, _)
+                        mu, phi, det_probs, _ = model_output
+                    else:
+                        raise ValueError(f"Unexpected model output format with {len(model_output)} elements")
                 
-                estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
+                # If the model has a specialized method to get estimates and CI, use it
+                if hasattr(model, 'get_estimate_and_ci'):
+                    estimate, ci, uncertainty = model.get_estimate_and_ci(mu, phi)
+                else:
+                    # Otherwise, use mu as the estimate and construct a simple CI
+                    estimate = mu
+                    uncertainty = phi
+                    # Default to a basic 95% CI using a normal approximation
+                    ci = torch.stack([
+                        mu - 1.96 * uncertainty,
+                        mu + 1.96 * uncertainty
+                    ], dim=1)
                 
                 # Check for NaNs in output
                 if torch.isnan(estimate).any():
@@ -1752,9 +1775,9 @@ def parse_args():
 
 
 # python -m deep_conv.detect.evaluate \
-# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/CpGenie_OAC/ \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_simplified/ \
 # --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/ \
-# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/CpGenie_OAC
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/oac_simplified
 
 # python -m deep_conv.detect.evaluate \
 # --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/CpGenie_T-cells/ \
