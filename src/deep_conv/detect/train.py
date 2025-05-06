@@ -243,7 +243,7 @@ def train_model(model, train_loader, val_loader, args, device):
     )
 
     # Initialise tracking variables
-    best_composite = float('inf')
+    best_composite = float('-inf')
     best_composite_components = {}
 
     best_model_state = None
