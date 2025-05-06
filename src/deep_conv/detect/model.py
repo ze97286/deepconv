@@ -11,16 +11,20 @@ class ZeroAnchoringLayer(nn.Module):
         self.zero_detector = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
+            nn.BatchNorm1d(feature_dim // 2),
             nn.Linear(feature_dim // 2, feature_dim // 4),
             nn.GELU(),
+            nn.BatchNorm1d(feature_dim // 4),
             nn.Linear(feature_dim // 4, 1),
             nn.Sigmoid()
         )
-        self.sharpness = nn.Parameter(torch.tensor(8.0))
+        self.sharpness = nn.Parameter(torch.tensor(12.0))
         
     def forward(self, features, concentration):
         # Detect if sample should be zero
-        zero_prob = self.zero_detector(features)
+        features_flat = features.reshape(-1, features.size(-1))
+        zero_prob_flat = self.zero_detector(features_flat)
+        zero_prob = zero_prob_flat.reshape(concentration.shape)
         
         # Apply exponential dampening based on zero probability
         # When zero_prob is high, output approaches zero
@@ -30,9 +34,9 @@ class ZeroAnchoringLayer(nn.Module):
         anchored_concentration = concentration * zero_factor
         
         return anchored_concentration, zero_prob
-
+    
 class ConcentrationFocusedLoss(nn.Module):
-    def __init__(self, log_space_weight=6.0, critical_ranges=None, zero_penalty=10.0, control_penalty=200.0):
+    def __init__(self, log_space_weight=6.0, critical_ranges=None, zero_penalty=10.0, control_penalty=1000.0):
         super().__init__()
         self.log_space_weight = log_space_weight
         self.critical_ranges = critical_ranges or [(0.001, 0.005, 2.0), (0.005, 0.01, 1.5), (0.01, 0.05, 1.2)]
@@ -221,6 +225,21 @@ class ResidualBiasCorrectionLayer(nn.Module):
         corrected_pred = initial_pred * torch.exp(correction)
         
         return torch.clamp(corrected_pred, 0.0, 1.0)
+    
+class DynamicMarkerPruning(nn.Module):
+    def __init__(self, low_coverage_threshold=3.0):
+        super().__init__()
+        self.low_coverage_threshold = low_coverage_threshold
+    
+    def forward(self, marker_values, coverage):
+        # Create dynamic pruning mask
+        low_coverage_mask = coverage < self.low_coverage_threshold
+        
+        # Apply the mask by zeroing out low coverage marker values
+        marker_values_pruned = marker_values.clone()
+        marker_values_pruned[low_coverage_mask] = 0.0
+        
+        return marker_values_pruned
 
 class EnhancedCancerDetectionModel(nn.Module):
     def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
@@ -318,22 +337,40 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         self.register_buffer('calibration', torch.ones(1))
         self.register_buffer('clinical_threshold', torch.tensor(0.001))
+        
+        # Add dynamic marker pruning module
+        self.marker_pruning = DynamicMarkerPruning(
+            low_coverage_threshold=min_reliable_coverage
+        )
     
     def forward(self, marker_values, coverage):
+        # Apply dynamic marker pruning
+        marker_values_pruned = self.marker_pruning(marker_values, coverage)
+        
+        # Apply more aggressive coverage-based reliability weighting
+        # Exponential penalty for low coverage
+        coverage_reliability = 1.0 - torch.exp(-coverage / self.min_reliable_coverage)
+        coverage_reliability = torch.clamp(coverage_reliability, 0.01, 1.0)
+        
+        # Apply stronger dampening to marker values based on coverage
+        marker_values_weighted = marker_values_pruned * coverage_reliability
+        
+        # Missing mask (after pruning)
         missing_mask = (coverage == 0)
         unreliable_mask = (coverage < self.min_reliable_coverage) & ~missing_mask
         combined_mask = missing_mask | unreliable_mask
         
-        marker_values = torch.nan_to_num(marker_values, nan=0.0)
+        # Ensure NaN values are handled
+        marker_values_weighted = torch.nan_to_num(marker_values_weighted, nan=0.0)
         
-        batch_size, num_markers = marker_values.shape
+        batch_size, num_markers = marker_values_weighted.shape
         
-        value_features = self.value_embedding(marker_values.unsqueeze(-1))
+        value_features = self.value_embedding(marker_values_weighted.unsqueeze(-1))
         value_features = value_features.reshape(batch_size * num_markers, -1)
         value_features = self.value_bn(value_features)
         value_features = value_features.reshape(batch_size, num_markers, -1)
         
-        log_values = torch.log1p(marker_values * 100)
+        log_values = torch.log1p(marker_values_weighted * 100)
         log_features = self.log_value_embedding(log_values.unsqueeze(-1))
         log_features = log_features.reshape(batch_size * num_markers, -1)
         log_features = self.log_value_bn(log_features)
@@ -354,7 +391,9 @@ class EnhancedCancerDetectionModel(nn.Module):
             src_key_padding_mask=combined_mask
         )
         
+        # Enhanced reliability weighting with stronger coverage dependence
         reliability = self.reliability_weight(log_coverage)
+        reliability = reliability * coverage_reliability.unsqueeze(-1)  # Enhanced reliability weighting
         
         attention_scores = self.attention(transformer_output).squeeze(-1)
         attention_scores = attention_scores * reliability.squeeze(-1)
@@ -382,8 +421,15 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         concentration = self.bias_correction(aggregated, concentration)
         
-        # Apply zero anchoring
+        # Apply zero anchoring with enhanced dampening
         concentration, zero_prob = self.zero_anchoring(aggregated, concentration)
+        
+        # Apply additional coverage-based dampening at the final prediction stage
+        mean_coverage = coverage.mean(dim=1, keepdim=True)
+        coverage_factor = torch.clamp(mean_coverage / (self.min_reliable_coverage * 2.0), 0.2, 1.0)
+        
+        # Apply coverage-based dampening
+        concentration = concentration * coverage_factor
         
         concentration = torch.clamp(concentration, 0.0, 1.0)
         
@@ -407,7 +453,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         ci = torch.cat([lower, upper], dim=1)
         
         return mu_thresholded, ci, scaled_uncertainty
-    
+  
     def calibrate(self, val_loader, device='cpu'):
         self.eval()
         
@@ -507,7 +553,8 @@ class EnhancedCancerDetectionModel(nn.Module):
                 specificity = true_negatives.sum() / (all_targets < 0.001).sum()
                 
                 # Higher weight to specificity to ensure controls are handled better
-                weighted_accuracy = 0.7 * specificity + 0.3 * sensitivity
+                # Increased from 0.7 to 0.85 for stronger emphasis on controls
+                weighted_accuracy = 0.85 * specificity + 0.15 * sensitivity
                 
                 concentration_score = 0
                 if true_positives.sum() > 0:
@@ -591,21 +638,33 @@ class EnhancedCancerDetectionModel(nn.Module):
     def predict_with_clinical_threshold(self, marker_values, coverage):
         concentration, uncertainty, attention_weights, zero_prob = self.forward(marker_values, coverage)
         
-        # Apply zero-forcing when zero_prob is high
+        # Dynamic thresholding based on coverage
+        mean_coverage = coverage.mean(dim=1, keepdim=True)
+        low_coverage_mask = mean_coverage < (self.min_reliable_coverage * 1.5)
+        
+        # Increase threshold for low coverage samples
+        dynamic_threshold = torch.where(
+            low_coverage_mask,
+            self.clinical_threshold * 2.0,  # Double threshold for low coverage
+            self.clinical_threshold
+        )
+        
+        # Apply zero probability-based adjustment
+        is_likely_zero = zero_prob > 0.7
         concentration_adjusted = torch.where(
-            zero_prob > 0.8,  # Strong confidence of zero
+            is_likely_zero,
             torch.zeros_like(concentration),
             concentration
         )
         
-        # Also apply clinical threshold
-        is_detected = concentration_adjusted >= self.clinical_threshold
+        # Apply the clinical threshold with the dynamic adjustment
+        is_detected = concentration_adjusted >= dynamic_threshold
         
         # Zero out anything below threshold
         concentration_thresholded = torch.where(is_detected, concentration_adjusted, torch.zeros_like(concentration_adjusted))
         
         return concentration_thresholded, uncertainty, attention_weights, is_detected
-       
+
 class MarkerImportanceAnalyser:
     def __init__(self, model):
         self.model = model
