@@ -370,7 +370,8 @@ def train_model(model, train_loader, val_loader, args, device):
                    f"MAE: {val_metrics['mae']:.6f}, "
                    f"R²: {val_metrics['r2']:.4f}, "
                    f"Log-R²: {val_metrics.get('log_r2', 0.0):.4f}, "
-                   f"Log-Slope: {val_metrics.get('log_slope', 0.0):.4f}")
+                   f"Log-Slope: {val_metrics.get('log_slope', 0.0):.4f}, "
+                   f"Log-Intercept: {val_metrics.get('log_intercept', 0.0):.4f}")
         
         # Log concentration-specific metrics for critical ranges
         for range_name in ['0.1-0.5%', '0.5-1%', '1-5%']:
@@ -2480,7 +2481,7 @@ def generate_clinical_report(evaluation_results):
 
 
 # OAC
-# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_simplified --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --feature_dim 128 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --excluded_markers "44,58,111,133,77,95,127,38,108,115" --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
+# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_unbias --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --feature_dim 128 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --excluded_markers "44,58,111,133,77,95,127,38,108,115" --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
 
 
 def main():
