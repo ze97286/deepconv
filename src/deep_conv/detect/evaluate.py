@@ -1775,9 +1775,9 @@ def parse_args():
 
 
 # python -m deep_conv.detect.evaluate \
-# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_simplified/ \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_unbias/ \
 # --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/ \
-# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/oac_simplified
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/oac_unbias
 
 # python -m deep_conv.detect.evaluate \
 # --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/CpGenie_T-cells/ \
