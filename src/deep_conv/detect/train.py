@@ -613,34 +613,12 @@ def validate_model(model, val_loader, device):
         log_slope = 0.0
         log_intercept = 0.0
         
-        if non_zero_mask.sum() > 10:
-            # Log-transform the non-zero values
-            log_pred = np.log10(predictions[non_zero_mask])
-            log_true = np.log10(targets[non_zero_mask])
-            
-            # Calculate R² in log space
-            log_r2 = r2_score(log_true, log_pred)
-            
-            # Calculate slope and intercept in log space using numpy polyfit
-            try:
-                poly_coeffs = np.polyfit(log_true, log_pred, 1)
-                log_slope = poly_coeffs[0]
-                log_intercept = poly_coeffs[1]
-            except Exception as e:
-                logger.error(f"Error calculating log-space regression with polyfit: {str(e)}")
-                # Fall back to manual calculation
-                try:
-                    x_mean = np.mean(log_true)
-                    y_mean = np.mean(log_pred)
-                    
-                    numerator = np.sum((log_true - x_mean) * (log_pred - y_mean))
-                    denominator = np.sum((log_true - x_mean) ** 2)
-                    
-                    if denominator > epsilon:
-                        log_slope = numerator / denominator
-                        log_intercept = y_mean - log_slope * x_mean
-                except Exception as e:
-                    logger.error(f"Error calculating manual log-space regression: {str(e)}")
+        log_space_results = calculate_log_space_metrics(predictions[non_zero_mask], targets[non_zero_mask])
+        log_r2 = log_space_results['log_r2']
+        log_slope = log_space_results['log_slope']
+        log_intercept = log_space_results['log_intercept']
+        
+        # Calculate concentration metrics
         
         # Calculate concentration-stratified metrics
         concentration_metrics = compute_concentration_metrics(predictions, targets)
@@ -1162,6 +1140,44 @@ def evaluate(model, data_loader, args, device, split_name="test"):
     
     return results
 
+def calculate_log_space_metrics(predictions, targets, epsilon=1e-10):
+    """Calculate standardized log-space metrics for both training and plotting.
+    
+    Args:
+        predictions: numpy array of model predictions
+        targets: numpy array of true values
+        epsilon: small value to avoid log(0)
+        
+    Returns:
+        Dictionary with log_r2, log_slope, log_intercept
+    """
+    # Filter to ensure we only use valid positive values
+    mask = (targets > epsilon) & (predictions > epsilon)
+    
+    if mask.sum() <= 10:  # Need enough points for reliable regression
+        return {
+            'log_r2': 0.0,
+            'log_slope': 0.0,
+            'log_intercept': 0.0
+        }
+    
+    # Transform to log space using base 10
+    log_y_true = np.log10(targets[mask])
+    log_y_pred = np.log10(predictions[mask])
+    
+    # Calculate R² in log space
+    log_r2 = r2_score(log_y_true, log_y_pred)
+    
+    # Calculate slope and intercept using numpy polyfit
+    coeffs = np.polyfit(log_y_true, log_y_pred, 1)
+    log_slope = coeffs[0]
+    log_intercept = coeffs[1]
+    
+    return {
+        'log_r2': log_r2,
+        'log_slope': log_slope,
+        'log_intercept': log_intercept
+    }
 def visualise_results(predictions, ground_truth, output_dir, ci_data=None, marker_importance=None, prefix=""):
     """
     Unified visualisation function for both validation and test results,
@@ -1580,9 +1596,11 @@ def visualise_results(predictions, ground_truth, output_dir, ci_data=None, marke
     log_preds = np.log10(preds + epsilon)
     
     # Linear regression in log space
-    slope, intercept, r_value, p_value, std_err = stats.linregress(log_targets, log_preds)
-    log_r2 = r_value ** 2
-    
+    log_space_results = calculate_log_space_metrics(targets, preds)
+    log_r2 = log_space_results['log_r2']
+    slope = log_space_results['log_slope']
+    intercept = log_space_results['log_intercept']
+
     # Create log-log plot
     fig_log = go.Figure()
     
@@ -1691,22 +1709,19 @@ def visualise_results(predictions, ground_truth, output_dir, ci_data=None, marke
             (0.1, 1.0, "High (>10%)")
         ]
         
-        epsilon = 1e-10
         results = []
         
         for low, high, name in ranges:
             mask = (ground_truth >= low) & (ground_truth < high)
             if mask.sum() > 10:  # Need enough points
-                log_true = np.log10(ground_truth[mask] + epsilon)
-                log_pred = np.log10(predictions[mask] + epsilon)
-                
-                # Linear regression in log space
-                slope, intercept, r_value, _, _ = stats.linregress(log_true, log_pred)
-                
+                log_space_results = calculate_log_space_metrics(ground_truth, predictions)
+                log_r2 = log_space_results['log_r2']
+                slope = log_space_results['log_slope']
+                intercept = log_space_results['log_intercept']
                 results.append({
                     'range': name,
                     'n_samples': mask.sum(),
-                    'log_r2': r_value**2,
+                    'log_r2': log_r2,
                     'slope': slope,
                     'intercept': intercept
                 })
@@ -2044,16 +2059,12 @@ def evaluate_clinical_performance(y_true, y_pred, blank_samples=None):
     
     # 5. Evaluation in log space for low-range accuracy
     # Add small constant to avoid log(0)
-    epsilon = 1e-10
-    log_y_true = np.log10(y_true + epsilon)
-    log_y_pred = np.log10(y_pred + epsilon)
-    
     # Linear regression in log space
-    slope, intercept, r_value, _, _ = stats.linregress(log_y_true, log_y_pred)
+    log_space_results = calculate_log_space_metrics(y_true, y_pred)
     results['log_space'] = {
-        'r_squared': r_value ** 2,
-        'slope': slope,
-        'intercept': intercept
+        'r_squared': log_space_results['log_r2'],
+        'slope': log_space_results['log_slope'],
+        'intercept': log_space_results['log_intercept']
     }
     
     # 6. Clinical error assessment - weighted more heavily for false negatives

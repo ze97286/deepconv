@@ -51,7 +51,7 @@ def setup_logging(output_dir=None):
 
 def load_model(model_dir, device='cpu'):
     """
-    Load a trained model from a directory
+    Load a trained model from a directory with enhanced compatibility
     
     Args:
         model_dir: Directory containing the model checkpoint
@@ -70,7 +70,13 @@ def load_model(model_dir, device='cpu'):
         # Fall back to final model if best model doesn't exist
         model_path = os.path.join(model_dir, 'final_model.pt')
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"No model checkpoint found in {model_dir}")
+            # Try to find any .pt file
+            pt_files = [f for f in os.listdir(model_dir) if f.endswith('.pt')]
+            if pt_files:
+                model_path = os.path.join(model_dir, pt_files[0])
+                logger.warning(f"Standard model files not found, using {pt_files[0]} instead")
+            else:
+                raise FileNotFoundError(f"No model checkpoint found in {model_dir}")
 
     logger.info(f"Loading checkpoint from {model_path}")
     checkpoint = torch.load(model_path, map_location=device)
@@ -86,116 +92,90 @@ def load_model(model_dir, device='cpu'):
         if not args:
             logger.warning(f"No args.json found in {model_dir}. Using default parameters.")
             args = {}
-    
-    
-    # Standard single model
+
     # Get model parameters
-    model_state = checkpoint.get('model', None)
-    if model_state is None:
-        # Some checkpoints store the model state directly
-        model_state = checkpoint
-    
-    # Get num_markers from the first layer weights if not in args
-    if isinstance(model_state, dict):
-        # Check for background_level dimension
-        if 'background_level' in model_state:
-            bg_shape = model_state['background_level'].shape
-            if len(bg_shape) > 1 and bg_shape[1] > 1:
-                # This is a marker-specific background, extract the number of markers
-                args['num_markers'] = bg_shape[1]
-                args['marker_specific_bg'] = True
-        
-        # If still not found, try to infer from value_embedding or other layers
-        if 'num_markers' not in args:
-            for key in model_state:
-                if 'value_embedding.weight' in key:
-                    feature_dim = model_state[key].shape[1]
-                    args['feature_dim'] = feature_dim * 2  # Assuming feature_dim//2 in the embedding
-                    break
-                elif 'embedding' in key and 'weight' in key:
-                    # Try to infer from embedding dimensions
-                    shape = model_state[key].shape
-                    if len(shape) > 1:
-                        for dim in shape:
-                            if dim > 50:  # Likely the marker dimension
-                                args['num_markers'] = dim
-                                break
-    
+    if 'model' in checkpoint and isinstance(checkpoint['model'], dict):
+        model_state = checkpoint['model']
+    else:
+        # Try other common keys
+        for key in ['state_dict', 'model_state_dict', 'model_state']:
+            if key in checkpoint and isinstance(checkpoint[key], dict):
+                model_state = checkpoint[key]
+                break
+        else:
+            # If no recognized key is found, assume the checkpoint itself is the state dict
+            model_state = checkpoint
+
+    # Get num_markers from the model state if not in args
+    if 'num_markers' not in args:
+        # Try to infer from marker_pos_embedding parameter size
+        for key in model_state:
+            if 'marker_pos_embedding' in key:
+                args['num_markers'] = model_state[key].shape[1]
+                logger.info(f"Inferred num_markers={args['num_markers']} from model state")
+                break
+            elif 'value_embedding.weight' in key:
+                # Can also try to infer from other layer dimensions if needed
+                pass
+
     # Set defaults with fallbacks
-    detection_thresholds = args.get('detection_thresholds', [0.001, 0.01, 0.05])
-    # Convert from string if needed
-    if isinstance(detection_thresholds, str):
-        try:
-            detection_thresholds = json.loads(detection_thresholds)
-        except:
-            detection_thresholds = [0.001, 0.01, 0.05]
+    defaults = {
+        'num_markers': 136,
+        'feature_dim': 128,
+        'num_heads': 8,
+        'num_layers': 3,
+        'dropout_rate': 0.2,
+        'min_reliable_coverage': 3.0
+    }
     
+    for key, default_value in defaults.items():
+        if key not in args:
+            args[key] = default_value
+
     # Create and load model
     try:
+        logger.info(f"Creating model with parameters: {args}")
+
         model = EnhancedCancerDetectionModel(
-            num_markers=args.get('num_markers', 136),  # Default to 136 as a fallback
-            feature_dim=args.get('feature_dim', 128),
-            num_heads=args.get('num_heads', 8),
-            num_layers=args.get('num_layers', 3),
-            dropout_rate=args.get('dropout_rate', 0.2),
-            detection_thresholds=detection_thresholds,
-            focal_weight_factor=args.get('focal_weight_factor', 50),
-            low_concentration_threshold=args.get('low_concentration_threshold', 0.01),
-            marker_specific_bg=args.get('marker_specific_bg', True),  # Default to True if we have evidence of it
-            l2_weight=args.get('l2_weight', 0.05),
-            min_reliable_coverage=args.get('min_reliable_coverage', 5.0)
+            num_markers=args['num_markers'],
+            feature_dim=args['feature_dim'],
+            num_heads=args['num_heads'],
+            num_layers=args['num_layers'],
+            dropout_rate=args['dropout_rate'],
+            min_reliable_coverage=args.get('min_reliable_coverage', 3.0)
         )
-        
-        # First try strict loading
+
+        # Try strict loading first
         try:
             model.load_state_dict(model_state, strict=True)
+            logger.info("Model loaded with strict=True")
         except Exception as e:
+            # If strict loading fails, try non-strict loading
             logger.warning(f"Strict loading failed: {e}")
-            # Try non-strict loading
+            logger.warning("Attempting non-strict loading...")
             model.load_state_dict(model_state, strict=False)
-            logger.info("Used non-strict loading instead")
-        
-        # Apply calibration values if available
-        if 'calibration' in checkpoint:
+            logger.info("Model loaded with strict=False")
+
+        # Apply calibration if available
+        if 'calibration' in checkpoint and isinstance(checkpoint['calibration'], dict):
             with torch.no_grad():
                 if hasattr(model, 'calibration'):
-                    model.calibration.fill_(checkpoint['calibration'].get('calibration_factor', 1.0))
-                
-                # Handle background level properly
-                if hasattr(model, 'background_level'):
-                    if 'global_bg_level' in checkpoint['calibration']:
-                        # Single background level
-                        bg_level = checkpoint['calibration'].get('global_bg_level', 0.05)
-                        model.background_level.fill_(bg_level)
-                    elif model.marker_specific_bg and 'marker_bg_levels' in checkpoint['calibration']:
-                        # Marker-specific background levels (if shape matches)
-                        bg_levels = checkpoint['calibration']['marker_bg_levels']
-                        if isinstance(bg_levels, torch.Tensor) and bg_levels.shape == model.background_level.shape:
-                            model.background_level.copy_(bg_levels)
-                        else:
-                            # Fall back to global stats if available
-                            if 'marker_bg_stats' in checkpoint['calibration']:
-                                stats = checkpoint['calibration']['marker_bg_stats']
-                                median_val = stats.get('median', 0.05)
-                                model.background_level.fill_(median_val)
-                            else:
-                                # Default fallback
-                                model.background_level.fill_(0.05)
-                
-                if hasattr(model, 'low_calibration'):
-                    model.low_calibration.fill_(checkpoint['calibration'].get('low_calibration_factor', 1.0))
-        
+                    calibration_factor = checkpoint['calibration'].get('calibration_factor', 1.0)
+                    model.calibration.fill_(calibration_factor)
+                    logger.info(f"Applied calibration factor: {calibration_factor}")
+                else:
+                    logger.warning("Model has no calibration attribute, skipping calibration")
+
     except Exception as e:
-        logger.error(f"Error creating model: {e}")
+        logger.error(f"Error creating/loading model: {e}")
         raise
-    
+
     # Move model to device
     model = model.to(device)
     model.eval()
-    
+
     logger.info(f"Model loaded successfully")
     return model, args
-
 
 def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device='cuda'):
     """
@@ -489,10 +469,10 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
         
         # Create standard visualisations if available
         try:
-            from deep_conv.detect.visualise import create_visualisations
+            from deep_conv.detect.train import visualise_results
             
             logger.info("Creating standard visualisations...")
-            viz_metrics = create_visualisations(
+            viz_metrics = visualise_results(
                 predictions=all_preds.flatten(), 
                 ground_truth=all_targets.flatten(),
                 output_dir=viz_dir
@@ -510,6 +490,8 @@ def evaluate_model(model, data_loader, output_dir=None, thresholds=None, device=
         try:
             logger.info("Creating enhanced visualisations...")
             
+            plot_log_space_analysis(all_targets, all_preds, viz_dir)
+
             # Create prediction plots with CI
             plot_predictions(all_preds, all_targets, all_lower_ci, all_upper_ci, viz_dir)
             
@@ -1552,6 +1534,126 @@ def plot_predictions(predictions, targets, lower_ci, upper_ci, output_dir):
     # Save figure
     fig.write_html(os.path.join(output_dir, 'true_vs_predicted.html'))
     fig.write_image(os.path.join(output_dir, 'true_vs_predicted.png'), scale=2)
+
+
+def plot_log_space_analysis(targets, predictions, output_dir):
+    """
+    Create log-space analysis plot for visualizing linearity at low concentrations
+    
+    Args:
+        targets: Ground truth values
+        predictions: Predicted values
+        output_dir: Directory to save visualisation
+    """
+    import os
+    import plotly.graph_objects as go
+    import numpy as np
+    from sklearn.metrics import r2_score
+    from scipy import stats
+    
+    # Ensure we're working with flattened arrays
+    targets = targets.flatten()
+    predictions = predictions.flatten()
+    
+    # Filter out zero values for log transformation
+    non_zero_mask = (targets > 1e-6) & (predictions > 1e-6)
+    valid_targets = targets[non_zero_mask]
+    valid_predictions = predictions[non_zero_mask]
+    
+    # Transform to log space
+    log_targets = np.log10(valid_targets)
+    log_predictions = np.log10(valid_predictions)
+    
+    # Calculate log-space metrics using polyfit
+    poly_coeffs = np.polyfit(log_targets, log_predictions, 1)
+    log_slope = poly_coeffs[0]
+    log_intercept = poly_coeffs[1]
+    
+    # Calculate R² in log space
+    log_r2 = r2_score(log_targets, log_predictions)
+    
+    # Create the regression line
+    x_range = np.linspace(min(log_targets), max(log_targets), 100)
+    y_pred = log_slope * x_range + log_intercept
+    
+    # Create relative errors for coloring
+    rel_errors = 100 * (valid_predictions - valid_targets) / valid_targets
+    
+    # Create figure
+    fig = go.Figure()
+    
+    # Add scatter plot with color based on relative error
+    fig.add_trace(
+        go.Scatter(
+            x=log_targets,
+            y=log_predictions,
+            mode='markers',
+            marker=dict(
+                size=8,
+                color=rel_errors,
+                colorscale='RdBu_r',  # Red for negative, blue for positive
+                cmin=-50,
+                cmax=50,
+                colorbar=dict(
+                    title='Relative Error (%)'
+                )
+            ),
+            name='Log-space Predictions'
+        )
+    )
+    
+    # Add regression line
+    fig.add_trace(
+        go.Scatter(
+            x=x_range,
+            y=y_pred,
+            mode='lines',
+            line=dict(color='red', width=2, dash='dash'),
+            name=f'Regression Line (slope={log_slope:.3f})'
+        )
+    )
+    
+    # Add perfect prediction line
+    fig.add_trace(
+        go.Scatter(
+            x=[min(log_targets), max(log_targets)],
+            y=[min(log_targets), max(log_targets)],
+            mode='lines',
+            line=dict(color='black', width=1, dash='dot'),
+            name='Perfect Prediction'
+        )
+    )
+    
+    # Add metrics annotation
+    fig.add_annotation(
+        x=0.05,
+        y=0.95,
+        xref='paper',
+        yref='paper',
+        text=f"Log-Space R² = {log_r2:.4f}<br>Slope = {log_slope:.3f}<br>Intercept = {log_intercept:.3f}",
+        showarrow=False,
+        bgcolor='white',
+        bordercolor='black',
+        borderwidth=1
+    )
+    
+    # Update layout
+    fig.update_layout(
+        title='Log-Space Analysis for Linearity at Low Concentrations',
+        xaxis_title='Log10(True Concentration)',
+        yaxis_title='Log10(Predicted Concentration)',
+        template='plotly_white',
+        width=900,
+        height=900,
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+    )
+    
+    # Make square plot
+    fig.update_layout(yaxis=dict(scaleanchor='x', scaleratio=1))
+    
+    # Save figure
+    fig.write_html(os.path.join(output_dir, 'log_space_analysis.html'))
+    fig.write_image(os.path.join(output_dir, 'log_space_analysis.png'), scale=2)
 
 
 def run_evaluation(model_dir, input_dir, output_dir=None, device=None):
