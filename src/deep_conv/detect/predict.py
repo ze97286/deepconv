@@ -172,6 +172,17 @@ def load_model(model_dir, device='cpu'):
                 else:
                     logger.warning("Model has no calibration attribute, skipping calibration")
 
+        if 'clinical_threshold' in checkpoint and isinstance(checkpoint['clinical_threshold'], (float, int)):
+            print(f"clinical_threshold => {checkpoint['clinical_threshold']}")
+            with torch.no_grad():
+                if hasattr(model, 'clinical_threshold'):
+                    threshold_value = checkpoint['clinical_threshold']
+                    model.clinical_threshold.fill_(threshold_value)
+                    logger.info(f"Applied clinical threshold: {threshold_value}")
+                else:
+                    logger.warning("Model has no clinical_threshold attribute, skipping threshold")
+
+
     except Exception as e:
         logger.error(f"Error creating/loading model: {e}")
         raise
