@@ -355,14 +355,17 @@ def train_model(model, train_loader, val_loader, args, device):
         history['log_intercept'].append(val_metrics.get('log_intercept', 0.0))
 
         # Log validation results with added log-space metrics
-        logger.info(f"Epoch {epoch+1}/{args.epochs} - "
-                   f"Train Loss: {train_loss:.4f}, "
-                   f"Val Loss: {val_loss:.4f}, "
-                   f"MAE: {val_metrics['mae']:.6f}, "
-                   f"R²: {val_metrics['r2']:.4f}, "
-                   f"Log-R²: {val_metrics.get('log_r2', 0.0):.4f}, "
-                   f"Log-Slope: {val_metrics.get('log_slope', 0.0):.4f}, "
-                   f"Log-Intercept: {val_metrics.get('log_intercept', 0.0):.4f}")
+        logger.info(
+            f"Epoch {epoch+1}/{args.epochs} - "
+            f"Train Loss: {train_loss:.4f}, "
+            f"Val Loss: {val_loss:.4f}, "
+            f"MAE: {val_metrics['mae']:.6f}, "
+            f"R²: {val_metrics['r2']:.4f}, "
+            f"Log-R²: {val_metrics.get('log_r2', 0.0):.4f}, "
+            f"Log-Slope: {val_metrics.get('log_slope', 0.0):.4f}, "
+            f"Log-Intercept: {val_metrics.get('log_intercept', 0.0):.4f}, "
+            f"Low-Conc error: {low_conc_error:.6f}"
+        )
 
         # Log concentration-specific metrics for critical ranges
         for range_name in ['0.1-0.5%', '0.5-1%', '1-5%']:
@@ -398,7 +401,7 @@ def train_model(model, train_loader, val_loader, args, device):
         }
 
         # Check improvement in validation loss
-        if composite_score < best_composite:
+        if composite_score > best_composite:
             improvement = True
             improvement_msg = (
                 f"New best model (composite)!"
@@ -715,7 +718,7 @@ def validate_model(model, val_loader, device):
             'log_slope': 0.0,
             'log_intercept': 0.0
         }
-    
+
 def compute_concentration_metrics(predictions, targets):
     """
     Compute concentration-stratified metrics
