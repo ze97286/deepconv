@@ -1140,7 +1140,7 @@ def evaluate(model, data_loader, args, device, split_name="test"):
     
     return results
 
-def calculate_log_space_metrics(predictions, targets, epsilon=1e-10):
+def calculate_log_space_metrics(predictions, targets, epsilon=1e-6):
     """Calculate standardized log-space metrics for both training and plotting.
     
     Args:
@@ -1591,7 +1591,7 @@ def visualise_results(predictions, ground_truth, output_dir, ci_data=None, marke
     
     # 2. Log-space analysis (important for clinical assessment)
     # Filter out zero values for log transformation
-    epsilon = 1e-10  
+    epsilon = 1e-6  
     non_zero_mask = (targets > epsilon) & (preds > epsilon)
     valid_targets = targets[non_zero_mask]
     valid_predictions = preds[non_zero_mask]
@@ -2182,7 +2182,7 @@ def visualise_clinical_performance(evaluation_results):
         # Create perfect prediction line
         min_val = min(min(true), min(pred))
         max_val = max(max(true), max(pred))
-        perfect_line = np.logspace(np.log10(max(min_val, 1e-10)), np.log10(max_val), 100)
+        perfect_line = np.logspace(np.log10(max(min_val, 1e-6)), np.log10(max_val), 100)
         
         fig.add_trace(
             go.Scatter(
@@ -2285,7 +2285,7 @@ def visualise_clinical_performance(evaluation_results):
         true = evaluation_results['calibration']['y_true']
         pred = evaluation_results['calibration']['y_pred']
         
-        epsilon = 1e-10
+        epsilon = 1e-6
         log_true = np.log10(true + epsilon)
         log_pred = np.log10(pred + epsilon)
         
