@@ -5,15 +5,41 @@ import math
 import scipy.stats as stats
 import numpy as np
 
+class ZeroAnchoringLayer(nn.Module):
+    def __init__(self, feature_dim):
+        super().__init__()
+        self.zero_detector = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim // 2),
+            nn.GELU(),
+            nn.Linear(feature_dim // 2, feature_dim // 4),
+            nn.GELU(),
+            nn.Linear(feature_dim // 4, 1),
+            nn.Sigmoid()
+        )
+        self.sharpness = nn.Parameter(torch.tensor(8.0))
+        
+    def forward(self, features, concentration):
+        # Detect if sample should be zero
+        zero_prob = self.zero_detector(features)
+        
+        # Apply exponential dampening based on zero probability
+        # When zero_prob is high, output approaches zero
+        zero_factor = torch.exp(-self.sharpness * zero_prob)
+        
+        # Apply dampening (multiplication reduces the value toward zero)
+        anchored_concentration = concentration * zero_factor
+        
+        return anchored_concentration, zero_prob
+
 class ConcentrationFocusedLoss(nn.Module):
-    def __init__(self, log_space_weight=6.0, critical_ranges=None, zero_penalty=10.0, control_penalty=20.0):
+    def __init__(self, log_space_weight=6.0, critical_ranges=None, zero_penalty=10.0, control_penalty=200.0):
         super().__init__()
         self.log_space_weight = log_space_weight
         self.critical_ranges = critical_ranges or [(0.001, 0.005, 2.0), (0.005, 0.01, 1.5), (0.01, 0.05, 1.2)]
         self.zero_penalty = zero_penalty
         self.control_penalty = control_penalty
     
-    def forward(self, mu, uncertainty, y_true, control_mask=None):
+    def forward(self, mu, uncertainty, y_true, control_mask=None, zero_prob=None):
         # Basic MSE loss
         mse_loss = F.mse_loss(mu, y_true, reduction='none')
         
@@ -127,6 +153,20 @@ class ConcentrationFocusedLoss(nn.Module):
         if control_mask is not None and control_mask.sum() > 0:
             control_loss = self.control_penalty * mu[control_mask].mean()
         
+        # Zero probability supervision (if available)
+        zero_prob_loss = torch.tensor(0.0, device=mse_loss.device)
+        if zero_prob is not None:
+            zero_target = (y_true < epsilon).float()
+            zero_prob_loss = F.binary_cross_entropy(zero_prob.squeeze(), zero_target.squeeze()) * 5.0
+            
+            # Additional loss for control samples
+            if control_mask is not None and control_mask.sum() > 0:
+                control_zero_loss = F.binary_cross_entropy(
+                    zero_prob[control_mask].squeeze(),
+                    torch.ones(control_mask.sum(), device=zero_prob.device)
+                ) * 10.0
+                zero_prob_loss = zero_prob_loss + control_zero_loss
+        
         # Calibration loss
         calibration_loss = torch.tensor(0.0, device=mse_loss.device)
         if uncertainty is not None:
@@ -151,11 +191,12 @@ class ConcentrationFocusedLoss(nn.Module):
             intercept_penalty +  # Added explicit intercept penalty
             zero_penalty + 
             control_loss + 
+            zero_prob_loss +
             0.2 * calibration_loss + 
             0.8 * monotonicity_penalty)
         
         return total_loss
-    
+
 class ResidualBiasCorrectionLayer(nn.Module):
     def __init__(self, feature_dim):
         super().__init__()
@@ -272,6 +313,9 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         self.bias_correction = ResidualBiasCorrectionLayer(feature_dim)
         
+        # Add zero anchoring layer
+        self.zero_anchoring = ZeroAnchoringLayer(feature_dim)
+        
         self.register_buffer('calibration', torch.ones(1))
         self.register_buffer('clinical_threshold', torch.tensor(0.001))
     
@@ -338,25 +382,31 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         concentration = self.bias_correction(aggregated, concentration)
         
+        # Apply zero anchoring
+        concentration, zero_prob = self.zero_anchoring(aggregated, concentration)
+        
         concentration = torch.clamp(concentration, 0.0, 1.0)
         
         uncertainty = self.uncertainty_head(aggregated)
         
-        return concentration, uncertainty, attention_weights
+        return concentration, uncertainty, attention_weights, zero_prob
     
     def get_estimate_and_ci(self, mu, uncertainty, ci_level=0.95):
+        # Apply clinical threshold to force low values to zero
+        mu_thresholded = torch.where(mu >= self.clinical_threshold, mu, torch.zeros_like(mu))
+        
         scaled_uncertainty = uncertainty * self.calibration
         
         z_score = torch.tensor(1.96) if ci_level == 0.95 else torch.tensor(
             torch.distributions.Normal(0, 1).icdf(torch.tensor((1 + ci_level) / 2))
         )
         
-        lower = torch.clamp(mu - z_score * scaled_uncertainty, min=0.0)
-        upper = torch.clamp(mu + z_score * scaled_uncertainty, max=1.0)
+        lower = torch.clamp(mu_thresholded - z_score * scaled_uncertainty, min=0.0)
+        upper = torch.clamp(mu_thresholded + z_score * scaled_uncertainty, max=1.0)
         
         ci = torch.cat([lower, upper], dim=1)
         
-        return mu, ci, scaled_uncertainty
+        return mu_thresholded, ci, scaled_uncertainty
     
     def calibrate(self, val_loader, device='cpu'):
         self.eval()
@@ -379,7 +429,7 @@ class EnhancedCancerDetectionModel(nn.Module):
                     coverage = coverage.to(device)
                     y_true = y_true.to(device)
                     
-                    mu, uncertainty, _ = self(marker_values, coverage)
+                    mu, uncertainty, _, _ = self(marker_values, coverage)
                     
                     uncertainty_calibrated = uncertainty * factor
                     
@@ -411,6 +461,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         self.eval()
         all_preds = []
         all_targets = []
+        all_zero_probs = []
         
         with torch.no_grad():
             for batch_data in val_loader:
@@ -423,13 +474,15 @@ class EnhancedCancerDetectionModel(nn.Module):
                 coverage = coverage.to(device)
                 y_true = y_true.to(device)
                 
-                mu, _, _ = self(marker_values, coverage)
+                mu, _, _, zero_prob = self(marker_values, coverage)
                 
                 all_preds.extend(mu.cpu().numpy().flatten())
                 all_targets.extend(y_true.cpu().numpy().flatten())
+                all_zero_probs.extend(zero_prob.cpu().numpy().flatten())
         
         all_preds = np.array(all_preds)
         all_targets = np.array(all_targets)
+        all_zero_probs = np.array(all_zero_probs)
         
         if target_metric == 'specificity':
             negatives = all_targets < 0.001
@@ -452,6 +505,9 @@ class EnhancedCancerDetectionModel(nn.Module):
                 
                 sensitivity = true_positives.sum() / (all_targets >= 0.001).sum()
                 specificity = true_negatives.sum() / (all_targets < 0.001).sum()
+                
+                # Higher weight to specificity to ensure controls are handled better
+                weighted_accuracy = 0.7 * specificity + 0.3 * sensitivity
                 
                 concentration_score = 0
                 if true_positives.sum() > 0:
@@ -482,10 +538,11 @@ class EnhancedCancerDetectionModel(nn.Module):
                         0.2 * slope_penalty
                     )
                 
+                # Weighted score with emphasis on specificity and accuracy
                 score = (
-                    0.35 * specificity +
-                    0.25 * sensitivity +
-                    0.40 * concentration_score
+                    0.5 * specificity +  # Higher weight on specificity
+                    0.2 * sensitivity +  # Lower weight on sensitivity
+                    0.3 * concentration_score
                 )
                 
                 if score > best_score:
@@ -530,13 +587,25 @@ class EnhancedCancerDetectionModel(nn.Module):
             'npv': float(true_negatives.sum() / (~detected).sum()) if (~detected).sum() > 0 else 0,
             'concentration_metrics': concentration_metrics
         }
-
-    def predict_with_clinical_threshold(self, marker_values, coverage):
-        concentration, uncertainty, attention_weights = self.forward(marker_values, coverage)
-        is_detected = concentration >= self.clinical_threshold
-        
-        return concentration, uncertainty, attention_weights, is_detected
     
+    def predict_with_clinical_threshold(self, marker_values, coverage):
+        concentration, uncertainty, attention_weights, zero_prob = self.forward(marker_values, coverage)
+        
+        # Apply zero-forcing when zero_prob is high
+        concentration_adjusted = torch.where(
+            zero_prob > 0.8,  # Strong confidence of zero
+            torch.zeros_like(concentration),
+            concentration
+        )
+        
+        # Also apply clinical threshold
+        is_detected = concentration_adjusted >= self.clinical_threshold
+        
+        # Zero out anything below threshold
+        concentration_thresholded = torch.where(is_detected, concentration_adjusted, torch.zeros_like(concentration_adjusted))
+        
+        return concentration_thresholded, uncertainty, attention_weights, is_detected
+       
 class MarkerImportanceAnalyser:
     def __init__(self, model):
         self.model = model

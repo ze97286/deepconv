@@ -169,7 +169,7 @@ def parse_excluded_markers(excluded_markers_str):
         return []
     return [int(idx.strip()) for idx in excluded_markers_str.split(',')]# T-cells
 
-def compute_loss(mu, uncertainty, y_true, control_mask=None):
+def compute_loss(mu, uncertainty, y_true, control_mask=None, zero_prob=None):
     """
     Simplified loss function focused on relative error
     """
@@ -187,10 +187,15 @@ def compute_loss(mu, uncertainty, y_true, control_mask=None):
     else:
         rel_loss = torch.tensor(0.0, device=mu.device)
     
-    # Control sample penalty
     control_loss = torch.tensor(0.0, device=mu.device)
     if control_mask is not None and control_mask.sum() > 0:
-        control_loss = 10.0 * mu[control_mask].mean()
+        control_loss = 100.0 * mu[control_mask].mean()
+    
+    # Zero probability supervision (if available)
+    zero_loss = torch.tensor(0.0, device=mu.device)
+    if zero_prob is not None:
+        zero_target = (y_true < epsilon).float()
+        zero_loss = F.binary_cross_entropy(zero_prob.squeeze(), zero_target.squeeze()) * 5.0
     
     # Uncertainty calibration
     if uncertainty is not None:
@@ -200,7 +205,7 @@ def compute_loss(mu, uncertainty, y_true, control_mask=None):
         calibration_loss = torch.tensor(0.0, device=mu.device)
     
     # Combine losses - increase weight on relative error
-    total_loss = mse_loss.mean() + 2.0 * rel_loss + control_loss + 0.2 * calibration_loss
+    total_loss = mse_loss.mean() + 2.0 * rel_loss + control_loss + zero_loss + 0.2 * calibration_loss
     
     return total_loss
 
@@ -283,11 +288,11 @@ def train_model(model, train_loader, val_loader, args, device):
                 y_true = y_true.to(device)
                 control_mask = control_mask.to(device)
 
-                # Forward pass
-                mu, uncertainty, _ = model(marker_values, coverage)
+                # Forward pass with the new model outputs
+                mu, uncertainty, _, zero_prob = model(marker_values, coverage)
 
-                # Calculate loss with control mask
-                loss = compute_loss(mu, uncertainty, y_true, control_mask)
+                # Calculate loss with control mask and zero probability
+                loss = compute_loss(mu, uncertainty, y_true, control_mask, zero_prob)
 
             else:  # Standard dataset without control_mask
                 marker_values, coverage, y_true = batch_data
@@ -296,10 +301,10 @@ def train_model(model, train_loader, val_loader, args, device):
                 y_true = y_true.to(device)
 
                 # Forward pass
-                mu, uncertainty, _ = model(marker_values, coverage)
+                mu, uncertainty, _, zero_prob = model(marker_values, coverage)
 
                 # Calculate loss without control mask
-                loss = compute_loss(mu, uncertainty, y_true)
+                loss = compute_loss(mu, uncertainty, y_true, None, zero_prob)
 
             # Scale for gradient accumulation
             if args.grad_accum_steps > 1:
@@ -510,7 +515,7 @@ def train_model(model, train_loader, val_loader, args, device):
 
 def validate_model(model, val_loader, device):
     """
-    Validate model performance with concentration-focused metrics, clinical threshold support,
+    Validate model performance with concentration-focused metrics
     and log-space metrics for better low concentration evaluation
     
     Args:
@@ -528,6 +533,7 @@ def validate_model(model, val_loader, device):
     all_targets = []
     all_uncertainties = []
     all_clinical_detections = []
+    all_zero_probs = []
     
     # Track batch count for reporting
     batch_count = 0
@@ -549,16 +555,24 @@ def validate_model(model, val_loader, device):
                     )
                     all_clinical_detections.append(is_detected.cpu().numpy())
                 else:
-                    mu, uncertainty, _ = model(marker_values, coverage)
+                    # Use the new model output format
+                    mu, uncertainty, _, zero_prob = model(marker_values, coverage)
+                    all_zero_probs.append(zero_prob.cpu().numpy())
                 
                 # Compute loss safely
                 try:
                     # Use control_mask if available (4th element)
                     if len(batch_data) > 3:
                         control_mask = batch_data[3].to(device)
-                        batch_loss = compute_loss(mu, uncertainty, y_true, control_mask)
+                        if hasattr(model, 'predict_with_clinical_threshold'):
+                            batch_loss = compute_loss(mu, uncertainty, y_true, control_mask)
+                        else:
+                            batch_loss = compute_loss(mu, uncertainty, y_true, control_mask, zero_prob)
                     else:
-                        batch_loss = compute_loss(mu, uncertainty, y_true)
+                        if hasattr(model, 'predict_with_clinical_threshold'):
+                            batch_loss = compute_loss(mu, uncertainty, y_true)
+                        else:
+                            batch_loss = compute_loss(mu, uncertainty, y_true, None, zero_prob)
                 except Exception as e:
                     logger.error(f"Error computing loss in validation batch {batch_idx}: {str(e)}")
                     # Use a default loss to continue
@@ -686,6 +700,21 @@ def validate_model(model, val_loader, device):
                 'npv': true_negatives / (true_negatives + false_negatives) if (true_negatives + false_negatives) > 0 else 0
             }
         
+        # Zero probability metrics if available
+        zero_prob_metrics = {}
+        if all_zero_probs:
+            zero_probs = np.concatenate(all_zero_probs)
+            zero_mask = targets < epsilon
+            if np.any(zero_mask):
+                zero_prob_metrics = {
+                    'zero_prob_accuracy': np.mean((zero_probs[zero_mask] > 0.5).astype(float)),
+                    'zero_mean_prob': np.mean(zero_probs[zero_mask]),
+                    'nonzero_mean_prob': np.mean(zero_probs[~zero_mask])
+                }
+                # Log zero probability metrics
+                logger.info(f"Zero prob metrics - Accuracy: {zero_prob_metrics['zero_prob_accuracy']:.4f}, "
+                           f"Mean prob on zeros: {zero_prob_metrics['zero_mean_prob']:.4f}")
+        
         # Log success
         logger.info(f"Validation complete: processed {batch_count}/{total_batches} batches")
         
@@ -700,6 +729,7 @@ def validate_model(model, val_loader, device):
             'concentration_metrics': concentration_metrics,
             'uncertainty_metrics': uncertainty_metrics,
             'clinical_metrics': clinical_metrics,
+            'zero_prob_metrics': zero_prob_metrics,
             'log_r2': log_r2,
             'log_slope': log_slope,
             'log_intercept': log_intercept
