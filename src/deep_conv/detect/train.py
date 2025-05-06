@@ -1590,20 +1590,28 @@ def visualise_results(predictions, ground_truth, output_dir, ci_data=None, marke
     fig_err.write_image(os.path.join(clinical_dir, 'error_distribution.png'), scale=2)
     
     # 2. Log-space analysis (important for clinical assessment)
-    # Add small constant to avoid log(0)
-    epsilon = 1e-10
-    log_targets = np.log10(targets + epsilon)
-    log_preds = np.log10(preds + epsilon)
-    
-    # Linear regression in log space
+    # Filter out zero values for log transformation
+    epsilon = 1e-10  
+    non_zero_mask = (targets > epsilon) & (preds > epsilon)
+    valid_targets = targets[non_zero_mask]
+    valid_predictions = preds[non_zero_mask]
+
+    # Transform to log space
+    log_targets = np.log10(valid_targets)
+    log_preds = np.log10(valid_predictions)
+
+    # Get metrics from our standardized function
     log_space_results = calculate_log_space_metrics(targets, preds)
     log_r2 = log_space_results['log_r2']
     slope = log_space_results['log_slope']
     intercept = log_space_results['log_intercept']
 
+    # Calculate relative errors for coloring
+    rel_errors = 100 * (valid_predictions - valid_targets) / valid_targets
+
     # Create log-log plot
     fig_log = go.Figure()
-    
+
     # Add scatter points
     fig_log.add_trace(
         go.Scatter(
@@ -1611,65 +1619,98 @@ def visualise_results(predictions, ground_truth, output_dir, ci_data=None, marke
             y=log_preds,
             mode='markers',
             marker=dict(
-                color=df['rel_error'].clip(-50, 50),  # Use capped relative error for color
+                color=rel_errors.clip(-50, 50),  # Use capped relative error for color
                 colorscale='RdBu_r',
                 cmin=-50,
                 cmax=50,
-                colorbar=dict(title='Relative Error (%)')
+                colorbar=dict(
+                    title='Relative Error (%)',
+                    titleside='right',
+                    thickness=20,
+                    len=0.75,
+                    y=0.5,
+                    yanchor='middle'
+                )
             ),
-            name='Samples'
+            name='Samples',
+            showlegend=False  # Hide from legend as it's shown in colorbar
         )
     )
-    
+
     # Add regression line
     x_range = np.linspace(min(log_targets), max(log_targets), 100)
     y_pred = slope * x_range + intercept
-    
+
     fig_log.add_trace(
         go.Scatter(
             x=x_range,
             y=y_pred,
             mode='lines',
-            line=dict(color='red', dash='dash'),
+            line=dict(color='red', dash='dash', width=2),
             name=f'Regression Line (slope={slope:.2f})'
         )
     )
-    
+
     # Add identity line (slope=1, intercept=0)
     fig_log.add_trace(
         go.Scatter(
             x=x_range,
             y=x_range,
             mode='lines',
-            line=dict(color='black', dash='dot'),
+            line=dict(color='black', dash='dot', width=1.5),
             name='Perfect Prediction'
         )
     )
-    
-    # Add annotation for log-space metrics
+
+    # Add annotation for log-space metrics in a box
     fig_log.add_annotation(
         x=0.05,
         y=0.95,
         xref="paper",
         yref="paper",
-        text=f"Log-Space R² = {log_r2:.4f}<br>Slope = {slope:.3f}<br>Intercept = {intercept:.3f}",
+        text=f"<b>Log-Space R² = {log_r2:.4f}</b><br><b>Slope = {slope:.3f}</b><br><b>Intercept = {intercept:.3f}</b>",
         showarrow=False,
         font=dict(size=14),
         bgcolor="white",
         bordercolor="black",
-        borderwidth=1
+        borderwidth=1,
+        align="left",
+        opacity=0.8
     )
-    
-    # Update layout
+
+    # Update layout with better legend positioning
     fig_log.update_layout(
         title='Log-Space Analysis for Linearity at Low Concentrations',
         xaxis_title='Log10(True Concentration)',
         yaxis_title='Log10(Predicted Concentration)',
         template='plotly_white',
         width=900,
-        height=700
+        height=700,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            bgcolor="rgba(255, 255, 255, 0.8)",
+            bordercolor="Black",
+            borderwidth=1
+        ),
+        margin=dict(t=100, r=80, b=80, l=80)  # Add margin to ensure colorbar doesn't get cut off
     )
-    
+
+    # Make axes more proportional
+    fig_log.update_layout(
+        yaxis=dict(
+            scaleanchor="x",
+            scaleratio=1,
+            range=[min(log_preds)-0.5, max(log_preds)+0.5]
+        ),
+        xaxis=dict(
+            range=[min(log_targets)-0.5, max(log_targets)+0.5]
+        )
+    )
+
     # Save figure
     fig_log.write_html(os.path.join(clinical_dir, 'log_space_analysis.html'))
     fig_log.write_image(os.path.join(clinical_dir, 'log_space_analysis.png'), scale=2)
@@ -1714,7 +1755,7 @@ def visualise_results(predictions, ground_truth, output_dir, ci_data=None, marke
         for low, high, name in ranges:
             mask = (ground_truth >= low) & (ground_truth < high)
             if mask.sum() > 10:  # Need enough points
-                log_space_results = calculate_log_space_metrics(ground_truth, predictions)
+                log_space_results = calculate_log_space_metrics(ground_truth[mask], predictions[mask])
                 log_r2 = log_space_results['log_r2']
                 slope = log_space_results['log_slope']
                 intercept = log_space_results['log_intercept']
