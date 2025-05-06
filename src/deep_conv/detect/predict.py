@@ -57,7 +57,7 @@ def setup_logging(output_dir=None):
 
 def load_model(model_dir, device='cpu'):
     """
-    Load a trained model from a directory
+    Load a trained model from a directory with enhanced compatibility
     
     Args:
         model_dir: Directory containing the model checkpoint
@@ -76,7 +76,13 @@ def load_model(model_dir, device='cpu'):
         # Fall back to final model if best model doesn't exist
         model_path = os.path.join(model_dir, 'final_model.pt')
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"No model checkpoint found in {model_dir}")
+            # Try to find any .pt file
+            pt_files = [f for f in os.listdir(model_dir) if f.endswith('.pt')]
+            if pt_files:
+                model_path = os.path.join(model_dir, pt_files[0])
+                logger.warning(f"Standard model files not found, using {pt_files[0]} instead")
+            else:
+                raise FileNotFoundError(f"No model checkpoint found in {model_dir}")
 
     logger.info(f"Loading checkpoint from {model_path}")
     checkpoint = torch.load(model_path, map_location=device)
@@ -94,10 +100,17 @@ def load_model(model_dir, device='cpu'):
             args = {}
 
     # Get model parameters
-    model_state = checkpoint.get('model', None)
-    if model_state is None:
-        # Some checkpoints store the model state directly
-        model_state = checkpoint
+    if 'model' in checkpoint and isinstance(checkpoint['model'], dict):
+        model_state = checkpoint['model']
+    else:
+        # Try other common keys
+        for key in ['state_dict', 'model_state_dict', 'model_state']:
+            if key in checkpoint and isinstance(checkpoint[key], dict):
+                model_state = checkpoint[key]
+                break
+        else:
+            # If no recognized key is found, assume the checkpoint itself is the state dict
+            model_state = checkpoint
 
     # Get num_markers from the model state if not in args
     if 'num_markers' not in args:
@@ -105,6 +118,7 @@ def load_model(model_dir, device='cpu'):
         for key in model_state:
             if 'marker_pos_embedding' in key:
                 args['num_markers'] = model_state[key].shape[1]
+                logger.info(f"Inferred num_markers={args['num_markers']} from model state")
                 break
             elif 'value_embedding.weight' in key:
                 # Can also try to infer from other layer dimensions if needed
@@ -137,8 +151,16 @@ def load_model(model_dir, device='cpu'):
             min_reliable_coverage=args.get('min_reliable_coverage', 3.0)
         )
 
-        # Load model state
-        model.load_state_dict(model_state, strict=True)
+        # Try strict loading first
+        try:
+            model.load_state_dict(model_state, strict=True)
+            logger.info("Model loaded with strict=True")
+        except Exception as e:
+            # If strict loading fails, try non-strict loading
+            logger.warning(f"Strict loading failed: {e}")
+            logger.warning("Attempting non-strict loading...")
+            model.load_state_dict(model_state, strict=False)
+            logger.info("Model loaded with strict=False")
 
         # Apply calibration if available
         if 'calibration' in checkpoint and isinstance(checkpoint['calibration'], dict):
@@ -147,6 +169,8 @@ def load_model(model_dir, device='cpu'):
                     calibration_factor = checkpoint['calibration'].get('calibration_factor', 1.0)
                     model.calibration.fill_(calibration_factor)
                     logger.info(f"Applied calibration factor: {calibration_factor}")
+                else:
+                    logger.warning("Model has no calibration attribute, skipping calibration")
 
     except Exception as e:
         logger.error(f"Error creating/loading model: {e}")
@@ -158,6 +182,7 @@ def load_model(model_dir, device='cpu'):
 
     logger.info(f"Model loaded successfully")
     return model, args
+
 
 def predict(model, marker_values, coverage, sample_ids, output_dir=None, device='cpu'):
     """
@@ -193,11 +218,16 @@ def predict(model, marker_values, coverage, sample_ids, output_dir=None, device=
         marker_values = marker_values.to(device)
         coverage = coverage.to(device)
         
-        # Forward pass - the simplified model returns (concentration, uncertainty, attention_weights)
-        concentration, uncertainty, _ = model(marker_values, coverage)
+       
+        # Standard model - handle different return formats
+        model_output = model(marker_values, coverage)
         
-        # Get estimate and confidence intervals
-        estimate, ci, scaled_uncertainty = model.get_estimate_and_ci(concentration, uncertainty)
+        
+        # Standard model returns (concentration, uncertainty, attention_weights)
+        mu = model_output[0]  # concentration
+        phi = model_output[1]  # uncertainty
+        
+        estimate, ci, scaled_uncertainty = model.get_estimate_and_ci(mu, phi)
         
         # Store predictions
         all_preds.append(estimate.cpu().numpy())
@@ -297,7 +327,6 @@ def run_predict(model_dir, input_dir, output_dir=None, device=None):
             data_dir=input_dir,
             atlas_path=atlas_path,
             target_cell_type=target_cell_type,
-            target_cell_idx=target_cell_idx,
             excluded_markers=excluded_markers
         )
         
@@ -312,6 +341,16 @@ def run_predict(model_dir, input_dir, output_dir=None, device=None):
         import traceback
         logger.error(traceback.format_exc())
         return None
+
+# python -m deep_conv.detect.predict \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_unbias/ \
+# --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA/ \
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/oac_unbias/
+
+# python -m deep_conv.detect.predict \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_unbias/ \
+# --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/cfDNA/ \
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/CD/cfDNA/oac_unbias/
 
 if __name__ == '__main__':
     args = parse_args()
