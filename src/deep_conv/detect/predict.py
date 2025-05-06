@@ -86,7 +86,8 @@ def load_model(model_dir, device='cpu'):
 
     logger.info(f"Loading checkpoint from {model_path}")
     checkpoint = torch.load(model_path, map_location=device)
-
+    from pprint import pprint
+    pprint(checkpoint)
     # Load args if available
     args_path = os.path.join(model_dir, 'args.json')
     if os.path.exists(args_path):
@@ -133,7 +134,7 @@ def load_model(model_dir, device='cpu'):
         'dropout_rate': 0.2,
         'min_reliable_coverage': 3.0
     }
-    
+
     for key, default_value in defaults.items():
         if key not in args:
             args[key] = default_value
@@ -181,7 +182,6 @@ def load_model(model_dir, device='cpu'):
                     logger.info(f"Applied clinical threshold: {threshold_value}")
                 else:
                     logger.warning("Model has no clinical_threshold attribute, skipping threshold")
-
 
     except Exception as e:
         logger.error(f"Error creating/loading model: {e}")
