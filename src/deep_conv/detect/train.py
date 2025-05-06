@@ -372,7 +372,7 @@ def train_model(model, train_loader, val_loader, args, device):
                 logger.info(f"  {range_name} (n={metrics['count']}): "
                         f"MAE={metrics['mae']:.6f}, "
                         f"Within 25%={within_25:.1f}%")
-        
+
         # Check for improvement - now including log-space metrics
         improvement = False
         improvement_msg = ""
@@ -400,18 +400,19 @@ def train_model(model, train_loader, val_loader, args, device):
         # Check improvement in validation loss
         if composite_score < best_composite:
             improvement = True
-            improvement_msg = f"New best model (composite)!"+\
-                  f"\nloss: {best_composite_components.get('val_loss',float('inf')):.4f} → {val_loss:.4f}"+\
-                  f"\nlog_r2: {best_composite_components.get('log_r2',0):.4f} → {log_r2:.4f}"+\
-                  f"\nlog_slope: {best_composite_components.get('log_slope',0):.4f} → {log_slope:.4f}"+\
-                  f"\nlog_intercept: {best_composite_components.get('log_intercept',0):.4f} → {log_intercept:.4f}"+\
-                  f"\nlow_conc_error: {best_composite_components.get('low_conc_error',0):.4f} → {low_conc_error:.4f}"                  
-            
+            improvement_msg = (
+                f"New best model (composite)!"
+                + f"\ncomposite score: {best_composite} -> {composite_score}"
+                + f"\nloss: {best_composite_components.get('val_loss',float('inf')):.4f} → {val_loss:.4f}"
+                + f"\nlog_r2: {best_composite_components.get('log_r2',0):.4f} → {log_r2:.4f}"
+                + f"\nlog_slope: {best_composite_components.get('log_slope',0):.4f} → {log_slope:.4f}"
+                + f"\nlog_intercept: {best_composite_components.get('log_intercept',0):.4f} → {log_intercept:.4f}"
+                + f"\nlow_conc_error: {best_composite_components.get('low_conc_error',0):.4f} → {low_conc_error:.4f}"
+            )
+
             best_composite  = composite_score
             best_composite_components = composite_score_components
-        
-       
-        
+
         # If there's improvement, save the model
         if improvement:
             best_model_state = {
@@ -421,22 +422,24 @@ def train_model(model, train_loader, val_loader, args, device):
                 'args': vars(args),
                 'git_commit': git_commit
             }
-            
+
             # Save best model
             torch.save(best_model_state, os.path.join(args.output_dir, 'best_model.pt'))
             logger.info(f"✓ {improvement_msg}")
             patience_counter = 0
         else:
             patience_counter += 1
-            logger.info(f"× No improvement. Patience: {patience_counter}/{args.early_stopping}")
-        
+            logger.info(
+                f"× No improvement (composite score: {composite_score:.4f} best composite score: {best_composite:.4f}). Patience: {patience_counter}/{args.early_stopping}"
+            )
+
         # Periodic calibration (if enabled)
         if args.calibrate and (epoch % args.calibrate_every == 0 or epoch == args.epochs - 1):
             logger.info("Calibrating model uncertainty estimates...")
             try:
                 calibration_results = model.calibrate(val_loader, device)
                 logger.info(f"  Calibration factor: {calibration_results['calibration_factor']:.4f}")
-                
+
                 # Also calibrate clinical threshold if enabled
                 if hasattr(args, 'calibrate_clinical_threshold') and args.calibrate_clinical_threshold:
                     logger.info("Calibrating clinical decision threshold...")
@@ -445,23 +448,23 @@ def train_model(model, train_loader, val_loader, args, device):
                         device,
                         target_metric='concentration_aware'
                     )
-                    
+
                     if clinical_calibration:
                         logger.info(f"  Clinical threshold: {clinical_calibration['threshold']:.6f}")
                         logger.info(f"  Specificity: {clinical_calibration['specificity']:.2f}")
                         logger.info(f"  Sensitivity: {clinical_calibration['sensitivity']:.2f}")
                     else:
                         logger.warning("  Failed to calibrate clinical threshold")
-                
+
             except Exception as e:
                 logger.error(f"× Error during calibration: {str(e)}")
                 logger.info("  Skipping calibration for this epoch")
-        
+
         # Early stopping
         if patience_counter >= args.early_stopping:
             logger.info(f"Early stopping triggered after {epoch+1} epochs")
             break
-        
+
         # Checkpoint saving
         if (epoch + 1) % args.save_interval == 0:
             checkpoint_path = os.path.join(args.output_dir, f'checkpoint_epoch_{epoch+1}.pt')
@@ -475,7 +478,7 @@ def train_model(model, train_loader, val_loader, args, device):
                 'git_commit': git_commit
             }, checkpoint_path)
             logger.info(f"Checkpoint saved to {checkpoint_path}")
-    
+
     # Save final model
     final_model_path = os.path.join(args.output_dir, 'final_model.pt')
     torch.save({
@@ -487,19 +490,19 @@ def train_model(model, train_loader, val_loader, args, device):
         'git_commit': git_commit
     }, final_model_path)
     logger.info(f"Final model saved to {final_model_path}")
-    
+
     # Save training history
     history_path = os.path.join(args.output_dir, 'training_history.json')
     with open(history_path, 'w') as f:
         json.dump({k: [float(v) for v in vals] for k, vals in history.items()}, f, indent=2)
-    
+
     # Create plots of training history
     plot_training_history(history, args.output_dir)
-    
+
     # Load best model for return
     if best_model_state is not None:
         model.load_state_dict(best_model_state['model'])
-    
+
     return model, best_model_state
 
 def validate_model(model, val_loader, device):
