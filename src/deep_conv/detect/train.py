@@ -36,7 +36,7 @@ def parse_args():
     parser.add_argument('--atlas_path', type=str, required=True, help='Path to atlas file')
     parser.add_argument('--target_cell_type', type=str, required=True, help='Target cell type')
     parser.add_argument('--target_cell_idx', type=int, required=True, help='Target cell index in ground truth')
-    parser.add_argument('--excluded_markers', type=str, default='', help='Comma-separated list of marker indices to exclude')
+    parser.add_argument('--excluded_markers', type=str, default='0,2,3,5,9,10,11,13,14,16,18,21,22,23,25,27,28,29,30,31,32,34,38,39,40,42,43,44,46,47,48,50,51,52,54,55,56,58,59,61,62,64,65,67,70,74,75,76,77,78,82,83,84,85,86,87,89,91,94,95,97,98,100,101,102,103,104,105,108,109,111,112,113,114,115,116,117,118,120,121,122,124,125,126,127,128,129,133,135', help='Comma-separated list of marker indices to exclude')
     
     # Model parameters
     parser.add_argument('--feature_dim', type=int, default=128, help='Feature dimension')
@@ -2976,12 +2976,12 @@ def generate_clinical_report(evaluation_results):
         Textual report of clinical performance
     """
     report = ["# Clinical Performance Report\n"]
-    
+
     # Overall assessment
     if 'limit_of_detection' in evaluation_results:
         lod = evaluation_results['limit_of_detection']
         report.append(f"## Lower Limit of Detection\nThe model can reliably detect tumor fractions above {lod:.6f} (LoD).")
-    
+
     # Performance by range
     report.append("\n## Performance Across Clinical Ranges")
     for range_name, metrics in evaluation_results['stratified_performance'].items():
@@ -2989,7 +2989,7 @@ def generate_clinical_report(evaluation_results):
         report.append(f"- Sample count: {metrics['count']}")
         report.append(f"- Median absolute error: {metrics['median_error']:.6f}")
         report.append(f"- Median relative error: {metrics['relative_error']:.1f}%")
-    
+
     # Detection performance
     report.append("\n## Detection Performance at Clinical Decision Thresholds")
     for threshold, metrics in evaluation_results['detection_performance'].items():
@@ -2998,28 +2998,28 @@ def generate_clinical_report(evaluation_results):
         report.append(f"- Specificity: {metrics['specificity']:.2f}")
         report.append(f"- Positive Predictive Value: {metrics['ppv']:.2f}")
         report.append(f"- Negative Predictive Value: {metrics['npv']:.2f}")
-    
+
     # Clinical recommendations
     report.append("\n## Clinical Recommendations")
-    
+
     # Identify poorest performing range
     performance_by_range = {r: m['mae'] for r, m in evaluation_results['stratified_performance'].items()}
     worst_range = max(performance_by_range, key=performance_by_range.get)
-    
+
     report.append(f"- Exercise additional caution when interpreting results in the {worst_range.replace('_', ' ')} range.")
-    
+
     # Add detection recommendation based on LoD
     if 'limit_of_detection' in evaluation_results:
         lod = evaluation_results['limit_of_detection']
         report.append(f"- Results below {lod:.6f} should be reported as 'below reliable detection limit'.")
-    
+
     # Add recommendation based on specificity at low threshold
     lowest_threshold = min(evaluation_results['detection_performance'].keys())
     spec_at_lowest = evaluation_results['detection_performance'][lowest_threshold]['specificity']
-    
+
     if spec_at_lowest < 0.95:
         report.append(f"- Consider confirmatory testing for positive results near the detection threshold due to specificity of {spec_at_lowest:.2f}.")
-    
+
     return "\n".join(report)
 
 # qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_t -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_t.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train \
@@ -3049,7 +3049,7 @@ def generate_clinical_report(evaluation_results):
 
 
 # OAC
-# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_unbias_with_controls --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --feature_dim 128 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --excluded_markers "15,17,42,44,58,61,73,104,111,112,133,77,95,127,38,108,115" --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
+# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_detector_with_pon --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --feature_dim 128 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
 
 
 def main():
