@@ -243,7 +243,7 @@ class DynamicMarkerPruning(nn.Module):
 
 class EnhancedCancerDetectionModel(nn.Module):
     def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
-                 dropout_rate=0.2, min_reliable_coverage=3.0):
+                 dropout_rate=0.2, min_reliable_coverage=5.0):
         super().__init__()
         
         self.num_markers = num_markers
