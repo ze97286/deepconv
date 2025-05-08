@@ -5,6 +5,8 @@ import pandas as pd
 import json
 import logging
 from tqdm import tqdm
+import plotly.graph_objects as go
+import plotly.express as px
 
 from deep_conv.detect.preprocess import prepare_data_for_predict
 from deep_conv.detect.model import EnhancedCancerDetectionModel
@@ -228,7 +230,7 @@ def load_model(model_dir, device='cpu'):
     
     return model, args
 
-def predict(model, marker_values, coverage, sample_ids, output_dir=None, device='cpu'):
+def predict(model, marker_values, coverage, sample_ids, output_dir=None, device='cpu', ichor_cna_path=None):
     """
     Predict using a trained model on a dataset and save the results to the output dir
     
@@ -292,7 +294,7 @@ def predict(model, marker_values, coverage, sample_ids, output_dir=None, device=
     predictions_file = os.path.join(output_dir, 'predictions.csv')
     predictions_df.to_csv(predictions_file, index=False)
     logger.info(f"Predictions saved to {predictions_file}")
-    
+
     # Save summary statistics
     summary = {
         'num_samples': len(sample_ids),
@@ -388,6 +390,273 @@ def run_predict(model_dir, input_dir, output_dir=None, device=None):
 # --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_unbias_with_controls/ \
 # --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/cfDNA/ \
 # --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/CD/cfDNA/oac_unbias_with_controls/
+
+
+def plot_timepoint(df, output_path, name, title):
+    fig = go.Figure()
+    # Add estimated values as scatter plot with error bars
+    fig.add_trace(go.Scatter(
+        x=df['sample_id'],
+        y=df['estimated'],
+        mode='markers',
+        name='Estimated',
+        error_y=dict(
+            type='data',
+            symmetric=False,
+            array=df['upper_ci'] - df['estimated'],
+            arrayminus=df['estimated'] - df['lower_ci']
+        ),
+        marker=dict(size=10, color='blue'),
+        text=[f"Uncertainty: {u}" for u in df['uncertainty']],
+        hovertemplate=
+            "Sample ID: %{x}<br>" +
+            "Estimated: %{y:.3f}<br>" +
+            "%{text}<br>" +
+            "CI: [%{customdata[0]:.3f}, %{customdata[1]:.3f}]<extra></extra>",
+        customdata=df[['lower_ci', 'upper_ci']].values
+    ))
+    # Update layout
+    fig.update_layout(
+        title=title,
+        xaxis_title="Sample ID",
+        yaxis_title="Estimated Value",
+        template="plotly_white"
+    )
+    fig.write_html(f"{output_path}/{name}_model_estimates.html")
+    fig.write_image(f"{output_path}/{name}_model_estimates.png", scale=2)
+
+
+def scatter_plot_vs_ichor_cna(df_merged, output_path, col_name, name, title):
+    # Create scatter plot
+    fig = px.scatter(
+        df_merged,
+        x='estimate_method1',
+        y='estimate_method2',
+        text='sample',
+        labels={
+            'estimate_method1': 'ichorCNA',
+            'estimate_method2': col_name
+        },
+        title=title
+    )
+    # Optional: Add a y = x reference line
+    fig.add_shape(
+        type='line',
+        x0=min(df_merged['estimate_method1'].min(), df_merged['estimate_method2'].min()),
+        y0=min(df_merged['estimate_method1'].min(), df_merged['estimate_method2'].min()),
+        x1=max(df_merged['estimate_method1'].max(), df_merged['estimate_method2'].max()),
+        y1=max(df_merged['estimate_method1'].max(), df_merged['estimate_method2'].max()),
+        line=dict(color='gray', dash='dash')
+    )
+    fig.update_traces(textposition='top center')
+    fig.update_layout(
+        xaxis_title='ichorCNA',
+        yaxis_title=col_name,
+        template='plotly_white'
+    )
+    fig.write_html(f"{output_path}/{name}_scatter_plot.html")
+    fig.write_image(f"{output_path}/{name}_scatter_plot.png", scale=2)
+
+
+def plot_vs_nnls_vs_ichorcna(merged, output_path, name, title):
+    fig = px.bar(
+        merged,
+        x='sample',
+        y='estimated',
+        color='method',
+        barmode='group',
+        text='estimated',
+        title=title
+    )
+    fig.update_traces(texttemplate='%{text:.2f}', textposition='outside')
+    fig.update_layout(
+        yaxis_title='Estimate',
+        xaxis_title='Sample',
+        uniformtext_minsize=8,
+        uniformtext_mode='hide',
+        template='plotly_white'
+    )
+    fig.write_html(f"{output_path}/{name}_dc_vs_nnls_vs_ichorcna.html")
+    fig.write_image(f"{output_path}/{name}_dc_vs_nnls_vs_ichorcna.png", scale=2)
+
+def plot_results(model_name="oac_detector"):
+    import pandas as pd
+    import os
+
+    # A/B model estimates with CI and uncertainty
+    out_base_dir = f"/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/{model_name}/"
+    ab_df =  pd.read_csv(out_base_dir+"/predictions.csv")
+    os.makedirs(out_base_dir+"model_estimates", exist_ok=True)
+    plot_timepoint(ab_df, out_base_dir+"model_estimates","ab", "Estimated OAC Content with Confidence Intervals for A/B cohort")
+
+    # A/B model estimates with CI and uncertainty at timepoint
+    ab_df['timepoint'] = ab_df['sample_id'].map(lambda x: x.split("_")[1])
+    for tp in ab_df['timepoint'].unique():
+        os.makedirs(out_base_dir+f"model_estimates/{tp}", exist_ok=True)
+        df = ab_df[ab_df.timepoint == tp]
+        plot_timepoint(df, out_base_dir+f"model_estimates/{tp}",f"ab_{tp}", f"Estimated OAC Content with Confidence Intervals for A/B cohort at timepoint {tp}")
+
+    ab_df['method'] = "deepconv"
+    ab_df['sample'] = ab_df['sample_id'].map(lambda x: x.split("_plasma")[0])
+    ab_dc = ab_df[['sample', 'timepoint', 'estimated','method']]
+    nnls_df = pd.read_csv("/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/nnls/nnls_ab_cfDNA_deconvolution.csv", sep="\t")
+    nnls_df['estimated'] = nnls_df['OAC']
+    nnls_df['method'] = 'nnls'
+    nnls_df['timepoint'] = nnls_df['sample'].map(lambda x: x.split("_")[1])
+    ab_nnls = nnls_df[['sample', 'timepoint', 'estimated','method']]
+    ichorcna_ab = pd.read_csv("/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/ab_ichorcna_cfdna.csv", sep="\t")
+    ichorcna_ab.columns=['sample', 'tf','ploidy']
+    ichorcna_ab['timepoint'] = ichorcna_ab['sample'].map(lambda x: x.split("_")[1])  
+    ichorcna_ab['method'] = 'ichorcna'
+    ichorcna_ab['estimated'] = ichorcna_ab['tf']
+    ichorcna_ab = ichorcna_ab[['sample', 'timepoint', 'estimated','method']]
+    df_all = pd.concat([ab_dc,ab_nnls, ichorcna_ab])
+
+    # A/B deepconv vs nnls vs ichorCNA
+    os.makedirs(out_base_dir+"benchmarks", exist_ok=True)
+    plot_vs_nnls_vs_ichorcna(df_all,out_base_dir+"benchmarks", "ab","Estimate Comparison Across Methods for A/B cohort")
+
+    # A/B deepconv vs nnls vs ichorCNA at timepoint
+    for tp in df_all['timepoint'].unique():
+        os.makedirs(out_base_dir+f"benchmarks/{tp}", exist_ok=True)
+        df = df_all[df_all.timepoint == tp]
+        plot_vs_nnls_vs_ichorcna(
+            df,
+            out_base_dir+f"benchmarks/{tp}",
+            f"ab_{tp}",
+            f"Estimate Comparison Across Methods for A/B cohort at timepoint {tp}",
+        )
+
+    # A/B deepconv vs ichorCNA scatter plot
+    df1 = ichorcna_ab.rename(columns={'estimated': 'estimate_method1'})
+    df2 = ab_dc.rename(columns={'estimated': 'estimate_method2'})
+    df_merged = pd.merge(df1, df2, on='sample')
+    scatter_plot_vs_ichor_cna(
+        df_merged,
+        out_base_dir+"benchmarks",
+        "deepconv",
+        "ab_deepconv_vs_ichorcna",
+        "Deep conv vs ichorCNA in A/B cohort",
+    )
+    for tp in df_merged['timepoint_x'].unique():
+        df = df_merged[df_merged.timepoint_x == tp]
+        scatter_plot_vs_ichor_cna(
+            df,
+            out_base_dir+f"benchmarks/{tp}",
+            "deepconv",
+            f"ab_deepconv_vs_ichorcna_{tp}",
+            f"Deep conv vs ichorCNA in A/B cohort at timepoint {tp}",
+        )
+
+    # A/B nnls vs ichorCNA scatter plot
+    df2 = ab_nnls.rename(columns={'estimated': 'estimate_method2'})
+    df_merged = pd.merge(df1, df2, on='sample')
+    scatter_plot_vs_ichor_cna(
+        df_merged,
+        out_base_dir+"benchmarks",
+        "nnls",
+        "ab_nnls_vs_ichorcna",
+        "NNLS vs ichorCNA in A/B cohort",
+    )
+    for tp in df_merged['timepoint_x'].unique():
+        df = df_merged[df_merged.timepoint_x == tp]
+        scatter_plot_vs_ichor_cna(
+            df,
+            out_base_dir+f"benchmarks/{tp}",
+            "nnls",
+            f"ab_nnls_vs_ichorcna_{tp}",
+            f"NNLS vs ichorCNA in A/B cohort at timepoint {tp}",
+        )
+
+    # C/D
+    out_base_dir = f"/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/CD/cfDNA/{model_name}/"
+    cd_df =  pd.read_csv(out_base_dir+"/predictions.csv")
+    # C/D model estimates with CI and uncertainty
+    os.makedirs(out_base_dir+"model_estimates", exist_ok=True)
+    plot_timepoint(cd_df, out_base_dir+"model_estimates","cd", "Estimated OAC Content with Confidence Intervals for C/D cohort")
+
+    cd_df['timepoint'] = cd_df['sample_id'].map(lambda x: x.split("-")[-1] if "SCAN" not in x and "GI" not in x else "Ctrl")
+    cd_df["timepoint"].replace("ScrBsI", "ScrBsl", inplace=True)
+    for tp in cd_df['timepoint'].unique():
+        os.makedirs(out_base_dir+f"model_estimates/{tp}", exist_ok=True)
+        df = cd_df[cd_df.timepoint == tp]
+        plot_timepoint(df, out_base_dir+f"model_estimates/{tp}",f"cd_{tp}", "Estimated OAC Content with Confidence Intervals for C/D cohort")
+
+    cd_df['method'] = "deepconv"
+    cd_df['sample'] = cd_df['sample_id'].map(lambda x: x.split("_plasma")[0])
+    cd_dc = cd_df[['sample', 'timepoint', 'estimated','method']]
+    nnls_df = pd.read_csv("/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/CD/cfDNA/nnls/nnls_cd_cfDNA_deconvolution.csv", sep="\t")
+    nnls_df['estimated'] = nnls_df['OAC']
+    nnls_df['method'] = 'nnls'
+    nnls_df['timepoint'] = nnls_df['sample'].map(lambda x: x.split("-")[-1] if "SCAN" not in x and "GI" not in x else "Ctrl")
+    nnls_df["timepoint"].replace("ScrBsI", "ScrBsl", inplace=True)
+    cd_nnls = nnls_df[['sample', 'timepoint', 'estimated','method']]
+
+    ichorcna_cd = pd.read_csv("/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/CD/cfDNA/cd_ichorcna_cfdna.csv", sep="\t")
+    ichorcna_cd.columns=['sample', 'tf','ploidy']
+    ichorcna_cd['timepoint'] = ichorcna_cd['sample'].map(lambda x: x.split("-")[-1] if "SCAN" not in x and "GI" not in x else "Ctrl")
+    ichorcna_cd['timepoint'].replace("ScrBsI", "ScrBsl", inplace=True)
+    ichorcna_cd['method'] = 'ichorcna'
+    ichorcna_cd['estimated'] = ichorcna_cd['tf']
+    ichorcna_cd = ichorcna_cd[['sample', 'timepoint', 'estimated','method']]
+    df_all = pd.concat([cd_dc,cd_nnls, ichorcna_cd])
+
+    # C/D deepconv vs nnls vs ichorCNA
+    os.makedirs(out_base_dir+"benchmarks", exist_ok=True)
+    plot_vs_nnls_vs_ichorcna(df_all,out_base_dir+"benchmarks", "cd","Estimate Comparison Across Methods for C/D cohort")
+
+    # C/D deepconv vs nnls vs ichorCNA at timepoint
+    for tp in df_all['timepoint'].unique():
+        os.makedirs(out_base_dir+f"benchmarks/{tp}", exist_ok=True)
+        df = df_all[df_all.timepoint == tp]
+        plot_vs_nnls_vs_ichorcna(
+            df,
+            out_base_dir+f"benchmarks/{tp}",
+            f"cd_{tp}",
+            f"Estimate Comparison Across Methods for C/D cohort at timepoint {tp}",
+        )
+
+    # C/D deepconv vs ichorCNA scatter plot
+    df1 = ichorcna_cd.rename(columns={'estimated': 'estimate_method1'})
+    df2 = cd_dc.rename(columns={'estimated': 'estimate_method2'})
+    df_merged = pd.merge(df1, df2, on='sample')
+    scatter_plot_vs_ichor_cna(
+        df_merged,
+        out_base_dir + "benchmarks",
+        "deepconv",
+        "cd_deepconv_vs_ichorcna",
+        "DeepConv vs ichorCNA in C/D cohort",
+    )
+    for tp in df_merged['timepoint_x'].unique():
+        df = df_merged[df_merged.timepoint_x == tp]
+        scatter_plot_vs_ichor_cna(
+            df,
+            out_base_dir+f"benchmarks/{tp}",
+            "deepconv",
+            f"cd_deepconv_vs_ichorcna_{tp}",
+            f"DeepConv vs ichorCNA in C/D cohort at timepoint {tp}",
+        )
+
+    # C/D nnls vs ichorCNA scatter plot
+    df2 = cd_nnls.rename(columns={'estimated': 'estimate_method2'})
+    df_merged = pd.merge(df1, df2, on='sample')
+    scatter_plot_vs_ichor_cna(
+        df_merged,
+        out_base_dir + "benchmarks",
+        "nnls",
+        "cd_nnls_vs_ichorcna",
+        "NNLS vs ichorCNA in C/D cohort",
+    )
+    for tp in df_merged['timepoint_x'].unique():
+        df = df_merged[df_merged.timepoint_x == tp]
+        scatter_plot_vs_ichor_cna(
+            df,
+            out_base_dir+f"benchmarks/{tp}",
+            "nnls",
+            f"cd_nnls_vs_ichorcna_{tp}",
+            f"NNLS vs ichorCNA in C/D cohort at timepoint {tp}",
+        )
+
 
 if __name__ == '__main__':
     args = parse_args()
