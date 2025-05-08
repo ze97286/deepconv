@@ -15,7 +15,7 @@ parallel -j "$THREADS" '
     echo "Processing {}"
     /users/zetzioni/sharedscratch/wgbs_tools/wgbstools bam2pat \
       --no_beta --include_flags 67 --exclude_flags 3980 --clip 10 \
-      -@ 2 \
+      -@ 22 \
       -o '"$PATDIR"' --genome hg38 {}; 
     zcat '"$PATDIR"'/{/.}.pat.gz | bgzip -c > '"$PATDIR"'/{/.}.wgbs.pat.gz; 
     mv '"$PATDIR"'/{/.}.wgbs.pat.gz '"$PATDIR"'/{/.}.pat.gz; 
