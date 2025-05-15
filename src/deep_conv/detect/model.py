@@ -51,7 +51,7 @@ class ConcentrationFocusedLoss(nn.Module):
         epsilon = 1e-6
         non_zero_mask = (y_true > epsilon)
         
-        # Initialize relative error tensor
+        # Initialise relative error tensor
         rel_error = torch.zeros_like(mse_loss, device=mse_loss.device)
         
         # Compute relative error only for non-zero targets
@@ -112,7 +112,7 @@ class ConcentrationFocusedLoss(nn.Module):
             # MSE in log space
             log_mse = F.mse_loss(log_pred, log_true)
             
-            # Penalize deviation from slope=1 and intercept=0 in log space
+            # Penalise deviation from slope=1 and intercept=0 in log space
             if non_zero_mask_both.sum() > 1:
                 # Simple linear regression coefficients
                 x_mean = log_true.mean()
@@ -126,7 +126,7 @@ class ConcentrationFocusedLoss(nn.Module):
                 
                 # Penalties for slope and intercept
                 slope_penalty = (slope - 1.0) ** 2 * 4.0
-                intercept_penalty = intercept ** 2 * 5.0  # Penalize deviation from zero
+                intercept_penalty = intercept ** 2 * 5.0  # Penalise deviation from zero
                 
                 # Calculate residuals in log space
                 residuals = log_pred - log_true
@@ -177,14 +177,14 @@ class ConcentrationFocusedLoss(nn.Module):
             z_scores = torch.abs(mu - y_true) / (uncertainty + epsilon)
             calibration_loss = F.smooth_l1_loss(z_scores, torch.ones_like(z_scores, device=z_scores.device) * 1.96)
         
-        # Monotonicity regularization
+        # Monotonicity regularisation
         batch_size = y_true.shape[0]
         monotonicity_penalty = torch.tensor(0.0, device=mse_loss.device)
         if batch_size > 1:
             sorted_targets, indices = torch.sort(y_true.squeeze(), dim=0)
             sorted_preds = mu.squeeze()[indices]
             
-            # Only penalize when predictions decrease as targets increase
+            # Only penalise when predictions decrease as targets increase
             monotonicity_penalty = torch.clamp(sorted_preds[:-1] - sorted_preds[1:], min=0).mean() * 2.0
         
         # Total loss with strong weight on log-space accuracy and explicit intercept penalty
@@ -242,26 +242,51 @@ class DynamicMarkerPruning(nn.Module):
         return marker_values_pruned
 
 class EnhancedCancerDetectionModel(nn.Module):
-    def __init__(self, num_markers, feature_dim=128, num_heads=8, num_layers=3, 
+    def __init__(self, num_markers, feature_dim=16, num_heads=2, num_layers=3, 
                  dropout_rate=0.2, min_reliable_coverage=5.0):
         super().__init__()
         
-        self.num_markers = num_markers
-        self.feature_dim = feature_dim
+        # Add dynamic marker pruning module
         self.min_reliable_coverage = min_reliable_coverage
         
+        self.marker_pruning = DynamicMarkerPruning(
+            low_coverage_threshold=min_reliable_coverage
+        )
+        
+        # Multi-modal feature embedding + batch normalisation
         self.value_embedding = nn.Linear(1, feature_dim // 2)
         self.coverage_embedding = nn.Linear(1, feature_dim // 2)
         self.log_value_embedding = nn.Linear(1, feature_dim // 2)
-        
         self.value_bn = nn.BatchNorm1d(feature_dim // 2)
         self.coverage_bn = nn.BatchNorm1d(feature_dim // 2)
         self.log_value_bn = nn.BatchNorm1d(feature_dim // 2)
         
+        # Feature projection and marker identity embedding
         self.feature_projection = nn.Linear(feature_dim * 3 // 2, feature_dim)
+
+        # Marker Identity Embedding allows the model to learn the relative importance weights - markers can have different SNR profiles, 
+        # and some may be more reliable or consistent across samples - the embedding can help adjust  for these technical differences.
+        # From a purely computational perspective, it provides a mechanism for the transformer to distinguish between different input 
+        # positions. Its analogous to the positional encoding in transformers.
+        self.marker_identity_embedding = nn.Parameter(torch.randn(1, num_markers, feature_dim) * 0.02)
         
-        self.marker_pos_embedding = nn.Parameter(torch.randn(1, num_markers, feature_dim) * 0.02)
-        
+        # Transformer encoder
+        # Input [batch × 136 × 16]
+        #   │
+        #   ↓
+        # Layer 1: 
+        #   LayerNorm → MultiHeadAttention(2 heads) → LayerNorm → Feedforward(16→48→16)
+        #   │
+        #   ↓
+        # Layer 2: 
+        #   LayerNorm → MultiHeadAttention(2 heads) → LayerNorm → Feedforward(16→48→16)
+        #   │
+        #   ↓
+        # Layer 3: 
+        #   LayerNorm → MultiHeadAttention(2 heads) → LayerNorm → Feedforward(16→48→16)
+        #   │
+        #   ↓
+        # Output [batch × 136 × 16]
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=feature_dim,
             nhead=num_heads,
@@ -272,18 +297,11 @@ class EnhancedCancerDetectionModel(nn.Module):
             norm_first=True
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        self.reliability_weight = nn.Sequential(
-            nn.Linear(1, feature_dim // 4),
-            nn.GELU(),
-            nn.Linear(feature_dim // 4, feature_dim // 4),
-            nn.GELU(),
-            nn.Linear(feature_dim // 4, 1),
-            nn.Sigmoid()
-        )
-        
+
+        # the critical bridge between marker-level processing and sample-level representation.
         self.attention = nn.Linear(feature_dim, 1)
         
+        # mixture of experts - 3 heads each specialising in a different concentration range
         self.concentration_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim),
             nn.GELU(),
@@ -293,7 +311,6 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Dropout(dropout_rate),
             nn.Linear(feature_dim // 2, 1)
         )
-        
         self.low_concentration_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim),
             nn.GELU(),
@@ -303,7 +320,6 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Dropout(dropout_rate * 0.5),
             nn.Linear(feature_dim // 2, 1)
         )
-        
         self.ultra_low_concentration_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim),
             nn.GELU(),
@@ -313,6 +329,7 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Linear(feature_dim // 2, 1)
         )
         
+        # concentration gate is merging the outputs of the three heads and deciding which one to use for a given sample
         self.concentration_gate = nn.Sequential(
             nn.Linear(feature_dim, 32),
             nn.GELU(),
@@ -322,6 +339,7 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Softmax(dim=1)
         )
         
+        # estimation of uncertainty
         self.uncertainty_head = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
@@ -330,18 +348,15 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Softplus()
         )
         
+        # Small factor for systematic bias correction
         self.bias_correction = ResidualBiasCorrectionLayer(feature_dim)
         
-        # Add zero anchoring layer
+        # Zero anchoring layer to distinguish between true zero and trace concentration
         self.zero_anchoring = ZeroAnchoringLayer(feature_dim)
         
         self.register_buffer('calibration', torch.ones(1))
         self.register_buffer('clinical_threshold', torch.tensor(0.001))
         
-        # Add dynamic marker pruning module
-        self.marker_pruning = DynamicMarkerPruning(
-            low_coverage_threshold=min_reliable_coverage
-        )
     
     def forward(self, marker_values, coverage):
         # Apply dynamic marker pruning
@@ -384,7 +399,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         features = torch.cat([value_features, coverage_features, log_features], dim=-1)
         features = self.feature_projection(features)
-        features = features + self.marker_pos_embedding
+        features = features + self.marker_identity_embedding
         
         transformer_output = self.transformer_encoder(
             features, 
@@ -392,8 +407,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         )
         
         # Enhanced reliability weighting with stronger coverage dependence
-        reliability = self.reliability_weight(log_coverage)
-        reliability = reliability * coverage_reliability.unsqueeze(-1)  # Enhanced reliability weighting
+        reliability = coverage_reliability.unsqueeze(-1)  
         
         attention_scores = self.attention(transformer_output).squeeze(-1)
         attention_scores = attention_scores * reliability.squeeze(-1)
@@ -430,9 +444,9 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         # Apply coverage-based dampening
         concentration = concentration * coverage_factor
-        
         concentration = torch.clamp(concentration, 0.0, 1.0)
         
+        # Calculate uncertainty
         uncertainty = self.uncertainty_head(aggregated)
         
         return concentration, uncertainty, attention_weights, zero_prob

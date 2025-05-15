@@ -39,10 +39,10 @@ def parse_args():
     parser.add_argument('--excluded_markers', type=str, default='0,2,3,5,9,10,11,13,14,16,18,21,22,23,25,27,28,29,30,31,32,34,38,39,40,42,43,44,46,47,48,50,51,52,54,55,56,58,59,61,62,64,65,67,70,74,75,76,77,78,82,83,84,85,86,87,89,91,94,95,97,98,100,101,102,103,104,105,108,109,111,112,113,114,115,116,117,118,120,121,122,124,125,126,127,128,129,133,135', help='Comma-separated list of marker indices to exclude')
     
     # Model parameters
-    parser.add_argument('--feature_dim', type=int, default=128, help='Feature dimension')
-    parser.add_argument('--num_heads', type=int, default=8, help='Number of attention heads')
+    parser.add_argument('--feature_dim', type=int, default=16, help='Feature dimension')
+    parser.add_argument('--num_heads', type=int, default=2, help='Number of attention heads')
     parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for regularisation')
-    parser.add_argument('--num_layers', type=int, default=3, help='Number of transformer layers')
+    parser.add_argument('--num_layers', type=int, default=2, help='Number of transformer layers')
     parser.add_argument('--min_reliable_coverage', type=float, default=3.0, 
                    help='Minimum coverage considered reliable for marker values')
     # Training parameters
@@ -3049,7 +3049,7 @@ def generate_clinical_report(evaluation_results):
 
 
 # OAC
-# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_detector_with_pon --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --feature_dim 128 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
+# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_detector_with_pon_feature_dim16 --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --feature_dim 16 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
 
 
 def main():
