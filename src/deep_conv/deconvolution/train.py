@@ -473,6 +473,7 @@ def train_model(
     use_wandb: bool = True,
     wandb_project: str = "cfDNA-Deconvolution",
     wandb_entity: str = None,
+    num_epochs_without_augmentation: int = 30,
     device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ) -> Tuple[nn.Module, float]:
     """Train the deconvolution model over multiple epochs with early stopping.
@@ -559,8 +560,8 @@ def train_model(
         )
 
         # Select validation datasets (unaugmented for early epochs, augmented later)
-        current_val_loaders = val_loaders_unaugmented if epoch < 100 else val_loaders_augmented
-        print(f"Validation with {'augmented' if epoch >= 100 else 'unaugmented'} data")
+        current_val_loaders = val_loaders_unaugmented if epoch < num_epochs_without_augmentation else val_loaders_augmented
+        print(f"Validation with {'augmented' if epoch >= num_epochs_without_augmentation else 'unaugmented'} data")
 
         # Run validation
         avg_val_loss, val_stats = validate(

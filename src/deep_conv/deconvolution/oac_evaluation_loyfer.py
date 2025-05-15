@@ -1006,7 +1006,7 @@ def run_oac_analysis(model_name, presence_model_name):
 
     # plot AB cohort cfDNA Ben's Atlas with NNLS vs Deepcon with Zohar's atlas OAC concentration vs ichorCNA
     ben_cf_ab = pd.read_csv(out_base_dir+"/AB/cfDNA/nnls/nnls_ab_cfDNA_deconvolution.csv",sep="\t")
-    zohar_cf_ab = pd.read_csv(out_base_dir+"/AB/cfDNA/deepconv/deep_conv_ab_cfDNA_deconvolution.csv",sep="\t")
+    zohar_cf_ab = pd.read_csv(out_base_dir+f"/AB/cfDNA/{model_name}/deep_conv_ab_cfDNA_deconvolution.csv",sep="\t")
     merged_cf_ab_oac = zohar_cf_ab.merge(ben_cf_ab, suffixes=('_deepconv','_nnls'), on='sample')[['sample','OAC_deepconv', 'OAC_nnls']]
     merged_cf_ab_oac = merged_cf_ab_oac.merge(ichorcna_cf_ab,on="sample", how="outer").dropna()
     merged_cf_ab_oac.to_csv(out_base_dir+"/AB/cfDNA/ab_cf_vs_ichorcna.csv",sep="\t",index=False)
@@ -1015,7 +1015,7 @@ def run_oac_analysis(model_name, presence_model_name):
 
     # plot CD cohort cfDNA Ben's Atlas with NNLS vs Deepcon with Zohar's atlas OAC concentration vs ichorCNA
     ben_cf_cd = pd.read_csv(out_base_dir+"/CD/cfDNA//nnls/nnls_cd_cfDNA_deconvolution.csv",sep="\t")
-    zohar_cf_cd = pd.read_csv(out_base_dir+"/CD/cfDNA//deepconv/deep_conv_cd_cfDNA_deconvolution.csv",sep="\t")
+    zohar_cf_cd = pd.read_csv(out_base_dir+f"/CD/cfDNA/{model_name}/deep_conv_cd_cfDNA_deconvolution.csv",sep="\t")
     merged_cf_cd_oac = zohar_cf_cd.merge(ben_cf_cd, suffixes=('_deepconv','_nnls'), on='sample')[['sample','OAC_deepconv', 'OAC_nnls']]
     merged_cf_cd_oac = merged_cf_cd_oac.merge(ichorcna_cf_cd,on="sample", how="outer").dropna()
     merged_cf_cd_oac.to_csv(out_base_dir+"/CD/cfDNA/cd_cf_vs_ichorcna.csv",sep="\t",index=False)
