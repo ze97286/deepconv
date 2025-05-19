@@ -93,6 +93,7 @@ cell_type_to_pat = {
 
 import subprocess
 import os
+from pathlib import Path
 
 def merge_pat_files(pat_files, output_path):
     """
@@ -136,8 +137,15 @@ def merge_pat_files(pat_files, output_path):
     merged = merged.sort_values(['chr_sort', 'pos'])
     merged = merged.drop('chr_sort', axis=1)
     
+    # Convert output_path to string if it's not already
+    output_path_str = str(output_path)
+    
     # Create temp output path without .gz extension
-    temp_output = output_path.replace('.gz', '')
+    if output_path_str.endswith('.gz'):
+        temp_output = output_path_str[:-3]
+    else:
+        temp_output = output_path_str
+        output_path_str = output_path_str + '.gz'
     
     # Save as uncompressed file
     merged.to_csv(temp_output, sep='\t', index=False, header=False)
@@ -149,11 +157,11 @@ def merge_pat_files(pat_files, output_path):
     subprocess.run(['tabix', '-s', '1', '-b', '2', '-e', '2', temp_output + '.gz'])
     
     # If the output path is different from temp_output.gz, move it there
-    if temp_output + '.gz' != output_path:
-        os.rename(temp_output + '.gz', output_path)
-        os.rename(temp_output + '.gz.tbi', output_path + '.tbi')
+    if temp_output + '.gz' != output_path_str:
+        os.rename(temp_output + '.gz', output_path_str)
+        os.rename(temp_output + '.gz.tbi', output_path_str + '.tbi')
     
-    return output_path
+    return output_path_str
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
