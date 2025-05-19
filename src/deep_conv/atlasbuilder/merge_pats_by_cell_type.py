@@ -1,7 +1,7 @@
 import pandas as pd
 import argparse
 from pathlib import Path
-
+import subprocess
 
 cell_type_to_pat = {
     "B-cells": [
@@ -91,13 +91,17 @@ cell_type_to_pat = {
     ],
 }
 
+import subprocess
+import os
+
 def merge_pat_files(pat_files, output_path):
     """
     Merge pat files by summing read counts at each position.
+    Ensures the output is properly sorted, bgzip compressed, and tabix indexed.
     
     Args:
         pat_files: list of pat file paths to merge
-        output_path: where to save merged file
+        output_path: where to save merged file (with .gz extension)
     """
     dfs = []
     for pat_file in pat_files:
@@ -106,10 +110,50 @@ def merge_pat_files(pat_files, output_path):
         dfs.append(df)
     combined = pd.concat(dfs)
     merged = combined.groupby(['chr', 'pos', 'pattern'], as_index=False)['count'].sum()
-    merged = merged.sort_values(['chr', 'pos'])
-    merged.to_csv(output_path, sep='\t', index=False, header=False, compression='gzip')
+    
+    # Custom sorting function for chromosomes
+    def chr_sort_key(chrom):
+        # Remove 'chr' prefix if present
+        chrom = str(chrom)
+        if chrom.startswith('chr'):
+            chrom = chrom[3:]
+        # Handle numbered chromosomes
+        if chrom.isdigit():
+            return int(chrom)
+        # Handle X, Y, MT, etc.
+        elif chrom == 'X':
+            return 100
+        elif chrom == 'Y':
+            return 101
+        elif chrom == 'M' or chrom == 'MT':
+            return 102
+        # Handle other cases
+        else:
+            return 1000 + ord(chrom[0])
+    
+    # Apply custom sorting
+    merged['chr_sort'] = merged['chr'].apply(chr_sort_key)
+    merged = merged.sort_values(['chr_sort', 'pos'])
+    merged = merged.drop('chr_sort', axis=1)
+    
+    # Create temp output path without .gz extension
+    temp_output = output_path.replace('.gz', '')
+    
+    # Save as uncompressed file
+    merged.to_csv(temp_output, sep='\t', index=False, header=False)
+    
+    # Compress with bgzip (creates temp_output.gz)
+    subprocess.run(['bgzip', temp_output])
+    
+    # Index with tabix
+    subprocess.run(['tabix', '-s', '1', '-b', '2', '-e', '2', temp_output + '.gz'])
+    
+    # If the output path is different from temp_output.gz, move it there
+    if temp_output + '.gz' != output_path:
+        os.rename(temp_output + '.gz', output_path)
+        os.rename(temp_output + '.gz.tbi', output_path + '.tbi')
+    
     return output_path
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
