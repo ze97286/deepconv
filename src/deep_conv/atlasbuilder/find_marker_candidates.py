@@ -10,12 +10,52 @@ from functools import partial
 from tqdm import tqdm
 import os
 import time
+import numba
+import gc
+
 
 @dataclass
 class Region:
     start_cpg: int
     end_cpg: int
     index: int  
+
+
+# 1. Optimized function for counting valid CpGs
+@numba.jit(nopython=True)
+def count_valid_cpgs(pattern):
+    count = 0
+    for c in pattern:
+        if c == 'C' or c == 'T':
+            count += 1
+    return count
+
+
+# 2. Optimized function for counting valid CpGs in a slice
+@numba.jit(nopython=True)
+def count_valid_cpgs_slice(pattern, start, length):
+    count = 0
+    end = min(start + length, len(pattern))
+    for i in range(start, end):
+        if pattern[i] == 'C' or pattern[i] == 'T':
+            count += 1
+    return count
+
+
+# 3. Fast filter for relevant chunks
+@numba.jit(nopython=True)
+def fast_filter(starts, pattern_lens, first_cpg, last_cpg):
+    mask = np.zeros(len(starts), dtype=np.bool_)
+    for i in range(len(starts)):
+        if starts[i] < last_cpg and starts[i] + pattern_lens[i] > first_cpg:
+            mask[i] = True
+    return mask
+
+
+# 4. Process multiple patterns in batch for better memory usage
+def process_patterns_batch(patterns, starts, counts, counter):
+    for pattern, start, count in zip(patterns, starts, counts):
+        counter.process_pattern(pattern, start, count)
 
 
 class RegionCounter:
@@ -46,24 +86,24 @@ class RegionCounter:
         self.start_sorted_indices = np.argsort(self.start_positions)
     
     def find_overlapping_regions(self, pat_start: int, pattern: str) -> List[Tuple[Region, int, int]]:
-        valid_cpgs = sum(1 for c in pattern if c in 'CT')
+        # 5. Use optimized function for valid CpGs count
+        valid_cpgs = count_valid_cpgs(pattern)
         if valid_cpgs < self.min_cpgs:
             return []
             
         pat_end = pat_start + len(pattern) - 1
         overlaps = []
         
-        # Find first region that ends after pattern start
+        # 6. Optimized region finding with direct array indexing
         left = np.searchsorted(self.end_positions, pat_start, side='right')
         
-        # Find last region that starts before pattern end
-        right = np.searchsorted(self.start_positions[self.start_sorted_indices], pat_end, side='right')
-        
-        # Only check regions in this window
-        candidate_indices = set(range(left, len(self.regions))) & set(self.start_sorted_indices[:right])
-        
-        for i in candidate_indices:
+        # 7. Direct iteration over region indices
+        for i in range(left, len(self.regions)):
             region = self.regions[i]
+            # Early termination when no more overlaps possible
+            if region.start_cpg > pat_end:
+                break
+                
             # Calculate overlap
             overlap_start = max(pat_start, region.start_cpg)
             overlap_end = min(pat_end + 1, region.end_cpg)
@@ -72,14 +112,16 @@ class RegionCounter:
                 continue
                 
             pattern_offset = overlap_start - pat_start
-            overlap_pat = pattern[pattern_offset:pattern_offset + (overlap_end - overlap_start)]
+            overlap_len = overlap_end - overlap_start
             
-            valid_overlap_cpgs = sum(1 for c in overlap_pat if c in 'CT')
+            # 8. Use optimized function for slice valid CpGs count
+            valid_overlap_cpgs = count_valid_cpgs_slice(pattern, pattern_offset, overlap_len)
             
             if valid_overlap_cpgs >= self.min_cpgs:
-                overlaps.append((region, pattern_offset, overlap_end - overlap_start))
+                overlaps.append((region, pattern_offset, overlap_len))
                 
         return overlaps
+        
     def process_pattern(self, pattern: str, start_cpg: int, count: int):
         if len(pattern) < self.min_cpgs:
             return
@@ -89,7 +131,8 @@ class RegionCounter:
         for region, offset, overlap_len in overlaps:
             overlap_pat = pattern[offset:offset + overlap_len]
             meth_count = overlap_pat.count('C')
-            valid_cpgs = sum(1 for c in overlap_pat if c in 'CT')
+            # 9. Use optimized function for valid CpGs count
+            valid_cpgs = count_valid_cpgs(overlap_pat)
             meth_ratio = meth_count / valid_cpgs
             if meth_ratio < self.th1:
                 self.counts[region.index]['u'] += count
@@ -123,27 +166,46 @@ def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> 
     pat_file = str(pat_file)
     cell_type = Path(pat_file).stem.replace('.pat', '')
     column_names = ['chr', 'start', 'pattern', 'count']
-    total_lines = sum(1 for _ in (gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file)))
-    processed_lines = 0
     
-    with tqdm(total=total_lines, desc=f"Processing {cell_type}") as pbar:
+    # 10. Improved progress tracking based on file size
+    file_size = os.path.getsize(pat_file)
+    processed_bytes = 0
+    
+    with tqdm(total=file_size, desc=f"Processing {cell_type}", unit='B', unit_scale=True) as pbar:
+        file_handle = gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file)
+        
         for chunk in pd.read_csv(pat_file, sep='\t', names=column_names, chunksize=1_000_000):
-            relevant_chunk = chunk[
-                (chunk['start'] < counter.last_cpg) & 
-                (chunk['start'] + chunk['pattern'].str.len() > counter.first_cpg)
-            ]
+            # 11. Optimize chunk filtering using numba
+            pattern_lens = np.array([len(p) for p in chunk['pattern']], dtype=np.int32)
+            starts = chunk['start'].values.astype(np.int32)
+            mask = fast_filter(starts, pattern_lens, counter.first_cpg, counter.last_cpg)
+            relevant_chunk = chunk[mask]
+            
             if len(relevant_chunk) == 0:
                 if chunk['start'].min() >= counter.last_cpg:
-                    pbar.update(total_lines - processed_lines)
-                    break  # Past all our regions
-                processed_lines += len(chunk)
-                pbar.update(len(chunk))
+                    # Early termination when past all regions
+                    pbar.update(file_size - processed_bytes)
+                    break
+                chunk_bytes = chunk.memory_usage(deep=True).sum()
+                processed_bytes += chunk_bytes
+                pbar.update(chunk_bytes)
                 continue
-            for _, row in relevant_chunk.iterrows():
-                counter.process_pattern(row['pattern'], row['start'], row['count'])
-            chunk_size = len(chunk)
-            processed_lines += chunk_size
-            pbar.update(chunk_size)
+                
+            # 12. Process patterns in batch
+            process_patterns_batch(
+                relevant_chunk['pattern'].values,
+                relevant_chunk['start'].values,
+                relevant_chunk['count'].values,
+                counter
+            )
+            
+            # Update progress based on memory usage
+            chunk_bytes = chunk.memory_usage(deep=True).sum()
+            processed_bytes += chunk_bytes
+            pbar.update(chunk_bytes)
+        
+        file_handle.close()
+    
     results_uxm = []
     results_coverage = []
     for idx in range(len(regions_df)):
@@ -175,6 +237,10 @@ def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> 
                 'value': 0,
                 'cell_type': cell_type
             })
+    
+    # 13. Memory cleanup
+    gc.collect()
+    
     return pd.DataFrame(results_uxm), pd.DataFrame(results_coverage), cell_type
 
 
@@ -182,19 +248,26 @@ def process_pat_file_with_name(regions_df, pat_file, min_cpgs):
     return {'file': pat_file.name, 'result': process_pat_file(pat_file=pat_file, min_cpgs=min_cpgs, regions_df=regions_df)}
 
 
+# 14. Optimized DataFrame merge function
+def efficient_merge(base_df, value_df, key_cols=['name', 'direction'], value_col='value'):
+    # Create lookup dictionary
+    lookup = {}
+    for _, row in value_df.iterrows():
+        key = tuple(row[k] for k in key_cols)
+        lookup[key] = row[value_col]
+    
+    # Fast lookup
+    result = []
+    for _, row in base_df.iterrows():
+        key = tuple(row[k] for k in key_cols)
+        result.append(lookup.get(key, np.nan))
+    
+    return result
+
+
 def create_marker_matrices(atlas_path: str, pat_dir: str, min_cpgs: int, threads=4) -> tuple[pd.DataFrame, pd.DataFrame]:
    """
    Create marker values matrix and coverage matrix from atlas markers and pat files.
-   Args:
-       atlas_path: Path to atlas file containing markers
-       pat_dir: Directory containing pat files
-       min_cpgs: Minimum CpGs required for overlap
-   
-   Returns:
-       tuple of (marker_matrix, coverage_matrix) where:
-       - Rows are markers from atlas
-       - First columns are name, direction
-       - Remaining columns are values/coverage for each pat file
    """
    # Read atlas
    print(f"Loading markers from {atlas_path}...")
@@ -209,9 +282,9 @@ def create_marker_matrices(atlas_path: str, pat_dir: str, min_cpgs: int, threads
             total=len(pat_files),
             desc="Processing pat files"
         ))
-    # Sort results by filename
-   results = sorted(results, key=lambda x: x['file'])  # or key=lambda x: x[0] if using tuples
-    # If you need just the results in order:
+   # Sort results by filename
+   results = sorted(results, key=lambda x: x['file'])
+   # If you need just the results in order:
    results = [r['result'] for r in results]
    # Create base matrix with name and direction
    base_df = markers_df[['name', 'direction']]
@@ -219,19 +292,19 @@ def create_marker_matrices(atlas_path: str, pat_dir: str, min_cpgs: int, threads
    marker_matrix = base_df.copy()
    coverage_matrix = base_df.copy()
    for uxm_df, coverage_df, cell_type in results:
-       # Add columns for this pat file's values
-       marker_matrix[cell_type] = pd.merge(
+       # 15. Use efficient merge instead of pandas merge
+       marker_matrix[cell_type] = efficient_merge(
            base_df, 
-           uxm_df[['name', 'direction', 'value']], 
-           on=['name', 'direction'], 
-           how='left'
-       )['value']
-       coverage_matrix[cell_type] = pd.merge(
+           uxm_df[['name', 'direction', 'value']]
+       )
+       coverage_matrix[cell_type] = efficient_merge(
            base_df, 
-           coverage_df[['name', 'direction', 'value']], 
-           on=['name', 'direction'], 
-           how='left'
-       )['value'].fillna(0)
+           coverage_df[['name', 'direction', 'value']]
+       )
+   
+   # 16. Memory cleanup
+   gc.collect()
+   
    return marker_matrix, coverage_matrix
 
 
@@ -246,13 +319,6 @@ def get_ground_truth(pat_dir, names):
 def evaluate_marker_quality(values, target_idx, min_signal, min_snr, significance_threshold):
     """
     Evaluate marker quality with additional metrics while keeping core functionality
-    
-    Args:
-        values: Array of UXM proportions for all cell types
-        target_idx: Index of target cell type
-        min_signal: Minimum required signal
-        min_snr: Minimum required SNR
-        significance_threshold: P-value threshold
     """
     target_value = values[target_idx]
     other_values = values[np.arange(len(values)) != target_idx]
@@ -354,81 +420,81 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
     print(f"Loading regions from {regions}...")
     t0 = time.time()
     batch_id=0
-    for batch in pd.read_csv(regions, sep='\t', chunksize=batch_size):
-        batch_id+=1
-        output_file = f'{output_dir}/{chr}_raw_markers_{batch_id}.l{min_cpgs}.bed.gz'
-        if os.path.exists(output_file):
-            print(f"Skipping batch {batch_id} as it was already processed")
-            continue
-        t_batch = time.time()
-        regions_df = batch.reset_index(drop=True) 
-        print(f"Loaded {len(regions_df)} regions")
-        pat_files = list(Path(pat_dir).glob('*.pat.gz'))
-        if not pat_files:
-            raise ValueError(f"No .pat.gz files found in {pat_dir}")
-        with mp.Pool(threads) as pool:
-            process_func = partial(process_pat_file, regions_df, min_cpgs=min_cpgs)
-            results = list(tqdm(
-                pool.imap(process_func, pat_files),
-                total=len(pat_files),
-                desc="Overall progress"
-            ))
-        print("\nBuilding final matrices...")
-        # Separate UXM and coverage results
-        uxm_dfs = []
-        coverage_dfs = []
-        cell_types = []
-        for uxm_df, coverage_df, cell_type in results:
-            uxm_dfs.append(uxm_df)
-            coverage_dfs.append(coverage_df)
-            cell_types.append(cell_type)
-        # Create final matrices
-        # First, create the base DataFrame with name and direction
-        base_df = regions_df[['name', 'direction']]
-        # Create UXM matrix
-        uxm_matrix = base_df.copy()
-        for df, cell_type in zip(uxm_dfs, cell_types):
-            # First merge base_df with current results
-            merged = pd.merge(base_df, 
-                            df[['name', 'direction', 'value']], 
-                            on=['name', 'direction'], 
-                            how='left')
-            # Then assign to new column
-            uxm_matrix[f"{cell_type}_merged"] = merged['value']
-        # Create coverage matrix                           
-        coverage_matrix = base_df.copy()
-        for df, cell_type in zip(coverage_dfs, cell_types):
-            merged = pd.merge(base_df, 
-                            df[['name', 'direction', 'value']], 
-                            on=['name', 'direction'], 
-                            how='left')
-            coverage_matrix[f"{cell_type}_merged"] = merged['value']
-        marker_props, coverage = uxm_matrix, coverage_matrix
-        col_mapping = {col.split('_')[0]: col for col in marker_props.columns if col not in ['name', 'direction']}
-        cell_types = list(col_mapping.keys())
-        valid_rows = ~marker_props.iloc[:, 2:].isna().any(axis=1)
-        marker_props = marker_props[valid_rows]
-        coverage = coverage[valid_rows]
-        batch_df = regions_df
-        batch_df = batch_df[valid_rows].reset_index(drop=True)
-        if len(batch_df) == 0:
-            print("finished batch with no coverage",batch_id,"in",time.time()-t_batch)    
-            continue 
-        coverage.index = marker_props.index
-        batch_df.index = marker_props.index
-        sufficient_coverage = (coverage.iloc[:, 2:] >= min_coverage).all(axis=1)
-        marker_props = marker_props[sufficient_coverage].reset_index(drop=True)
-        coverage = coverage[sufficient_coverage].reset_index(drop=True)
-        batch_df = batch_df[sufficient_coverage].reset_index(drop=True)
-        if len(batch_df) == 0:
-            print("finished batch with insufficient coverage",batch_id,"in",time.time()-t_batch)
-            continue
-        marker_props.to_csv(f'{output_dir}/{chr}_raw_markers_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
-        coverage.to_csv(f'{output_dir}/{chr}_raw_coverage_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
-        values_matrix = marker_props.iloc[:, 2:].values
-        best_targets_idx = values_matrix.argmax(axis=1)
-        find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, coverage, values_matrix, best_targets_idx, min_signal_threshold, snr_threshold, significance_threshold, output_dir, batch_id)
-        print("finished batch",batch_id,"in",time.time()-t_batch)
+    
+    # 17. Use context manager for better resource handling
+    with pd.read_csv(regions, sep='\t', chunksize=batch_size) as reader:
+        for batch in reader:
+            batch_id+=1
+            output_file = f'{output_dir}/{chr}_raw_markers_{batch_id}.l{min_cpgs}.bed.gz'
+            if os.path.exists(output_file):
+                print(f"Skipping batch {batch_id} as it was already processed")
+                continue
+            t_batch = time.time()
+            regions_df = batch.reset_index(drop=True) 
+            print(f"Loaded {len(regions_df)} regions")
+            pat_files = list(Path(pat_dir).glob('*.pat.gz'))
+            if not pat_files:
+                raise ValueError(f"No .pat.gz files found in {pat_dir}")
+            with mp.Pool(threads) as pool:
+                process_func = partial(process_pat_file, regions_df, min_cpgs=min_cpgs)
+                results = list(tqdm(
+                    pool.imap(process_func, pat_files),
+                    total=len(pat_files),
+                    desc="Overall progress"
+                ))
+            print("\nBuilding final matrices...")
+            # Separate UXM and coverage results
+            uxm_dfs = []
+            coverage_dfs = []
+            cell_types = []
+            for uxm_df, coverage_df, cell_type in results:
+                uxm_dfs.append(uxm_df)
+                coverage_dfs.append(coverage_df)
+                cell_types.append(cell_type)
+            # Create final matrices
+            # First, create the base DataFrame with name and direction
+            base_df = regions_df[['name', 'direction']]
+            # Create UXM matrix
+            uxm_matrix = base_df.copy()
+            for df, cell_type in zip(uxm_dfs, cell_types):
+                # 18. Use efficient merge instead of pandas merge
+                uxm_matrix[f"{cell_type}_merged"] = efficient_merge(base_df, df)
+            # Create coverage matrix                           
+            coverage_matrix = base_df.copy()
+            for df, cell_type in zip(coverage_dfs, cell_types):
+                # 19. Use efficient merge instead of pandas merge
+                coverage_matrix[f"{cell_type}_merged"] = efficient_merge(base_df, df)
+                
+            marker_props, coverage = uxm_matrix, coverage_matrix
+            col_mapping = {col.split('_')[0]: col for col in marker_props.columns if col not in ['name', 'direction']}
+            cell_types = list(col_mapping.keys())
+            valid_rows = ~marker_props.iloc[:, 2:].isna().any(axis=1)
+            marker_props = marker_props[valid_rows]
+            coverage = coverage[valid_rows]
+            batch_df = regions_df
+            batch_df = batch_df[valid_rows].reset_index(drop=True)
+            if len(batch_df) == 0:
+                print("finished batch with no coverage",batch_id,"in",time.time()-t_batch)    
+                continue 
+            coverage.index = marker_props.index
+            batch_df.index = marker_props.index
+            sufficient_coverage = (coverage.iloc[:, 2:] >= min_coverage).all(axis=1)
+            marker_props = marker_props[sufficient_coverage].reset_index(drop=True)
+            coverage = coverage[sufficient_coverage].reset_index(drop=True)
+            batch_df = batch_df[sufficient_coverage].reset_index(drop=True)
+            if len(batch_df) == 0:
+                print("finished batch with insufficient coverage",batch_id,"in",time.time()-t_batch)
+                continue
+            marker_props.to_csv(f'{output_dir}/{chr}_raw_markers_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
+            coverage.to_csv(f'{output_dir}/{chr}_raw_coverage_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
+            values_matrix = marker_props.iloc[:, 2:].values
+            best_targets_idx = values_matrix.argmax(axis=1)
+            find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, coverage, values_matrix, best_targets_idx, min_signal_threshold, snr_threshold, significance_threshold, output_dir, batch_id)
+            
+            # 20. Memory cleanup after batch processing
+            gc.collect()
+            
+            print("finished batch",batch_id,"in",time.time()-t_batch)
 
     print("finished",chr, "in",time.time()-t0)
 
