@@ -300,26 +300,13 @@ def evaluate_marker_quality(values, target_idx, min_signal, min_snr, significanc
 
 def find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, coverage, 
                      values_matrix, best_targets_idx, min_signal_threshold, 
-                     snr_threshold, significance_threshold, output_dir, batch_id, target_cell_type=None):
-    """Find good markers efficiently using bulk operations, optionally filtering for a specific cell type"""
+                     snr_threshold, significance_threshold, output_dir, batch_id):
+    """Find good markers efficiently using bulk operations"""
     # Find all good markers with their metrics
     good_indices = []
     good_metrics = []
     
-    # If target_cell_type is specified, get its index in cell_types list
-    target_cell_idx = None
-    if target_cell_type is not None:
-        if target_cell_type in cell_types:
-            target_cell_idx = cell_types.index(target_cell_type)
-        else:
-            print(f"Warning: Specified cell type '{target_cell_type}' not found in available cell types: {cell_types}")
-            return None
-    
     for i in range(len(values_matrix)):
-        # Skip if we're focusing on a target cell type and this row's best target isn't it
-        if target_cell_idx is not None and best_targets_idx[i] != target_cell_idx:
-            continue
-            
         is_good_marker, metrics = evaluate_marker_quality(
             values_matrix[i],
             best_targets_idx[i],
@@ -352,55 +339,33 @@ def find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, cove
         result_df[cell] = marker_props[col_mapping[cell]].iloc[good_indices].values
         result_df[f'{cell}_coverage'] = coverage[col_mapping[cell]].iloc[good_indices].values
     
-    # Save results - now only save for the target cell type or filtered results
-    if target_cell_type is None:
-        grouped = result_df.groupby('target')
-        for target, group in grouped:
-            filename = f"{chr}_{target}_markers_{batch_id}.parquet"
-            filepath = os.path.join(output_dir, filename)
-            group.to_parquet(filepath, index=False)
-            print(f"saved {len(group)} markers for chromosome {chr}/{target}")
-    else:
-        filename = f"{chr}_{target_cell_type}_markers_{batch_id}.parquet"
+    # Save results
+    grouped = result_df.groupby('target')
+    for target, group in grouped:
+        filename = f"{chr}_{target}_markers_{batch_id}.parquet"
         filepath = os.path.join(output_dir, filename)
-        result_df.to_parquet(filepath, index=False)
-        print(f"saved {len(result_df)} markers for chromosome {chr}/{target_cell_type}")
+        group.to_parquet(filepath, index=False)
+        print(f"saved {len(group)} markers for chromosome {chr}/{target}")
     
     return result_df
 
 
-def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_threshold, significance_threshold, min_signal_threshold, output_dir, threads, target_cell_type=None, batch_size=500_000):
+def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_threshold, significance_threshold, min_signal_threshold, output_dir, threads, batch_size=500_000):
     print(f"Loading regions from {regions}...")
     t0 = time.time()
     batch_id=0
     for batch in pd.read_csv(regions, sep='\t', chunksize=batch_size):
         batch_id+=1
         output_file = f'{output_dir}/{chr}_raw_markers_{batch_id}.l{min_cpgs}.bed.gz'
-        
-        # If target cell type is specified, check for its output file instead
-        if target_cell_type is not None:
-            target_output_file = f'{output_dir}/{chr}_{target_cell_type}_markers_{batch_id}.parquet'
-            if os.path.exists(target_output_file):
-                print(f"Skipping batch {batch_id} as it was already processed for {target_cell_type}")
-                continue
-        elif os.path.exists(output_file):
+        if os.path.exists(output_file):
             print(f"Skipping batch {batch_id} as it was already processed")
             continue
-            
         t_batch = time.time()
         regions_df = batch.reset_index(drop=True) 
         print(f"Loaded {len(regions_df)} regions")
         pat_files = list(Path(pat_dir).glob('*.pat.gz'))
         if not pat_files:
             raise ValueError(f"No .pat.gz files found in {pat_dir}")
-        
-        # Check if target cell type has a corresponding pat file
-        if target_cell_type is not None:
-            target_pat_files = list(Path(pat_dir).glob(f'{target_cell_type}*.pat.gz'))
-            if not target_pat_files:
-                print(f"Warning: No .pat.gz files found for target cell type '{target_cell_type}'")
-                print(f"Available pat files are for: {[Path(p).stem.replace('.pat', '') for p in pat_files]}")
-                
         with mp.Pool(threads) as pool:
             process_func = partial(process_pat_file, regions_df, min_cpgs=min_cpgs)
             results = list(tqdm(
@@ -417,11 +382,6 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
             uxm_dfs.append(uxm_df)
             coverage_dfs.append(coverage_df)
             cell_types.append(cell_type)
-        
-        # If target cell type specified, verify it's in the cell types list
-        if target_cell_type is not None and target_cell_type not in cell_types:
-            print(f"Warning: Target cell type '{target_cell_type}' not found in processed cell types: {cell_types}")
-            
         # Create final matrices
         # First, create the base DataFrame with name and direction
         base_df = regions_df[['name', 'direction']]
@@ -463,20 +423,11 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
         if len(batch_df) == 0:
             print("finished batch with insufficient coverage",batch_id,"in",time.time()-t_batch)
             continue
-        
-        # Always save raw marker data regardless of target cell type
         marker_props.to_csv(f'{output_dir}/{chr}_raw_markers_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
         coverage.to_csv(f'{output_dir}/{chr}_raw_coverage_{batch_id}.l{min_cpgs}.bed.gz', sep='\t', index=False, compression='gzip')
-        
         values_matrix = marker_props.iloc[:, 2:].values
         best_targets_idx = values_matrix.argmax(axis=1)
-        
-        # Call find_good_markers with the target_cell_type parameter
-        find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, coverage, 
-                         values_matrix, best_targets_idx, min_signal_threshold, 
-                         snr_threshold, significance_threshold, output_dir, batch_id, 
-                         target_cell_type=target_cell_type)
-        
+        find_good_markers(chr, batch_df, cell_types, marker_props, col_mapping, coverage, values_matrix, best_targets_idx, min_signal_threshold, snr_threshold, significance_threshold, output_dir, batch_id)
         print("finished batch",batch_id,"in",time.time()-t_batch)
 
     print("finished",chr, "in",time.time()-t0)
@@ -496,12 +447,9 @@ def main():
     parser.add_argument('--output_dir', required=True, help='Path to output marker and coverage files')
     parser.add_argument('--threads', type=int, default=mp.cpu_count(), help='Number of threads')
     parser.add_argument('--batch_size', type=int, default=100_000, help='Batch size')
-    parser.add_argument('--target_cell_type', type=str, default="OAC", help='Target cell type to output markers for (optional)')
     args = parser.parse_args()
 
-    process_with_params(args.chr, args.pat_dir, args.regions, args.min_cpgs, args.min_coverage, 
-                       args.snr_threshold, args.significance_threshold, args.min_signal_threshold, 
-                       args.output_dir, args.threads, args.target_cell_type, batch_size=args.batch_size)
+    process_with_params(args.chr, args.pat_dir, args.regions, args.min_cpgs, args.min_coverage, args.snr_threshold, args.significance_threshold, args.min_signal_threshold, args.output_dir, args.threads, batch_size=args.batch_size)
 
 
 if __name__ == '__main__':
