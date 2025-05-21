@@ -23,7 +23,9 @@ for sample in samples:
         print(f"Warning: File {bbc_file} not found, skipping sample {sample}")
         continue
     df = pd.read_csv(bbc_file, sep="\t")
-    print(f"processing sample for {sample_name}")
+    if df['SAMPLE'].str.contains('Immonly').any() or df['SAMPLE'].str.contains('C6').any():
+        first = df['SAMPLE'].unique()[0]
+        df = df[df.SAMPLE==first]
     def map_region(row):
         chr = row['chr']
         start = row['start']
@@ -57,6 +59,7 @@ for sample in samples:
 
 # Create the final dataframe from the list of sample data
 result_df = pd.DataFrame(sample_data_list)
+result_df['sample'] = result_df['sample'].str.replace(r'-[ABC]$', '', regex=True)
 result_df.to_csv('/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/oac_detector/hatchet_rd_values.csv', index=False)
 
 predictions = pd.read_csv("/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/oac_detector/predictions.csv")
@@ -123,8 +126,7 @@ r2_mean = r2_score(y_test, y_pred_mean)
 print(f"\nModel with estimated + mean/median RD:")
 print(f"Mean Squared Error: {mse_mean:.4f}")
 print(f"R-squared: {r2_mean:.4f}")
-print(f"Coefficients: {dict(zip(['intercept', 'estimated', 'mean_RD', 'median_RD'], 
-                              [model_with_mean.intercept_] + model_with_mean.coef_.tolist()))}")
+print(f"Coefficients: {dict(zip(['intercept', 'estimated', 'mean_RD', 'median_RD'], [model_with_mean.intercept_] + model_with_mean.coef_.tolist()))}")
 
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)

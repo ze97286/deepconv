@@ -10,7 +10,6 @@ from plotly.subplots import make_subplots
 from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
 from sklearn.preprocessing import StandardScaler
 
-# atlas = pd.read_csv("/users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed", sep="\t")
 atlas = pd.read_csv("/users/zetzioni/sharedscratch/atlas/atlas/atlas_dmr_by_read.blood+gi+tum.U100.l4.bed", sep="\t")
 atlas = atlas[atlas.target=="OAC"]
 atlas.reset_index(inplace=True)
@@ -24,6 +23,9 @@ for sample in samples:
         print(f"Warning: File {bbc_file} not found, skipping sample {sample}")
         continue
     df = pd.read_csv(bbc_file, sep="\t")
+    if df['SAMPLE'].str.contains('Immonly').any() or df['SAMPLE'].str.contains('C6').any():
+        first = df['SAMPLE'].unique()[0]
+        df = df[df.SAMPLE==first]
     print(f"processing sample for {sample_name}")
     def map_region(row):
         chr = row['chr']
@@ -58,7 +60,8 @@ for sample in samples:
 
 # Create the final dataframe from the list of sample data
 result_df = pd.DataFrame(sample_data_list)
-result_df.to_csv('/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/oac_detector/hatchet_rd_values.csv', index=False)
+result_df['sample'] = result_df['sample'].str.replace(r'-[ABC]$', '', regex=True)
+result_df.to_csv('/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/nnls/hatchet_rd_values.csv', index=False)
 
 # predictions = pd.read_csv("/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/oac_detector/predictions.csv")
 predictions = pd.read_csv("/users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/nnls/nnls_ab_cfDNA_deconvolution.csv", sep="\t")
