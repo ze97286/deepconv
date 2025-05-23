@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 import gzip
@@ -25,51 +24,27 @@ def load_cpg_positions(cpg_bed_path: str) -> pd.DataFrame:
 def parse_hatchet_cn(hatchet_file: str) -> pd.DataFrame:
     """
     Parse HATCHET best.bbc.ucn file to extract copy number segments.
+    RD column represents the relative read depth (copy number relative to normal).
     """
     print("Parsing HATCHET copy number data...")
     
     # Read HATCHET file
     cn_df = pd.read_csv(hatchet_file, sep='\t', comment='#', header=None)
     
-    # Check number of columns
-    num_cols = len(cn_df.columns)
-    print(f"HATCHET file has {num_cols} columns")
+    # Extract relevant columns: chr(0), start(1), end(2), RD(4)
+    cn_segments = cn_df.iloc[:, [0, 1, 2, 4]].copy()
+    cn_segments.columns = ['chr', 'start', 'end', 'rd']
     
-    # Columns are: chr(0), start(1), end(2), then pairs of (cn, u) starting at column 11
-    # Extract basic info
-    cn_segments = cn_df.iloc[:, [0, 1, 2]].copy()
-    cn_segments.columns = ['chr', 'start', 'end']
-    
-    # Calculate weighted average copy number across all clones
-    # Normal is at columns 11,12; clones start at 13,14 and continue in pairs
-    total_cn = 0
-    
-    # Process normal
-    cn_normal = cn_df.iloc[:, 11].apply(lambda x: sum(map(int, x.split('|'))))
-    u_normal = cn_df.iloc[:, 12]
-    total_cn = cn_normal * u_normal
-    
-    # Process clones (they come in pairs: cn, u)
-    clone_idx = 1
-    col_idx = 13
-    while col_idx < num_cols - 1:  # -1 because we need pairs
-        try:
-            cn_clone = cn_df.iloc[:, col_idx].apply(lambda x: sum(map(int, x.split('|'))))
-            u_clone = cn_df.iloc[:, col_idx + 1]
-            total_cn += cn_clone * u_clone
-            clone_idx += 1
-            col_idx += 2
-        except:
-            break
-    
-    cn_segments['cn'] = total_cn
+    # RD is relative to diploid, so CN = RD * 2
+    cn_segments['cn'] = cn_segments['rd'] * 2
     
     # Sort by chromosome and start position
     cn_segments = cn_segments.sort_values(['chr', 'start'])
     
-    print(f"Parsed {len(cn_segments)} segments from {clone_idx} clone(s)")
+    print(f"Parsed {len(cn_segments)} segments")
+    print(f"CN range: {cn_segments['cn'].min():.2f} - {cn_segments['cn'].max():.2f}")
     
-    return cn_segments
+    return cn_segments[['chr', 'start', 'end', 'cn']]
 
 def assign_cn_to_positions_vectorized(positions_df: pd.DataFrame, cn_segments: pd.DataFrame) -> pd.Series:
     """
@@ -77,6 +52,11 @@ def assign_cn_to_positions_vectorized(positions_df: pd.DataFrame, cn_segments: p
     """
     # Initialize with default diploid
     cn_values = pd.Series(2.0, index=positions_df.index)
+    
+    # Debug: Check first few positions
+    debug_positions = positions_df.head(10)
+    print(f"\nDebug - First few positions to assign CN:")
+    print(debug_positions[['chr', 'position']].head())
     
     # Group by chromosome for efficiency
     for chrom in positions_df['chr'].unique():
@@ -88,11 +68,28 @@ def assign_cn_to_positions_vectorized(positions_df: pd.DataFrame, cn_segments: p
         if len(chr_segments) == 0:
             continue
         
+        # Debug: Show segments for first chromosome
+        if chrom == positions_df['chr'].iloc[0]:
+            print(f"\nDebug - CN segments for {chrom}:")
+            print(chr_segments.head())
+            print(f"Position range in data: {chr_positions.min()} - {chr_positions.max()}")
+        
         # Vectorized interval assignment
+        assigned_count = 0
         for _, segment in chr_segments.iterrows():
             segment_mask = (chr_positions >= segment['start']) & (chr_positions < segment['end'])
             if segment_mask.any():
+                positions_in_segment = segment_mask.sum()
                 cn_values.loc[chr_mask].iloc[segment_mask] = segment['cn']
+                assigned_count += positions_in_segment
+        
+        if chrom == positions_df['chr'].iloc[0]:
+            print(f"Assigned CN to {assigned_count} positions in {chrom}")
+    
+    # Debug: Check CN distribution
+    cn_dist = cn_values.value_counts().head()
+    print(f"\nDebug - CN distribution after assignment:")
+    print(cn_dist)
     
     return cn_values
 
@@ -289,7 +286,6 @@ def process_multiple_samples(
         all_stats[sample_name] = stats
     
     return all_stats
-
 
 if __name__ == "__main__":
     sample_pairs = [
