@@ -1,0 +1,277 @@
+import pandas as pd
+import numpy as np
+import gzip
+from typing import Dict, Tuple
+from tqdm import tqdm
+from pathlib import Path
+
+def load_cpg_positions(cpg_bed_path: str) -> pd.DataFrame:
+    """
+    Load CpG positions and create a mapping from (chr, cpg_index) to genomic position.
+    """
+    print("Loading CpG positions...")
+    
+    # Read BED file
+    cpg_df = pd.read_csv(cpg_bed_path, sep='\t', compression='gzip', 
+                         header=None, names=['chr', 'start', 'end'])
+    
+    # Create index for each chromosome
+    cpg_positions = []
+    for chrom, group in cpg_df.groupby('chr', sort=False):
+        positions = group.reset_index(drop=True)
+        positions['cpg_idx'] = positions.index + 1  # 1-based indexing
+        positions['position'] = positions['start']
+        cpg_positions.append(positions[['chr', 'cpg_idx', 'position']])
+    
+    # Combine and create multi-index for fast lookup
+    cpg_mapping = pd.concat(cpg_positions, ignore_index=True)
+    cpg_mapping = cpg_mapping.set_index(['chr', 'cpg_idx'])
+    
+    return cpg_mapping
+
+def parse_hatchet_cn(hatchet_file: str) -> pd.DataFrame:
+    """
+    Parse HATCHET best.bbc.ucn file to extract copy number segments.
+    """
+    print("Parsing HATCHET copy number data...")
+    
+    # Read HATCHET file
+    cn_df = pd.read_csv(hatchet_file, sep='\t', comment='#', header=None)
+    
+    # Assign column names
+    cn_df.columns = ['chr', 'start', 'end', 'sample', 'rd', 'snps', 'cov', 
+                     'alpha', 'beta', 'baf', 'cluster', 'cn_normal', 
+                     'u_normal', 'cn_clone1', 'u_clone1']
+    
+    # Calculate weighted average copy number
+    cn_df['cn_normal_total'] = cn_df['cn_normal'].apply(
+        lambda x: sum(map(int, x.split('|')))
+    )
+    cn_df['cn_clone1_total'] = cn_df['cn_clone1'].apply(
+        lambda x: sum(map(int, x.split('|')))
+    )
+    
+    cn_df['cn'] = (cn_df['cn_normal_total'] * cn_df['u_normal'] + 
+                   cn_df['cn_clone1_total'] * cn_df['u_clone1'])
+    
+    # Keep only necessary columns and sort
+    cn_segments = cn_df[['chr', 'start', 'end', 'cn']].sort_values(['chr', 'start'])
+    
+    return cn_segments
+
+def assign_cn_to_positions_vectorized(positions_df: pd.DataFrame, cn_segments: pd.DataFrame) -> pd.Series:
+    """
+    Vectorized assignment of copy numbers to positions.
+    """
+    # Initialize with default diploid
+    cn_values = pd.Series(2.0, index=positions_df.index)
+    
+    # Group by chromosome for efficiency
+    for chrom in positions_df['chr'].unique():
+        # Get data for this chromosome
+        chr_mask = positions_df['chr'] == chrom
+        chr_positions = positions_df.loc[chr_mask, 'position'].values
+        chr_segments = cn_segments[cn_segments['chr'] == chrom]
+        
+        if len(chr_segments) == 0:
+            continue
+        
+        # Vectorized interval assignment
+        for _, segment in chr_segments.iterrows():
+            segment_mask = (chr_positions >= segment['start']) & (chr_positions < segment['end'])
+            if segment_mask.any():
+                cn_values.loc[chr_mask].iloc[segment_mask] = segment['cn']
+    
+    return cn_values
+
+def probabilistic_round_vectorized(values: pd.Series, rng: np.random.Generator) -> pd.Series:
+    """
+    Vectorized probabilistic rounding.
+    """
+    if len(values) == 0:
+        return values
+    
+    integer_parts = values.astype(int)
+    fractional_parts = values - integer_parts
+    
+    # Generate random values for all elements at once
+    random_values = rng.random(len(values))
+    
+    # Add 1 where random value is less than fractional part
+    return integer_parts + (random_values < fractional_parts).astype(int)
+
+def correct_pat_file_probabilistic(
+    pat_file: str, 
+    hatchet_file: str, 
+    cpg_bed_path: str, 
+    output_file: str,
+    seed: int = 42,
+    chunk_size: int = 1_000_000
+):
+    """
+    Create CNA-corrected PAT file using probabilistic rounding to preserve pattern diversity.
+    """
+    # Set random seed
+    rng = np.random.default_rng(seed)
+    
+    # Load reference data
+    cpg_mapping = load_cpg_positions(cpg_bed_path)
+    cn_segments = parse_hatchet_cn(hatchet_file)
+    
+    # Statistics tracking
+    stats = {
+        'total_patterns': 0,
+        'patterns_removed': 0,
+        'patterns_unchanged': 0,
+        'patterns_adjusted': 0,
+        'total_reads_before': 0,
+        'total_reads_after': 0,
+        'cn_distribution': {}
+    }
+    
+    # Count total lines for progress bar
+    print("Counting patterns...")
+    total_lines = sum(1 for _ in open(pat_file))
+    
+    print(f"Processing {total_lines:,} patterns...")
+    
+    # Process in chunks
+    with tqdm(total=total_lines, desc="Processing patterns") as pbar:
+        # Open output file
+        with open(output_file, 'w') as outfile:
+            # Read PAT file in chunks
+            for chunk in pd.read_csv(pat_file, sep='\t', header=None, 
+                                    names=['chr', 'cpg_idx', 'pattern', 'count'],
+                                    chunksize=chunk_size):
+                
+                # Update statistics
+                stats['total_patterns'] += len(chunk)
+                stats['total_reads_before'] += chunk['count'].sum()
+                
+                # Merge with CpG positions to get genomic coordinates
+                chunk_with_pos = chunk.merge(
+                    cpg_mapping, 
+                    left_on=['chr', 'cpg_idx'], 
+                    right_index=True, 
+                    how='left'
+                )
+                
+                # Filter out unmapped positions
+                valid_mask = ~chunk_with_pos['position'].isna()
+                if not valid_mask.all():
+                    print(f"Warning: {(~valid_mask).sum()} positions couldn't be mapped")
+                
+                chunk_with_pos = chunk_with_pos[valid_mask].copy()
+                
+                if len(chunk_with_pos) == 0:
+                    pbar.update(len(chunk))
+                    continue
+                
+                # Assign copy numbers
+                chunk_with_pos['cn'] = assign_cn_to_positions_vectorized(chunk_with_pos, cn_segments)
+                
+                # Track CN distribution
+                cn_counts = chunk_with_pos['cn'].value_counts()
+                for cn, count in cn_counts.items():
+                    cn_key = f"{cn:.1f}"
+                    stats['cn_distribution'][cn_key] = stats['cn_distribution'].get(cn_key, 0) + count
+                
+                # Calculate adjustment factor
+                chunk_with_pos['adjustment_factor'] = 2.0 / chunk_with_pos['cn']
+                
+                # Apply probabilistic correction
+                adjusted_values = chunk_with_pos['count'] * chunk_with_pos['adjustment_factor']
+                chunk_with_pos['adjusted_count'] = probabilistic_round_vectorized(adjusted_values, rng)
+                
+                # Update statistics
+                unchanged_mask = chunk_with_pos['cn'] == 2.0
+                stats['patterns_unchanged'] += unchanged_mask.sum()
+                
+                adjusted_mask = (chunk_with_pos['cn'] != 2.0) & (chunk_with_pos['adjusted_count'] > 0)
+                stats['patterns_adjusted'] += adjusted_mask.sum()
+                
+                removed_mask = chunk_with_pos['adjusted_count'] == 0
+                stats['patterns_removed'] += removed_mask.sum()
+                
+                # Filter out patterns with 0 count
+                output_chunk = chunk_with_pos[chunk_with_pos['adjusted_count'] > 0].copy()
+                
+                stats['total_reads_after'] += output_chunk['adjusted_count'].sum()
+                
+                # Write output
+                output_chunk[['chr', 'cpg_idx', 'pattern', 'adjusted_count']].to_csv(
+                    outfile, 
+                    sep='\t', 
+                    header=False, 
+                    index=False,
+                    mode='a'
+                )
+                
+                pbar.update(len(chunk))
+    
+    # Print statistics
+    print("\n=== CNA Correction Statistics ===")
+    print(f"Total patterns processed: {stats['total_patterns']:,}")
+    print(f"Patterns removed (adjusted to 0): {stats['patterns_removed']:,} ({100*stats['patterns_removed']/stats['total_patterns']:.2f}%)")
+    print(f"Patterns unchanged (CN=2): {stats['patterns_unchanged']:,} ({100*stats['patterns_unchanged']/stats['total_patterns']:.2f}%)")
+    print(f"Patterns adjusted: {stats['patterns_adjusted']:,} ({100*stats['patterns_adjusted']/stats['total_patterns']:.2f}%)")
+    print(f"\nTotal reads before: {stats['total_reads_before']:,}")
+    print(f"Total reads after: {stats['total_reads_after']:,}")
+    print(f"Read preservation: {100*stats['total_reads_after']/stats['total_reads_before']:.2f}%")
+    
+    print("\nCopy number distribution:")
+    for cn, count in sorted(stats['cn_distribution'].items()):
+        print(f"  CN={cn}: {count:,} patterns ({100*count/stats['total_patterns']:.2f}%)")
+    
+    return stats
+
+def process_multiple_samples(
+    sample_pairs: list,  # List of (pat_file, hatchet_file) tuples
+    cpg_bed_path: str,
+    output_dir: str,
+    seed: int = 42
+):
+    """
+    Process multiple tumor samples to create CNA-corrected PAT files.
+    """
+    # Create output directory
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    all_stats = {}
+    
+    for pat_file, hatchet_file in sample_pairs:
+        sample_name = Path(pat_file).stem.replace('.pat', '')
+        output_file = Path(output_dir) / f"{sample_name}_cna_corrected.pat"
+        
+        print(f"\n{'='*60}")
+        print(f"Processing sample: {sample_name}")
+        print(f"{'='*60}")
+        
+        stats = correct_pat_file_probabilistic(
+            pat_file=pat_file,
+            hatchet_file=hatchet_file,
+            cpg_bed_path=cpg_bed_path,
+            output_file=str(output_file),
+            seed=seed
+        )
+        
+        all_stats[sample_name] = stats
+    
+    return all_stats
+
+# Example usage
+if __name__ == "__main__":
+    sample_pairs = [
+        ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/129-001_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/129-001:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
+        ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-021_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-021:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
+        ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-011_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-011:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
+        ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/069-009_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/069-009:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
+        ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-043_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-043:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
+        ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-022_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-022:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
+    ]
+    
+    process_multiple_samples(
+        sample_pairs=sample_pairs,
+        cpg_bed_path="/users/zetzioni/sharedscratch/wgbs_tools/references/hg38/CpG.bed.gz",
+        output_dir="/users/zetzioni/sharedscratch/loyfer_atlas/cna_corrected_pats"
+    )
