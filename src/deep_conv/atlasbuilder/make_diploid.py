@@ -38,24 +38,43 @@ def parse_hatchet_cn(hatchet_file: str) -> pd.DataFrame:
     # Read HATCHET file
     cn_df = pd.read_csv(hatchet_file, sep='\t', comment='#', header=None)
     
-    # Assign column names
-    cn_df.columns = ['chr', 'start', 'end', 'sample', 'rd', 'snps', 'cov', 
-                     'alpha', 'beta', 'baf', 'cluster', 'cn_normal', 
-                     'u_normal', 'cn_clone1', 'u_clone1']
+    # Check number of columns
+    num_cols = len(cn_df.columns)
+    print(f"HATCHET file has {num_cols} columns")
     
-    # Calculate weighted average copy number
-    cn_df['cn_normal_total'] = cn_df['cn_normal'].apply(
-        lambda x: sum(map(int, x.split('|')))
-    )
-    cn_df['cn_clone1_total'] = cn_df['cn_clone1'].apply(
-        lambda x: sum(map(int, x.split('|')))
-    )
+    # Columns are: chr(0), start(1), end(2), then pairs of (cn, u) starting at column 11
+    # Extract basic info
+    cn_segments = cn_df.iloc[:, [0, 1, 2]].copy()
+    cn_segments.columns = ['chr', 'start', 'end']
     
-    cn_df['cn'] = (cn_df['cn_normal_total'] * cn_df['u_normal'] + 
-                   cn_df['cn_clone1_total'] * cn_df['u_clone1'])
+    # Calculate weighted average copy number across all clones
+    # Normal is at columns 11,12; clones start at 13,14 and continue in pairs
+    total_cn = 0
     
-    # Keep only necessary columns and sort
-    cn_segments = cn_df[['chr', 'start', 'end', 'cn']].sort_values(['chr', 'start'])
+    # Process normal
+    cn_normal = cn_df.iloc[:, 11].apply(lambda x: sum(map(int, x.split('|'))))
+    u_normal = cn_df.iloc[:, 12]
+    total_cn = cn_normal * u_normal
+    
+    # Process clones (they come in pairs: cn, u)
+    clone_idx = 1
+    col_idx = 13
+    while col_idx < num_cols - 1:  # -1 because we need pairs
+        try:
+            cn_clone = cn_df.iloc[:, col_idx].apply(lambda x: sum(map(int, x.split('|'))))
+            u_clone = cn_df.iloc[:, col_idx + 1]
+            total_cn += cn_clone * u_clone
+            clone_idx += 1
+            col_idx += 2
+        except:
+            break
+    
+    cn_segments['cn'] = total_cn
+    
+    # Sort by chromosome and start position
+    cn_segments = cn_segments.sort_values(['chr', 'start'])
+    
+    print(f"Parsed {len(cn_segments)} segments from {clone_idx} clone(s)")
     
     return cn_segments
 
@@ -259,7 +278,7 @@ def process_multiple_samples(
     
     return all_stats
 
-# Example usage
+
 if __name__ == "__main__":
     sample_pairs = [
         ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/129-001_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/129-001:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
