@@ -1,3 +1,4 @@
+
 import pandas as pd
 import numpy as np
 import gzip
@@ -8,24 +9,16 @@ from pathlib import Path
 def load_cpg_positions(cpg_bed_path: str) -> pd.DataFrame:
     """
     Load CpG positions and create a mapping from (chr, cpg_index) to genomic position.
+    BED file format: chr, position, cpg_index
     """
     print("Loading CpG positions...")
     
-    # Read BED file
+    # Read BED file with correct column names
     cpg_df = pd.read_csv(cpg_bed_path, sep='\t', compression='gzip', 
-                         header=None, names=['chr', 'start', 'end'])
+                         header=None, names=['chr', 'position', 'cpg_idx'])
     
-    # Create index for each chromosome
-    cpg_positions = []
-    for chrom, group in cpg_df.groupby('chr', sort=False):
-        positions = group.reset_index(drop=True)
-        positions['cpg_idx'] = positions.index + 1  # 1-based indexing
-        positions['position'] = positions['start']
-        cpg_positions.append(positions[['chr', 'cpg_idx', 'position']])
-    
-    # Combine and create multi-index for fast lookup
-    cpg_mapping = pd.concat(cpg_positions, ignore_index=True)
-    cpg_mapping = cpg_mapping.set_index(['chr', 'cpg_idx'])
+    # Create multi-index for fast lookup
+    cpg_mapping = cpg_df.set_index(['chr', 'cpg_idx'])
     
     return cpg_mapping
 
@@ -135,7 +128,12 @@ def correct_pat_file_probabilistic(
     
     # Load reference data
     cpg_mapping = load_cpg_positions(cpg_bed_path)
+    print(f"Loaded {len(cpg_mapping)} CpG positions")
+    print(f"CpG mapping chromosomes: {cpg_mapping.index.get_level_values('chr').unique()[:5].tolist()}")
+    
     cn_segments = parse_hatchet_cn(hatchet_file)
+    print(f"CN segments chromosomes: {cn_segments['chr'].unique()[:5].tolist()}")
+    print(f"CN range: {cn_segments['cn'].min():.2f} - {cn_segments['cn'].max():.2f}")
     
     # Statistics tracking
     stats = {
@@ -172,6 +170,13 @@ def correct_pat_file_probabilistic(
                 stats['total_patterns'] += len(chunk)
                 stats['total_reads_before'] += chunk['count'].sum()
                 
+                # Debug: Check first few entries
+                if stats['total_patterns'] <= 1000000:
+                    print(f"\nFirst few PAT entries:")
+                    print(chunk.head())
+                    print(f"\nUnique chromosomes in chunk: {chunk['chr'].unique()[:5]}")
+                    print(f"CpG index range: {chunk['cpg_idx'].min()} - {chunk['cpg_idx'].max()}")
+                
                 # Merge with CpG positions to get genomic coordinates
                 chunk_with_pos = chunk.merge(
                     cpg_mapping, 
@@ -183,7 +188,9 @@ def correct_pat_file_probabilistic(
                 # Filter out unmapped positions
                 valid_mask = ~chunk_with_pos['position'].isna()
                 if not valid_mask.all():
-                    print(f"Warning: {(~valid_mask).sum()} positions couldn't be mapped")
+                    unmapped_count = (~valid_mask).sum()
+                    if unmapped_count > 100000:  # Only show warning for large numbers
+                        print(f"Warning: {unmapped_count} positions couldn't be mapped")
                 
                 chunk_with_pos = chunk_with_pos[valid_mask].copy()
                 
@@ -214,7 +221,7 @@ def correct_pat_file_probabilistic(
                 adjusted_mask = (chunk_with_pos['cn'] != 2.0) & (chunk_with_pos['adjusted_count'] > 0)
                 stats['patterns_adjusted'] += adjusted_mask.sum()
                 
-                removed_mask = chunk_with_pos['adjusted_count'] == 0
+                removed_mask = (chunk_with_pos['cn'] != 2.0) & (chunk_with_pos['adjusted_count'] == 0)
                 stats['patterns_removed'] += removed_mask.sum()
                 
                 # Filter out patterns with 0 count
