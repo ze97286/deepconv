@@ -150,7 +150,12 @@ def correct_pat_file_probabilistic(
     
     # Count total lines for progress bar
     print("Counting patterns...")
-    total_lines = sum(1 for _ in open(pat_file))
+    if pat_file.endswith('.gz'):
+        with gzip.open(pat_file, 'rt') as f:
+            total_lines = sum(1 for _ in f)
+    else:
+        with open(pat_file, 'r') as f:
+            total_lines = sum(1 for _ in f)
     
     print(f"Processing {total_lines:,} patterns...")
     
