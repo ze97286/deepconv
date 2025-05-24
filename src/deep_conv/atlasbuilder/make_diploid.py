@@ -238,6 +238,15 @@ def correct_pat_file_probabilistic(
     # Fill gaps in CN segments
     cn_segments = fill_cn_gaps(cn_segments, fill_gaps=fill_gaps)
     
+    # Debug: Show sample of CN segments after filling
+    print(f"\nDebug - Sample of CN segments after gap filling:")
+    print(cn_segments[cn_segments['chr'] == 'chr1'].head(10))
+    
+    # Check CN distribution in segments
+    print(f"\nDebug - CN value distribution in segments:")
+    cn_value_counts = cn_segments['cn'].value_counts().head(10)
+    print(cn_value_counts)
+    
     # Statistics tracking
     stats = {
         'total_patterns': 0,
@@ -296,6 +305,19 @@ def correct_pat_file_probabilistic(
                 
                 # Assign copy numbers
                 chunk_with_pos['cn'] = assign_cn_to_positions_vectorized(chunk_with_pos, cn_segments)
+                
+                # Debug: Check CN assignment for first chunk
+                if stats['total_patterns'] <= 1_000_000:
+                    print(f"\nDebug - Sample of positions with CN assignments:")
+                    sample_df = chunk_with_pos[['chr', 'position', 'cn']].head(20)
+                    print(sample_df)
+                    
+                    # Check if any non-2.0 CN values exist
+                    non_diploid = chunk_with_pos[chunk_with_pos['cn'] != 2.0]
+                    print(f"\nPatterns with CN != 2.0 in this chunk: {len(non_diploid)}")
+                    if len(non_diploid) > 0:
+                        print("Examples:")
+                        print(non_diploid[['chr', 'position', 'cn']].head())
                 
                 # Track CN distribution
                 cn_counts = chunk_with_pos['cn'].value_counts()
