@@ -81,6 +81,7 @@ def assign_cn_to_positions_vectorized(positions_df: pd.DataFrame, cn_segments: p
     for chrom in positions_df['chr'].unique():
         # Get data for this chromosome
         chr_mask = positions_df['chr'] == chrom
+        chr_indices = positions_df.index[chr_mask]
         chr_positions = positions_df.loc[chr_mask, 'position'].values
         chr_segments = cn_segments[cn_segments['chr'] == chrom]
         
@@ -91,7 +92,9 @@ def assign_cn_to_positions_vectorized(positions_df: pd.DataFrame, cn_segments: p
         for _, segment in chr_segments.iterrows():
             segment_mask = (chr_positions >= segment['start']) & (chr_positions < segment['end'])
             if segment_mask.any():
-                cn_values.loc[chr_mask].iloc[segment_mask] = segment['cn']
+                # Use the actual indices to update cn_values
+                indices_to_update = chr_indices[segment_mask]
+                cn_values.loc[indices_to_update] = segment['cn']
     
     return cn_values
 
