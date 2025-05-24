@@ -24,52 +24,49 @@ def load_cpg_positions(cpg_bed_path: str) -> pd.DataFrame:
 def parse_hatchet_cn(hatchet_file: str) -> pd.DataFrame:
     """
     Parse HATCHET best.bbc.ucn file to extract copy number segments.
-    Simply uses the RD (read depth) column which already contains the aggregate CN information.
     """
     print("Parsing HATCHET copy number data...")
     
     # Read HATCHET file
     cn_df = pd.read_csv(hatchet_file, sep='\t', comment='#', header=None)
     
-    # Extract only what we need: chr, start, end, RD
-    # RD (column 4) is the read depth ratio - this is all we need!
-    cn_segments = cn_df.iloc[:, [0, 1, 2, 4]].copy()
-    cn_segments.columns = ['chr', 'start', 'end', 'rd']
+    # Check number of columns
+    num_cols = len(cn_df.columns)
+    print(f"HATCHET file has {num_cols} columns")
     
-    # Convert RD to copy number: CN = RD * 2
-    cn_segments['cn'] = cn_segments['rd'] * 2
+    # Columns are: chr(0), start(1), end(2), then pairs of (cn, u) starting at column 11
+    # Extract basic info
+    cn_segments = cn_df.iloc[:, [0, 1, 2]].copy()
+    cn_segments.columns = ['chr', 'start', 'end']
     
-    # Keep only the columns we need
-    cn_segments = cn_segments[['chr', 'start', 'end', 'cn']]
+    # Calculate weighted average copy number across all clones
+    # Normal is at columns 11,12; clones start at 13,14 and continue in pairs
+    total_cn = 0
+    
+    # Process normal
+    cn_normal = cn_df.iloc[:, 11].apply(lambda x: sum(map(int, x.split('|'))))
+    u_normal = cn_df.iloc[:, 12]
+    total_cn = cn_normal * u_normal
+    
+    # Process clones (they come in pairs: cn, u)
+    clone_idx = 1
+    col_idx = 13
+    while col_idx < num_cols - 1:  # -1 because we need pairs
+        try:
+            cn_clone = cn_df.iloc[:, col_idx].apply(lambda x: sum(map(int, x.split('|'))))
+            u_clone = cn_df.iloc[:, col_idx + 1]
+            total_cn += cn_clone * u_clone
+            clone_idx += 1
+            col_idx += 2
+        except:
+            break
+    
+    cn_segments['cn'] = total_cn
     
     # Sort by chromosome and start position
     cn_segments = cn_segments.sort_values(['chr', 'start'])
     
-    print(f"Parsed {len(cn_segments)} segments")
-    print(f"CN range: {cn_segments['cn'].min():.2f} - {cn_segments['cn'].max():.2f}")
-    
-    # Debug: Check for gaps in coverage
-    for chrom in ['chr1', 'chr2', 'chr3']:
-        chr_segs = cn_segments[cn_segments['chr'] == chrom]
-        if len(chr_segs) > 0:
-            print(f"\n{chrom} coverage: {len(chr_segs)} segments")
-            print(f"  First segment: {chr_segs.iloc[0]['start']:,} - {chr_segs.iloc[0]['end']:,}")
-            print(f"  Last segment: {chr_segs.iloc[-1]['start']:,} - {chr_segs.iloc[-1]['end']:,}")
-            
-            # Check for gaps
-            gaps = []
-            for i in range(len(chr_segs) - 1):
-                if chr_segs.iloc[i]['end'] < chr_segs.iloc[i+1]['start']:
-                    gap_size = chr_segs.iloc[i+1]['start'] - chr_segs.iloc[i]['end']
-                    if gap_size > 1000:  # Only report significant gaps
-                        gaps.append((chr_segs.iloc[i]['end'], chr_segs.iloc[i+1]['start'], gap_size))
-            
-            if gaps:
-                print(f"  Found {len(gaps)} gaps in coverage")
-                for i, (end, start, size) in enumerate(gaps[:3]):  # Show first 3 gaps
-                    print(f"    Gap {i+1}: {end:,} - {start:,} ({size:,} bp)")
-                if len(gaps) > 3:
-                    print(f"    ... and {len(gaps)-3} more gaps")
+    print(f"Parsed {len(cn_segments)} segments from {clone_idx} clone(s)")
     
     return cn_segments
 
@@ -225,15 +222,6 @@ def correct_pat_file_probabilistic(
 ):
     """
     Create CNA-corrected PAT file using probabilistic rounding to preserve pattern diversity.
-    
-    Args:
-        pat_file: Input PAT file path
-        hatchet_file: HATCHET best.bbc.ucn file path
-        cpg_bed_path: CpG reference BED file path (gzipped)
-        output_file: Output CNA-corrected PAT file path
-        seed: Random seed for reproducibility
-        chunk_size: Number of lines to process at once
-        fill_gaps: Whether to fill gaps between CN segments
     """
     # Set random seed
     rng = np.random.default_rng(seed)
@@ -284,13 +272,6 @@ def correct_pat_file_probabilistic(
                 # Update statistics
                 stats['total_patterns'] += len(chunk)
                 stats['total_reads_before'] += chunk['count'].sum()
-                
-                # Debug: Check first few entries
-                if stats['total_patterns'] <= 1000000:
-                    print(f"\nFirst few PAT entries:")
-                    print(chunk.head())
-                    print(f"\nUnique chromosomes in chunk: {chunk['chr'].unique()[:5]}")
-                    print(f"CpG index range: {chunk['cpg_idx'].min()} - {chunk['cpg_idx'].max()}")
                 
                 # Merge with CpG positions to get genomic coordinates
                 chunk_with_pos = chunk.merge(
@@ -365,7 +346,7 @@ def correct_pat_file_probabilistic(
     print(f"Total reads after: {stats['total_reads_after']:,}")
     print(f"Read preservation: {100*stats['total_reads_after']/stats['total_reads_before']:.2f}%")
     
-    print("\nCopy number distribution:")
+    print("\nCopy number distribution (before correction):")
     for cn, count in sorted(stats['cn_distribution'].items()):
         print(f"  CN={cn}: {count:,} patterns ({100*count/stats['total_patterns']:.2f}%)")
     
