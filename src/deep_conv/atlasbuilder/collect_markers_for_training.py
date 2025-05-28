@@ -162,6 +162,17 @@ def merge(base_dir, num_files, prefix, cov):
 	print(f"saved data to {base_dir}/eval_{cov}/tier1/")
 
 
+def concat_columns_if_aligned(frames, keys=('name', 'direction')):
+    base = frames[0]
+    for i, df in enumerate(frames[1:], start=1):
+        for key in keys:
+            if not df[key].equals(base[key]):
+                raise ValueError(f"Mismatch in column '{key}' for batch {i+1}")
+    result = base.copy()
+    for df in frames[1:]:
+        result = pd.concat([result, df.drop(columns=keys)], axis=1)
+    return result
+
 def merge_aug(base_dir, num_files):
 	aug_markers = []
 	aug_coverage = []
@@ -172,15 +183,13 @@ def merge_aug(base_dir, num_files):
 		aug_markers.append(pd.read_parquet(base_dir+f"{str(i)}_aug_marker_values.parquet"))
 		aug_coverage.append(pd.read_parquet(base_dir+f"{str(i)}_aug_coverage.parquet"))
 		aug_y.append(pd.read_parquet(base_dir+f"{str(i)}_aug_ground_truth_y.parquet"))		
-	aug_merged_markers = aug_markers[0]
-	for i, m in enumerate(aug_markers[1:]):
-		aug_merged_markers = aug_merged_markers.merge(m, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
+	
+	aug_merged_markers = concat_columns_if_aligned(aug_markers)
 	aug_merged_markers.to_parquet(f"{base_dir}/marker_values.parquet", index=False)
 	aug_markers = []
 	gc.collect()
-	aug_merged_coverage = aug_coverage[0]
-	for i, c in enumerate(aug_coverage[1:]):
-		aug_merged_coverage = aug_merged_coverage.merge(c, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
+
+	aug_merged_coverage = concat_columns_if_aligned(aug_coverage)
 	aug_merged_coverage.to_parquet(f"{base_dir}/coverage.parquet", index=False)
 	aug_coverage = []
 	gc.collect()
@@ -200,16 +209,12 @@ def merge_aug(base_dir, num_files):
 		y.append(pd.read_parquet(base_dir+f"{str(i)}_ground_truth_y.parquet"))
 		metadata.append(pd.read_parquet(base_dir+f"{str(i)}_aug_sample_info.parquet"))		
 
-	merged_markers = markers[0]
-	for i, m in enumerate(markers[1:]):
-		merged_markers = merged_markers.merge(m, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
+	merged_markers = concat_columns_if_aligned(markers)
 	merged_markers.to_parquet(f"{base_dir}/raw_marker_values.parquet", index=False)
 	markers = []
 	gc.collect()
 
-	merged_coverage = coverage[0]
-	for i, c in enumerate(coverage[1:]):
-		merged_coverage = merged_coverage.merge(c, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
+	merged_coverage = concat_columns_if_aligned(coverage)
 	merged_coverage.to_parquet(f"{base_dir}/raw_coverage.parquet", index=False)
 	coverage = []
 	gc.collect()
