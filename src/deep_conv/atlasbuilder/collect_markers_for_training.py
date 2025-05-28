@@ -7,6 +7,7 @@ from deep_conv.atlasbuilder.find_marker_candidates import create_marker_matrices
 import plotly.graph_objects as go
 import plotly.subplots as sp
 import math
+import gc
 
 
 def prepare(atlas_path, pat_dir, min_cpgs=4, threads=32):
@@ -165,40 +166,59 @@ def merge_aug(base_dir, num_files):
 	aug_markers = []
 	aug_coverage = []
 	aug_y = []
-	markers = []
-	coverage = []
-	y = []
-	metadata = []         
+
 	suffixes = [f"_batch{i}" for i in range(1,num_files+1)]
 	for i in range(1,num_files+1):		
 		aug_markers.append(pd.read_parquet(base_dir+f"{str(i)}_aug_marker_values.parquet"))
 		aug_coverage.append(pd.read_parquet(base_dir+f"{str(i)}_aug_coverage.parquet"))
-		aug_y.append(pd.read_parquet(base_dir+f"{str(i)}_aug_ground_truth_y.parquet"))
-		metadata.append(pd.read_parquet(base_dir+f"{str(i)}_aug_sample_info.parquet"))		
-		markers.append(pd.read_parquet(base_dir+f"{str(i)}_marker_values.parquet"))
-		coverage.append(pd.read_parquet(base_dir+f"{str(i)}_coverage.parquet"))
-		y.append(pd.read_parquet(base_dir+f"{str(i)}_ground_truth_y.parquet"))
+		aug_y.append(pd.read_parquet(base_dir+f"{str(i)}_aug_ground_truth_y.parquet"))		
 	aug_merged_markers = aug_markers[0]
 	for i, m in enumerate(aug_markers[1:]):
 		aug_merged_markers = aug_merged_markers.merge(m, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
 	aug_merged_markers.to_parquet(f"{base_dir}/marker_values.parquet", index=False)
-	merged_markers = markers[0]
-	for i, m in enumerate(markers[1:]):
-		merged_markers = merged_markers.merge(m, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
-	merged_markers.to_parquet(f"{base_dir}/raw_marker_values.parquet", index=False)
+	aug_markers = []
+	gc.collect()
 	aug_merged_coverage = aug_coverage[0]
 	for i, c in enumerate(aug_coverage[1:]):
 		aug_merged_coverage = aug_merged_coverage.merge(c, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
 	aug_merged_coverage.to_parquet(f"{base_dir}/coverage.parquet", index=False)
+	aug_coverage = []
+	gc.collect()
+
+	aug_y_merged = pd.concat(aug_y, ignore_index=True).fillna(0)
+	aug_y_merged.to_parquet(f"{base_dir}/ground_truth_y.parquet", index=False)
+	aug_y = []
+	gc.collect()
+
+	markers = []
+	coverage = []
+	y = []
+	metadata = []     
+	for i in range(1,num_files+1):		
+		markers.append(pd.read_parquet(base_dir+f"{str(i)}_marker_values.parquet"))
+		coverage.append(pd.read_parquet(base_dir+f"{str(i)}_coverage.parquet"))
+		y.append(pd.read_parquet(base_dir+f"{str(i)}_ground_truth_y.parquet"))
+		metadata.append(pd.read_parquet(base_dir+f"{str(i)}_aug_sample_info.parquet"))		
+
+	merged_markers = markers[0]
+	for i, m in enumerate(markers[1:]):
+		merged_markers = merged_markers.merge(m, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
+	merged_markers.to_parquet(f"{base_dir}/raw_marker_values.parquet", index=False)
+	markers = []
+	gc.collect()
+
 	merged_coverage = coverage[0]
 	for i, c in enumerate(coverage[1:]):
 		merged_coverage = merged_coverage.merge(c, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
 	merged_coverage.to_parquet(f"{base_dir}/raw_coverage.parquet", index=False)
+	coverage = []
+	gc.collect()
+
 	for i in range(num_files):
 		metadata[i]["original_index"] = metadata[i]["original_index"] + len(y[0])*i
-	metadata = pd.concat(metadata, ignore_index=True).fillna(0)
-	aug_y = pd.concat(aug_y, ignore_index=True).fillna(0)
-	aug_y.to_parquet(f"{base_dir}/ground_truth_y.parquet", index=False)
+	metadata_merged = pd.concat(metadata, ignore_index=True).fillna(0)
+	metadata_merged.to_parquet(f"{base_dir}/sample_info.parquet", index=False)
+
 	y = pd.concat(y, ignore_index=True).fillna(0)
 	y.to_parquet(f"{base_dir}/raw_ground_truth_y.parquet", index=False)
 	print(f"saved data to {base_dir}")
