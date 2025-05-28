@@ -161,6 +161,29 @@ def merge(base_dir, num_files, prefix, cov):
 	print(f"saved data to {base_dir}/eval_{cov}/tier1/")
 
 
+def merge_aug(base_dir, num_files):
+	markers = []
+	coverage = []
+	y = []
+	suffixes = [f"_batch{i}" for i in range(1,num_files+1)]
+	for i in range(1,num_files+1):		
+		markers.append(pd.read_parquet(base_dir+str(i)+"/aug_marker_values.parquet"))
+		coverage.append(pd.read_parquet(base_dir+str(i)+"/aug_coverage.parquet"))
+		y.append(pd.read_parquet(base_dir+str(i)+"/aug_ground_truth_y.parquet"))		
+	merged_markers = markers[0]
+	for i, m in enumerate(markers[1:]):
+		merged_markers = merged_markers.merge(m, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
+	merged_coverage = coverage[0]
+	for i, c in enumerate(coverage[1:]):
+		merged_coverage = merged_coverage.merge(c, on=['name', 'direction'], how='outer',suffixes=('', suffixes[i]))
+	y = pd.concat(y, ignore_index=True).fillna(0)
+	merged_markers.to_parquet(f"{base_dir}/marker_values.parquet", index=False)
+	merged_coverage.to_parquet(f"{base_dir}/coverage.parquet", index=False)
+	y.to_parquet(f"{base_dir}/ground_truth_y.parquet", index=False)
+	print(f"saved data to {base_dir}")
+
+
+
 def merge_all():
     merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "high")
     merge("/users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/", 5, "eval", "med")
