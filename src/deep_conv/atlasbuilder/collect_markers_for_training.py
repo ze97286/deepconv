@@ -191,7 +191,7 @@ def concat_columns_if_aligned(frames, suffixes, keys=('name', 'direction')):
         renamed_dataframes.append(renamed_df.drop(columns=list(keys)))
 
     # Combine
-    result = base[keys].copy()
+    result = base[list(keys)].copy()
     result = pd.concat([result] + renamed_dataframes, axis=1)
     return result
 
