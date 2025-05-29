@@ -36,6 +36,7 @@ def parse_args():
     parser.add_argument('--eval_dir', type=str, required=True, help='Directory containing evaluationparquet files')
     parser.add_argument('--test_dir', type=str, required=True, help='Directory containing test parquet files')
     parser.add_argument('--atlas_path', type=str, required=True, help='Path to atlas file')
+    parser.add_argument('--target_cell_type', type=str, required=True, help='Target cell type')
     parser.add_argument('--target_cell_idx', type=int, required=True, help='Target cell index in ground truth')
 
     # Model parameters
@@ -3014,8 +3015,7 @@ def generate_clinical_report(evaluation_results):
     return "\n".join(report)
 
 # OAC
-# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_detector_with_cna --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
-
+# qrsh -b y -l h_vmem=10g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_detector_with_cna --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --train_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --eval_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/ --test_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/test_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
 
 def main():
     """
