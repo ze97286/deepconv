@@ -320,6 +320,7 @@ def prepare_data_for_training(
     """
     loaders = []
     for data_dir in [train_dir, val_dir, test_dir]:    
+        print("loading data from {data_dir}")
         marker_values_path = os.path.join(data_dir, "marker_values.parquet")
         coverage_path = os.path.join(data_dir, "coverage.parquet")
         ground_truth_path = os.path.join(data_dir, "ground_truth_y.parquet")

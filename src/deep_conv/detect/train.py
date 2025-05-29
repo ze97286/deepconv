@@ -3051,7 +3051,6 @@ def main():
     logger.info(f"Arguments saved to {args_file}")
    
     # Prepare data
-    logger.info(f"Preparing data from {args.data_dir}...")
     try:
         train_loader, val_loader, test_loader, num_markers = prepare_data_for_training(
             train_dir=args.data_dir,
