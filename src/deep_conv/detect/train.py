@@ -28,67 +28,58 @@ from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanc
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train improved cell type concentration model')
-    
+
     parser.add_argument('--name', type=str, default=None, help='Name for this training run (used for output directory)')
 
     # Data parameters
-    parser.add_argument('--data_dir', type=str, required=True, help='Directory containing parquet files')
+    parser.add_argument('--train_dir', type=str, required=True, help='Directory containing training parquet files')
+    parser.add_argument('--eval_dir', type=str, required=True, help='Directory containing evaluationparquet files')
+    parser.add_argument('--test_dir', type=str, required=True, help='Directory containing test parquet files')
     parser.add_argument('--atlas_path', type=str, required=True, help='Path to atlas file')
-    parser.add_argument('--target_cell_type', type=str, required=True, help='Target cell type')
     parser.add_argument('--target_cell_idx', type=int, required=True, help='Target cell index in ground truth')
-    parser.add_argument('--excluded_markers', type=str, default='0,2,3,5,9,10,11,13,14,16,18,21,22,23,25,27,28,29,30,31,32,34,38,39,40,42,43,44,46,47,48,50,51,52,54,55,56,58,59,61,62,64,65,67,70,74,75,76,77,78,82,83,84,85,86,87,89,91,94,95,97,98,100,101,102,103,104,105,108,109,111,112,113,114,115,116,117,118,120,121,122,124,125,126,127,128,129,133,135', help='Comma-separated list of marker indices to exclude')
-    
+
     # Model parameters
-    parser.add_argument('--feature_dim', type=int, default=64, help='Feature dimension')
-    parser.add_argument('--num_heads', type=int, default=4, help='Number of attention heads')
+    parser.add_argument('--feature_dim', type=int, default=256, help='Feature dimension')
+    parser.add_argument('--num_heads', type=int, default=16, help='Number of attention heads')
     parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for regularisation')
-    parser.add_argument('--num_layers', type=int, default=2, help='Number of transformer layers')
-    parser.add_argument('--min_reliable_coverage', type=float, default=3.0, 
-                   help='Minimum coverage considered reliable for marker values')
+    parser.add_argument('--num_layers', type=int, default=6, help='Number of transformer layers')
+    parser.add_argument('--min_reliable_coverage', type=float, default=3.0, help='Minimum coverage considered reliable for marker values')
+
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimiser')
-    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
+    parser.add_argument('--epochs', type=int, default=500, help='Number of epochs')
     parser.add_argument('--grad_accum_steps', type=int, default=16, help='Gradient accumulation steps')
-    parser.add_argument('--early_stopping', type=int, default=10, help='Early stopping patience')
+    parser.add_argument('--early_stopping', type=int, default=20, help='Early stopping patience')
     parser.add_argument('--output_dir', type=str, default="./saved_models", help='Output directory')
-    
+
     # Misc parameters
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--device', type=str, default='', help='Device to use (empty for auto)')
     parser.add_argument('--save_interval', type=int, default=10, help='Save checkpoint every N epochs')
-    
-    parser.add_argument('--control_data_dir', type=str, default=None, 
-                   help='Directory containing control data for contrastive learning')
-    parser.add_argument('--calibrate_clinical_threshold', action='store_true',
-                        help='Calibrate clinical decision threshold in addition to uncertainty')
-    parser.add_argument('--target_specificity', type=float, default=0.95,
-                        help='Target specificity for clinical threshold calibration')
-    parser.add_argument('--calibrate', action='store_true', 
-                    help='Calibrate confidence intervals')
-    parser.add_argument('--calibrate_every', type=int, default=5,
-                    help='Calibrate model every N epochs')
+
+    parser.add_argument('--control_data_dir', type=str, default=None, help='Directory containing control data for contrastive learning')
+    parser.add_argument('--calibrate_clinical_threshold', action='store_true', help='Calibrate clinical decision threshold in addition to uncertainty')
+    parser.add_argument('--target_specificity', type=float, default=0.95, help='Target specificity for clinical threshold calibration')
+    parser.add_argument('--calibrate', action='store_true', help='Calibrate confidence intervals')
+    parser.add_argument('--calibrate_every', type=int, default=5, help='Calibrate model every N epochs')
 
     # Clinical evaluation parameters (these were in the main function)
-    parser.add_argument('--clinical_eval', action='store_true',
-                       help='Enable comprehensive clinical evaluation metrics')
-    parser.add_argument('--generate_clinical_report', action='store_true',
-                       help='Generate clinical interpretation report')
-    parser.add_argument('--visualise_clinical', action='store_true',
-                       help='Generate clinical performance visualisations')
+    parser.add_argument('--clinical_eval', action='store_true',help='Enable comprehensive clinical evaluation metrics')
+    parser.add_argument('--generate_clinical_report', action='store_true',help='Generate clinical interpretation report')
+    parser.add_argument('--visualise_clinical', action='store_true', help='Generate clinical performance visualisations')
 
     args = parser.parse_args()
-    
+
     if args.name:
         dir_name = args.name
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         dir_name = f"cell_type_model_{timestamp}"
-    
+
     args.output_dir = os.path.join(args.output_dir, dir_name)
 
-    args.early_stopping = max(args.early_stopping, 20)
 
     return args
 
@@ -3022,34 +3013,8 @@ def generate_clinical_report(evaluation_results):
 
     return "\n".join(report)
 
-# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_t -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_t.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train \
-# --name optimised_CpGenie_T-cells_1pct \
-# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell \
-# --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/T-cells/ \
-# --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed \
-# --target_cell_type T-cells \
-# --target_cell_idx 11 \
-# --snr_profile low \
-# --dropout_rate 0.15 \
-# --feature_dim 128 \
-# --num_heads 8 \
-# --num_layers 3 \
-# --detection_thresholds "0.001,0.005,0.01,0.02,0.05" \
-# --critical_ranges "0.01,0.02,6.0;0.02,0.05,4.0;0.05,0.1,2.5" \
-# --detection_loss_weight 0.4 \
-# --min_reliable_coverage 3.0 \
-# --enable_adaptive_thresholds \
-# --early_stopping 30 \
-# --grad_accum_steps 4 \
-# --batch_size 32 \
-# --weight_decay 0.02 \
-# --epochs 300 \
-# --lr 3.5e-4 \
-# --save_interval 10'
-
-
 # OAC
-# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_detector_with_pon_feature_dim16 --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --feature_dim 16 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
+# qrsh -b y -l h_vmem=2g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_detector_with_cna --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --data_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
 
 
 def main():
@@ -3084,21 +3049,17 @@ def main():
     with open(args_file, 'w') as f:
         json.dump(vars(args), f, indent=2)
     logger.info(f"Arguments saved to {args_file}")
-    
-    # Process excluded markers
-    excluded_markers = parse_excluded_markers(args.excluded_markers)
-    if excluded_markers:
-        logger.info(f"Excluding {len(excluded_markers)} markers: {excluded_markers}")
-    
+   
     # Prepare data
     logger.info(f"Preparing data from {args.data_dir}...")
     try:
         train_loader, val_loader, test_loader, num_markers = prepare_data_for_training(
-            data_dir=args.data_dir,
+            train_dir=args.data_dir,
+            val_dir=args.data_dir,
+            test_dir=args.data_dir,
             atlas_path=args.atlas_path,
             target_cell_type=args.target_cell_type,
             target_cell_idx=args.target_cell_idx,
-            excluded_markers=excluded_markers
         )
         logger.info(f"✓ Data preparation complete")
     except Exception as e:
@@ -3117,7 +3078,6 @@ def main():
                 args.target_cell_type, 
                 args.batch_size, 
                 logger,
-                excluded_markers=excluded_markers
             )
             logger.info(f"✓ Control data loaded successfully")
         except Exception as e:
