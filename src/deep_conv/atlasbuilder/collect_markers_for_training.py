@@ -171,23 +171,28 @@ def print_duplicate_columns(df):
         print("No duplicated columns found.")
 
 def concat_columns_if_aligned(frames, suffixes, keys=('name', 'direction')):
+    if len(frames) != len(suffixes):
+        raise ValueError("Length of suffixes must match number of frames")
+
+    # Validate alignment on keys
     base = frames[0]
     for i, df in enumerate(frames[1:], start=1):
         for key in keys:
             if not df[key].equals(base[key]):
                 raise ValueError(f"Mismatch in column '{key}' for batch {i+1}")
 
-    # Start with the base
-    result = base.copy()
-    data_columns = [col for col in base.columns if col not in keys]
+    # Build all renamed dataframes with suffixes
+    renamed_dataframes = []
+    for i, df in enumerate(frames):
+        suffix = suffixes[i]
+        data_columns = [col for col in df.columns if col not in keys]
+        rename_map = {col: f"{col}{suffix}" for col in data_columns}
+        renamed_df = df.rename(columns=rename_map)
+        renamed_dataframes.append(renamed_df.drop(columns=list(keys)))
 
-    for i, df in enumerate(frames[1:], start=1):
-        # Rename only data columns to add suffix
-        suffix = suffixes[i] if suffixes else f"_{i}"
-        renamed_df = df.copy()
-        renamed_df.rename(columns={col: f"{col}{suffix}" for col in data_columns}, inplace=True)
-        result = pd.concat([result, renamed_df.drop(columns=list(keys))], axis=1)
-
+    # Combine
+    result = base[keys].copy()
+    result = pd.concat([result] + renamed_dataframes, axis=1)
     return result
 
 def merge_aug(base_dir, num_files):
