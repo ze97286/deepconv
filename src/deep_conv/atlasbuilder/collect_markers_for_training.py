@@ -170,7 +170,7 @@ def concat_columns_if_aligned(frames, keys=('name', 'direction')):
                 raise ValueError(f"Mismatch in column '{key}' for batch {i+1}")
     result = base.copy()
     for df in frames[1:]:
-        result = pd.concat([result, df.drop(columns=keys)], axis=1)
+        result = pd.concat([result, df.drop(columns=list(keys))], axis=1)
     return result
 
 def merge_aug(base_dir, num_files):
