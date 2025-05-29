@@ -208,18 +208,18 @@ def merge_aug(base_dir, num_files):
 
 	aug_merged_markers = concat_columns_if_aligned(aug_markers, suffixes)
 	print_duplicate_columns(aug_merged_markers)
-	aug_merged_markers.to_parquet(f"{base_dir}/marker_values.parquet", index=False)
+	aug_merged_markers.to_parquet(f"{base_dir}/marker_values.parquet", engine="fastparquet", index=False, )
 	aug_markers = []
 	gc.collect()
 
 	aug_merged_coverage = concat_columns_if_aligned(aug_coverage, suffixes)
 	print_duplicate_columns(aug_merged_coverage)
-	aug_merged_coverage.to_parquet(f"{base_dir}/coverage.parquet", index=False)
+	aug_merged_coverage.to_parquet(f"{base_dir}/coverage.parquet", engine="fastparquet", index=False)
 	aug_coverage = []
 	gc.collect()
 
 	aug_y_merged = pd.concat(aug_y, ignore_index=True).fillna(0)
-	aug_y_merged.to_parquet(f"{base_dir}/ground_truth_y.parquet", index=False)
+	aug_y_merged.to_parquet(f"{base_dir}/ground_truth_y.parquet", engine="fastparquet",index=False)
 	aug_y = []
 	gc.collect()
 
@@ -235,23 +235,23 @@ def merge_aug(base_dir, num_files):
 
 	merged_markers = concat_columns_if_aligned(markers, suffixes)
 	print_duplicate_columns(merged_markers)
-	merged_markers.to_parquet(f"{base_dir}/raw_marker_values.parquet", index=False)
+	merged_markers.to_parquet(f"{base_dir}/raw_marker_values.parquet", engine="fastparquet",index=False)
 	markers = []
 	gc.collect()
 
 	merged_coverage = concat_columns_if_aligned(coverage, suffixes)
 	print_duplicate_columns(merged_coverage)
-	merged_coverage.to_parquet(f"{base_dir}/raw_coverage.parquet", index=False)
+	merged_coverage.to_parquet(f"{base_dir}/raw_coverage.parquet", engine="fastparquet",index=False)
 	coverage = []
 	gc.collect()
 
 	for i in range(num_files):
 		metadata[i]["original_index"] = metadata[i]["original_index"] + len(y[0])*i
 	metadata_merged = pd.concat(metadata, ignore_index=True).fillna(0)
-	metadata_merged.to_parquet(f"{base_dir}/sample_info.parquet", index=False)
+	metadata_merged.to_parquet(f"{base_dir}/sample_info.parquet", engine="fastparquet", index=False)
 
 	y = pd.concat(y, ignore_index=True).fillna(0)
-	y.to_parquet(f"{base_dir}/raw_ground_truth_y.parquet", index=False)
+	y.to_parquet(f"{base_dir}/raw_ground_truth_y.parquet", engine="fastparquet", index=False)
 	print(f"saved data to {base_dir}")
 
 
