@@ -3053,9 +3053,9 @@ def main():
     # Prepare data
     try:
         train_loader, val_loader, test_loader, num_markers = prepare_data_for_training(
-            train_dir=args.data_dir,
-            val_dir=args.data_dir,
-            test_dir=args.data_dir,
+            train_dir=args.train_dir,
+            val_dir=args.eval_dir,
+            test_dir=args.test_dir,
             atlas_path=args.atlas_path,
             target_cell_type=args.target_cell_type,
             target_cell_idx=args.target_cell_idx,
