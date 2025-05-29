@@ -162,7 +162,7 @@ def merge(base_dir, num_files, prefix, cov):
 	print(f"saved data to {base_dir}/eval_{cov}/tier1/")
 
 
-def concat_columns_if_aligned(frames, keys=('name', 'direction'), suffixes=None):
+def concat_columns_if_aligned(frames, suffixes, keys=('name', 'direction')):
     base = frames[0]
     for i, df in enumerate(frames[1:], start=1):
         for key in keys:
