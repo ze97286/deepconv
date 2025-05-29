@@ -161,14 +161,6 @@ def merge(base_dir, num_files, prefix, cov):
 	y.to_parquet(f"{base_dir}/eval_{cov}/tier1/ground_truth_y.parquet", index=False)
 	print(f"saved data to {base_dir}/eval_{cov}/tier1/")
 
-def print_duplicate_columns(df):
-    counts = df.columns.value_counts()
-    dupes = counts[counts > 1]
-    if not dupes.empty:
-        print(f"Found {len(dupes)} duplicated columns:")
-        print(dupes)
-    else:
-        print("No duplicated columns found.")
 
 def concat_columns_if_aligned(frames, suffixes, keys=('name', 'direction')):
     if len(frames) != len(suffixes):
@@ -192,8 +184,13 @@ def concat_columns_if_aligned(frames, suffixes, keys=('name', 'direction')):
 
     # Combine
     result = base[list(keys)].copy()
-    result = pd.concat([result] + renamed_dataframes, axis=1)
-    return result
+    df = pd.concat([result] + renamed_dataframes, axis=1)
+    # df['marker_id'] = 
+    value_df = df.drop(columns=["name", "direction"])
+    df_transposed = value_df.T.copy()
+    df_transposed.columns = df['name']
+    df_transposed.index.name = "sample_id"
+    return df_transposed
 
 def merge_aug(base_dir, num_files):
 	aug_markers = []
@@ -207,19 +204,17 @@ def merge_aug(base_dir, num_files):
 		aug_y.append(pd.read_parquet(base_dir+f"{str(i)}_aug_ground_truth_y.parquet"))		
 
 	aug_merged_markers = concat_columns_if_aligned(aug_markers, suffixes)
-	print_duplicate_columns(aug_merged_markers)
-	aug_merged_markers.to_parquet(f"{base_dir}/marker_values.parquet", engine="fastparquet", index=False, )
+	aug_merged_markers.to_parquet(f"{base_dir}/marker_values.parquet",  index=False, )
 	aug_markers = []
 	gc.collect()
 
 	aug_merged_coverage = concat_columns_if_aligned(aug_coverage, suffixes)
-	print_duplicate_columns(aug_merged_coverage)
-	aug_merged_coverage.to_parquet(f"{base_dir}/coverage.parquet", engine="fastparquet", index=False)
+	aug_merged_coverage.to_parquet(f"{base_dir}/coverage.parquet",  index=False)
 	aug_coverage = []
 	gc.collect()
 
 	aug_y_merged = pd.concat(aug_y, ignore_index=True).fillna(0)
-	aug_y_merged.to_parquet(f"{base_dir}/ground_truth_y.parquet", engine="fastparquet",index=False)
+	aug_y_merged.to_parquet(f"{base_dir}/ground_truth_y.parquet", index=False)
 	aug_y = []
 	gc.collect()
 
@@ -234,24 +229,22 @@ def merge_aug(base_dir, num_files):
 		metadata.append(pd.read_parquet(base_dir+f"{str(i)}_aug_sample_info.parquet"))		
 
 	merged_markers = concat_columns_if_aligned(markers, suffixes)
-	print_duplicate_columns(merged_markers)
-	merged_markers.to_parquet(f"{base_dir}/raw_marker_values.parquet", engine="fastparquet",index=False)
+	merged_markers.to_parquet(f"{base_dir}/raw_marker_values.parquet", index=False)
 	markers = []
 	gc.collect()
 
 	merged_coverage = concat_columns_if_aligned(coverage, suffixes)
-	print_duplicate_columns(merged_coverage)
-	merged_coverage.to_parquet(f"{base_dir}/raw_coverage.parquet", engine="fastparquet",index=False)
+	merged_coverage.to_parquet(f"{base_dir}/raw_coverage.parquet", index=False)
 	coverage = []
 	gc.collect()
 
 	for i in range(num_files):
 		metadata[i]["original_index"] = metadata[i]["original_index"] + len(y[0])*i
 	metadata_merged = pd.concat(metadata, ignore_index=True).fillna(0)
-	metadata_merged.to_parquet(f"{base_dir}/sample_info.parquet", engine="fastparquet", index=False)
+	metadata_merged.to_parquet(f"{base_dir}/sample_info.parquet",  index=False)
 
 	y = pd.concat(y, ignore_index=True).fillna(0)
-	y.to_parquet(f"{base_dir}/raw_ground_truth_y.parquet", engine="fastparquet", index=False)
+	y.to_parquet(f"{base_dir}/raw_ground_truth_y.parquet",  index=False)
 	print(f"saved data to {base_dir}")
 
 
