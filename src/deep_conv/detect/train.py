@@ -47,7 +47,7 @@ def parse_args():
     parser.add_argument('--min_reliable_coverage', type=float, default=3.0, help='Minimum coverage considered reliable for marker values')
 
     # Training parameters
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=512, help='Batch size')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimiser')
     parser.add_argument('--epochs', type=int, default=500, help='Number of epochs')
