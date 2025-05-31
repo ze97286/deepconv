@@ -40,10 +40,10 @@ def parse_args():
     parser.add_argument('--target_cell_idx', type=int, required=True, help='Target cell index in ground truth')
 
     # Model parameters
-    parser.add_argument('--feature_dim', type=int, default=64, help='Feature dimension')
-    parser.add_argument('--num_heads', type=int, default=8, help='Number of attention heads')
+    parser.add_argument('--feature_dim', type=int, default=32, help='Feature dimension')
+    parser.add_argument('--num_heads', type=int, default=4, help='Number of attention heads')
     parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for regularisation')
-    parser.add_argument('--num_layers', type=int, default=4, help='Number of transformer layers')
+    parser.add_argument('--num_layers', type=int, default=2, help='Number of transformer layers')
     parser.add_argument('--min_reliable_coverage', type=float, default=3.0, help='Minimum coverage considered reliable for marker values')
 
     # Training parameters
