@@ -148,10 +148,10 @@ def apply_cna_to_sample(
     seed: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Simpler approach: Just scale the observed signal by CNA.
+    scale the observed signal by CNA.
     
-    Rationale: In regions with CN=4, the tumor signal is effectively doubled
-    in the mixture, even though the tumor fraction stays the same.
+    Rationale: In regions with CN=4, the tumour signal is effectively doubled
+    in the mixture, even though the tumour fraction stays the same.
     """
     if seed is not None:
         rng = np.random.default_rng(seed)
