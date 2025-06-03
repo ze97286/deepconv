@@ -148,67 +148,52 @@ def apply_cna_to_sample(
     seed: Optional[int] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Apply CNA effects to cancer markers only.
+    Simpler approach: Just scale the observed signal by CNA.
     
-    Args:
-        marker_values: Original marker values for all markers
-        coverage: Original coverage for all markers
-        cn_values: Copy number values for all markers
-        cancer_marker_indices: Indices of cancer markers to adjust
-        seed: Random seed for reproducibility
-        
-    Returns:
-        adjusted_marker_values, adjusted_coverage
+    Rationale: In regions with CN=4, the tumor signal is effectively doubled
+    in the mixture, even though the tumor fraction stays the same.
     """
     if seed is not None:
         rng = np.random.default_rng(seed)
     else:
         rng = np.random.default_rng()
     
-    # Copy arrays to avoid modifying originals
     adj_marker_values = marker_values.copy()
-    adj_coverage = coverage.astype(float).copy()
+    adj_coverage = coverage.copy().astype(float)
     
-    # Only adjust cancer markers
     for idx in cancer_marker_indices:
-        if idx >= len(marker_values):
-            continue
-            
-        # Skip if coverage is 0 or marker value is NaN
         if coverage[idx] == 0 or np.isnan(marker_values[idx]):
-            # Keep original values (0 coverage and NaN marker value)
             continue
             
-        # Get CN for this marker
         cn = cn_values[idx]
-        
-        # Skip if diploid (no adjustment needed)
         if cn == 2.0:
             continue
         
-        # Adjustment factor
-        factor = cn / 2.0
+        # Scale factor for signal
+        signal_factor = cn / 2.0
         
-        # Calculate adjusted values
-        orig_unmeth_count = marker_values[idx] * coverage[idx]
+        # The observed unmethylated proportion increases with amplification
+        # but is bounded by the tumor fraction
+        # Example: 5% tumor fraction with 80% tumor unmethylated
+        # CN=2: 0.05 * 0.80 = 0.04 (4% observed)
+        # CN=4: might go up to ~0.08 (8% observed) but not 0.16
         
-        # Apply adjustment
-        adj_coverage_val = coverage[idx] * factor
-        adj_unmeth_count = orig_unmeth_count * factor
+        # Adjust the marker value
+        current_signal = marker_values[idx]
+        adjusted_signal = current_signal * signal_factor
         
-        # Probabilistic rounding
-        adj_coverage[idx] = probabilistic_round(adj_coverage_val, rng)
-        adj_unmeth_count_rounded = probabilistic_round(adj_unmeth_count, rng)
+        # Apply a soft ceiling based on reasonable tumor fraction limits
+        # This prevents values from exceeding 1.0
+        max_reasonable_signal = min(0.5, current_signal * 3)  # Don't let signal more than triple
+        adj_marker_values[idx] = min(adjusted_signal, max_reasonable_signal, 1.0)
         
-        # Calculate new marker value
-        if adj_coverage[idx] > 0:
-            adj_marker_values[idx] = adj_unmeth_count_rounded / adj_coverage[idx]
-        else:
-            # If adjusted coverage rounds to 0, set marker value to NaN
+        # Adjust coverage
+        adj_coverage[idx] = probabilistic_round(coverage[idx] * signal_factor, rng)
+        
+        if adj_coverage[idx] == 0:
             adj_marker_values[idx] = np.nan
     
     return adj_marker_values, adj_coverage.astype(int)
-
 def probabilistic_round(value: float, rng: np.random.Generator) -> int:
     """Probabilistic rounding to preserve expected values."""
     if value == 0:
