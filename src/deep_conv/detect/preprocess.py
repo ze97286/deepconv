@@ -343,9 +343,9 @@ def prepare_data_for_evaluation(
     target_cell_type,
     target_cell_idx,
 ):
-    marker_values_path = os.path.join(data_dir, "raw_marker_values.parquet")
-    coverage_path = os.path.join(data_dir, "raw_coverage.parquet")
-    ground_truth_path = os.path.join(data_dir, "raw_ground_truth_y.parquet")
+    marker_values_path = os.path.join(data_dir, "marker_values.parquet")
+    coverage_path = os.path.join(data_dir, "coverage.parquet")
+    ground_truth_path = os.path.join(data_dir, "ground_truth_y.parquet")
 
     marker_values_df = transpose_df(pd.read_parquet(marker_values_path))
     coverage_df = transpose_df(pd.read_parquet(coverage_path))

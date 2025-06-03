@@ -283,6 +283,10 @@ def train_model(model, train_loader, val_loader, args, device):
                 # Forward pass with the new model outputs
                 mu, uncertainty, _, zero_prob = model(marker_values, coverage)
 
+                print(f"zero_prob: min={zero_prob.min().item()}, max={zero_prob.max().item()}")
+                print(f"Contains nan: {torch.isnan(zero_prob).any()}")
+                print(f"Contains inf: {torch.isinf(zero_prob).any()}")
+
                 # Calculate loss with control mask and zero probability
                 loss = compute_loss(mu, uncertainty, y_true, control_mask, zero_prob)
 
@@ -3015,7 +3019,7 @@ def generate_clinical_report(evaluation_results):
     return "\n".join(report)
 
 # OAC
-# qrsh -b y -l h_vmem=10g -pe smp 32 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_detector_with_cna --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --train_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --eval_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/ --test_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/test_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
+# qrsh -b y -l h_vmem=10g -pe smp 10 -V -N train_oac -wd /users/zetzioni/sharedscratch/deepconv/src -o ~/sharedscratch/logs/train_oac.log 'cd /users/zetzioni/sharedscratch/deepconv/src && python -m deep_conv.detect.train --name oac_detector_with_cna --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell --train_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/train_single_cell_clinical/OAC/ --eval_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/eval_single_cell_clinical/OAC/ --test_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.blood+gi+tum.l4/test_single_cell_clinical/OAC/ --atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac.blood+gi+tum.l4.bed --target_cell_type OAC --target_cell_idx 9 --dropout_rate 0.15 --control_data_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/controls/cfDNA/ --calibrate --calibrate_every 15 --early_stopping 30 --epochs 200 --weight_decay 0.01 --clinical_eval --generate_clinical_report --visualise_clinical --calibrate_clinical_threshold'
 
 def main():
     """
