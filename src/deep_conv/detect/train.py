@@ -25,6 +25,8 @@ from plotly.subplots import make_subplots
 
 from deep_conv.detect.preprocess import prepare_data_for_training, load_train_with_contrastive_data
 from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyser
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train improved cell type concentration model')

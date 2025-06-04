@@ -359,10 +359,6 @@ class EnhancedCancerDetectionModel(nn.Module):
         
     
     def forward(self, marker_values, coverage):
-        # Check inputs
-        print(f"Input marker_values: min={marker_values[~torch.isnan(marker_values)].min():.4f}, max={marker_values[~torch.isnan(marker_values)].max():.4f}")
-        print(f"NaN count in marker_values: {torch.isnan(marker_values).sum()}")
-        
         # Apply dynamic marker pruning
         marker_values_pruned = self.marker_pruning(marker_values, coverage)
         
@@ -373,7 +369,6 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         # Apply stronger dampening to marker values based on coverage
         marker_values_weighted = marker_values_pruned * coverage_reliability
-        print(f"After weighting: min={marker_values_weighted[~torch.isnan(marker_values_weighted)].min():.4f}, max={marker_values_weighted[~torch.isnan(marker_values_weighted)].max():.4f}")
 
         # Missing mask (after pruning)
         missing_mask = (coverage == 0)
@@ -382,7 +377,6 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         # Ensure NaN values are handled
         marker_values_weighted = torch.nan_to_num(marker_values_weighted, nan=0.0)
-        print(f"After nan_to_num: min={marker_values_weighted.min():.4f}, max={marker_values_weighted.max():.4f}")
         
         batch_size, num_markers = marker_values_weighted.shape
         
