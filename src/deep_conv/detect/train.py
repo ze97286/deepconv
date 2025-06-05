@@ -40,6 +40,7 @@ def parse_args():
     parser.add_argument('--atlas_path', type=str, required=True, help='Path to atlas file')
     parser.add_argument('--target_cell_type', type=str, required=True, help='Target cell type')
     parser.add_argument('--target_cell_idx', type=int, required=True, help='Target cell index in ground truth')
+    parser.add_argument('--raw', action=argparse.BooleanOptionalAction, default=False, help='use CNA corrected or uncorrected')
 
     # Model parameters
     parser.add_argument('--feature_dim', type=int, default=32, help='Feature dimension')
@@ -3065,6 +3066,7 @@ def main():
             atlas_path=args.atlas_path,
             target_cell_type=args.target_cell_type,
             target_cell_idx=args.target_cell_idx,
+            use_raw=args.raw,
         )
         logger.info(f"✓ Data preparation complete")
     except Exception as e:

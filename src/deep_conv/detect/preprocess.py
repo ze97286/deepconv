@@ -304,6 +304,7 @@ def prepare_data_for_training(
     atlas_path,
     target_cell_type,
     target_cell_idx,
+    use_raw
 ):
     """
     Prepare data for training
@@ -318,12 +319,13 @@ def prepare_data_for_training(
     Returns:
         train_loader, val_loader, test_loader, num_markers, data_stats
     """
+    prefix = "raw_" if use_raw else ""
     loaders = []
     for data_dir in [train_dir, val_dir, test_dir]:    
         print("loading data from {data_dir}")
-        marker_values_path = os.path.join(data_dir, "marker_values.parquet")
-        coverage_path = os.path.join(data_dir, "coverage.parquet")
-        ground_truth_path = os.path.join(data_dir, "ground_truth_y.parquet")
+        marker_values_path = os.path.join(data_dir, prefix+"marker_values.parquet")
+        coverage_path = os.path.join(data_dir, prefix+"coverage.parquet")
+        ground_truth_path = os.path.join(data_dir, prefix+"ground_truth_y.parquet")
         loader, num_markers = load_and_preprocess_data(
             marker_values_path=marker_values_path,
             coverage_path=coverage_path,
@@ -342,6 +344,7 @@ def prepare_data_for_evaluation(
     atlas_path,
     target_cell_type,
     target_cell_idx,
+    use_raw
 ):
     marker_values_path = os.path.join(data_dir, "marker_values.parquet")
     coverage_path = os.path.join(data_dir, "coverage.parquet")
