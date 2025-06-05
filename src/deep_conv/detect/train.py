@@ -286,10 +286,6 @@ def train_model(model, train_loader, val_loader, args, device):
                 # Forward pass with the new model outputs
                 mu, uncertainty, _, zero_prob = model(marker_values, coverage)
 
-                print(f"zero_prob: min={zero_prob.min().item()}, max={zero_prob.max().item()}")
-                print(f"Contains nan: {torch.isnan(zero_prob).any()}")
-                print(f"Contains inf: {torch.isinf(zero_prob).any()}")
-
                 # Calculate loss with control mask and zero probability
                 loss = compute_loss(mu, uncertainty, y_true, control_mask, zero_prob)
 
