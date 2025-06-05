@@ -43,19 +43,19 @@ def parse_args():
     parser.add_argument('--raw', action=argparse.BooleanOptionalAction, default=False, help='use CNA corrected or uncorrected')
 
     # Model parameters
-    parser.add_argument('--feature_dim', type=int, default=32, help='Feature dimension')
-    parser.add_argument('--num_heads', type=int, default=4, help='Number of attention heads')
-    parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for regularisation')
-    parser.add_argument('--num_layers', type=int, default=2, help='Number of transformer layers')
+    parser.add_argument('--feature_dim', type=int, default=128, help='Feature dimension')
+    parser.add_argument('--num_heads', type=int, default=8, help='Number of attention heads')
+    parser.add_argument('--dropout_rate', type=float, default=0.15, help='Dropout rate for regularisation')
+    parser.add_argument('--num_layers', type=int, default=3, help='Number of transformer layers')
     parser.add_argument('--min_reliable_coverage', type=float, default=3.0, help='Minimum coverage considered reliable for marker values')
 
     # Training parameters
-    parser.add_argument('--batch_size', type=int, default=512, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimiser')
-    parser.add_argument('--epochs', type=int, default=500, help='Number of epochs')
+    parser.add_argument('--epochs', type=int, default=200, help='Number of epochs')
     parser.add_argument('--grad_accum_steps', type=int, default=16, help='Gradient accumulation steps')
-    parser.add_argument('--early_stopping', type=int, default=20, help='Early stopping patience')
+    parser.add_argument('--early_stopping', type=int, default=30, help='Early stopping patience')
     parser.add_argument('--output_dir', type=str, default="./saved_models", help='Output directory')
 
     # Misc parameters
@@ -67,7 +67,7 @@ def parse_args():
     parser.add_argument('--calibrate_clinical_threshold', action='store_true', help='Calibrate clinical decision threshold in addition to uncertainty')
     parser.add_argument('--target_specificity', type=float, default=0.95, help='Target specificity for clinical threshold calibration')
     parser.add_argument('--calibrate', action='store_true', help='Calibrate confidence intervals')
-    parser.add_argument('--calibrate_every', type=int, default=5, help='Calibrate model every N epochs')
+    parser.add_argument('--calibrate_every', type=int, default=15, help='Calibrate model every N epochs')
 
     # Clinical evaluation parameters (these were in the main function)
     parser.add_argument('--clinical_eval', action='store_true',help='Enable comprehensive clinical evaluation metrics')
