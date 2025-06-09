@@ -368,7 +368,6 @@ def run_predict(model_dir, input_dir, output_dir=None, device=None):
             data_dir=input_dir,
             atlas_path=atlas_path,
             target_cell_type=target_cell_type,
-            excluded_markers=excluded_markers
         )
         
         # Make predictions
