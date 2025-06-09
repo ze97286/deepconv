@@ -374,6 +374,9 @@ def run_predict(model_dir, input_dir, output_dir=None, device=None):
         results_df = predict(model, marker_values, coverage, sample_ids, output_dir, device)        
         logger.info("Evaluation completed successfully")
         
+        model_name = os.path.basename(os.path.normpath(model_dir))
+        plot_results(model_name)
+
         return results_df
         
     except Exception as e:
