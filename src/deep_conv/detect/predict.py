@@ -128,7 +128,7 @@ def load_model(model_dir, device='cpu'):
 
     # Set defaults with fallbacks
     defaults = {
-        'num_markers': 136,
+        'num_markers': 349,
         'feature_dim': 128,
         'num_heads': 8,
         'num_layers': 3,
@@ -139,6 +139,8 @@ def load_model(model_dir, device='cpu'):
     for key, default_value in defaults.items():
         if key not in args:
             args[key] = default_value
+
+    print(args)
 
     # Create and load model
     try:
@@ -382,14 +384,24 @@ def run_predict(model_dir, input_dir, output_dir=None, device=None):
         return None
 
 # python -m deep_conv.detect.predict \
-# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_unbias_with_controls/ \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_detector_without_cna_headless/ \
 # --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA/ \
-# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/oac_unbias_with_controls/
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/oac_detector_without_cna_headless/
 
 # python -m deep_conv.detect.predict \
-# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_unbias_with_controls/ \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_detector_cna_corrected_headless/ \
+# --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/AB/cfDNA/ \
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/AB/cfDNA/oac_detector_cna_corrected_headless/
+
+# python -m deep_conv.detect.predict \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_detector_without_cna_headless/ \
 # --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/cfDNA/ \
-# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/CD/cfDNA/oac_unbias_with_controls/
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/CD/cfDNA/oac_detector_without_cna_headless/
+
+# python -m deep_conv.detect.predict \
+# --model_dir /users/zetzioni/sharedscratch/loyfer_atlas/saved_models/single_cell/oac_detector_cna_corrected_headless/ \
+# --input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.blood+gi+tum.l4/CD/cfDNA/ \
+# --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/analysis/CD/cfDNA/oac_detector_cna_corrected_headless/
 
 
 def plot_timepoint(df, output_path, name, title):
