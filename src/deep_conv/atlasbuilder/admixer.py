@@ -78,7 +78,6 @@ class SyntheticMixtureGenerator:
             (20, 0.1),  # 20x - 10%
             (30, 0.05), # 30x - 5%
         ]
-
         os.makedirs(output_dir, exist_ok=True)
     
     def _build_cna_interval_trees(self):
@@ -180,7 +179,7 @@ class SyntheticMixtureGenerator:
             # Process by chromosome for cache efficiency
             merged = defaultdict(int)
             tumor_read_count = 0
-            tumor_read_count_pre_cna = 0 
+            tumor_read_count_pre_cna = 0  # Track pre-CNA tumor reads
             control_read_count = 0
             
             # Process tumor data
@@ -194,28 +193,34 @@ class SyntheticMixtureGenerator:
                     patterns = [x[1] for x in chrom_data]
                     counts = np.array([x[2] for x in chrom_data])
                     
-                    # First, calculate pre-CNA sampling (for actual TF)
-                    mask_pre_cna = counts > 0
-                    if np.any(mask_pre_cna):
-                        # Sample with intended TF (no CNA adjustment)
-                        sampled_pre_cna = np.random.binomial(counts[mask_pre_cna], tf)
-                        tumor_read_count_pre_cna += sampled_pre_cna.sum()
-                    
-                    # Now do actual sampling with CNA adjustment
+                    # Get all CNAs for this chromosome at once
                     cnas = generator.get_cna_batch(cna_profile_id, chrom, positions)
-                    effective_tfs = np.minimum(tf * (cnas / 2.0), 1.0)
                     
-                    # Vectorized sampling for all positions
-                    mask = (counts > 0) & (effective_tfs > 0)
+                    # First sample with intended TF (no CNA adjustment)
+                    mask = counts > 0
                     if np.any(mask):
-                        # Sample all at once
-                        sampled = np.random.binomial(counts[mask], effective_tfs[mask])
+                        # Sample tumor reads based on intended TF
+                        sampled_pre_cna = np.random.binomial(counts[mask], tf)
+                        tumor_read_count_pre_cna += sampled_pre_cna.sum()
+                        
+                        # Now apply CNA effect to these sampled reads
+                        # For each read that was selected, it has cn/2 chance of being observed
+                        cna_factors = cnas[mask] / 2.0
+                        # Cap at 1.0 to avoid issues
+                        cna_factors = np.minimum(cna_factors, 1.0)
+                        
+                        # Apply CNA effect
+                        sampled_with_cna = np.zeros_like(sampled_pre_cna)
+                        for i, (pre_cna_count, cna_factor) in enumerate(zip(sampled_pre_cna, cna_factors)):
+                            if pre_cna_count > 0 and cna_factor > 0:
+                                sampled_with_cna[i] = np.random.binomial(pre_cna_count, cna_factor)
                         
                         # Add to merged
+                        positions_masked = np.array(positions)[mask]
+                        patterns_masked = np.array(patterns)[mask]
+                        
                         for i, (pos, pattern, sampled_count) in enumerate(
-                            zip(np.array(positions)[mask], 
-                                np.array(patterns)[mask], 
-                                sampled)):
+                            zip(positions_masked, patterns_masked, sampled_with_cna)):
                             if sampled_count > 0:
                                 merged[(chrom, pos, pattern)] += sampled_count
                                 tumor_read_count += sampled_count
