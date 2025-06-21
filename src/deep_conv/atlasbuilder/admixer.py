@@ -53,17 +53,17 @@ class SyntheticMixtureGenerator:
         self.control_data = [self.load_pat_file(f) for f in control_pat_files]
         logger.info("PAT files loaded")
         
-        # Define sampling distribution
+        # Define sampling distribution as proportions
         self.tf_ranges = [
-            (0.0, 0.0, 30000),      # True negatives
-            (0.0005, 0.001, 30000), # 0.05-0.1%
-            (0.001, 0.005, 60000),  # 0.1-0.5%
-            (0.005, 0.01, 60000),   # 0.5-1%
-            (0.01, 0.02, 40000),    # 1-2%
-            (0.02, 0.05, 40000),    # 2-5%
-            (0.05, 0.10, 20000),    # 5-10%
-            (0.10, 0.20, 15000),    # 10-20%
-            (0.20, 0.40, 5000),     # 20-40%
+            (0.0, 0.0, 0.10),      # True negatives - 10%
+            (0.0005, 0.001, 0.10), # 0.05-0.1% - 10%
+            (0.001, 0.005, 0.20),  # 0.1-0.5% - 20%
+            (0.005, 0.01, 0.20),   # 0.5-1% - 20%
+            (0.01, 0.02, 0.133),   # 1-2% - 13.3%
+            (0.02, 0.05, 0.133),   # 2-5% - 13.3%
+            (0.05, 0.10, 0.067),   # 5-10% - 6.7%
+            (0.10, 0.20, 0.05),    # 10-20% - 5%
+            (0.20, 0.40, 0.017),   # 20-40% - 1.7%
         ]
         
         # Coverage distributions
@@ -136,7 +136,9 @@ class SyntheticMixtureGenerator:
         n_cnas = len(self.cna_profiles)
         
         # Generate samples according to TF distribution
-        for tf_min, tf_max, n_tf_samples in self.tf_ranges:
+        for tf_min, tf_max, tf_proportion in self.tf_ranges:
+            n_tf_samples = int(n_samples * tf_proportion)
+            logger.info(f"\nGenerating {n_tf_samples} samples for TF range {tf_min:.1%}-{tf_max:.1%}")
             for i in range(n_tf_samples):
                 # Sample parameters
                 tumor_idx = np.random.randint(n_tumors)
@@ -365,7 +367,7 @@ class SyntheticMixtureGenerator:
         logger.info(f"\nMetadata saved to: {metadata_file}")
         
         return metadata_df
-
+    
 # python -m deep_conv.atlasbuilder.admixer --tissue_input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.l4/train_tissue/ --control_input_dir /users/zetzioni/sharedscratch/loyfer_atlas/OAC/atlas_oac.l4/controls/cfDNA/ --output_dir /users/zetzioni/sharedscratch/loyfer_atlas/training/oac.l4/train/ --cna_profiles_file /mnt/lustre/shared/ICGC/ESAD-UK/copy_number_somatic_mutation.ESAD-UK.tsv.gz --n_samples 100 --n_workers 8
 if __name__ == "__main__":
     import argparse
