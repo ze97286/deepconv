@@ -12,7 +12,6 @@ from tqdm import tqdm
 import pickle
 import h5py
 from intervaltree import IntervalTree, Interval
-import glob 
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class SyntheticMixtureGenerator:
     """
-    Synthetic cfDNA mixture generator.
+    Highly optimized synthetic cfDNA mixture generator.
     """
     
     def __init__(self, 
@@ -180,6 +179,7 @@ class SyntheticMixtureGenerator:
             # Process by chromosome for cache efficiency
             merged = defaultdict(int)
             tumor_read_count = 0
+            tumor_read_count_pre_cna = 0 
             control_read_count = 0
             
             # Process tumor data
@@ -193,7 +193,14 @@ class SyntheticMixtureGenerator:
                     patterns = [x[1] for x in chrom_data]
                     counts = np.array([x[2] for x in chrom_data])
                     
-                    # Get all CNAs for this chromosome at once
+                    # First, calculate pre-CNA sampling (for actual TF)
+                    mask_pre_cna = counts > 0
+                    if np.any(mask_pre_cna):
+                        # Sample with intended TF (no CNA adjustment)
+                        sampled_pre_cna = np.random.binomial(counts[mask_pre_cna], tf)
+                        tumor_read_count_pre_cna += sampled_pre_cna.sum()
+                    
+                    # Now do actual sampling with CNA adjustment
                     cnas = generator.get_cna_batch(cna_profile_id, chrom, positions)
                     effective_tfs = np.minimum(tf * (cnas / 2.0), 1.0)
                     
@@ -227,6 +234,7 @@ class SyntheticMixtureGenerator:
                     mask = counts > 0
                     if np.any(mask):
                         sampled = np.random.binomial(counts[mask], control_fraction)
+                        control_read_count += sampled.sum()
                         
                         for i, (pos, pattern, sampled_count) in enumerate(
                             zip(np.array(positions)[mask], 
@@ -234,7 +242,6 @@ class SyntheticMixtureGenerator:
                                 sampled)):
                             if sampled_count > 0:
                                 merged[(chrom, pos, pattern)] += sampled_count
-                                control_read_count += sampled_count
             
             # Convert to regular dict
             merged = dict(merged)
@@ -248,8 +255,13 @@ class SyntheticMixtureGenerator:
                 current_coverage = 0
                 final_tumor_reads = 0
                 final_total_reads = 0
+                tumor_fraction_actual = 0.0
             else:
                 current_coverage = np.mean(list(position_reads.values()))
+                
+                # Calculate pre-CNA actual tumor fraction
+                total_reads_pre_cna = tumor_read_count_pre_cna + control_read_count
+                tumor_fraction_actual = tumor_read_count_pre_cna / total_reads_pre_cna if total_reads_pre_cna > 0 else 0.0
                 
                 # Downsample if needed
                 total_reads = tumor_read_count + control_read_count
@@ -280,8 +292,8 @@ class SyntheticMixtureGenerator:
                     final_tumor_reads = tumor_read_count
                     final_total_reads = total_reads
             
-            # Calculate actual tumor fraction
-            actual_tf = final_tumor_reads / final_total_reads if final_total_reads > 0 else 0.0
+            # Calculate post-CNA tumor read fraction
+            tumor_read_fraction = final_tumor_reads / final_total_reads if final_total_reads > 0 else 0.0
             
             # Store results
             result = {
@@ -289,8 +301,9 @@ class SyntheticMixtureGenerator:
                 'tumor_idx': params['tumor_idx'],
                 'control_idx': params['control_idx'],
                 'cna_profile_id': params['cna_profile_id'],
-                'tumor_fraction': params['tumor_fraction'],
-                'actual_tumor_fraction': actual_tf,
+                'tumor_fraction_intended': params['tumor_fraction'],
+                'tumor_fraction_actual': tumor_fraction_actual,  # Pre-CNA, post-sampling
+                'tumor_read_fraction': tumor_read_fraction,      # Post-CNA (what we observe)
                 'target_coverage': params['target_coverage'],
                 'final_coverage': target_coverage if current_coverage > target_coverage else current_coverage,
                 'n_patterns': len(merged),
@@ -344,7 +357,7 @@ class SyntheticMixtureGenerator:
                              "Monocytes", "NK-cells", "OAC", "Small-intestine", "T-cells"]
                 concentrations = np.zeros(len(cell_types))
                 oac_idx = cell_types.index("OAC")
-                concentrations[oac_idx] = result['actual_tumor_fraction']
+                concentrations[oac_idx] = result['tumor_fraction_actual']  # Use pre-CNA actual TF
                 
                 sample_group.create_dataset('cell_types', data=np.array(cell_types, dtype='S30'))
                 sample_group.create_dataset('concentrations', data=concentrations)
@@ -371,7 +384,7 @@ class SyntheticMixtureGenerator:
             
             with open(conc_file, 'w') as f:
                 for cell_type in cell_types:
-                    conc = result['actual_tumor_fraction'] if cell_type == "OAC" else 0.0
+                    conc = result['tumor_fraction_actual'] if cell_type == "OAC" else 0.0  # Use pre-CNA actual TF
                     f.write(f"{cell_type},{conc}\n")
     
     def generate_dataset(self, n_samples: int = 300000, seed: int = 42, 
