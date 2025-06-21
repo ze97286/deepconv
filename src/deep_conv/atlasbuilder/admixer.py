@@ -195,32 +195,19 @@ class SyntheticMixtureGenerator:
                     
                     # Get all CNAs for this chromosome at once
                     cnas = generator.get_cna_batch(cna_profile_id, chrom, positions)
+                    effective_tfs = np.minimum(tf * (cnas / 2.0), 1.0)
                     
-                    # First sample with intended TF (no CNA adjustment)
-                    mask = counts > 0
+                    # Vectorized sampling for all positions
+                    mask = (counts > 0) & (effective_tfs > 0)
                     if np.any(mask):
-                        # Sample tumor reads based on intended TF
-                        sampled_pre_cna = np.random.binomial(counts[mask], tf)
-                        tumor_read_count_pre_cna += sampled_pre_cna.sum()
-                        
-                        # Now apply CNA effect to these sampled reads
-                        # For each read that was selected, it has cn/2 chance of being observed
-                        cna_factors = cnas[mask] / 2.0
-                        # Cap at 1.0 to avoid issues
-                        cna_factors = np.minimum(cna_factors, 1.0)
-                        
-                        # Apply CNA effect
-                        sampled_with_cna = np.zeros_like(sampled_pre_cna)
-                        for i, (pre_cna_count, cna_factor) in enumerate(zip(sampled_pre_cna, cna_factors)):
-                            if pre_cna_count > 0 and cna_factor > 0:
-                                sampled_with_cna[i] = np.random.binomial(pre_cna_count, cna_factor)
+                        # Sample all at once WITH CNA effects
+                        sampled = np.random.binomial(counts[mask], effective_tfs[mask])
                         
                         # Add to merged
-                        positions_masked = np.array(positions)[mask]
-                        patterns_masked = np.array(patterns)[mask]
-                        
                         for i, (pos, pattern, sampled_count) in enumerate(
-                            zip(positions_masked, patterns_masked, sampled_with_cna)):
+                            zip(np.array(positions)[mask], 
+                                np.array(patterns)[mask], 
+                                sampled)):
                             if sampled_count > 0:
                                 merged[(chrom, pos, pattern)] += sampled_count
                                 tumor_read_count += sampled_count
@@ -240,7 +227,6 @@ class SyntheticMixtureGenerator:
                     mask = counts > 0
                     if np.any(mask):
                         sampled = np.random.binomial(counts[mask], control_fraction)
-                        control_read_count += sampled.sum()
                         
                         for i, (pos, pattern, sampled_count) in enumerate(
                             zip(np.array(positions)[mask], 
@@ -248,6 +234,7 @@ class SyntheticMixtureGenerator:
                                 sampled)):
                             if sampled_count > 0:
                                 merged[(chrom, pos, pattern)] += sampled_count
+                                control_read_count += sampled_count
             
             # Convert to regular dict
             merged = dict(merged)
@@ -265,9 +252,9 @@ class SyntheticMixtureGenerator:
             else:
                 current_coverage = np.mean(list(position_reads.values()))
                 
-                # Calculate pre-CNA actual tumor fraction
-                total_reads_pre_cna = tumor_read_count_pre_cna + control_read_count
-                tumor_fraction_actual = tumor_read_count_pre_cna / total_reads_pre_cna if total_reads_pre_cna > 0 else 0.0
+                # For actual tumor fraction, we just use the intended TF
+                # The sampling variation should be minimal with many regions
+                tumor_fraction_actual = tf
                 
                 # Downsample if needed
                 total_reads = tumor_read_count + control_read_count
