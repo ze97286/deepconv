@@ -12,7 +12,6 @@ from tqdm import tqdm
 import pickle
 import h5py
 from intervaltree import IntervalTree, Interval
-import glob
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class SyntheticMixtureGenerator:
     """
-    Generate synthetic cfDNA mixtures for deep learning model training with massive parallelization.
+    Synthetic cfDNA mixture generator.
     """
     
     def __init__(self, 
@@ -97,8 +96,15 @@ class SyntheticMixtureGenerator:
                 chrom_data = profile_data[profile_data['chromosome'] == chrom]
                 
                 for _, row in chrom_data.iterrows():
+                    start = row['chromosome_start']
+                    end = row['chromosome_end']
+                    
+                    # Handle zero-width intervals by extending by 1bp
+                    if start >= end:
+                        end = start + 1
+                    
                     # Add interval with copy number as data
-                    tree[row['chromosome_start']:row['chromosome_end']] = row['copy_number']
+                    tree[start:end] = row['copy_number']
                 
                 trees[chrom] = tree
             
