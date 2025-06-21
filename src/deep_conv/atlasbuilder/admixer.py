@@ -12,6 +12,7 @@ from tqdm import tqdm
 import pickle
 import h5py
 from intervaltree import IntervalTree, Interval
+import glob
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
