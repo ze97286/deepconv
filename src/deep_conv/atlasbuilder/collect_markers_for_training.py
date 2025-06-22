@@ -3,11 +3,27 @@ import pandas as pd
 import numpy as np
 import argparse
 from pathlib import Path
-from deep_conv.atlasbuilder.find_marker_candidates import create_marker_matrices, get_ground_truth
+from deep_conv.atlasbuilder.find_marker_candidates import create_marker_matrices, get_ground_truth, create_marker_matrices_h5, get_ground_truth_h5
 import plotly.graph_objects as go
 import plotly.subplots as sp
 import math
 import gc
+
+
+def prepare_h5(atlas_path, pat_dir, min_cpgs=4, threads=32):
+    if os.path.exists(Path(pat_dir)/"marker_values.parquet"):
+        X = pd.read_parquet(Path(pat_dir)/"marker_values.parquet")
+    else:
+        X, coverage = create_marker_matrices_h5(atlas_path, pat_dir, min_cpgs, threads)
+        X.to_parquet(pat_dir/"marker_values.parquet", index=False)
+        coverage.to_parquet(pat_dir/"coverage.parquet", index=False)
+    y = get_ground_truth_h5(pat_dir,X.columns[2:]).fillna(0)
+    atlas = pd.read_csv(atlas_path,sep="\t")
+    cell_types = list(atlas.columns[8:])
+    if "duodenum" in cell_types and "Duodenum" in y.columns:
+        y.rename(columns={"Duodenum":"duodenum"}, inplace=True)
+    y = y[cell_types]
+    y.to_parquet(pat_dir/"ground_truth_y.parquet", index=False)
 
 
 def prepare(atlas_path, pat_dir, min_cpgs=4, threads=32):

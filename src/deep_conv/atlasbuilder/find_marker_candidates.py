@@ -12,7 +12,7 @@ import os
 import time
 import numba
 import gc
-
+import h5py
 
 @dataclass
 class Region:
@@ -307,6 +307,92 @@ def create_marker_matrices(atlas_path: str, pat_dir: str, min_cpgs: int, threads
    
    return marker_matrix, coverage_matrix
 
+def create_marker_matrices_h5(atlas_path: str, pat_dir: str, min_cpgs: int, threads=4) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Create marker values matrix and coverage matrix from atlas markers and pat files.
+    Handles both regular pat.gz files and HDF5 batch files.
+    """
+    # Read atlas
+    print(f"Loading markers from {atlas_path}...")
+    markers_df = pd.read_csv(atlas_path, sep='\t')
+    
+    # Check if this is an HDF5 directory
+    h5_files = sorted(glob.glob(os.path.join(pat_dir, 'batch_*.h5')))
+    
+    if h5_files:
+        # Extract all samples from HDF5 to temporary pat.gz files
+        print(f"Found {len(h5_files)} HDF5 batch files. Extracting samples...")
+        temp_dir = os.path.join(pat_dir, 'temp_pats')
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Extract all samples
+        for h5_file in tqdm(h5_files, desc="Extracting from HDF5"):
+            with h5py.File(h5_file, 'r') as f:
+                for sample_id in f.keys():
+                    # Extract to pat.gz file
+                    pat_file = os.path.join(temp_dir, f"{sample_id}.pat.gz")
+                    
+                    chroms = f[sample_id]['chromosomes'][:]
+                    positions = f[sample_id]['positions'][:]
+                    patterns = f[sample_id]['patterns'][:]
+                    counts = f[sample_id]['counts'][:]
+                    
+                    with gzip.open(pat_file, 'wt') as out:
+                        for chrom, pos, pattern, count in zip(chroms, positions, patterns, counts):
+                            chrom = chrom.decode() if isinstance(chrom, bytes) else chrom
+                            pattern = pattern.decode() if isinstance(pattern, bytes) else pattern
+                            out.write(f"{chrom}\t{pos}\t{pattern}\t{count}\n")
+        
+        # Use temp directory for processing
+        pat_files = sorted(list(Path(temp_dir).glob('*.pat.gz')))
+    else:
+        # Regular pat.gz files
+        pat_files = sorted(list(Path(pat_dir).glob('*.pat.gz')))
+    
+    print(f"Found {len(pat_files)} pat files to process")
+    
+    # Use existing parallel processing
+    with mp.Pool(threads) as pool:
+        process_func = partial(process_pat_file_with_name, markers_df, min_cpgs=min_cpgs)
+        results = list(tqdm(
+            pool.imap(process_func, pat_files),
+            total=len(pat_files),
+            desc="Processing pat files"
+        ))
+    
+    # Clean up temp files if we created them
+    if h5_files and os.path.exists(temp_dir):
+        import shutil
+        shutil.rmtree(temp_dir)
+    
+    # Sort results by filename
+    results = sorted(results, key=lambda x: x['file'])
+    # If you need just the results in order:
+    results = [r['result'] for r in results]
+    
+    # Create base matrix with name and direction
+    base_df = markers_df[['name', 'direction']]
+    
+    # Build matrices
+    marker_matrix = base_df.copy()
+    coverage_matrix = base_df.copy()
+    
+    for uxm_df, coverage_df, cell_type in results:
+        # Use efficient merge instead of pandas merge
+        marker_matrix[cell_type] = efficient_merge(
+            base_df, 
+            uxm_df[['name', 'direction', 'value']]
+        )
+        coverage_matrix[cell_type] = efficient_merge(
+            base_df, 
+            coverage_df[['name', 'direction', 'value']]
+        )
+    
+    # Memory cleanup
+    gc.collect()
+    
+    return marker_matrix, coverage_matrix
+
 
 def get_ground_truth(pat_dir, names):
     dfs = []
@@ -315,6 +401,46 @@ def get_ground_truth(pat_dir, names):
     df=pd.concat(dfs, ignore_index=True)
     return df
 
+def get_ground_truth_h5(pat_dir, names):
+    # Check if this is an HDF5 directory
+    h5_files = sorted(glob.glob(os.path.join(pat_dir, 'batch_*.h5')))
+    
+    if h5_files:
+        # Extract concentration files from HDF5
+        temp_dir = os.path.join(pat_dir, 'temp_concentrations')
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        for h5_file in h5_files:
+            with h5py.File(h5_file, 'r') as f:
+                for sample_id in f.keys():
+                    if sample_id in names:
+                        # Extract concentration file
+                        conc_file = os.path.join(temp_dir, f"{sample_id}_true_concentrations.csv")
+                        cell_types = [ct.decode() if isinstance(ct, bytes) else ct 
+                                     for ct in f[sample_id]['cell_types'][:]]
+                        concentrations = f[sample_id]['concentrations'][:]
+                        
+                        with open(conc_file, 'w') as out:
+                            for ct, conc in zip(cell_types, concentrations):
+                                out.write(f"{ct},{conc}\n")
+        
+        # Use temp directory
+        use_dir = temp_dir
+    else:
+        use_dir = pat_dir
+    
+    # Original code
+    dfs = []
+    for n in names:
+        dfs.append(pd.read_csv(str(use_dir)+f"/{n}_true_concentrations.csv"))
+    df=pd.concat(dfs, ignore_index=True)
+    
+    # Clean up temp files if created
+    if h5_files and os.path.exists(temp_dir):
+        import shutil
+        shutil.rmtree(temp_dir)
+    
+    return df
 
 def evaluate_marker_quality(values, target_idx, min_signal, min_snr, significance_threshold):
     """
