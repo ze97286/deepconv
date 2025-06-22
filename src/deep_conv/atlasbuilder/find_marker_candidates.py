@@ -430,11 +430,17 @@ def get_ground_truth_h5(pat_dir, names):
     else:
         use_dir = pat_dir
     
-    # Original code
+    # Read files and reshape to expected format
     dfs = []
     for n in names:
-        dfs.append(pd.read_csv(str(use_dir)+f"/{n}_true_concentrations.csv"))
-    df=pd.concat(dfs, ignore_index=True)
+        # Read the CSV without headers
+        df = pd.read_csv(f"{use_dir}/{n}_true_concentrations.csv", header=None, names=['cell_type', 'concentration'])
+        # Pivot to get cell types as columns
+        df_pivot = df.set_index('cell_type').T
+        df_pivot.index = [n]  # Set sample name as index
+        dfs.append(df_pivot)
+    
+    df = pd.concat(dfs, ignore_index=True)
     
     # Clean up temp files if created
     if h5_files and os.path.exists(temp_dir):
@@ -442,7 +448,6 @@ def get_ground_truth_h5(pat_dir, names):
         shutil.rmtree(temp_dir)
     
     return df
-
 def evaluate_marker_quality(values, target_idx, min_signal, min_snr, significance_threshold):
     """
     Evaluate marker quality with additional metrics while keeping core functionality
