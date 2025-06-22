@@ -69,9 +69,12 @@ def load_and_preprocess_data(
     print(f"Loading data from {marker_values_path}, {coverage_path}, {ground_truth_path}...")
     
     # Load marker values and coverage data
-    marker_values_df = transpose_df(pd.read_parquet(marker_values_path))
-    coverage_df = transpose_df(pd.read_parquet(coverage_path))
+    # marker_values_df = transpose_df(pd.read_parquet(marker_values_path))
+    # coverage_df = transpose_df(pd.read_parquet(coverage_path))
     
+    marker_values_df = pd.read_parquet(marker_values_path)
+    coverage_df = pd.read_parquet(coverage_path)
+
     # Load ground truth
     ground_truth_df = pd.read_parquet(ground_truth_path)
     y_true = ground_truth_df.iloc[:, target_cell_idx].values
