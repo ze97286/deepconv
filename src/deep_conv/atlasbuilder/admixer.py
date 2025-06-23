@@ -159,7 +159,7 @@ class SyntheticMixtureGenerator:
         return np.array(copy_numbers)
     
     @staticmethod
-    def process_sample_batch(params_batch: List[Dict], generator: 'OptimizedMixtureGenerator') -> List[Dict]:
+    def process_sample_batch(params_batch: List[Dict], generator: 'SyntheticMixtureGenerator') -> List[Dict]:
         """
         Process a batch of samples together for efficiency.
         """
@@ -179,10 +179,9 @@ class SyntheticMixtureGenerator:
             # Process by chromosome for cache efficiency
             merged = defaultdict(int)
             tumor_read_count = 0
-            tumor_read_count_pre_cna = 0  # Track pre-CNA tumor reads
             control_read_count = 0
             
-            # Process tumor data
+            # Process tumor data ONLY if tf > 0
             if tf > 0:
                 for chrom, chrom_data in tumor_data.items():
                     if not chrom_data:
@@ -212,9 +211,12 @@ class SyntheticMixtureGenerator:
                                 merged[(chrom, pos, pattern)] += sampled_count
                                 tumor_read_count += sampled_count
             
-            # Process control data
+            # Process control data ONLY if tf < 1.0
             if tf < 1.0:
                 control_fraction = 1.0 - tf
+                
+                # IMPORTANT: When tf=0, we should NOT use the CNA profile at all
+                # The sample should be purely diploid control
                 for chrom, chrom_data in control_data.items():
                     if not chrom_data:
                         continue
@@ -226,6 +228,8 @@ class SyntheticMixtureGenerator:
                     
                     mask = counts > 0
                     if np.any(mask):
+                        # Sample control reads - no CNA effects ever!
+                        # Control is always diploid regardless of tumor fraction
                         sampled = np.random.binomial(counts[mask], control_fraction)
                         
                         for i, (pos, pattern, sampled_count) in enumerate(
@@ -253,7 +257,6 @@ class SyntheticMixtureGenerator:
                 current_coverage = np.mean(list(position_reads.values()))
                 
                 # For actual tumor fraction, we just use the intended TF
-                # The sampling variation should be minimal with many regions
                 tumor_fraction_actual = tf
                 
                 # Downsample if needed
@@ -293,22 +296,22 @@ class SyntheticMixtureGenerator:
                 'sample_id': params['sample_id'],
                 'tumor_idx': params['tumor_idx'],
                 'control_idx': params['control_idx'],
-                'cna_profile_id': params['cna_profile_id'],
+                'cna_profile_id': params['cna_profile_id'] if tf > 0 else 'diploid',  # Mark as diploid for tf=0
                 'tumor_fraction_intended': params['tumor_fraction'],
-                'tumor_fraction_actual': tumor_fraction_actual,  # Pre-CNA, post-sampling
-                'tumor_read_fraction': tumor_read_fraction,      # Post-CNA (what we observe)
+                'tumor_fraction_actual': tumor_fraction_actual,
+                'tumor_read_fraction': tumor_read_fraction,
                 'target_coverage': params['target_coverage'],
                 'final_coverage': target_coverage if current_coverage > target_coverage else current_coverage,
                 'n_patterns': len(merged),
                 'tumor_reads': final_tumor_reads,
                 'total_reads': final_total_reads,
-                'pat_data': merged  # Store the actual data
+                'pat_data': merged
             }
             
             results.append(result)
         
-        return results
-    
+        return
+
     def save_batch_to_hdf5(self, results: List[Dict], batch_id: int):
         """
         Save a batch of results to HDF5 format for efficient storage.
