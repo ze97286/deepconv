@@ -296,7 +296,7 @@ class SyntheticMixtureGenerator:
                 'sample_id': params['sample_id'],
                 'tumor_idx': params['tumor_idx'],
                 'control_idx': params['control_idx'],
-                'cna_profile_id': params['cna_profile_id'] if tf > 0 else 'diploid',  # Mark as diploid for tf=0
+                'cna_profile_id': params['cna_profile_id'] if tf > 0 else 'diploid',
                 'tumor_fraction_intended': params['tumor_fraction'],
                 'tumor_fraction_actual': tumor_fraction_actual,
                 'tumor_read_fraction': tumor_read_fraction,
@@ -310,7 +310,7 @@ class SyntheticMixtureGenerator:
             
             results.append(result)
         
-        return
+        return results
 
     def save_batch_to_hdf5(self, results: List[Dict], batch_id: int):
         """
