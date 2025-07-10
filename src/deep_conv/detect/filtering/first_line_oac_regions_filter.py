@@ -30,7 +30,7 @@ def refined_stage1_filtering(df):
     # REFINED filtering
     filtered = df[
         # High cancer signal
-        (df['OAC'] >= 0.7) &
+        (df['OAC'] >= 0.5) &
         (df['OAC_coverage'] >= 80) &
         
         # STRICT on blood/immune
@@ -38,13 +38,13 @@ def refined_stage1_filtering(df):
         (df['median_blood_background'] <= 0.005) &
         
         # BROAD GI filter - two conditions
-        (df['max_gi'] <= 0.2) &  # Max 20% in any GI tissue
-        (df['gi_to_oac_ratio'] <= 0.25) &  # GI < 1/4 of OAC signal
+        (df['max_gi'] <= 0.3) &  # Max 30% in any GI tissue
+        (df['gi_to_oac_ratio'] <= 0.35) &  # GI <= 35% of OAC signal
         
         # Updated cfDNA compatibility
-        (df['region_length'] <= 400) &
+        (df['region_length'] <= 500) &
         (df['n_cpgs'] >= 4) &
-        (df['n_cpgs'] <= 30)
+        (df['n_cpgs'] <= 40)
     ]
     
     print(f"Regions after refined filtering: {len(filtered):,}")
