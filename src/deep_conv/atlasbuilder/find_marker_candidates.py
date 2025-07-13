@@ -289,19 +289,28 @@ def create_marker_matrices(atlas_path: str, pat_dir: str, min_cpgs: int, threads
    results = [r['result'] for r in results]
    # Create base matrix with name and direction
    base_df = markers_df[['name', 'direction']]
-   # Build matrices
-   marker_matrix = base_df.copy()
-   coverage_matrix = base_df.copy()
+   
+   # Build matrices efficiently to avoid fragmentation
+   print("Building marker and coverage matrices...")
+   
+   # Prepare data for efficient creation
+   marker_data = {'name': base_df['name'], 'direction': base_df['direction']}
+   coverage_data = {'name': base_df['name'], 'direction': base_df['direction']}
+   
    for uxm_df, coverage_df, cell_type in results:
        # 15. Use efficient merge instead of pandas merge
-       marker_matrix[cell_type] = efficient_merge(
+       marker_data[cell_type] = efficient_merge(
            base_df, 
            uxm_df[['name', 'direction', 'value']]
        )
-       coverage_matrix[cell_type] = efficient_merge(
+       coverage_data[cell_type] = efficient_merge(
            base_df, 
            coverage_df[['name', 'direction', 'value']]
        )
+   
+   # Create matrices all at once to avoid fragmentation
+   marker_matrix = pd.DataFrame(marker_data)
+   coverage_matrix = pd.DataFrame(coverage_data)
    
    # 16. Memory cleanup
    gc.collect()
@@ -374,20 +383,27 @@ def create_marker_matrices_h5(atlas_path: str, pat_dir: str, min_cpgs: int, thre
     # Create base matrix with name and direction
     base_df = markers_df[['name', 'direction']]
     
-    # Build matrices
-    marker_matrix = base_df.copy()
-    coverage_matrix = base_df.copy()
+    # Build matrices efficiently with pd.concat to avoid fragmentation
+    print("Building marker and coverage matrices...")
+    
+    # Prepare data for efficient concatenation
+    marker_data = {'name': base_df['name'], 'direction': base_df['direction']}
+    coverage_data = {'name': base_df['name'], 'direction': base_df['direction']}
     
     for uxm_df, coverage_df, cell_type in results:
         # Use efficient merge instead of pandas merge
-        marker_matrix[cell_type] = efficient_merge(
+        marker_data[cell_type] = efficient_merge(
             base_df, 
             uxm_df[['name', 'direction', 'value']]
         )
-        coverage_matrix[cell_type] = efficient_merge(
+        coverage_data[cell_type] = efficient_merge(
             base_df, 
             coverage_df[['name', 'direction', 'value']]
         )
+    
+    # Create matrices all at once to avoid fragmentation
+    marker_matrix = pd.DataFrame(marker_data)
+    coverage_matrix = pd.DataFrame(coverage_data)
     
     # Memory cleanup
     gc.collect()
@@ -583,19 +599,26 @@ def process_with_params(chr, pat_dir, regions, min_cpgs, min_coverage, snr_thres
                 uxm_dfs.append(uxm_df)
                 coverage_dfs.append(coverage_df)
                 cell_types.append(cell_type)
-            # Create final matrices
+            # Create final matrices efficiently to avoid fragmentation
+            print("Building final UXM and coverage matrices...")
             # First, create the base DataFrame with name and direction
             base_df = regions_df[['name', 'direction']]
-            # Create UXM matrix
-            uxm_matrix = base_df.copy()
+            
+            # Prepare data for efficient matrix creation
+            uxm_data = {'name': base_df['name'], 'direction': base_df['direction']}
+            coverage_data = {'name': base_df['name'], 'direction': base_df['direction']}
+            
             for df, cell_type in zip(uxm_dfs, cell_types):
                 # 18. Use efficient merge instead of pandas merge
-                uxm_matrix[f"{cell_type}_merged"] = efficient_merge(base_df, df)
-            # Create coverage matrix                           
-            coverage_matrix = base_df.copy()
+                uxm_data[f"{cell_type}_merged"] = efficient_merge(base_df, df)
+                
             for df, cell_type in zip(coverage_dfs, cell_types):
                 # 19. Use efficient merge instead of pandas merge
-                coverage_matrix[f"{cell_type}_merged"] = efficient_merge(base_df, df)
+                coverage_data[f"{cell_type}_merged"] = efficient_merge(base_df, df)
+            
+            # Create matrices all at once to avoid fragmentation
+            uxm_matrix = pd.DataFrame(uxm_data)
+            coverage_matrix = pd.DataFrame(coverage_data)
                 
             marker_props, coverage = uxm_matrix, coverage_matrix
             col_mapping = {col.split('_')[0]: col for col in marker_props.columns if col not in ['name', 'direction']}
