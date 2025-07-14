@@ -249,19 +249,31 @@ def process_pat_file_with_name(regions_df, pat_file, min_cpgs):
     return {'file': pat_file.name, 'result': process_pat_file(pat_file=pat_file, min_cpgs=min_cpgs, regions_df=regions_df)}
 
 
-# 14. Optimized DataFrame merge function
+# 14. Optimized DataFrame merge function using vectorized operations
 def efficient_merge(base_df, value_df, key_cols=['name', 'direction'], value_col='value'):
-    # Create lookup dictionary
+    # Create lookup dictionary using vectorized operations
     lookup = {}
-    for _, row in value_df.iterrows():
-        key = tuple(row[k] for k in key_cols)
-        lookup[key] = row[value_col]
     
-    # Fast lookup
-    result = []
-    for _, row in base_df.iterrows():
-        key = tuple(row[k] for k in key_cols)
-        result.append(lookup.get(key, np.nan))
+    # Vectorized key creation for value_df
+    if len(key_cols) == 2:
+        # Optimized for the common case of ['name', 'direction']
+        for name, direction, value in zip(value_df[key_cols[0]], value_df[key_cols[1]], value_df[value_col]):
+            lookup[(name, direction)] = value
+    else:
+        # General case for arbitrary key columns
+        for i in range(len(value_df)):
+            key = tuple(value_df.iloc[i][k] for k in key_cols)
+            lookup[key] = value_df.iloc[i][value_col]
+    
+    # Vectorized lookup for base_df
+    if len(key_cols) == 2:
+        # Optimized for the common case
+        result = [lookup.get((name, direction), np.nan) 
+                 for name, direction in zip(base_df[key_cols[0]], base_df[key_cols[1]])]
+    else:
+        # General case
+        result = [lookup.get(tuple(base_df.iloc[i][k] for k in key_cols), np.nan) 
+                 for i in range(len(base_df))]
     
     return result
 
@@ -290,14 +302,15 @@ def create_marker_matrices(atlas_path: str, pat_dir: str, min_cpgs: int, threads
    # Create base matrix with name and direction
    base_df = markers_df[['name', 'direction']]
    
-   # Build matrices efficiently to avoid fragmentation
-   print("Building marker and coverage matrices...")
+   # Build matrices efficiently with progress tracking
+   print(f"Building marker and coverage matrices for {len(results)} samples...")
    
    # Prepare data for efficient creation
    marker_data = {'name': base_df['name'], 'direction': base_df['direction']}
    coverage_data = {'name': base_df['name'], 'direction': base_df['direction']}
    
-   for uxm_df, coverage_df, cell_type in results:
+   # Process with progress bar
+   for uxm_df, coverage_df, cell_type in tqdm(results, desc="Merging sample data"):
        # 15. Use efficient merge instead of pandas merge
        marker_data[cell_type] = efficient_merge(
            base_df, 
@@ -309,6 +322,7 @@ def create_marker_matrices(atlas_path: str, pat_dir: str, min_cpgs: int, threads
        )
    
    # Create matrices all at once to avoid fragmentation
+   print("Creating final DataFrames...")
    marker_matrix = pd.DataFrame(marker_data)
    coverage_matrix = pd.DataFrame(coverage_data)
    
@@ -383,14 +397,15 @@ def create_marker_matrices_h5(atlas_path: str, pat_dir: str, min_cpgs: int, thre
     # Create base matrix with name and direction
     base_df = markers_df[['name', 'direction']]
     
-    # Build matrices efficiently with pd.concat to avoid fragmentation
-    print("Building marker and coverage matrices...")
+    # Build matrices efficiently with progress tracking
+    print(f"Building marker and coverage matrices for {len(results)} samples...")
     
     # Prepare data for efficient concatenation
     marker_data = {'name': base_df['name'], 'direction': base_df['direction']}
     coverage_data = {'name': base_df['name'], 'direction': base_df['direction']}
     
-    for uxm_df, coverage_df, cell_type in results:
+    # Process with progress bar
+    for i, (uxm_df, coverage_df, cell_type) in enumerate(tqdm(results, desc="Merging sample data")):
         # Use efficient merge instead of pandas merge
         marker_data[cell_type] = efficient_merge(
             base_df, 
@@ -402,6 +417,7 @@ def create_marker_matrices_h5(atlas_path: str, pat_dir: str, min_cpgs: int, thre
         )
     
     # Create matrices all at once to avoid fragmentation
+    print("Creating final DataFrames...")
     marker_matrix = pd.DataFrame(marker_data)
     coverage_matrix = pd.DataFrame(coverage_data)
     
