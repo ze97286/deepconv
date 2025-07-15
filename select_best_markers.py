@@ -110,25 +110,59 @@ def select_best_markers_from_atlas(atlas_path, target_cell_type, top_k=1000):
     # Compute scores
     scores, target_atlas = compute_atlas_based_scores(atlas, target_cell_type)
     
-    # Get top K markers
-    top_indices = np.argsort(scores)[-top_k:][::-1]  # Descending order
-    top_scores = scores[top_indices]
+    # Sort by score
+    sorted_indices = np.argsort(scores)[::-1]  # Descending order
+    
+    # Select non-overlapping markers
+    selected_indices = []
+    selected_regions = []
+    
+    for idx in sorted_indices:
+        row = target_atlas.iloc[idx]
+        chr_name = row['chr']
+        start = row['start']
+        end = row['end']
+        
+        # Check overlap with already selected regions
+        overlaps = False
+        for sel_chr, sel_start, sel_end in selected_regions:
+            if chr_name == sel_chr:
+                # Check if regions overlap
+                if not (end < sel_start or start > sel_end):
+                    overlaps = True
+                    break
+        
+        if not overlaps:
+            selected_indices.append(idx)
+            selected_regions.append((chr_name, start, end))
+            
+            if len(selected_indices) >= top_k:
+                break
+    
+    # Convert to array
+    selected_indices = np.array(selected_indices)
     
     # Select top markers from atlas
-    selected_atlas = target_atlas.iloc[top_indices].copy()
-    selected_atlas['selection_score'] = top_scores
+    selected_atlas = target_atlas.iloc[selected_indices].copy()
+    selected_atlas['selection_score'] = scores[selected_indices]
     
-    print(f"\nSelected {len(selected_atlas)} markers:")
-    print(f"Score range: {top_scores.min():.4f} - {top_scores.max():.4f}")
-    print(f"Mean score: {top_scores.mean():.4f}")
+    print(f"\nSelected {len(selected_atlas)} non-overlapping markers:")
+    print(f"Score range: {selected_atlas['selection_score'].min():.4f} - {selected_atlas['selection_score'].max():.4f}")
+    print(f"Mean score: {selected_atlas['selection_score'].mean():.4f}")
     
     # Print top 10 for inspection
     print(f"\nTop 10 markers:")
     for i in range(min(10, len(selected_atlas))):
         row = selected_atlas.iloc[i]
-        score = top_scores[i]
+        score = row['selection_score']
         marker_name = row.get('name', f'marker_{i}')
         print(f"  {marker_name}: score={score:.4f}")
+    
+    # Print chromosome distribution
+    chr_counts = selected_atlas['chr'].value_counts()
+    print(f"\nChromosome distribution:")
+    for chr_name, count in chr_counts.head().items():
+        print(f"  {chr_name}: {count} markers")
     
     return selected_atlas
 
