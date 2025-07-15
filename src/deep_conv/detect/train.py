@@ -3097,8 +3097,6 @@ def main():
         model = EnhancedCancerDetectionModel(
             num_markers=num_markers,
             feature_dim=args.feature_dim,
-            num_heads=args.num_heads,
-            num_layers=args.num_layers,
             dropout_rate=args.dropout_rate,
             min_reliable_coverage=args.min_reliable_coverage
         )
