@@ -12,14 +12,18 @@ import os
 
 def load_atlas(atlas_path):
     """Load atlas file and return DataFrame"""
-    if atlas_path.endswith('.bed'):
-        # BED format: chr, start, end, name, score, strand, ...
-        atlas = pd.read_csv(atlas_path, sep='\t', header=None)
-        # Assume standard BED format columns
-        atlas.columns = ['chr', 'start', 'end', 'name', 'score', 'strand'] + [f'col_{i}' for i in range(6, len(atlas.columns))]
-    else:
-        # CSV/TSV format
-        atlas = pd.read_csv(atlas_path, sep='\t')
+    # Always try to read with header first
+    atlas = pd.read_csv(atlas_path, sep='\t')
+    
+    # Convert numeric columns to proper types
+    numeric_cols = ['start', 'end', 'startCpG', 'endCpG', 
+                    'B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 
+                    'Colon', 'Esophagus', 'Gastric', 'Granulocytes', 
+                    'Monocytes', 'NK-cells', 'OAC', 'Small-intestine', 'T-cells']
+    
+    for col in numeric_cols:
+        if col in atlas.columns:
+            atlas[col] = pd.to_numeric(atlas[col], errors='coerce')
     
     return atlas
 
@@ -28,76 +32,61 @@ def compute_atlas_based_scores(atlas, target_cell_type):
     Compute marker quality scores based purely on atlas characteristics
     """
     # Filter to target cell type markers
-    target_atlas = atlas[atlas['target'] == target_cell_type].copy() if 'target' in atlas.columns else atlas.copy()
+    target_atlas = atlas[atlas['target'] == target_cell_type].copy()
     
     n_markers = len(target_atlas)
     scores = np.zeros(n_markers)
     
     print(f"Computing atlas-based scores for {n_markers} {target_cell_type} markers...")
     
-    # Find atlas columns that likely contain signal information
-    signal_cols = []
-    for col in target_atlas.columns:
-        if target_cell_type.lower() in col.lower():
-            signal_cols.append(col)
+    # Get cell type columns
+    cell_type_cols = ['B-cells', 'CD34-erythroblasts', 'CD34-megakaryocytes', 
+                      'Colon', 'Esophagus', 'Gastric', 'Granulocytes', 
+                      'Monocytes', 'NK-cells', 'OAC', 'Small-intestine', 'T-cells']
     
-    if not signal_cols:
-        print("Warning: No target-specific signal columns found in atlas")
-        # Use all numeric columns as potential signal
-        signal_cols = target_atlas.select_dtypes(include=[np.number]).columns.tolist()
+    # Filter to existing columns
+    cell_type_cols = [col for col in cell_type_cols if col in target_atlas.columns]
+    other_cell_types = [col for col in cell_type_cols if col != target_cell_type]
     
-    print(f"Using signal columns: {signal_cols}")
+    print(f"Target column: {target_cell_type}")
+    print(f"Other cell types: {other_cell_types}")
     
     for idx, (_, row) in enumerate(target_atlas.iterrows()):
         score = 0.0
         
-        # 1. Signal strength (mean signal across conditions)
-        if signal_cols:
-            signal_values = [row[col] for col in signal_cols if pd.notna(row[col])]
-            if signal_values:
-                signal_strength = np.mean(signal_values)
-                score += 0.4 * min(signal_strength, 1.0)  # Cap at 1.0
+        # 1. Target cell type signal strength
+        if target_cell_type in row and pd.notna(row[target_cell_type]):
+            target_signal = row[target_cell_type]
+            score += 0.3 * min(abs(target_signal), 1.0)
         
-        # 2. Background signal (if available)
-        background_cols = [col for col in target_atlas.columns if 'background' in col.lower() or 'control' in col.lower()]
-        if background_cols:
-            background_values = [row[col] for col in background_cols if pd.notna(row[col])]
-            if background_values:
-                background_signal = np.mean(background_values)
-                # Lower background is better
-                score += 0.2 * max(0, 1.0 - background_signal)
+        # 2. Specificity (high in target, low in others)
+        if other_cell_types and target_cell_type in row:
+            target_val = row[target_cell_type] if pd.notna(row[target_cell_type]) else 0
+            other_vals = [row[col] for col in other_cell_types if col in row and pd.notna(row[col])]
+            if other_vals:
+                mean_other = np.mean(other_vals)
+                # Higher difference = more specific
+                specificity = target_val - mean_other
+                score += 0.3 * max(0, min(specificity, 1.0))
         
         # 3. Region length (shorter regions might be more specific)
-        if 'start' in row and 'end' in row:
+        if pd.notna(row['start']) and pd.notna(row['end']):
             region_length = row['end'] - row['start']
-            # Normalize by typical CpG region length (assume 1kb is optimal)
-            length_score = max(0, 1.0 - abs(region_length - 1000) / 1000)
-            score += 0.1 * length_score
+            # Normalize by typical CpG region length (assume 500bp is optimal)
+            length_score = max(0, 1.0 - abs(region_length - 500) / 500)
+            score += 0.2 * length_score
         
-        # 4. Chromosome distribution bonus (spread across chromosomes is good)
-        # This will be computed globally after all markers are scored
-        
-        # 5. Coverage-related score (if available in atlas)
-        coverage_cols = [col for col in target_atlas.columns if 'coverage' in col.lower() or 'depth' in col.lower()]
-        if coverage_cols:
-            coverage_values = [row[col] for col in coverage_cols if pd.notna(row[col])]
-            if coverage_values:
-                coverage_score = min(np.mean(coverage_values) / 10.0, 1.0)  # Normalize
-                score += 0.1 * coverage_score
-        
-        # 6. Variability/SNR (if multiple conditions available)
-        if len(signal_cols) > 1:
-            signal_values = [row[col] for col in signal_cols if pd.notna(row[col])]
-            if len(signal_values) > 1:
-                signal_var = np.var(signal_values)
-                signal_mean = np.mean(signal_values)
-                if signal_mean > 0:
-                    cv = signal_var / signal_mean  # Coefficient of variation
-                    score += 0.2 * min(cv, 1.0)
+        # 4. Number of CpGs (if available)
+        if 'startCpG' in row and 'endCpG' in row:
+            if pd.notna(row['startCpG']) and pd.notna(row['endCpG']):
+                num_cpgs = row['endCpG'] - row['startCpG']
+                # Normalize (assume 10 CpGs is good)
+                cpg_score = min(num_cpgs / 10.0, 1.0)
+                score += 0.1 * cpg_score
         
         scores[idx] = score
     
-    # 4. Chromosome distribution bonus
+    # 5. Chromosome distribution bonus
     if 'chr' in target_atlas.columns:
         chr_counts = target_atlas['chr'].value_counts()
         for idx, (_, row) in enumerate(target_atlas.iterrows()):
