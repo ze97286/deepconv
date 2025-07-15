@@ -143,19 +143,17 @@ class ScalableMarkerAggregator(nn.Module):
             group_sums = group_assignments.sum(dim=1, keepdim=True) + 1e-8
             group_assignments = group_assignments / group_sums
         
-        # Step 2: Aggregate markers within each group (O(n))
-        group_features = []
+        # Step 2: Vectorized group aggregation (O(n)) - Much faster
+        # [batch, markers, groups] -> [batch, groups, markers]
+        group_assignments_t = group_assignments.transpose(1, 2)
         
+        # [batch, groups, markers] × [batch, markers, features] -> [batch, groups, features]
+        group_reprs = torch.bmm(group_assignments_t, features)
+        
+        # Process all groups in parallel through their specific networks
+        group_features = []
         for group_idx in range(self.num_groups):
-            # Get assignment weights for this group
-            group_weights = group_assignments[:, :, group_idx:group_idx+1]  # [batch, markers, 1]
-            
-            # Weighted average of markers assigned to this group
-            weighted_features = features * group_weights  # [batch, markers, feature_dim]
-            group_repr = weighted_features.sum(dim=1)  # [batch, feature_dim]
-            
-            # Process through group-specific network
-            group_processed = self.group_processors[group_idx](group_repr)
+            group_processed = self.group_processors[group_idx](group_reprs[:, group_idx])
             group_features.append(group_processed)
         
         # Stack group representations: [batch, num_groups, feature_dim]
