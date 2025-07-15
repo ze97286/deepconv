@@ -184,13 +184,8 @@ def main():
         args.atlas_path, args.target_cell_type, args.top_k
     )
     
-    # Save filtered atlas
-    if args.output.endswith('.bed'):
-        # Save as BED format
-        selected_atlas.to_csv(args.output, sep='\t', header=False, index=False)
-    else:
-        # Save as TSV format
-        selected_atlas.to_csv(args.output, sep='\t', index=False)
+    # Save filtered atlas in same format as input
+    selected_atlas.to_csv(args.output, sep='\t', index=False)
     
     print(f"\nSaved filtered atlas with {len(selected_atlas)} markers to {args.output}")
     
