@@ -78,111 +78,54 @@ class DynamicMarkerPruning(nn.Module):
 
 class ScalableMarkerAggregator(nn.Module):
     """
-    O(n) scalable replacement for transformer encoder
-    Designed to handle 10k+ markers efficiently
+    Simplified O(n) replacement for transformer encoder
+    Much simpler than original - just marker-wise processing + single attention
     """
-    def __init__(self, feature_dim=16, num_groups=64, dropout_rate=0.2):
+    def __init__(self, feature_dim=16, dropout_rate=0.2):
         super().__init__()
         self.feature_dim = feature_dim
-        self.num_groups = num_groups
         
-        # Learnable marker grouping - assigns each marker to a group
-        self.marker_grouping = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
+        # Simple marker-wise processing (no grouping complexity)
+        self.marker_processor = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim * 2),
             nn.GELU(),
-            nn.Linear(feature_dim // 2, num_groups),
-            nn.Softmax(dim=-1)
+            nn.Dropout(dropout_rate),
+            nn.Linear(feature_dim * 2, feature_dim),
+            nn.LayerNorm(feature_dim)
         )
         
-        # Group-wise processing with mixture of experts approach
-        self.group_processors = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(feature_dim, feature_dim),
-                nn.GELU(),
-                nn.Dropout(dropout_rate),
-                nn.Linear(feature_dim, feature_dim),
-                nn.LayerNorm(feature_dim)
-            ) for _ in range(num_groups)
-        ])
-        
-        # Cross-group communication (O(groups²) not O(markers²))
-        self.group_attention = nn.MultiheadAttention(
+        # Single self-attention layer for inter-marker communication
+        self.self_attention = nn.MultiheadAttention(
             embed_dim=feature_dim,
             num_heads=2,
             dropout=dropout_rate,
             batch_first=True
         )
         
-        # Final marker-level refinement
-        self.marker_refinement = nn.Sequential(
-            nn.Linear(feature_dim * 2, feature_dim),  # concat original + group-processed
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim, feature_dim),
-            nn.LayerNorm(feature_dim)
-        )
-        
     def forward(self, features, key_padding_mask=None):
         """
+        Simplified forward pass - much closer to original transformer
         Args:
             features: [batch_size, num_markers, feature_dim]
             key_padding_mask: [batch_size, num_markers] - True for masked positions
         """
-        batch_size, num_markers, feature_dim = features.shape
+        # Step 1: Process each marker independently (like feedforward in transformer)
+        processed = self.marker_processor(features)
         
-        # Step 1: Assign markers to groups (O(n))
-        # Shape: [batch_size, num_markers, num_groups]
-        group_assignments = self.marker_grouping(features)
+        # Step 2: Single self-attention for inter-marker communication
+        # This is O(n²) but still much faster than full transformer stack
+        attended_features, _ = self.self_attention(
+            processed, processed, processed, 
+            key_padding_mask=key_padding_mask
+        )
         
-        # Apply mask to group assignments if provided
-        if key_padding_mask is not None:
-            # Expand mask to match group assignment dimensions
-            mask_expanded = key_padding_mask.unsqueeze(-1).expand(-1, -1, self.num_groups)
-            group_assignments = group_assignments.masked_fill(mask_expanded, 0.0)
-            # Renormalize after masking
-            group_sums = group_assignments.sum(dim=1, keepdim=True) + 1e-8
-            group_assignments = group_assignments / group_sums
-        
-        # Step 2: Vectorized group aggregation (O(n)) - Much faster
-        # [batch, markers, groups] -> [batch, groups, markers]
-        group_assignments_t = group_assignments.transpose(1, 2)
-        
-        # [batch, groups, markers] × [batch, markers, features] -> [batch, groups, features]
-        group_reprs = torch.bmm(group_assignments_t, features)
-        
-        # Process all groups in parallel through their specific networks
-        group_features = []
-        for group_idx in range(self.num_groups):
-            group_processed = self.group_processors[group_idx](group_reprs[:, group_idx])
-            group_features.append(group_processed)
-        
-        # Stack group representations: [batch, num_groups, feature_dim]
-        group_stack = torch.stack(group_features, dim=1)
-        
-        # Step 3: Cross-group communication (O(groups²) << O(markers²))
-        group_attended, _ = self.group_attention(group_stack, group_stack, group_stack)
-        
-        # Step 4: Broadcast back to markers and refine (O(n)) - Vectorized
-        # Efficient matrix multiplication for all markers at once
-        # [batch, markers, groups] × [batch, groups, features] → [batch, markers, features]
-        markers_from_groups = torch.bmm(group_assignments, group_attended)
-        
-        # Combine with original features for all markers
-        # [batch, markers, features * 2]
-        combined = torch.cat([features, markers_from_groups], dim=-1)
-        
-        # Reshape for batch processing through refinement network
-        batch_size, num_markers, _ = combined.shape
-        combined_flat = combined.reshape(-1, combined.shape[-1])
-        refined_flat = self.marker_refinement(combined_flat)
-        
-        # Reshape back to [batch, markers, features]
-        output = refined_flat.reshape(batch_size, num_markers, -1)
+        # Step 3: Residual connection
+        output = processed + attended_features
         
         return output
 
 class EnhancedCancerDetectionModel(nn.Module):
-    def __init__(self, num_markers, feature_dim=16, num_groups=64, 
+    def __init__(self, num_markers, feature_dim=16,
                  dropout_rate=0.2, min_reliable_coverage=5.0):
         super().__init__()
         
@@ -228,7 +171,6 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Output [batch × 10k × 16]
         self.scalable_aggregator = ScalableMarkerAggregator(
             feature_dim=feature_dim,
-            num_groups=num_groups,
             dropout_rate=dropout_rate
         )
 

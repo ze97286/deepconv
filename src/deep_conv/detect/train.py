@@ -47,14 +47,14 @@ def parse_args():
     parser.add_argument('--num_heads', type=int, default=8, help='Number of attention heads')
     parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for regularisation')
     parser.add_argument('--num_layers', type=int, default=3, help='Number of transformer layers')
-    parser.add_argument('--min_reliable_coverage', type=float, default=5.0, help='Minimum coverage considered reliable for marker values')
+    parser.add_argument('--min_reliable_coverage', type=float, default=3.0, help='Minimum coverage considered reliable for marker values')
 
     # Training parameters
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
-    parser.add_argument('--lr', type=float, default=5e-4, help='Learning rate')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.005, help='Weight decay for optimiser')
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
-    parser.add_argument('--grad_accum_steps', type=int, default=4, help='Gradient accumulation steps')
+    parser.add_argument('--grad_accum_steps', type=int, default=16, help='Gradient accumulation steps')
     parser.add_argument('--early_stopping', type=int, default=15, help='Early stopping patience')
     parser.add_argument('--output_dir', type=str, default="./saved_models", help='Output directory')
 
