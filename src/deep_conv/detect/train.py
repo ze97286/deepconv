@@ -24,7 +24,7 @@ from sklearn.metrics import confusion_matrix
 from plotly.subplots import make_subplots
 
 from deep_conv.detect.preprocess import prepare_data_for_training, load_train_with_contrastive_data
-from deep_conv.detect.model import EnhancedCancerDetectionModel, MarkerImportanceAnalyser
+from deep_conv.detect.simplified_model import EnhancedCancerDetectionModel
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -43,19 +43,19 @@ def parse_args():
     parser.add_argument('--raw', action=argparse.BooleanOptionalAction, default=False, help='use CNA corrected or uncorrected')
 
     # Model parameters
-    parser.add_argument('--feature_dim', type=int, default=128, help='Feature dimension')
+    parser.add_argument('--feature_dim', type=int, default=16, help='Feature dimension')
     parser.add_argument('--num_heads', type=int, default=8, help='Number of attention heads')
-    parser.add_argument('--dropout_rate', type=float, default=0.15, help='Dropout rate for regularisation')
+    parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for regularisation')
     parser.add_argument('--num_layers', type=int, default=3, help='Number of transformer layers')
-    parser.add_argument('--min_reliable_coverage', type=float, default=3.0, help='Minimum coverage considered reliable for marker values')
+    parser.add_argument('--min_reliable_coverage', type=float, default=5.0, help='Minimum coverage considered reliable for marker values')
 
     # Training parameters
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-    parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
-    parser.add_argument('--weight_decay', type=float, default=0.01, help='Weight decay for optimiser')
-    parser.add_argument('--epochs', type=int, default=200, help='Number of epochs')
-    parser.add_argument('--grad_accum_steps', type=int, default=16, help='Gradient accumulation steps')
-    parser.add_argument('--early_stopping', type=int, default=30, help='Early stopping patience')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.005, help='Weight decay for optimiser')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of epochs')
+    parser.add_argument('--grad_accum_steps', type=int, default=32, help='Gradient accumulation steps')
+    parser.add_argument('--early_stopping', type=int, default=50, help='Early stopping patience')
     parser.add_argument('--output_dir', type=str, default="./saved_models", help='Output directory')
 
     # Misc parameters
@@ -158,12 +158,6 @@ def get_git_info():
     except subprocess.CalledProcessError:
         return {'commit': 'unknown', 'branch': 'unknown', 'clean': False}
 
-def parse_excluded_markers(excluded_markers_str):
-    """Parse excluded markers string into a list of indices"""
-    if not excluded_markers_str:
-        return []
-    return [int(idx.strip()) for idx in excluded_markers_str.split(',')]# T-cells
-
 def compute_loss(mu, uncertainty, y_true, control_mask=None, zero_prob=None):
     """
     Simplified loss function focused on relative error
@@ -172,25 +166,34 @@ def compute_loss(mu, uncertainty, y_true, control_mask=None, zero_prob=None):
     mse_loss = F.mse_loss(mu, y_true, reduction='none')
     
     # Calculate relative error for non-zero targets
-    epsilon = 1e-6
+    epsilon = 1e-4  # More stable epsilon
     non_zero_mask = (y_true > epsilon)
     
     if non_zero_mask.sum() > 0:
-        # Relative error
+        # Relative error with stable denominator
         rel_error = torch.abs(mu[non_zero_mask] - y_true[non_zero_mask]) / (y_true[non_zero_mask] + epsilon)
         rel_loss = rel_error.mean()
+        
+        # Log-space loss for better low concentration performance
+        log_pred = torch.log10(torch.clamp(mu[non_zero_mask], epsilon, 1.0))
+        log_true = torch.log10(torch.clamp(y_true[non_zero_mask], epsilon, 1.0))
+        log_loss = F.smooth_l1_loss(log_pred, log_true)
     else:
         rel_loss = torch.tensor(0.0, device=mu.device)
+        log_loss = torch.tensor(0.0, device=mu.device)
     
+    # Control loss - reduced from 100x to 20x
     control_loss = torch.tensor(0.0, device=mu.device)
     if control_mask is not None and control_mask.sum() > 0:
-        control_loss = 100.0 * mu[control_mask].mean()
+        # Use smooth L1 to prevent extreme gradients
+        control_predictions = mu[control_mask]
+        control_loss = 20.0 * F.smooth_l1_loss(control_predictions, torch.zeros_like(control_predictions))
     
     # Zero probability supervision (if available)
     zero_loss = torch.tensor(0.0, device=mu.device)
     if zero_prob is not None:
         zero_target = (y_true < epsilon).float()
-        zero_loss = F.binary_cross_entropy(zero_prob.squeeze(), zero_target.squeeze()) * 5.0
+        zero_loss = F.binary_cross_entropy(zero_prob.squeeze(), zero_target.squeeze()) * 3.0  # Reduced from 5.0
     
     # Uncertainty calibration
     if uncertainty is not None:
@@ -199,8 +202,13 @@ def compute_loss(mu, uncertainty, y_true, control_mask=None, zero_prob=None):
     else:
         calibration_loss = torch.tensor(0.0, device=mu.device)
     
-    # Combine losses - increase weight on relative error
-    total_loss = mse_loss.mean() + 2.0 * rel_loss + control_loss + zero_loss + 0.2 * calibration_loss
+    # Combine losses - more balanced weights
+    total_loss = (mse_loss.mean() + 
+                  2.0 * rel_loss + 
+                  1.5 * log_loss +  # Log-space loss for low concentrations
+                  control_loss + 
+                  zero_loss + 
+                  0.3 * calibration_loss)
     
     return total_loss
 
@@ -230,16 +238,16 @@ def train_model(model, train_loader, val_loader, args, device):
         weight_decay=args.weight_decay
     )
 
-    # Learning rate scheduler
+    # Learning rate scheduler - more conservative for large models
     total_steps = len(train_loader) * args.epochs
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=args.lr,
         total_steps=total_steps,
-        pct_start=0.1,
+        pct_start=0.15,        # Longer warmup for 10k markers
         anneal_strategy='cos',
-        div_factor=25.0,
-        final_div_factor=10000.0
+        div_factor=20.0,       # Less aggressive start (was 25.0)
+        final_div_factor=5000.0 # Less aggressive final (was 10000.0)
     )
 
     # Initialise tracking variables
@@ -313,8 +321,8 @@ def train_model(model, train_loader, val_loader, args, device):
 
             # Gradient accumulation and optimizer step
             if (i + 1) % args.grad_accum_steps == 0 or (i + 1) == len(train_loader):
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                # Gradient clipping - more conservative for large models
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
 
                 # Optimizer step
                 optimizer.step()
@@ -615,7 +623,7 @@ def validate_model(model, val_loader, device):
         mae = mean_absolute_error(targets, predictions)
         
         # Calculate log-space metrics
-        epsilon = 1e-6
+        epsilon = 1e-4  # Match epsilon from loss function
         non_zero_mask = (targets > epsilon) & (predictions > epsilon)
         
         # Default values in case there are no valid points
@@ -699,7 +707,7 @@ def validate_model(model, val_loader, device):
         zero_prob_metrics = {}
         if all_zero_probs:
             zero_probs = np.concatenate(all_zero_probs)
-            zero_mask = targets < epsilon
+            zero_mask = targets < epsilon  # Uses 1e-4 from above
             if np.any(zero_mask):
                 zero_prob_metrics = {
                     'zero_prob_accuracy': np.mean((zero_probs[zero_mask] > 0.5).astype(float)),
@@ -785,6 +793,7 @@ def compute_concentration_metrics(predictions, targets):
         }
     
     return results
+
 def compute_uncertainty_metrics(predictions, targets, uncertainties):
     """
     Compute metrics for uncertainty estimates
@@ -1904,7 +1913,6 @@ def create_enhanced_roc_curve(detection_metrics, output_dir, title_prefix=""):
     fig.write_html(os.path.join(output_dir, 'enhanced_roc_curve.html'))
     fig.write_image(os.path.join(output_dir, 'enhanced_roc_curve.png'), scale=2)
 
-
 def create_magnitude_aware_metrics(df, thresholds, output_dir):
     """
     Create metrics and plot for magnitude-aware classification performance.
@@ -1972,7 +1980,6 @@ def create_magnitude_aware_metrics(df, thresholds, output_dir):
         json.dump(results, f, indent=2)
     
     return results
-
 
 def create_magnitude_aware_plot(results, output_dir):
     """
@@ -2063,7 +2070,6 @@ def create_magnitude_aware_plot(results, output_dir):
     fig.write_html(os.path.join(output_dir, 'magnitude_aware_metrics.html'))
     fig.write_image(os.path.join(output_dir, 'magnitude_aware_metrics.png'), scale=2)
 
-
 def create_clinical_decision_metrics(df, thresholds, output_dir):
     """
     Create metrics specifically focused on clinical decision making.
@@ -2126,7 +2132,6 @@ def create_clinical_decision_metrics(df, thresholds, output_dir):
     create_clinical_decision_plot(clinical_metrics, output_dir)
     
     return clinical_metrics
-
 
 def create_clinical_decision_plot(clinical_metrics, output_dir):
     """
@@ -2266,7 +2271,6 @@ def create_clinical_decision_plot(clinical_metrics, output_dir):
     os.makedirs(output_dir, exist_ok=True)
     fig.write_html(os.path.join(output_dir, 'clinical_decision_metrics.html'))
     fig.write_image(os.path.join(output_dir, 'clinical_decision_metrics.png'), scale=2)
-
 
 def create_threshold_specific_analysis(df, specific_thresholds, output_dir):
     """

@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-import scipy.stats as stats
 import numpy as np
 
 class ZeroAnchoringLayer(nn.Module):
@@ -11,14 +9,15 @@ class ZeroAnchoringLayer(nn.Module):
         self.zero_detector = nn.Sequential(
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
-            nn.BatchNorm1d(feature_dim // 2),
+            nn.Dropout(0.1),  
             nn.Linear(feature_dim // 2, feature_dim // 4),
             nn.GELU(),
-            nn.BatchNorm1d(feature_dim // 4),
+            nn.Dropout(0.1),
             nn.Linear(feature_dim // 4, 1),
             nn.Sigmoid()
         )
-        self.sharpness = nn.Parameter(torch.tensor(12.0))
+        # Learnable sharpness with more conservative init
+        self.sharpness = nn.Parameter(torch.tensor(10.0))
         
     def forward(self, features, concentration):
         # Detect if sample should be zero
@@ -42,6 +41,7 @@ class ResidualBiasCorrectionLayer(nn.Module):
         self.correction_network = nn.Sequential(
             nn.Linear(feature_dim + 1, feature_dim // 2),
             nn.GELU(),
+            nn.Dropout(0.1),
             nn.Linear(feature_dim // 2, feature_dim // 4),
             nn.GELU(),
             nn.Linear(feature_dim // 4, 1),
@@ -51,7 +51,8 @@ class ResidualBiasCorrectionLayer(nn.Module):
         self.correction_scale = nn.Parameter(torch.tensor(0.05))
     
     def forward(self, features, initial_pred):
-        log_pred = torch.log10(torch.clamp(initial_pred, 1e-6, 1.0))
+        # More stable log transform with larger epsilon
+        log_pred = torch.log10(torch.clamp(initial_pred, 1e-4, 1.0))
         input_features = torch.cat([features, log_pred], dim=1)
         
         correction = self.correction_network(input_features) * self.correction_scale
@@ -75,8 +76,115 @@ class DynamicMarkerPruning(nn.Module):
         
         return marker_values_pruned
 
+class ScalableMarkerAggregator(nn.Module):
+    """
+    O(n) scalable replacement for transformer encoder
+    Designed to handle 10k+ markers efficiently
+    """
+    def __init__(self, feature_dim=16, num_groups=64, dropout_rate=0.2):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.num_groups = num_groups
+        
+        # Learnable marker grouping - assigns each marker to a group
+        self.marker_grouping = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim // 2),
+            nn.GELU(),
+            nn.Linear(feature_dim // 2, num_groups),
+            nn.Softmax(dim=-1)
+        )
+        
+        # Group-wise processing with mixture of experts approach
+        self.group_processors = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(feature_dim, feature_dim),
+                nn.GELU(),
+                nn.Dropout(dropout_rate),
+                nn.Linear(feature_dim, feature_dim),
+                nn.LayerNorm(feature_dim)
+            ) for _ in range(num_groups)
+        ])
+        
+        # Cross-group communication (O(groups²) not O(markers²))
+        self.group_attention = nn.MultiheadAttention(
+            embed_dim=feature_dim,
+            num_heads=2,
+            dropout=dropout_rate,
+            batch_first=True
+        )
+        
+        # Final marker-level refinement
+        self.marker_refinement = nn.Sequential(
+            nn.Linear(feature_dim * 2, feature_dim),  # concat original + group-processed
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(feature_dim, feature_dim),
+            nn.LayerNorm(feature_dim)
+        )
+        
+    def forward(self, features, key_padding_mask=None):
+        """
+        Args:
+            features: [batch_size, num_markers, feature_dim]
+            key_padding_mask: [batch_size, num_markers] - True for masked positions
+        """
+        batch_size, num_markers, feature_dim = features.shape
+        
+        # Step 1: Assign markers to groups (O(n))
+        # Shape: [batch_size, num_markers, num_groups]
+        group_assignments = self.marker_grouping(features)
+        
+        # Apply mask to group assignments if provided
+        if key_padding_mask is not None:
+            # Expand mask to match group assignment dimensions
+            mask_expanded = key_padding_mask.unsqueeze(-1).expand(-1, -1, self.num_groups)
+            group_assignments = group_assignments.masked_fill(mask_expanded, 0.0)
+            # Renormalize after masking
+            group_sums = group_assignments.sum(dim=1, keepdim=True) + 1e-8
+            group_assignments = group_assignments / group_sums
+        
+        # Step 2: Aggregate markers within each group (O(n))
+        group_features = []
+        
+        for group_idx in range(self.num_groups):
+            # Get assignment weights for this group
+            group_weights = group_assignments[:, :, group_idx:group_idx+1]  # [batch, markers, 1]
+            
+            # Weighted average of markers assigned to this group
+            weighted_features = features * group_weights  # [batch, markers, feature_dim]
+            group_repr = weighted_features.sum(dim=1)  # [batch, feature_dim]
+            
+            # Process through group-specific network
+            group_processed = self.group_processors[group_idx](group_repr)
+            group_features.append(group_processed)
+        
+        # Stack group representations: [batch, num_groups, feature_dim]
+        group_stack = torch.stack(group_features, dim=1)
+        
+        # Step 3: Cross-group communication (O(groups²) << O(markers²))
+        group_attended, _ = self.group_attention(group_stack, group_stack, group_stack)
+        
+        # Step 4: Broadcast back to markers and refine (O(n)) - Vectorized
+        # Efficient matrix multiplication for all markers at once
+        # [batch, markers, groups] × [batch, groups, features] → [batch, markers, features]
+        markers_from_groups = torch.bmm(group_assignments, group_attended)
+        
+        # Combine with original features for all markers
+        # [batch, markers, features * 2]
+        combined = torch.cat([features, markers_from_groups], dim=-1)
+        
+        # Reshape for batch processing through refinement network
+        batch_size, num_markers, _ = combined.shape
+        combined_flat = combined.reshape(-1, combined.shape[-1])
+        refined_flat = self.marker_refinement(combined_flat)
+        
+        # Reshape back to [batch, markers, features]
+        output = refined_flat.reshape(batch_size, num_markers, -1)
+        
+        return output
+
 class EnhancedCancerDetectionModel(nn.Module):
-    def __init__(self, num_markers, feature_dim=16, num_heads=2, num_layers=3, 
+    def __init__(self, num_markers, feature_dim=16, num_groups=64, 
                  dropout_rate=0.2, min_reliable_coverage=5.0):
         super().__init__()
         
@@ -99,38 +207,32 @@ class EnhancedCancerDetectionModel(nn.Module):
         self.feature_projection = nn.Linear(feature_dim * 3 // 2, feature_dim)
 
         # Marker Identity Embedding allows the model to learn the relative importance weights - markers can have different SNR profiles, 
-        # and some may be more reliable or consistent across samples - the embedding can help adjust  for these technical differences.
-        # From a purely computational perspective, it provides a mechanism for the transformer to distinguish between different input 
-        # positions. Its analogous to the positional encoding in transformers.
+        # and some may be more reliable or consistent across samples - the embedding can help adjust for these technical differences.
+        # Provides positional/identity information for marker differentiation in O(n) aggregation.
         self.marker_identity_embedding = nn.Parameter(torch.randn(1, num_markers, feature_dim) * 0.02)
         
-        # Transformer encoder
-        # Input [batch × 136 × 16]
+        # Scalable marker aggregator (O(n) replacement for transformer)
+        # Input [batch × 10k × 16]
         #   │
         #   ↓
-        # Layer 1: 
-        #   LayerNorm → MultiHeadAttention(2 heads) → LayerNorm → Feedforward(16→48→16)
+        # Step 1: Assign markers to groups (64 groups) - O(n)
         #   │
         #   ↓
-        # Layer 2: 
-        #   LayerNorm → MultiHeadAttention(2 heads) → LayerNorm → Feedforward(16→48→16)
+        # Step 2: Process within groups - O(n)
         #   │
         #   ↓
-        # Layer 3: 
-        #   LayerNorm → MultiHeadAttention(2 heads) → LayerNorm → Feedforward(16→48→16)
+        # Step 3: Cross-group attention - O(groups²) = O(64²) = O(4096) << O(10k²)
         #   │
         #   ↓
-        # Output [batch × 136 × 16]
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=feature_dim,
-            nhead=num_heads,
-            dim_feedforward=feature_dim * 3,
-            dropout=dropout_rate,
-            activation=F.gelu,
-            batch_first=True,
-            norm_first=True
+        # Step 4: Broadcast back to markers - O(n)
+        #   │
+        #   ↓
+        # Output [batch × 10k × 16]
+        self.scalable_aggregator = ScalableMarkerAggregator(
+            feature_dim=feature_dim,
+            num_groups=num_groups,
+            dropout_rate=dropout_rate
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
         # the critical bridge between marker-level processing and sample-level representation.
         self.attention = nn.Linear(feature_dim, 1)
@@ -235,20 +337,20 @@ class EnhancedCancerDetectionModel(nn.Module):
         features = self.feature_projection(features)
         features = features + self.marker_identity_embedding
         
-        transformer_output = self.transformer_encoder(
+        aggregated_output = self.scalable_aggregator(
             features, 
-            src_key_padding_mask=combined_mask
+            key_padding_mask=combined_mask
         )
         
         # Enhanced reliability weighting with stronger coverage dependence
         reliability = coverage_reliability.unsqueeze(-1)  
         
-        attention_scores = self.attention(transformer_output).squeeze(-1)
+        attention_scores = self.attention(aggregated_output).squeeze(-1)
         attention_scores = attention_scores * reliability.squeeze(-1)
         attention_scores = attention_scores.masked_fill(missing_mask, -1e9)
         attention_weights = F.softmax(attention_scores, dim=1)
         
-        aggregated = torch.sum(attention_weights.unsqueeze(-1) * transformer_output, dim=1)
+        aggregated = torch.sum(attention_weights.unsqueeze(-1) * aggregated_output, dim=1)
         
         standard_pred = self.concentration_head(aggregated)
         low_conc_pred = self.low_concentration_head(aggregated)
@@ -274,7 +376,8 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         # Apply additional coverage-based dampening at the final prediction stage
         mean_coverage = coverage.mean(dim=1, keepdim=True)
-        coverage_factor = torch.clamp(mean_coverage / (self.min_reliable_coverage * 2.0), 0.2, 1.0)
+        # Softer dampening - changed from 0.2-1.0 to 0.5-1.0 range
+        coverage_factor = torch.clamp(mean_coverage / (self.min_reliable_coverage * 1.5), 0.5, 1.0)
         
         # Apply coverage-based dampening
         concentration = concentration * coverage_factor
@@ -513,57 +616,3 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         return concentration_thresholded, uncertainty, attention_weights, is_detected
 
-class MarkerImportanceAnalyser:
-    def __init__(self, model):
-        self.model = model
-    
-    def get_marker_importance(self, dataloader, top_k=20, stratify_by_concentration=True):
-        self.model.eval()
-        all_attentions = []
-        all_concentrations = []
-        
-        with torch.no_grad():
-            for marker_values, coverage, y_true in dataloader:
-                _, _, attention_weights = self.model(marker_values, coverage)
-                
-                all_attentions.append(attention_weights)
-                all_concentrations.append(y_true)
-        
-        attention_weights = torch.cat(all_attentions, dim=0)
-        concentrations = torch.cat(all_concentrations, dim=0)
-        
-        avg_attention = attention_weights.mean(dim=0)
-        
-        top_k_indices = torch.topk(avg_attention, k=min(top_k, len(avg_attention))).indices
-        top_k_weights = avg_attention[top_k_indices]
-        
-        conc_stratified = None
-        if stratify_by_concentration:
-            ranges = [
-                ("ultra_low", 0.0, 0.001),
-                ("very_low", 0.001, 0.005),
-                ("low", 0.005, 0.01),
-                ("medium_low", 0.01, 0.05),
-                ("medium", 0.05, 0.1),
-                ("high", 0.1, 1.0)
-            ]
-            
-            conc_stratified = {}
-            for name, low, high in ranges:
-                mask = (concentrations >= low) & (concentrations < high)
-                
-                if not mask.any():
-                    continue
-                    
-                range_attention = attention_weights[mask.squeeze()].mean(dim=0)
-                
-                range_top_indices = torch.topk(range_attention, k=min(top_k, len(range_attention))).indices
-                range_top_weights = range_attention[range_top_indices]
-                
-                conc_stratified[name] = {
-                    "count": int(mask.sum().item()),
-                    "indices": range_top_indices.cpu().numpy(),
-                    "weights": range_top_weights.cpu().numpy()
-                }
-        
-        return top_k_indices.cpu().numpy(), top_k_weights.cpu().numpy(), conc_stratified
