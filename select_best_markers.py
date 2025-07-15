@@ -125,10 +125,11 @@ def select_best_markers_from_atlas(atlas_path, target_cell_type, top_k=1000):
         
         # Check overlap with already selected regions
         overlaps = False
+        min_distance = 100  # Minimum 100bp separation
         for sel_chr, sel_start, sel_end in selected_regions:
             if chr_name == sel_chr:
-                # Check if regions overlap
-                if not (end < sel_start or start > sel_end):
+                # Check if regions are too close (within min_distance)
+                if not (end + min_distance < sel_start or start > sel_end + min_distance):
                     overlaps = True
                     break
         
