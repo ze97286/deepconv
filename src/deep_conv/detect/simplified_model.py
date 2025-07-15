@@ -76,108 +76,56 @@ class DynamicMarkerPruning(nn.Module):
         
         return marker_values_pruned
 
-class ScalableMarkerAggregator(nn.Module):
+class DeepSetsMarkerProcessor(nn.Module):
     """
-    O(n) scalable replacement for transformer encoder
-    Designed to handle 10k+ markers efficiently
+    Deep Sets architecture for cancer detection from methylation markers
+    f(markers) = ρ(Σ φ(marker_i))
     """
-    def __init__(self, feature_dim=16, num_groups=64, dropout_rate=0.2):
+    def __init__(self, feature_dim=16, hidden_dim=64, dropout_rate=0.2):
         super().__init__()
         self.feature_dim = feature_dim
-        self.num_groups = num_groups
+        self.hidden_dim = hidden_dim
         
-        # Learnable marker grouping - assigns each marker to a group
-        self.marker_grouping = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
-            nn.GELU(),
-            nn.Linear(feature_dim // 2, num_groups),
-            nn.Softmax(dim=-1)
-        )
-        
-        # Group-wise processing with mixture of experts approach
-        self.group_processors = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(feature_dim, feature_dim),
-                nn.GELU(),
-                nn.Dropout(dropout_rate),
-                nn.Linear(feature_dim, feature_dim),
-                nn.LayerNorm(feature_dim)
-            ) for _ in range(num_groups)
-        ])
-        
-        # Cross-group communication (O(groups²) not O(markers²))
-        self.group_attention = nn.MultiheadAttention(
-            embed_dim=feature_dim,
-            num_heads=2,
-            dropout=dropout_rate,
-            batch_first=True
-        )
-        
-        # Final marker-level refinement
-        self.marker_refinement = nn.Sequential(
-            nn.Linear(feature_dim * 2, feature_dim),  # concat original + group-processed
+        # φ: processes each marker individually
+        self.marker_encoder = nn.Sequential(
+            nn.Linear(feature_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim, feature_dim),
-            nn.LayerNorm(feature_dim)
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim)
         )
+        
+        # For compatibility with existing code, return same feature_dim
+        self.output_projection = nn.Linear(hidden_dim, feature_dim)
         
     def forward(self, features, key_padding_mask=None):
         """
         Args:
             features: [batch_size, num_markers, feature_dim]
             key_padding_mask: [batch_size, num_markers] - True for masked positions
+        Returns:
+            processed_features: [batch_size, num_markers, feature_dim] 
         """
         batch_size, num_markers, feature_dim = features.shape
         
-        # Step 1: Assign markers to groups (O(n))
-        # Shape: [batch_size, num_markers, num_groups]
-        group_assignments = self.marker_grouping(features)
+        # φ: Process each marker individually
+        # Flatten for batch processing
+        features_flat = features.reshape(-1, feature_dim)
+        encoded_flat = self.marker_encoder(features_flat)
         
-        # Apply mask to group assignments if provided
+        # Reshape back to [batch, markers, hidden_dim]
+        encoded = encoded_flat.reshape(batch_size, num_markers, self.hidden_dim)
+        
+        # Project back to original feature_dim for compatibility
+        output = self.output_projection(encoded)
+        
+        # Apply mask if provided
         if key_padding_mask is not None:
-            # Expand mask to match group assignment dimensions
-            mask_expanded = key_padding_mask.unsqueeze(-1).expand(-1, -1, self.num_groups)
-            group_assignments = group_assignments.masked_fill(mask_expanded, 0.0)
-            # Renormalize after masking
-            group_sums = group_assignments.sum(dim=1, keepdim=True) + 1e-8
-            group_assignments = group_assignments / group_sums
-        
-        # Step 2: Vectorized group aggregation (O(n)) - Much faster
-        # [batch, markers, groups] -> [batch, groups, markers]
-        group_assignments_t = group_assignments.transpose(1, 2)
-        
-        # [batch, groups, markers] × [batch, markers, features] -> [batch, groups, features]
-        group_reprs = torch.bmm(group_assignments_t, features)
-        
-        # Process all groups in parallel through their specific networks
-        group_features = []
-        for group_idx in range(self.num_groups):
-            group_processed = self.group_processors[group_idx](group_reprs[:, group_idx])
-            group_features.append(group_processed)
-        
-        # Stack group representations: [batch, num_groups, feature_dim]
-        group_stack = torch.stack(group_features, dim=1)
-        
-        # Step 3: Cross-group communication (O(groups²) << O(markers²))
-        group_attended, _ = self.group_attention(group_stack, group_stack, group_stack)
-        
-        # Step 4: Broadcast back to markers and refine (O(n)) - Vectorized
-        # Efficient matrix multiplication for all markers at once
-        # [batch, markers, groups] × [batch, groups, features] → [batch, markers, features]
-        markers_from_groups = torch.bmm(group_assignments, group_attended)
-        
-        # Combine with original features for all markers
-        # [batch, markers, features * 2]
-        combined = torch.cat([features, markers_from_groups], dim=-1)
-        
-        # Reshape for batch processing through refinement network
-        batch_size, num_markers, _ = combined.shape
-        combined_flat = combined.reshape(-1, combined.shape[-1])
-        refined_flat = self.marker_refinement(combined_flat)
-        
-        # Reshape back to [batch, markers, features]
-        output = refined_flat.reshape(batch_size, num_markers, -1)
+            mask_expanded = key_padding_mask.unsqueeze(-1)
+            output = output.masked_fill(mask_expanded, 0.0)
         
         return output
 
@@ -204,30 +152,13 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Feature projection and marker identity embedding
         self.feature_projection = nn.Linear(feature_dim * 3 // 2, feature_dim)
 
-        # Marker Identity Embedding allows the model to learn the relative importance weights - markers can have different SNR profiles, 
-        # and some may be more reliable or consistent across samples - the embedding can help adjust for these technical differences.
-        # Provides positional/identity information for marker differentiation in O(n) aggregation.
-        self.marker_identity_embedding = nn.Parameter(torch.randn(1, num_markers, feature_dim) * 0.02)
         
-        # Scalable marker aggregator (O(n) replacement for transformer)
-        # Input [batch × 10k × 16]
-        #   │
-        #   ↓
-        # Step 1: Assign markers to groups (64 groups) - O(n)
-        #   │
-        #   ↓
-        # Step 2: Process within groups - O(n)
-        #   │
-        #   ↓
-        # Step 3: Cross-group attention - O(groups²) = O(64²) = O(4096) << O(10k²)
-        #   │
-        #   ↓
-        # Step 4: Broadcast back to markers - O(n)
-        #   │
-        #   ↓
-        # Output [batch × 10k × 16]
-        self.scalable_aggregator = ScalableMarkerAggregator(
+        # Deep Sets marker processor
+        # φ: processes each marker individually to learn marker-specific patterns
+        # This will feed into attention aggregation for ρ (set-level aggregation)
+        self.marker_processor = DeepSetsMarkerProcessor(
             feature_dim=feature_dim,
+            hidden_dim=64,
             dropout_rate=dropout_rate
         )
 
@@ -295,10 +226,9 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Apply dynamic marker pruning
         marker_values_pruned = self.marker_pruning(marker_values, coverage)
         
-        # Apply more aggressive coverage-based reliability weighting
-        # Exponential penalty for low coverage
-        coverage_reliability = 1.0 - torch.exp(-coverage / self.min_reliable_coverage)
-        coverage_reliability = torch.clamp(coverage_reliability, 0.01, 1.0)
+        # Gentler coverage-based reliability weighting for Deep Sets
+        # Linear scaling instead of exponential to preserve more signal
+        coverage_reliability = torch.clamp(coverage / self.min_reliable_coverage, 0.1, 1.0)
         
         # Apply stronger dampening to marker values based on coverage
         marker_values_weighted = marker_values_pruned * coverage_reliability
@@ -332,9 +262,9 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         features = torch.cat([value_features, coverage_features, log_features], dim=-1)
         features = self.feature_projection(features)
-        features = features + self.marker_identity_embedding
         
-        aggregated_output = self.scalable_aggregator(
+        # φ: Process each marker individually (Deep Sets φ function)
+        processed_features = self.marker_processor(
             features, 
             key_padding_mask=combined_mask
         )
@@ -342,12 +272,14 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Enhanced reliability weighting with stronger coverage dependence
         reliability = coverage_reliability.unsqueeze(-1)  
         
-        attention_scores = self.attention(aggregated_output).squeeze(-1)
+        # ρ: Aggregate the set (Deep Sets ρ function via attention)
+        attention_scores = self.attention(processed_features).squeeze(-1)
         attention_scores = attention_scores * reliability.squeeze(-1)
         attention_scores = attention_scores.masked_fill(missing_mask, -1e9)
         attention_weights = F.softmax(attention_scores, dim=1)
         
-        aggregated = torch.sum(attention_weights.unsqueeze(-1) * aggregated_output, dim=1)
+        # This is the Deep Sets aggregation: Σ φ(marker_i) weighted by learned attention
+        aggregated = torch.sum(attention_weights.unsqueeze(-1) * processed_features, dim=1)
         
         standard_pred = self.concentration_head(aggregated)
         low_conc_pred = self.low_concentration_head(aggregated)

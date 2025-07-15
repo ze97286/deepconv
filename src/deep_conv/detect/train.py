@@ -51,7 +51,7 @@ def parse_args():
 
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=2e-4, help='Learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.005, help='Weight decay for optimiser')
     parser.add_argument('--epochs', type=int, default=50, help='Number of epochs')
     parser.add_argument('--grad_accum_steps', type=int, default=16, help='Gradient accumulation steps')
