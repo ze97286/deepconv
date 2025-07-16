@@ -44,8 +44,8 @@ def prepare(atlas_path, pat_dir, min_cpgs=4, threads=32):
 
 def prepare_for_atlas(atlas_path, pat_dir, min_cpgs, prefix, threads=32):
     X, coverage = create_marker_matrices(atlas_path, pat_dir, min_cpgs, threads)
-    X.to_parquet(pat_dir/prefix+"_marker_values.parquet", index=False)
-    coverage.to_parquet(pat_dir/prefix+"_coverage.parquet", index=False)
+    X.to_parquet(pat_dir / f"{prefix}_marker_values.parquet", index=False)
+    coverage.to_parquet(pat_dir / f"{prefix}_coverage.parquet", index=False)
 
 def summarize_single_distribution(y_val, cell_types, out_dir):
     """
