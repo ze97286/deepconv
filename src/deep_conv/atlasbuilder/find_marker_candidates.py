@@ -119,7 +119,7 @@ class RegionCounter:
             valid_overlap_cpgs = count_valid_cpgs_slice(pattern, pattern_offset, overlap_len)
             
             if valid_overlap_cpgs >= self.min_cpgs:
-                overlaps.append((region, pattern_offset, overlap_len))
+                overlaps.append((region, pattern_offset, overlap_len, valid_overlap_cpgs))
                 
         return overlaps
         
@@ -129,11 +129,10 @@ class RegionCounter:
         overlaps = self.find_overlapping_regions(start_cpg, pattern)
         if overlaps:
             self.patterns_counted += 1
-        for region, offset, overlap_len in overlaps:
+        for region, offset, overlap_len, valid_cpgs in overlaps:
             overlap_pat = pattern[offset:offset + overlap_len]
             meth_count = overlap_pat.count('C')
-            # 9. Use optimized function for valid CpGs count
-            valid_cpgs = count_valid_cpgs(overlap_pat)
+            # No need to recount valid CpGs - we already have it!
             meth_ratio = meth_count / valid_cpgs
             if meth_ratio < self.th1:
                 self.counts[region.index]['u'] += count
@@ -175,7 +174,7 @@ def process_pat_file(regions_df: pd.DataFrame, pat_file: str, min_cpgs: int) -> 
     with tqdm(total=file_size, desc=f"Processing {cell_type}", unit='B', unit_scale=True) as pbar:
         file_handle = gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file)
         
-        for chunk in pd.read_csv(pat_file, sep='\t', names=column_names, chunksize=1_000_000):
+        for chunk in pd.read_csv(pat_file, sep='\t', names=column_names, chunksize=10_000_000):
             # 11. Optimize chunk filtering using numba
             pattern_lens = np.array([len(p) for p in chunk['pattern']], dtype=np.int32)
             starts = chunk['start'].values.astype(np.int32)
