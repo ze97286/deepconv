@@ -31,17 +31,11 @@ def refined_stage1_filtering(df):
         # High cancer signal
         (df['OAC'] >= 0.6) &
         (df['OAC_coverage'] >= 80) &
-        
         # STRICT on blood/immune
         (df['median_blood_background'] <= 0.001) &
-        
         # BROAD GI filter - two conditions
         (df['max_gi'] <= 0.2) &  # Max 20% in any GI tissue
         (df['gi_to_oac_ratio'] <= 0.25) &  # GI <= 1/4 of OAC signal
-        
-        # Updated cfDNA compatibility
-        (df['region_length'] <= 500) &
-        (df['n_cpgs'] >= 4) &
         (df['n_cpgs'] <= 40)
     ]
     
