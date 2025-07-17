@@ -282,14 +282,14 @@ def main():
     filtered_cov = pd.read_parquet(glob.glob(f"{args.pat_dir}/*filtered_coverage.parquet"))
 
     tumor_purity_dict = {
-        '069-009_ScrBsl_tumour_cna_corrected':0.5171,
-        '071-011_ScrBsl_tumour_cna_corrected':0.2361,
-        '071-014_ScrBsl_tumour_cna_corrected':0.07926,
-        '071-021_ScrBsl_tumour_cna_corrected':0.4766,
-        '071-022_ScrBsl_tumour_cna_corrected':0.4108,
-        '071-030_ScrBsl_tumour_cna_corrected':0.0801,
-        '071-043_ScrBsl_tumour_cna_corrected':0.4607,
-        '129-001_ScrBsl_tumour_cna_corrected':0.6921
+        'OAC_069-009_ScrBsl_tumour_cna_corrected':0.5171,
+        'OAC_071-011_ScrBsl_tumour_cna_corrected':0.2361,
+        'OAC_071-014_ScrBsl_tumour_cna_corrected':0.07926,
+        'OAC_071-021_ScrBsl_tumour_cna_corrected':0.4766,
+        'OAC_071-022_ScrBsl_tumour_cna_corrected':0.4108,
+        'OAC_071-030_ScrBsl_tumour_cna_corrected':0.0801,
+        'OAC_071-043_ScrBsl_tumour_cna_corrected':0.4607,
+        'OAC_129-001_ScrBsl_tumour_cna_corrected':0.6921
     }
 
     results, sample_cols, purities = analyse_tumour_purity_correlation(
