@@ -307,7 +307,7 @@ def main():
         min_correlation=0.7
     )
 
-    plot_top_correlations(filtered_mv, results, sample_cols, purities, args.min_cpgs, args.pat_dir)
+    plot_top_correlations(filtered_mv, results, sample_cols, purities, args.pat_dir, args.min_cpgs)
 
     # Save results
     results.to_csv(f'{args.pat_dir}/l{args.min_cpgs}_tumor_purity_correlations.csv', index=False)
