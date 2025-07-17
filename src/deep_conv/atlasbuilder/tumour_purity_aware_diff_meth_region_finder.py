@@ -83,23 +83,30 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
           'correlation': correlations,
           'pvalue': pvalues,
           'valid_samples': valid_counts,
-          'significant': (np.array(pvalues) < 0.05) & (np.abs(np.array(correlations)) > min_correlation)
+          'significant': (np.array(pvalues) < 0.05) & (np.array(correlations) > min_correlation)  # Only positive correlations!
       })
       # Add mean signal across samples
       results['mean_signal'] = np.nanmean(numeric_data, axis=1)
-      # Sort by absolute correlation (descending)
-      results = results.reindex(results['correlation'].abs().sort_values(ascending=False).index)
+      # Sort by correlation (descending) - we want positive correlations at the top
+      results = results.reindex(results['correlation'].sort_values(ascending=False).index)
       print(f"\nResults:")
-      print(f"Regions with |correlation| > {min_correlation}: {results['significant'].sum()}")
+      print(f"Regions with correlation > {min_correlation}: {results['significant'].sum()}")
       print(f"Regions with valid data: {(results['valid_samples'] >= 3).sum()}")
-      print(f"Top correlations: {results['correlation'].head(10).values}")
+      
+      # Report on negative correlations (biological nonsense for tumor markers)
+      negative_high_corr = (np.array(pvalues) < 0.05) & (np.array(correlations) < -min_correlation)
+      print(f"Regions with correlation < -{min_correlation} (negative - excluded): {negative_high_corr.sum()}")
+      
+      print(f"Top positive correlations: {results['correlation'].head(10).values}")
+      print(f"Top negative correlations: {results['correlation'].tail(10).values}")
       return results, sample_cols, purities
 
-def plot_top_correlations(filtered_mv, results, sample_cols, purities, n_plots=6):
-    """Plot signal vs tumor purity for top correlated regions"""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+def plot_top_correlations(filtered_mv, results, sample_cols, purities, output_dir, min_cpgs, n_plots=30):
+    """Plot signal vs tumor purity for top positively correlated regions"""
+    fig, axes = plt.subplots(10, 3, figsize=(15, 10))
+    fig.suptitle('Top Tumor-Specific Regions (Positive Correlations Only)', fontsize=16)
     axes = axes.flatten()
-    # Get top significant regions
+    # Get top significant regions (now only positive correlations)
     top_regions = results[results['significant']].head(n_plots)
     if len(top_regions) == 0:
         print("No significant regions found to plot!")
@@ -137,7 +144,9 @@ def plot_top_correlations(filtered_mv, results, sample_cols, purities, n_plots=6
     for idx in range(len(top_regions), n_plots):
         axes[idx].set_visible(False)
     plt.tight_layout()
-    plt.savefig('/users/zetzioni/sharedscratch/loyfer_atlas/cna_corrected_pats/tumour_purity_correlations.png', dpi=300, bbox_inches='tight')
+    output_file = f'{output_dir}/l{min_cpgs}_tumour_purity_correlations.png'
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    print(f"Saved plot to {output_file}")
 
 def extract_chromosome_from_results(results):
       """
@@ -272,24 +281,24 @@ def main():
     args = parser.parse_args()
 
     for i in range(1,23):
-        mv = pd.read_parquet(f"{args.pat_dir}/chr{i}_marker_values.parquet")
-        cov = pd.read_parquet(f"{args.pat_dir}/chr{i}_coverage.parquet")
+        mv = pd.read_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_marker_values.parquet")
+        cov = pd.read_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_coverage.parquet")
         filtered_mv, filtered_cov = filter_by_coverage(mv, cov, min_coverage=10)
-        filtered_mv.to_parquet(f"{args.pat_dir}/chr{i}_filtered_marker_values.parquet", index=False)
-        filtered_cov.to_parquet(f"{args.pat_dir}/chr{i}_filtered_coverage.parquet", index=False)
+        filtered_mv.to_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_filtered_marker_values.parquet", index=False)
+        filtered_cov.to_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_filtered_coverage.parquet", index=False)
 
     filtered_mv = pd.read_parquet(glob.glob(f"{args.pat_dir}/*filtered_marker_values.parquet"))
     filtered_cov = pd.read_parquet(glob.glob(f"{args.pat_dir}/*filtered_coverage.parquet"))
 
     tumor_purity_dict = {
-        'OAC_069-009_ScrBsl_tumour_cna_corrected':0.5171,
-        'OAC_071-011_ScrBsl_tumour_cna_corrected':0.2361,
-        'OAC_071-014_ScrBsl_tumour_cna_corrected':0.07926,
-        'OAC_071-021_ScrBsl_tumour_cna_corrected':0.4766,
-        'OAC_071-022_ScrBsl_tumour_cna_corrected':0.4108,
-        'OAC_071-030_ScrBsl_tumour_cna_corrected':0.0801,
-        'OAC_071-043_ScrBsl_tumour_cna_corrected':0.4607,
-        'OAC_129-001_ScrBsl_tumour_cna_corrected':0.6921
+        '069-009_ScrBsl_tumour_cna_corrected':0.5171,
+        '071-011_ScrBsl_tumour_cna_corrected':0.2361,
+        '071-014_ScrBsl_tumour_cna_corrected':0.07926,
+        '071-021_ScrBsl_tumour_cna_corrected':0.4766,
+        '071-022_ScrBsl_tumour_cna_corrected':0.4108,
+        '071-030_ScrBsl_tumour_cna_corrected':0.0801,
+        '071-043_ScrBsl_tumour_cna_corrected':0.4607,
+        '129-001_ScrBsl_tumour_cna_corrected':0.6921
     }
 
     results, sample_cols, purities = analyse_tumour_purity_correlation(
@@ -298,10 +307,10 @@ def main():
         min_correlation=0.7
     )
 
-    plot_top_correlations(filtered_mv, results, sample_cols, purities)
+    plot_top_correlations(filtered_mv, results, sample_cols, purities, args.min_cpgs, args.pat_dir)
 
     # Save results
-    results.to_csv(f'{args.pat_dir}/tumor_purity_correlations.csv', index=False)
+    results.to_csv(f'{args.pat_dir}/l{args.min_cpgs}_tumor_purity_correlations.csv', index=False)
 
     # Extract highly correlated regions for next stage
     tumor_specific_regions = results[results['significant']]['name'].values
