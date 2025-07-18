@@ -30,15 +30,23 @@ def filter_by_coverage(mv, cov, min_coverage=10):
       print(f"Kept {len(filtered_mv)/len(mv)*100:.1f}% of regions")
       return filtered_mv, filtered_cov
 
-def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correlation=0.7):
+def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correlation=0.7,
+                                    max_control_signal=0.01, check_controls=True):
       """
       Find regions where methylation signal correlates with tumor purity
+      AND have low signal in control samples (tumor-specific)
       """
       # Get sample columns that have purity info
       sample_cols = [col for col in filtered_mv.columns if col in tumor_purity_dict]
       purities = np.array([tumor_purity_dict[col] for col in sample_cols])
       print(f"Analyzing {len(sample_cols)} samples with purity data")
       print(f"Tumor purities: {purities}")
+      
+      # Get control columns if checking controls
+      control_cols = []
+      if check_controls:
+          control_cols = [col for col in filtered_mv.columns if col.startswith('Control_')]
+          print(f"Found {len(control_cols)} control samples for specificity check")
       # Pre-extract numeric data for all samples
       numeric_data = filtered_mv[sample_cols].values  # This should be clean float64
       # Calculate correlation for each region
@@ -87,11 +95,38 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
       })
       # Add mean signal across samples
       results['mean_signal'] = np.nanmean(numeric_data, axis=1)
+      
+      # Add control filtering if requested
+      if check_controls and control_cols:
+          print(f"\nApplying control filtering (max signal <= {max_control_signal})...")
+          control_data = filtered_mv[control_cols].values
+          control_max = np.nanmax(control_data, axis=1)
+          results['control_max'] = control_max
+          
+          # Update significant regions to include control filter
+          control_filter = control_max <= max_control_signal
+          results['significant'] = results['significant'] & control_filter
+          
+          # Store the correlation-only results before applying control filter  
+          correlation_only = (np.array(pvalues) < 0.05) & (np.array(correlations) > min_correlation)
+          print(f"Regions passing tumor-purity correlation: {correlation_only.sum()}")
+          print(f"Regions passing control filter: {control_filter.sum()}")
+          print(f"Regions passing BOTH filters: {results['significant'].sum()}")
+          
+          # Show control signal distribution
+          print(f"\nControl signal distribution:")
+          print(f"  Min: {np.nanmin(control_max):.4f}")
+          print(f"  25th percentile: {np.nanpercentile(control_max, 25):.4f}")
+          print(f"  50th percentile: {np.nanpercentile(control_max, 50):.4f}")
+          print(f"  75th percentile: {np.nanpercentile(control_max, 75):.4f}")
+          print(f"  Max: {np.nanmax(control_max):.4f}")
+          
       # Sort by correlation (descending) - we want positive correlations at the top
       results = results.reindex(results['correlation'].sort_values(ascending=False).index)
       print(f"\nResults:")
-      print(f"Regions with correlation > {min_correlation}: {results['significant'].sum()}")
+      print(f"Regions with correlation > {min_correlation}: {((np.array(pvalues) < 0.05) & (np.array(correlations) > min_correlation)).sum()}")
       print(f"Regions with valid data: {(results['valid_samples'] >= 3).sum()}")
+      print(f"Final significant regions (tumor-specific): {results['significant'].sum()}")
       
       # Report on negative correlations (biological nonsense for tumor markers)
       negative_high_corr = (np.array(pvalues) < 0.05) & (np.array(correlations) < -min_correlation)
@@ -270,16 +305,24 @@ def create_tumour_atlas_from_results(results, output_atlas_path, min_cpgs, regio
 # python -m deep_conv.atlasbuilder.tumour_purity_aware_diff_meth_region_finder \
 # --min_cpgs 3 \
 # --pat_dir /users/zetzioni/sharedscratch/loyfer_atlas/cna_corrected_pats \
-# --output_atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_tumour_content_correlated_regions_l3.bed
+# --control_dir /users/zetzioni/sharedscratch/loyfer_atlas/control_pats \
+# --output_atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_tumor_specific_l3.bed \
+# --min_correlation 0.7 \
+# --max_control_signal 0.01
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Process pat files for UXM analysis')
     parser.add_argument('--min_cpgs', type=int, required=True, help='Minimum CpGs required')
-    parser.add_argument('--pat_dir', required=True, help='Directory containing pat files')
+    parser.add_argument('--pat_dir', required=True, help='Directory containing tumor pat files')
+    parser.add_argument('--control_dir', required=True, help='Directory containing control pat files')
     parser.add_argument("--output_atlas_path", required=True, help="Path to save atlas")
+    parser.add_argument('--min_correlation', type=float, default=0.7, help='Minimum correlation with tumor purity')
+    parser.add_argument('--max_control_signal', type=float, default=0.01, help='Maximum signal allowed in control samples')
+    parser.add_argument('--no_control_filter', action='store_true', help='Skip control filtering (not recommended)')
 
     args = parser.parse_args()
 
+    # Process tumor samples
     for i in range(1,23):
         mv = pd.read_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_marker_values.parquet")
         cov = pd.read_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_coverage.parquet")
@@ -287,8 +330,41 @@ def main():
         filtered_mv.to_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_filtered_marker_values.parquet", index=False)
         filtered_cov.to_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_filtered_coverage.parquet", index=False)
 
-    filtered_mv = pd.read_parquet(glob.glob(f"{args.pat_dir}/*filtered_marker_values.parquet"))
-    filtered_cov = pd.read_parquet(glob.glob(f"{args.pat_dir}/*filtered_coverage.parquet"))
+    # Load tumor data
+    tumor_mv = pd.read_parquet(glob.glob(f"{args.pat_dir}/*filtered_marker_values.parquet"))
+    tumor_cov = pd.read_parquet(glob.glob(f"{args.pat_dir}/*filtered_coverage.parquet"))
+    
+    # Process control samples
+    print("Processing control samples...")
+    for i in range(1,23):
+        control_mv = pd.read_parquet(f"{args.control_dir}/l{args.min_cpgs}_chr{i}_marker_values.parquet")
+        control_cov = pd.read_parquet(f"{args.control_dir}/l{args.min_cpgs}_chr{i}_coverage.parquet")
+        filtered_control_mv, filtered_control_cov = filter_by_coverage(control_mv, control_cov, min_coverage=10)
+        filtered_control_mv.to_parquet(f"{args.control_dir}/l{args.min_cpgs}_chr{i}_filtered_marker_values.parquet", index=False)
+        filtered_control_cov.to_parquet(f"{args.control_dir}/l{args.min_cpgs}_chr{i}_filtered_coverage.parquet", index=False)
+
+    # Load control data
+    control_mv = pd.read_parquet(glob.glob(f"{args.control_dir}/*filtered_marker_values.parquet"))
+    control_cov = pd.read_parquet(glob.glob(f"{args.control_dir}/*filtered_coverage.parquet"))
+    
+    # Merge tumor and control data
+    print("Merging tumor and control data...")
+    # Align on common regions (intersection)
+    common_regions = tumor_mv.index.intersection(control_mv.index)
+    print(f"Found {len(common_regions)} common regions between tumor and control samples")
+    
+    # Create combined dataset
+    filtered_mv = tumor_mv.loc[common_regions].copy()
+    filtered_cov = tumor_cov.loc[common_regions].copy()
+    
+    # Add control columns
+    for col in control_mv.columns:
+        if col not in ['name', 'direction']:  # Skip metadata columns
+            filtered_mv[f"Control_{col}"] = control_mv.loc[common_regions, col]
+            filtered_cov[f"Control_{col}"] = control_cov.loc[common_regions, col]
+    
+    print(f"Combined dataset shape: {filtered_mv.shape}")
+    print(f"Control columns added: {len([col for col in filtered_mv.columns if col.startswith('Control_')])}")
 
     tumor_purity_dict = {
         '069-009_ScrBsl_tumour_cna_corrected':0.5171,
@@ -304,7 +380,9 @@ def main():
     results, sample_cols, purities = analyse_tumour_purity_correlation(
         filtered_mv,
         tumor_purity_dict,
-        min_correlation=0.7
+        min_correlation=args.min_correlation,
+        max_control_signal=args.max_control_signal,
+        check_controls=not args.no_control_filter
     )
 
     plot_top_correlations(filtered_mv, results, sample_cols, purities, args.pat_dir, args.min_cpgs)
