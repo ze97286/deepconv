@@ -7,27 +7,59 @@ import re
 
 def filter_by_coverage(mv, cov, min_coverage=10):
       """
-      Filter marker values and coverage dataframes to keep only rows 
-      where all samples have coverage > min_coverage
+      Filter marker values and coverage dataframes using mixed coverage thresholds
+      - High coverage controls (TP/X samples): >= 5 reads
+      - Low coverage controls (GI samples): >= 3 reads
+      - Tumor samples: >= min_coverage reads
       
       Args:
           mv: marker values dataframe (regions x samples)
           cov: coverage dataframe (regions x samples) 
-          min_coverage: minimum coverage threshold
+          min_coverage: minimum coverage threshold for tumor samples
           
       Returns:
           filtered_mv, filtered_cov: filtered dataframes
       """
       # Get sample columns (assuming first few columns are metadata like 'name', 'direction')
       sample_cols = [col for col in cov.columns if col not in ['name', 'direction']]
-      # Create mask: True for rows where ALL samples have coverage > min_coverage
-      coverage_mask = (cov[sample_cols] > min_coverage).all(axis=1)
+      
+      # Separate control and tumor samples
+      high_cov_controls = [col for col in sample_cols if col.startswith('Control_') and ('TP' in col or 'X' in col)]
+      low_cov_controls = [col for col in sample_cols if col.startswith('Control_') and 'GI' in col]
+      tumor_samples = [col for col in sample_cols if not col.startswith('Control_')]
+      
+      print(f"Sample classification:")
+      print(f"  High coverage controls: {len(high_cov_controls)}")
+      print(f"  Low coverage controls: {len(low_cov_controls)}")
+      print(f"  Tumor samples: {len(tumor_samples)}")
+      
+      # Create coverage masks
+      if high_cov_controls:
+          high_cov_mask = (cov[high_cov_controls] >= 5).all(axis=1)
+      else:
+          high_cov_mask = True
+      
+      if low_cov_controls:
+          low_cov_mask = (cov[low_cov_controls] >= 3).all(axis=1)
+      else:
+          low_cov_mask = True
+      
+      if tumor_samples:
+          tumor_mask = (cov[tumor_samples] >= min_coverage).all(axis=1)
+      else:
+          tumor_mask = True
+      
+      # Combined mask
+      coverage_mask = high_cov_mask & low_cov_mask & tumor_mask
+      
       # Apply filter to both dataframes
       filtered_mv = mv[coverage_mask].copy()
       filtered_cov = cov[coverage_mask].copy()
+      
       print(f"Original regions: {len(mv)}")
-      print(f"After coverage filter (all samples > {min_coverage}): {len(filtered_mv)}")
+      print(f"After mixed coverage filter: {len(filtered_mv)}")
       print(f"Kept {len(filtered_mv)/len(mv)*100:.1f}% of regions")
+      
       return filtered_mv, filtered_cov
 
 def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correlation=0.7,
@@ -100,8 +132,18 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
       if check_controls and control_cols:
           print(f"\nApplying control filtering (max signal <= {max_control_signal})...")
           control_data = filtered_mv[control_cols].values
+          print(f"  Control data shape: {control_data.shape}")
+          
+          # Debug: Check control data
+          print(f"  Control data range: {np.nanmin(control_data):.4f} - {np.nanmax(control_data):.4f}")
+          
           control_max = np.nanmax(control_data, axis=1)
           results['control_max'] = control_max
+          
+          # Debug: Show some examples
+          print(f"\n  Examples of control max values:")
+          for i in range(min(5, len(control_max))):
+              print(f"    Region {i}: control_max = {control_max[i]:.4f}")
           
           # Update significant regions to include control filter
           control_filter = control_max <= max_control_signal
@@ -120,6 +162,12 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
           print(f"  50th percentile: {np.nanpercentile(control_max, 50):.4f}")
           print(f"  75th percentile: {np.nanpercentile(control_max, 75):.4f}")
           print(f"  Max: {np.nanmax(control_max):.4f}")
+          
+          # Show what we'd get with different thresholds
+          print(f"\nRegions passing different control thresholds:")
+          for thresh in [0.01, 0.02, 0.05, 0.10, 0.15, 0.20]:
+              passing = (control_max <= thresh).sum()
+              print(f"  <= {thresh}: {passing} regions ({100*passing/len(control_max):.1f}%)")
           
       # Sort by correlation (descending) - we want positive correlations at the top
       results = results.reindex(results['correlation'].sort_values(ascending=False).index)
@@ -324,8 +372,13 @@ def main():
         filtered_cov.to_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_filtered_coverage.parquet", index=False)
 
     # Load tumor data
-    tumor_mv = pd.read_parquet(glob.glob(f"{args.pat_dir}/*filtered_marker_values.parquet"))
-    tumor_cov = pd.read_parquet(glob.glob(f"{args.pat_dir}/*filtered_coverage.parquet"))
+    tumor_files = glob.glob(f"{args.pat_dir}/*filtered_marker_values.parquet")
+    tumor_cov_files = glob.glob(f"{args.pat_dir}/*filtered_coverage.parquet")
+    print(f"Loading {len(tumor_files)} tumor marker files...")
+    print(f"Loading {len(tumor_cov_files)} tumor coverage files...")
+    
+    tumor_mv = pd.read_parquet(tumor_files)
+    tumor_cov = pd.read_parquet(tumor_cov_files)
     
     # Process control samples
     print("Processing control samples...")
@@ -337,12 +390,17 @@ def main():
         filtered_control_cov.to_parquet(f"{args.control_dir}/l{args.min_cpgs}_chr{i}_filtered_coverage.parquet", index=False)
 
     # Load control data
-    control_mv = pd.read_parquet(glob.glob(f"{args.control_dir}/*filtered_marker_values.parquet"))
-    control_cov = pd.read_parquet(glob.glob(f"{args.control_dir}/*filtered_coverage.parquet"))
+    control_files = glob.glob(f"{args.control_dir}/*filtered_marker_values.parquet")
+    control_cov_files = glob.glob(f"{args.control_dir}/*filtered_coverage.parquet")
+    print(f"Loading {len(control_files)} control marker files...")
+    print(f"Loading {len(control_cov_files)} control coverage files...")
+    
+    control_mv = pd.read_parquet(control_files)
+    control_cov = pd.read_parquet(control_cov_files)
     
     # Merge tumor and control data
     print("Merging tumor and control data...")
-    # Align on common regions (intersection)
+    # Since alignment is confirmed to be correct, use indices directly
     common_regions = tumor_mv.index.intersection(control_mv.index)
     print(f"Found {len(common_regions)} common regions between tumor and control samples")
     
@@ -351,10 +409,24 @@ def main():
     filtered_cov = tumor_cov.loc[common_regions].copy()
     
     # Add control columns
-    for col in control_mv.columns:
-        if col not in ['name', 'direction']:  # Skip metadata columns
-            filtered_mv[f"Control_{col}"] = control_mv.loc[common_regions, col]
-            filtered_cov[f"Control_{col}"] = control_cov.loc[common_regions, col]
+    print("\nAdding control columns...")
+    control_sample_cols = [col for col in control_mv.columns if col not in ['name', 'direction']]
+    print(f"Control sample columns to add: {len(control_sample_cols)}")
+    if len(control_sample_cols) > 0:
+        print(f"First 5 control columns: {control_sample_cols[:5]}")
+    
+    for col in control_sample_cols:
+        filtered_mv[f"Control_{col}"] = control_mv.loc[common_regions, col].values
+        filtered_cov[f"Control_{col}"] = control_cov.loc[common_regions, col].values
+    
+    # Debug: Check if control values were added correctly
+    control_cols_added = [col for col in filtered_mv.columns if col.startswith('Control_')]
+    if control_cols_added:
+        print(f"\nDebug - First control column values:")
+        first_control = control_cols_added[0]
+        print(f"  Column: {first_control}")
+        print(f"  First 5 values: {filtered_mv[first_control].iloc[:5].values}")
+        print(f"  Value range: {filtered_mv[first_control].min():.4f} - {filtered_mv[first_control].max():.4f}")
     
     print(f"Combined dataset shape: {filtered_mv.shape}")
     print(f"Control columns added: {len([col for col in filtered_mv.columns if col.startswith('Control_')])}")
