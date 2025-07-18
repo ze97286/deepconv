@@ -24,9 +24,11 @@ def filter_by_coverage(mv, cov, min_coverage=10):
       sample_cols = [col for col in cov.columns if col not in ['name', 'direction']]
       
       # Separate control and tumor samples
-      high_cov_controls = [col for col in sample_cols if col.startswith('Control_') and ('TP' in col or 'X' in col)]
-      low_cov_controls = [col for col in sample_cols if col.startswith('Control_') and 'GI' in col]
-      tumor_samples = [col for col in sample_cols if not col.startswith('Control_')]
+      # For control files: GI samples = low coverage, everything else = high coverage
+      # For tumor files: no controls present
+      low_cov_controls = [col for col in sample_cols if 'GI' in col]
+      high_cov_controls = [col for col in sample_cols if 'GI' not in col and ('TP' in col or 'X' in col)]
+      tumor_samples = [col for col in sample_cols if 'GI' not in col and 'TP' not in col and 'X' not in col]
       
       print(f"Sample classification:")
       print(f"  High coverage controls: {len(high_cov_controls)}")
