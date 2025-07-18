@@ -329,17 +329,28 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     print("Calculating merged cell type signals...")
     cell_type_order = ["B-cells", "CD34-erythroblasts", "CD34-megakaryocytes", 
                       "Colon", "Esophagus", "Gastric", "Granulocytes", 
-                      "Monocytes", "NK-cells", "Small-intestine", "T-cells"]
+                      "Monocytes", "NK-cells", "OAC", "Small-intestine", "T-cells"]  # Added OAC to the list
     
     # Add target column for calculate_weighted_cell_type_signals
     signal_df['target'] = 'OAC'
     
+    # IMPORTANT: signal_df now has tumor_100 column which will be used for OAC
     merged_signals, variance_stats = calculate_weighted_cell_type_signals(
         signal_df, coverage_df, cell_type_order, max_cv_threshold
     )
     
     print(f"Merged signals shape: {merged_signals.shape}")
     print(f"Merged signals columns: {list(merged_signals.columns)}")
+    
+    # Debug: check if OAC column exists and has the tumor_100 values
+    if 'OAC' in merged_signals.columns:
+        print(f"\n  DEBUG - OAC in merged signals vs tumor_100:")
+        for i in range(min(5, len(signal_df))):
+            idx = signal_df.index[i]
+            if idx in merged_signals.index:
+                print(f"    Region {idx}: tumor_100={signal_df.loc[idx, 'tumor_100']:.6f}, merged OAC={merged_signals.loc[idx, 'OAC']:.6f}")
+            else:
+                print(f"    Region {idx}: not found in merged_signals!")
     
     # Step 3: Calculate coverage requirements
     tumor_cols = [col for col in signal_df.columns if col.startswith('OAC')]
@@ -348,12 +359,23 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     # Step 4: Calculate control signals (strict approach: median ≤ 0.1%, max ≤ 1%)
     control_cols = [col for col in signal_df.columns if col.startswith('Control')]
     if control_cols:
+        # Debug: check raw control values
+        print(f"\n  DEBUG - Raw control signal check (first 5 regions):")
+        for i in range(min(5, len(signal_df))):
+            control_vals = signal_df[control_cols].iloc[i].values
+            print(f"    Region {i}: min={np.nanmin(control_vals):.6f}, max={np.nanmax(control_vals):.6f}, median={np.nanmedian(control_vals):.6f}")
+        
         # Calculate both median and max control signals
         signal_df['median_control'] = signal_df[control_cols].median(axis=1, skipna=True)
         signal_df['max_control'] = signal_df[control_cols].max(axis=1, skipna=True)
         # If all controls are NaN, set to 0
         signal_df['median_control'] = signal_df['median_control'].fillna(0)
         signal_df['max_control'] = signal_df['max_control'].fillna(0)
+        
+        # Debug: check calculated control columns
+        print(f"\n  DEBUG - Calculated control signals (overall):")
+        print(f"    Median control - min: {signal_df['median_control'].min():.6f}, max: {signal_df['median_control'].max():.6f}")
+        print(f"    Max control - min: {signal_df['max_control'].min():.6f}, max: {signal_df['max_control'].max():.6f}")
     else:
         signal_df['median_control'] = 0
         signal_df['max_control'] = 0
@@ -368,15 +390,44 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     blood_cols = [col for col in blood_immune_types if col in merged_signals.columns]
     gi_cols = [col for col in gi_types if col in merged_signals.columns]
     
+    # Debug: check if we found the right columns
+    print(f"\n  DEBUG - Found blood columns in merged signals: {blood_cols}")
+    print(f"  DEBUG - Found GI columns in merged signals: {gi_cols}")
+    
+    # Debug: check if merged_signals has the right indices
+    print(f"  DEBUG - signal_df indices match merged_signals: {signal_df.index.equals(merged_signals.index)}")
+    
     if blood_cols:
-        signal_df['max_blood_immune'] = merged_signals[blood_cols].max(axis=1)
-        signal_df['median_blood_immune'] = merged_signals[blood_cols].median(axis=1)
+        # Debug: check merged blood signals
+        print(f"\n  DEBUG - Merged blood signals (first 5 regions):")
+        for i in range(min(5, len(merged_signals))):
+            blood_vals = merged_signals[blood_cols].iloc[i].values
+            print(f"    Region {i}: min={np.nanmin(blood_vals):.6f}, max={np.nanmax(blood_vals):.6f}, median={np.nanmedian(blood_vals):.6f}")
+        
+        # Fix: ensure we're aligning the indices correctly
+        if not signal_df.index.equals(merged_signals.index):
+            print(f"  WARNING: Index mismatch! Realigning merged signals...")
+            # Use loc to ensure proper alignment
+            signal_df['max_blood_immune'] = merged_signals.loc[signal_df.index, blood_cols].max(axis=1)
+            signal_df['median_blood_immune'] = merged_signals.loc[signal_df.index, blood_cols].median(axis=1)
+        else:
+            signal_df['max_blood_immune'] = merged_signals[blood_cols].max(axis=1)
+            signal_df['median_blood_immune'] = merged_signals[blood_cols].median(axis=1)
+        
+        # Debug: check calculated blood columns
+        print(f"\n  DEBUG - Calculated blood signals (overall):")
+        print(f"    Median blood - min: {signal_df['median_blood_immune'].min():.6f}, max: {signal_df['median_blood_immune'].max():.6f}")
+        print(f"    Max blood - min: {signal_df['max_blood_immune'].min():.6f}, max: {signal_df['max_blood_immune'].max():.6f}")
     else:
         signal_df['max_blood_immune'] = 0
         signal_df['median_blood_immune'] = 0
         
     if gi_cols:
-        signal_df['max_gi'] = merged_signals[gi_cols].max(axis=1)
+        # Fix: ensure we're aligning the indices correctly
+        if not signal_df.index.equals(merged_signals.index):
+            signal_df['max_gi'] = merged_signals.loc[signal_df.index, gi_cols].max(axis=1)
+        else:
+            signal_df['max_gi'] = merged_signals[gi_cols].max(axis=1)
     else:
         signal_df['max_gi'] = 0
     
@@ -405,24 +456,53 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     step3 = step2[step2['tumor_coverage'] >= min_coverage]
     print(f"  After coverage ≥ {min_coverage}: {len(step3):,}")
     
+    # Debug control signals before filtering
+    print(f"\n  DEBUG - Control signal distribution at step3:")
+    print(f"    Median control - min: {step3['median_control'].min():.6f}, max: {step3['median_control'].max():.6f}")
+    print(f"    Median control - 25th percentile: {step3['median_control'].quantile(0.25):.6f}")
+    print(f"    Median control - median: {step3['median_control'].median():.6f}")
+    print(f"    Median control - 75th percentile: {step3['median_control'].quantile(0.75):.6f}")
+    print(f"    Max control - min: {step3['max_control'].min():.6f}, max: {step3['max_control'].max():.6f}")
+    print(f"    Max control - 25th percentile: {step3['max_control'].quantile(0.25):.6f}")
+    print(f"    Max control - median: {step3['max_control'].median():.6f}")
+    
     # Control signal filter - both median and max
     step4a = step3[step3['median_control'] <= max_control_median]
-    print(f"  After control median ≤ {max_control_median}: {len(step4a):,}")
+    print(f"\n  After control median ≤ {max_control_median}: {len(step4a):,}")
     
     step4 = step4a[step4a['max_control'] <= max_control_max]
     print(f"  After control max ≤ {max_control_max}: {len(step4):,}")
     
+    # Debug blood signals before filtering
+    if len(step4) > 0:
+        print(f"\n  DEBUG - Blood signal distribution at step4:")
+        print(f"    Median blood - min: {step4['median_blood_immune'].min():.6f}, max: {step4['median_blood_immune'].max():.6f}")
+        print(f"    Median blood - 25th percentile: {step4['median_blood_immune'].quantile(0.25):.6f}")
+        print(f"    Median blood - median: {step4['median_blood_immune'].median():.6f}")
+        print(f"    Max blood - min: {step4['max_blood_immune'].min():.6f}, max: {step4['max_blood_immune'].max():.6f}")
+    
     # Blood/immune filter
     step5 = step4[step4['median_blood_immune'] <= max_blood_signal]
-    print(f"  After blood signal ≤ {max_blood_signal}: {len(step5):,}")
+    print(f"\n  After blood signal ≤ {max_blood_signal}: {len(step5):,}")
     
     # Blood SNR filter
     step6 = step5[step5['snr_vs_blood'] >= min_snr_blood]
     print(f"  After blood SNR ≥ {min_snr_blood}: {len(step6):,}")
     
+    # Debug GI signals before filtering
+    if len(step6) > 0:
+        print(f"\n  DEBUG - GI signal distribution at step6:")
+        print(f"    Max GI - value: {step6['max_gi'].iloc[0]:.6f}")
+        print(f"    GI/tumor ratio - value: {step6['gi_to_tumor_ratio'].iloc[0]:.6f}")
+        print(f"    Individual GI signals for the remaining region:")
+        for gi_type in gi_cols:
+            if gi_type in merged_signals.columns:
+                idx = step6.index[0]
+                print(f"      {gi_type}: {merged_signals.loc[idx, gi_type]:.6f}")
+    
     # GI signal filter
     step7 = step6[step6['max_gi'] <= max_gi_signal]
-    print(f"  After GI signal ≤ {max_gi_signal}: {len(step7):,}")
+    print(f"\n  After GI signal ≤ {max_gi_signal}: {len(step7):,}")
     
     # GI ratio filter
     step8 = step7[step7['gi_to_tumor_ratio'] <= max_gi_to_tumor_ratio]
