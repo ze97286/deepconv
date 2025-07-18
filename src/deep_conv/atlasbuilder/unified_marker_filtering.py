@@ -41,7 +41,7 @@ def calculate_100_percent_tumor_signal(signal_df: pd.DataFrame,
 
 def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumour_purity_dict: Dict[str, float]):
     """
-    Analyze the data to suggest appropriate filtering thresholds using a sample of data
+    Analyze the data to suggest appropriate filtering thresholds using weighted cell type signals
     """
     print("="*60)
     print("THRESHOLD ANALYSIS")
@@ -68,45 +68,57 @@ def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumou
         print("No regions with valid tumor signal found!")
         return
     
-    # Calculate control signals directly (skip merged signals for speed)
+    # Calculate weighted cell type signals (the actual values used in filtering)
+    print("Calculating weighted cell type signals for threshold analysis...")
+    cell_type_order = ["B-cells", "CD34-erythroblasts", "CD34-megakaryocytes", 
+                      "Colon", "Esophagus", "Gastric", "Granulocytes", 
+                      "Monocytes", "NK-cells", "Small-intestine", "T-cells"]
+    
+    # Add target column for calculate_weighted_cell_type_signals
+    valid_tumor['target'] = 'OAC'
+    valid_coverage = sample_coverage.loc[valid_tumor.index]
+    
+    merged_signals, _ = calculate_weighted_cell_type_signals(
+        valid_tumor, valid_coverage, cell_type_order
+    )
+    
+    # Calculate control signals
     control_cols = [col for col in sample_df.columns if col.startswith('Control')]
     if control_cols:
-        valid_tumor['mean_control'] = valid_tumor[control_cols].mean(axis=1, skipna=True)
-        valid_tumor['mean_control'] = valid_tumor['mean_control'].fillna(0)
+        valid_tumor['median_control'] = valid_tumor[control_cols].median(axis=1, skipna=True)
+        valid_tumor['max_control'] = valid_tumor[control_cols].max(axis=1, skipna=True)
+        valid_tumor['median_control'] = valid_tumor['median_control'].fillna(0)
+        valid_tumor['max_control'] = valid_tumor['max_control'].fillna(0)
     else:
-        valid_tumor['mean_control'] = 0
+        valid_tumor['median_control'] = 0
+        valid_tumor['max_control'] = 0
     
     # Calculate coverage
     tumor_cols = [col for col in sample_df.columns if col.startswith('OAC')]
     valid_tumor['tumor_coverage'] = sample_coverage[tumor_cols].mean(axis=1)
     
-    # Sample-based estimates for blood/immune and GI signals
-    print("Calculating sample-based cell type signals...")
-    blood_immune_prefixes = ['Granulocytes', 'T-cells', 'B-cells', 'NK-cells', 
-                            'Monocytes', 'CD34-erythroblasts', 'CD34-megakaryocytes']
-    gi_prefixes = ['Colon', 'Esophagus', 'Gastric', 'Small-intestine']
+    # Calculate weighted blood/immune and GI signals
+    blood_immune_types = ['Granulocytes', 'T-cells', 'B-cells', 'NK-cells', 
+                         'Monocytes', 'CD34-erythroblasts', 'CD34-megakaryocytes']
+    gi_types = ['Colon', 'Esophagus', 'Gastric', 'Small-intestine']
     
-    blood_immune_cols = [col for col in sample_df.columns 
-                        for prefix in blood_immune_prefixes 
-                        if col.startswith(prefix)]
-    gi_cols = [col for col in sample_df.columns 
-              for prefix in gi_prefixes 
-              if col.startswith(prefix)]
+    blood_cols = [col for col in blood_immune_types if col in merged_signals.columns]
+    gi_cols = [col for col in gi_types if col in merged_signals.columns]
     
-    if blood_immune_cols:
-        valid_tumor['max_blood_immune'] = valid_tumor[blood_immune_cols].max(axis=1)
-        valid_tumor['median_blood_immune'] = valid_tumor[blood_immune_cols].median(axis=1)
+    if blood_cols:
+        valid_tumor['max_blood_immune'] = merged_signals[blood_cols].max(axis=1)
+        valid_tumor['median_blood_immune'] = merged_signals[blood_cols].median(axis=1)
     else:
         valid_tumor['max_blood_immune'] = 0
         valid_tumor['median_blood_immune'] = 0
         
     if gi_cols:
-        valid_tumor['max_gi'] = valid_tumor[gi_cols].max(axis=1)
+        valid_tumor['max_gi'] = merged_signals[gi_cols].max(axis=1)
     else:
         valid_tumor['max_gi'] = 0
     
     print(f"Analysis of {len(valid_tumor)} sampled regions with valid 100% tumor signal:")
-    print(f"Found {len(blood_immune_cols)} blood/immune and {len(gi_cols)} GI sample columns\n")
+    print(f"Found {len(blood_cols)} blood/immune and {len(gi_cols)} GI cell types\n")
     
     # Tumor signal analysis
     print("100% Tumor Signal:")
@@ -115,45 +127,53 @@ def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumou
     print(f"  Median: {valid_tumor['tumor_100'].median():.3f}")
     print(f"  75th percentile: {valid_tumor['tumor_100'].quantile(0.75):.3f}")
     print(f"  Max: {valid_tumor['tumor_100'].max():.3f}")
-    print(f"  Suggested min_tumor_signal: {valid_tumor['tumor_100'].quantile(0.75):.3f}")
+    # More reasonable tumor signal threshold (50th percentile)
+    print(f"  Suggested min_tumor_signal: {valid_tumor['tumor_100'].quantile(0.50):.3f}")
     
-    # Blood/immune analysis
-    print("\nBlood/Immune Signal:")
-    print(f"  Min: {valid_tumor['max_blood_immune'].min():.4f}")
-    print(f"  25th percentile: {valid_tumor['max_blood_immune'].quantile(0.25):.4f}")
-    print(f"  Median: {valid_tumor['max_blood_immune'].median():.4f}")
-    print(f"  75th percentile: {valid_tumor['max_blood_immune'].quantile(0.75):.4f}")
-    print(f"  Max: {valid_tumor['max_blood_immune'].max():.4f}")
-    print(f"  Suggested max_blood_signal: {valid_tumor['max_blood_immune'].quantile(0.25):.4f}")
+    # Blood/immune analysis (using weighted signals)
+    print("\nWeighted Blood/Immune Signal:")
+    print(f"  Min: {valid_tumor['median_blood_immune'].min():.4f}")
+    print(f"  25th percentile: {valid_tumor['median_blood_immune'].quantile(0.25):.4f}")
+    print(f"  Median: {valid_tumor['median_blood_immune'].median():.4f}")
+    print(f"  75th percentile: {valid_tumor['median_blood_immune'].quantile(0.75):.4f}")
+    print(f"  Max: {valid_tumor['median_blood_immune'].max():.4f}")
+    # More reasonable blood signal threshold (10th percentile)
+    print(f"  Suggested max_blood_signal: {valid_tumor['median_blood_immune'].quantile(0.10):.4f}")
     
-    # GI analysis
-    print("\nGI Signal:")
+    # GI analysis (using weighted signals)
+    print("\nWeighted GI Signal:")
     print(f"  Min: {valid_tumor['max_gi'].min():.4f}")
     print(f"  25th percentile: {valid_tumor['max_gi'].quantile(0.25):.4f}")
     print(f"  Median: {valid_tumor['max_gi'].median():.4f}")
     print(f"  75th percentile: {valid_tumor['max_gi'].quantile(0.75):.4f}")
     print(f"  Max: {valid_tumor['max_gi'].max():.4f}")
-    print(f"  Suggested max_gi_signal: {valid_tumor['max_gi'].quantile(0.75):.4f}")
+    # More reasonable GI signal threshold (50th percentile)
+    print(f"  Suggested max_gi_signal: {valid_tumor['max_gi'].quantile(0.50):.4f}")
     
     # Control analysis
     print("\nControl Signal:")
-    print(f"  Min: {valid_tumor['mean_control'].min():.4f}")
-    print(f"  5th percentile: {valid_tumor['mean_control'].quantile(0.05):.4f}")
-    print(f"  10th percentile: {valid_tumor['mean_control'].quantile(0.10):.4f}")
-    print(f"  25th percentile: {valid_tumor['mean_control'].quantile(0.25):.4f}")
-    print(f"  Median: {valid_tumor['mean_control'].median():.4f}")
-    print(f"  75th percentile: {valid_tumor['mean_control'].quantile(0.75):.4f}")
-    print(f"  Max: {valid_tumor['mean_control'].max():.4f}")
+    print(f"  Median control - Min: {valid_tumor['median_control'].min():.4f}")
+    print(f"  Median control - 5th percentile: {valid_tumor['median_control'].quantile(0.05):.4f}")
+    print(f"  Median control - 10th percentile: {valid_tumor['median_control'].quantile(0.10):.4f}")
+    print(f"  Median control - 25th percentile: {valid_tumor['median_control'].quantile(0.25):.4f}")
+    print(f"  Median control - Median: {valid_tumor['median_control'].median():.4f}")
+    
+    print(f"  Max control - Min: {valid_tumor['max_control'].min():.4f}")
+    print(f"  Max control - 5th percentile: {valid_tumor['max_control'].quantile(0.05):.4f}")
+    print(f"  Max control - 10th percentile: {valid_tumor['max_control'].quantile(0.10):.4f}")
+    print(f"  Max control - 25th percentile: {valid_tumor['max_control'].quantile(0.25):.4f}")
+    print(f"  Max control - Median: {valid_tumor['max_control'].median():.4f}")
     
     # Show percentage of regions with very low control signal
-    very_low_control = (valid_tumor['mean_control'] <= 0.001).sum()
-    low_control = (valid_tumor['mean_control'] <= 0.01).sum()
-    print(f"  Regions with control ≤ 0.001: {very_low_control}/{len(valid_tumor)} ({100*very_low_control/len(valid_tumor):.1f}%)")
-    print(f"  Regions with control ≤ 0.01: {low_control}/{len(valid_tumor)} ({100*low_control/len(valid_tumor):.1f}%)")
+    very_low_control_med = (valid_tumor['median_control'] <= 0.001).sum()
+    low_control_med = (valid_tumor['median_control'] <= 0.01).sum()
+    very_low_control_max = (valid_tumor['max_control'] <= 0.001).sum()
+    low_control_max = (valid_tumor['max_control'] <= 0.01).sum()
     
-    # Conservative suggestion
-    conservative_threshold = max(0.001, valid_tumor['mean_control'].quantile(0.05))
-    print(f"  Suggested max_control_signal: {conservative_threshold:.4f} (conservative: 5th percentile or 0.001, whichever is higher)")
+    print(f"  Regions with median control ≤ 0.001: {very_low_control_med}/{len(valid_tumor)} ({100*very_low_control_med/len(valid_tumor):.1f}%)")
+    print(f"  Regions with median control ≤ 0.01: {low_control_med}/{len(valid_tumor)} ({100*low_control_med/len(valid_tumor):.1f}%)")
+    print(f"  Regions with max control ≤ 0.001: {very_low_control_max}/{len(valid_tumor)} ({100*very_low_control_max/len(valid_tumor):.1f}%)")
+    print(f"  Regions with max control ≤ 0.01: {low_control_max}/{len(valid_tumor)} ({100*low_control_max/len(valid_tumor):.1f}%)")
     
     # Coverage analysis
     print("\nTumor Coverage:")
@@ -164,16 +184,16 @@ def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumou
     print(f"  Max: {valid_tumor['tumor_coverage'].max():.1f}")
     print(f"  Suggested min_coverage: {valid_tumor['tumor_coverage'].quantile(0.25):.0f}")
     
-    # Suggested command
+    # Realistic suggested command
     print("\n" + "="*60)
-    print("SUGGESTED COMMAND:")
+    print("REALISTIC SUGGESTED COMMAND:")
     print("="*60)
     print(f"python script.py \\")
-    print(f"  --min_tumor_signal {valid_tumor['tumor_100'].quantile(0.75):.3f} \\")
-    print(f"  --max_blood_signal {valid_tumor['max_blood_immune'].quantile(0.25):.4f} \\")
-    print(f"  --max_gi_signal {valid_tumor['max_gi'].quantile(0.75):.4f} \\")
-    conservative_threshold = max(0.001, valid_tumor['mean_control'].quantile(0.05))
-    print(f"  --max_control_signal {conservative_threshold:.4f} \\")
+    print(f"  --min_tumor_signal {valid_tumor['tumor_100'].quantile(0.50):.3f} \\")
+    print(f"  --max_blood_signal {valid_tumor['median_blood_immune'].quantile(0.10):.4f} \\")
+    print(f"  --max_gi_signal {valid_tumor['max_gi'].quantile(0.50):.4f} \\")
+    print(f"  --max_control_median 0.001 \\")
+    print(f"  --max_control_max 0.01 \\")
     print(f"  --min_coverage {valid_tumor['tumor_coverage'].quantile(0.25):.0f} \\")
     print(f"  --no_overlap")
 
@@ -437,10 +457,6 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     
     return filtered
 
-# python -m deep_conv.atlasbuilder.unified_marker_filtering \
-# --signal_file /users/zetzioni/sharedscratch/loyfer_atlas/pat_by_cell_type/l3_marker_values.parquet \
-# --coverage_file /users/zetzioni/sharedscratch/loyfer_atlas/pat_by_cell_type/l3_coverage.parquet \
-# --output_file /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_oac_mixed_subtypes.l3.bed
 def main():
     parser = argparse.ArgumentParser(description='Unified marker filtering')
     parser.add_argument('--signal_file', type=str, required=True, 
