@@ -5,65 +5,6 @@ import matplotlib.pyplot as plt
 import glob
 import re
 
-def filter_by_coverage(mv, cov, min_coverage=10):
-      """
-      Filter marker values and coverage dataframes using mixed coverage thresholds
-      - High coverage controls (TP/X samples): >= 5 reads
-      - Low coverage controls (GI samples): >= 3 reads
-      - Tumor samples: >= min_coverage reads
-      
-      Args:
-          mv: marker values dataframe (regions x samples)
-          cov: coverage dataframe (regions x samples) 
-          min_coverage: minimum coverage threshold for tumor samples
-          
-      Returns:
-          filtered_mv, filtered_cov: filtered dataframes
-      """
-      # Get sample columns (assuming first few columns are metadata like 'name', 'direction')
-      sample_cols = [col for col in cov.columns if col not in ['name', 'direction']]
-      
-      # Separate control and tumor samples
-      # For control files: GI samples = low coverage, everything else = high coverage
-      # For tumor files: no controls present
-      low_cov_controls = [col for col in sample_cols if 'GI' in col]
-      high_cov_controls = [col for col in sample_cols if 'GI' not in col and ('TP' in col or 'X' in col)]
-      tumor_samples = [col for col in sample_cols if 'GI' not in col and 'TP' not in col and 'X' not in col]
-      
-      print(f"Sample classification:")
-      print(f"  High coverage controls: {len(high_cov_controls)}")
-      print(f"  Low coverage controls: {len(low_cov_controls)}")
-      print(f"  Tumor samples: {len(tumor_samples)}")
-      
-      # Create coverage masks
-      if high_cov_controls:
-          high_cov_mask = (cov[high_cov_controls] >= 5).all(axis=1)
-      else:
-          high_cov_mask = True
-      
-      if low_cov_controls:
-          low_cov_mask = (cov[low_cov_controls] >= 3).all(axis=1)
-      else:
-          low_cov_mask = True
-      
-      if tumor_samples:
-          tumor_mask = (cov[tumor_samples] >= min_coverage).all(axis=1)
-      else:
-          tumor_mask = True
-      
-      # Combined mask
-      coverage_mask = high_cov_mask & low_cov_mask & tumor_mask
-      
-      # Apply filter to both dataframes
-      filtered_mv = mv[coverage_mask].copy()
-      filtered_cov = cov[coverage_mask].copy()
-      
-      print(f"Original regions: {len(mv)}")
-      print(f"After mixed coverage filter: {len(filtered_mv)}")
-      print(f"Kept {len(filtered_mv)/len(mv)*100:.1f}% of regions")
-      
-      return filtered_mv, filtered_cov
-
 def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correlation=0.7,
                                     max_control_signal=0.01, check_controls=True):
       """
@@ -365,35 +306,18 @@ def main():
 
     args = parser.parse_args()
 
-    # Process tumor samples
-    for i in range(1,23):
-        mv = pd.read_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_marker_values.parquet")
-        cov = pd.read_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_coverage.parquet")
-        filtered_mv, filtered_cov = filter_by_coverage(mv, cov, min_coverage=10)
-        filtered_mv.to_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_filtered_marker_values.parquet", index=False)
-        filtered_cov.to_parquet(f"{args.pat_dir}/l{args.min_cpgs}_chr{i}_filtered_coverage.parquet", index=False)
-
-    # Load tumor data
-    tumor_files = glob.glob(f"{args.pat_dir}/*filtered_marker_values.parquet")
-    tumor_cov_files = glob.glob(f"{args.pat_dir}/*filtered_coverage.parquet")
+    # Load tumor data (exclude filtered files)
+    tumor_files = [f for f in glob.glob(f"{args.pat_dir}/l{args.min_cpgs}_chr*_marker_values.parquet") if 'filtered' not in f]
+    tumor_cov_files = [f for f in glob.glob(f"{args.pat_dir}/l{args.min_cpgs}_chr*_coverage.parquet") if 'filtered' not in f]
     print(f"Loading {len(tumor_files)} tumor marker files...")
     print(f"Loading {len(tumor_cov_files)} tumor coverage files...")
     
     tumor_mv = pd.read_parquet(tumor_files)
     tumor_cov = pd.read_parquet(tumor_cov_files)
     
-    # Process control samples
-    print("Processing control samples...")
-    for i in range(1,23):
-        control_mv = pd.read_parquet(f"{args.control_dir}/l{args.min_cpgs}_chr{i}_marker_values.parquet")
-        control_cov = pd.read_parquet(f"{args.control_dir}/l{args.min_cpgs}_chr{i}_coverage.parquet")
-        filtered_control_mv, filtered_control_cov = filter_by_coverage(control_mv, control_cov, min_coverage=10)
-        filtered_control_mv.to_parquet(f"{args.control_dir}/l{args.min_cpgs}_chr{i}_filtered_marker_values.parquet", index=False)
-        filtered_control_cov.to_parquet(f"{args.control_dir}/l{args.min_cpgs}_chr{i}_filtered_coverage.parquet", index=False)
-
-    # Load control data
-    control_files = glob.glob(f"{args.control_dir}/*filtered_marker_values.parquet")
-    control_cov_files = glob.glob(f"{args.control_dir}/*filtered_coverage.parquet")
+    # Load control data (exclude filtered files)
+    control_files = [f for f in glob.glob(f"{args.control_dir}/l{args.min_cpgs}_chr*_marker_values.parquet") if 'filtered' not in f]
+    control_cov_files = [f for f in glob.glob(f"{args.control_dir}/l{args.min_cpgs}_chr*_coverage.parquet") if 'filtered' not in f]
     print(f"Loading {len(control_files)} control marker files...")
     print(f"Loading {len(control_cov_files)} control coverage files...")
     
@@ -432,6 +356,46 @@ def main():
     
     print(f"Combined dataset shape: {filtered_mv.shape}")
     print(f"Control columns added: {len([col for col in filtered_mv.columns if col.startswith('Control_')])}")
+    
+    # Apply mixed coverage filtering
+    print("\nApplying mixed coverage filtering...")
+    all_sample_cols = [col for col in filtered_cov.columns if col not in ['name', 'direction']]
+    print(f"Total sample columns: {len(all_sample_cols)}")
+    
+    # Classify controls
+    high_coverage_controls = [col for col in all_sample_cols if col.startswith('Control_') and 'GI' not in col]
+    low_coverage_controls = [col for col in all_sample_cols if col.startswith('Control_') and 'GI' in col]
+    tumor_samples = [col for col in all_sample_cols if not col.startswith('Control_')]
+    
+    print(f"Sample classification:")
+    print(f"  High coverage controls: {len(high_coverage_controls)}")
+    print(f"  Low coverage controls: {len(low_coverage_controls)}")
+    print(f"  Tumor samples: {len(tumor_samples)}")
+    
+    if len(high_coverage_controls) > 0:
+        print(f"  First few high coverage: {high_coverage_controls[:3]}")
+    if len(low_coverage_controls) > 0:
+        print(f"  First few low coverage: {low_coverage_controls[:3]}")
+    
+    # Create coverage masks
+    tumor_coverage_mask = (filtered_cov[tumor_samples] >= 10).all(axis=1) if tumor_samples else pd.Series(True, index=filtered_cov.index)
+    high_cov_control_mask = (filtered_cov[high_coverage_controls] >= 5).all(axis=1) if high_coverage_controls else pd.Series(True, index=filtered_cov.index)
+    low_cov_control_mask = (filtered_cov[low_coverage_controls] >= 3).all(axis=1) if low_coverage_controls else pd.Series(True, index=filtered_cov.index)
+    
+    # Combined coverage mask
+    combined_mask = tumor_coverage_mask & high_cov_control_mask & low_cov_control_mask
+    
+    print(f"Coverage filtering results:")
+    print(f"  Tumor coverage ≥10: {tumor_coverage_mask.sum()}/{len(tumor_coverage_mask)} regions ({100*tumor_coverage_mask.sum()/len(tumor_coverage_mask):.1f}%)")
+    print(f"  High coverage controls ≥5: {high_cov_control_mask.sum()}/{len(high_cov_control_mask)} regions ({100*high_cov_control_mask.sum()/len(high_cov_control_mask):.1f}%)")
+    print(f"  Low coverage controls ≥3: {low_cov_control_mask.sum()}/{len(low_cov_control_mask)} regions ({100*low_cov_control_mask.sum()/len(low_cov_control_mask):.1f}%)")
+    print(f"  Combined filter: {combined_mask.sum()}/{len(combined_mask)} regions ({100*combined_mask.sum()/len(combined_mask):.1f}%)")
+    
+    # Apply the filter
+    filtered_mv = filtered_mv[combined_mask].copy()
+    filtered_cov = filtered_cov[combined_mask].copy()
+    
+    print(f"Final dataset shape after coverage filtering: {filtered_mv.shape}")
 
     tumor_purity_dict = {
         '069-009_ScrBsl_tumour_cna_corrected':0.5171,
