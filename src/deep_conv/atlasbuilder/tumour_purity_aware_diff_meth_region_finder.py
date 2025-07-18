@@ -302,13 +302,6 @@ def create_tumour_atlas_from_results(results, output_atlas_path, min_cpgs, regio
         print(f"  {chr_name}: {chr_counts[chr_name]} regions")
     return final_atlas
 
-# python -m deep_conv.atlasbuilder.tumour_purity_aware_diff_meth_region_finder \
-# --min_cpgs 3 \
-# --pat_dir /users/zetzioni/sharedscratch/loyfer_atlas/cna_corrected_pats \
-# --control_dir /users/zetzioni/sharedscratch/loyfer_atlas/control_pats \
-# --output_atlas_path /users/zetzioni/sharedscratch/loyfer_atlas/atlas/atlas_tumor_specific_l3.bed \
-# --min_correlation 0.7 \
-# --max_control_signal 0.01
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Process pat files for UXM analysis')
