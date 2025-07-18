@@ -82,16 +82,9 @@ def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumou
         valid_tumor, valid_coverage, cell_type_order
     )
     
-    # Calculate control signals
-    control_cols = [col for col in sample_df.columns if col.startswith('Control')]
-    if control_cols:
-        valid_tumor['median_control'] = valid_tumor[control_cols].median(axis=1, skipna=True)
-        valid_tumor['max_control'] = valid_tumor[control_cols].max(axis=1, skipna=True)
-        valid_tumor['median_control'] = valid_tumor['median_control'].fillna(0)
-        valid_tumor['max_control'] = valid_tumor['max_control'].fillna(0)
-    else:
-        valid_tumor['median_control'] = 0
-        valid_tumor['max_control'] = 0
+    # Skip control signal analysis - regions are pre-filtered
+    valid_tumor['median_control'] = 0
+    valid_tumor['max_control'] = 0
     
     # Calculate coverage
     tumor_cols = [col for col in sample_df.columns if col.startswith('OAC')]
@@ -150,30 +143,9 @@ def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumou
     # More reasonable GI signal threshold (50th percentile)
     print(f"  Suggested max_gi_signal: {valid_tumor['max_gi'].quantile(0.50):.4f}")
     
-    # Control analysis
+    # Skip control analysis - regions are pre-filtered
     print("\nControl Signal:")
-    print(f"  Median control - Min: {valid_tumor['median_control'].min():.4f}")
-    print(f"  Median control - 5th percentile: {valid_tumor['median_control'].quantile(0.05):.4f}")
-    print(f"  Median control - 10th percentile: {valid_tumor['median_control'].quantile(0.10):.4f}")
-    print(f"  Median control - 25th percentile: {valid_tumor['median_control'].quantile(0.25):.4f}")
-    print(f"  Median control - Median: {valid_tumor['median_control'].median():.4f}")
-    
-    print(f"  Max control - Min: {valid_tumor['max_control'].min():.4f}")
-    print(f"  Max control - 5th percentile: {valid_tumor['max_control'].quantile(0.05):.4f}")
-    print(f"  Max control - 10th percentile: {valid_tumor['max_control'].quantile(0.10):.4f}")
-    print(f"  Max control - 25th percentile: {valid_tumor['max_control'].quantile(0.25):.4f}")
-    print(f"  Max control - Median: {valid_tumor['max_control'].median():.4f}")
-    
-    # Show percentage of regions with very low control signal
-    very_low_control_med = (valid_tumor['median_control'] <= 0.001).sum()
-    low_control_med = (valid_tumor['median_control'] <= 0.01).sum()
-    very_low_control_max = (valid_tumor['max_control'] <= 0.001).sum()
-    low_control_max = (valid_tumor['max_control'] <= 0.01).sum()
-    
-    print(f"  Regions with median control ≤ 0.001: {very_low_control_med}/{len(valid_tumor)} ({100*very_low_control_med/len(valid_tumor):.1f}%)")
-    print(f"  Regions with median control ≤ 0.01: {low_control_med}/{len(valid_tumor)} ({100*low_control_med/len(valid_tumor):.1f}%)")
-    print(f"  Regions with max control ≤ 0.001: {very_low_control_max}/{len(valid_tumor)} ({100*very_low_control_max/len(valid_tumor):.1f}%)")
-    print(f"  Regions with max control ≤ 0.01: {low_control_max}/{len(valid_tumor)} ({100*low_control_max/len(valid_tumor):.1f}%)")
+    print("  Skipped - regions are pre-filtered for tumor-specificity")
     
     # Coverage analysis
     print("\nTumor Coverage:")
@@ -192,8 +164,6 @@ def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumou
     print(f"  --min_tumor_signal {valid_tumor['tumor_100'].quantile(0.50):.3f} \\")
     print(f"  --max_blood_signal {valid_tumor['median_blood_immune'].quantile(0.10):.4f} \\")
     print(f"  --max_gi_signal {valid_tumor['max_gi'].quantile(0.50):.4f} \\")
-    print(f"  --max_control_median 0.001 \\")
-    print(f"  --max_control_max 0.01 \\")
     print(f"  --min_coverage {valid_tumor['tumor_coverage'].quantile(0.25):.0f} \\")
     print(f"  --no_overlap")
 
@@ -305,8 +275,6 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
                            max_blood_signal: float = 0.001,
                            max_gi_signal: float = 0.2,
                            max_gi_to_tumor_ratio: float = 0.25,
-                           max_control_median: float = 0.001,
-                           max_control_max: float = 0.01,
                            min_snr_blood: float = 10.0,
                            min_snr_gi: float = 3.0,
                            select_non_overlapping: bool = True,
@@ -356,29 +324,11 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     tumor_cols = [col for col in signal_df.columns if col.startswith('OAC')]
     signal_df['tumor_coverage'] = coverage_df[tumor_cols].mean(axis=1)
     
-    # Step 4: Calculate control signals (strict approach: median ≤ 0.1%, max ≤ 1%)
-    control_cols = [col for col in signal_df.columns if col.startswith('Control')]
-    if control_cols:
-        # Debug: check raw control values
-        print(f"\n  DEBUG - Raw control signal check (first 5 regions):")
-        for i in range(min(5, len(signal_df))):
-            control_vals = signal_df[control_cols].iloc[i].values
-            print(f"    Region {i}: min={np.nanmin(control_vals):.6f}, max={np.nanmax(control_vals):.6f}, median={np.nanmedian(control_vals):.6f}")
-        
-        # Calculate both median and max control signals
-        signal_df['median_control'] = signal_df[control_cols].median(axis=1, skipna=True)
-        signal_df['max_control'] = signal_df[control_cols].max(axis=1, skipna=True)
-        # If all controls are NaN, set to 0
-        signal_df['median_control'] = signal_df['median_control'].fillna(0)
-        signal_df['max_control'] = signal_df['max_control'].fillna(0)
-        
-        # Debug: check calculated control columns
-        print(f"\n  DEBUG - Calculated control signals (overall):")
-        print(f"    Median control - min: {signal_df['median_control'].min():.6f}, max: {signal_df['median_control'].max():.6f}")
-        print(f"    Max control - min: {signal_df['max_control'].min():.6f}, max: {signal_df['max_control'].max():.6f}")
-    else:
-        signal_df['median_control'] = 0
-        signal_df['max_control'] = 0
+    # Step 4: Skip control signal check - regions are pre-filtered for tumor-specificity
+    control_cols = []  # Force empty to skip control filtering
+    print("  Skipping control filtering - regions were pre-filtered in tumor-purity correlation step.")
+    signal_df['median_control'] = 0
+    signal_df['max_control'] = 0
     
     # Step 5: Calculate differential methylation metrics using merged signals
     # Group blood/immune cell types
@@ -438,7 +388,6 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     
     print(f"Found {len(blood_cols)} blood/immune cell types with valid signals")
     print(f"Found {len(gi_cols)} GI cell types with valid signals") 
-    print(f"Found {len(control_cols)} control samples")
     print(f"Found {len(tumor_cols)} tumor samples")
     
     # Step 7: Apply unified filtering criteria with detailed breakdown
@@ -456,22 +405,9 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     step3 = step2[step2['tumor_coverage'] >= min_coverage]
     print(f"  After coverage ≥ {min_coverage}: {len(step3):,}")
     
-    # Debug control signals before filtering
-    print(f"\n  DEBUG - Control signal distribution at step3:")
-    print(f"    Median control - min: {step3['median_control'].min():.6f}, max: {step3['median_control'].max():.6f}")
-    print(f"    Median control - 25th percentile: {step3['median_control'].quantile(0.25):.6f}")
-    print(f"    Median control - median: {step3['median_control'].median():.6f}")
-    print(f"    Median control - 75th percentile: {step3['median_control'].quantile(0.75):.6f}")
-    print(f"    Max control - min: {step3['max_control'].min():.6f}, max: {step3['max_control'].max():.6f}")
-    print(f"    Max control - 25th percentile: {step3['max_control'].quantile(0.25):.6f}")
-    print(f"    Max control - median: {step3['max_control'].median():.6f}")
-    
-    # Control signal filter - both median and max
-    step4a = step3[step3['median_control'] <= max_control_median]
-    print(f"\n  After control median ≤ {max_control_median}: {len(step4a):,}")
-    
-    step4 = step4a[step4a['max_control'] <= max_control_max]
-    print(f"  After control max ≤ {max_control_max}: {len(step4):,}")
+    # Skip control filtering - regions are pre-filtered for tumor-specificity
+    step4 = step3
+    print(f"  Skipping control filtering (regions pre-filtered): {len(step4):,}")
     
     # Debug blood signals before filtering
     if len(step4) > 0:
@@ -530,8 +466,11 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
         print(f"  100% tumor signal: {filtered['tumor_100'].min():.3f} - {filtered['tumor_100'].max():.3f}")
         print(f"  Max blood/immune: {filtered['max_blood_immune'].min():.4f} - {filtered['max_blood_immune'].max():.4f}")
         print(f"  Max GI: {filtered['max_gi'].min():.3f} - {filtered['max_gi'].max():.3f}")
-        print(f"  Median control: {filtered['median_control'].min():.4f} - {filtered['median_control'].max():.4f}")
-        print(f"  Max control: {filtered['max_control'].min():.4f} - {filtered['max_control'].max():.4f}")
+        if control_cols:
+            print(f"  Median control: {filtered['median_control'].min():.4f} - {filtered['median_control'].max():.4f}")
+            print(f"  Max control: {filtered['max_control'].min():.4f} - {filtered['max_control'].max():.4f}")
+        else:
+            print(f"  Control signals: Not applicable (tumor-specific regions pre-filtered)")
         print(f"  SNR vs blood: {filtered['snr_vs_blood'].min():.1f} - {filtered['snr_vs_blood'].max():.1f}")
         print(f"  SNR vs GI: {filtered['snr_vs_gi'].min():.1f} - {filtered['snr_vs_gi'].max():.1f}")
     
@@ -556,10 +495,6 @@ def main():
                        help='Maximum median blood/immune signal')
     parser.add_argument('--max_gi_signal', type=float, default=0.2,
                        help='Maximum GI tissue signal')
-    parser.add_argument('--max_control_median', type=float, default=0.001,
-                       help='Maximum median control signal (default: 0.001 = 0.1%)')
-    parser.add_argument('--max_control_max', type=float, default=0.01,
-                       help='Maximum individual control signal (default: 0.01 = 1%)')
     parser.add_argument('--max_cv_threshold', type=float, default=0.0,
                        help='Maximum coefficient of variation for within-cell-type samples (0 = no filtering)')
     parser.add_argument('--no_overlap', action='store_true',
@@ -596,6 +531,7 @@ def main():
         analyse_thresholds(signal_df, coverage_df, tumour_purity_dict)
         return
     
+    
     # Apply filtering (without overlap selection first)
     filtered_df = unified_marker_filtering(
         signal_df, coverage_df, tumour_purity_dict,
@@ -603,8 +539,6 @@ def main():
         min_coverage=args.min_coverage,
         max_blood_signal=args.max_blood_signal,
         max_gi_signal=args.max_gi_signal,
-        max_control_median=args.max_control_median,
-        max_control_max=args.max_control_max,
         select_non_overlapping=False,  # Don't select non-overlapping yet
         max_cv_threshold=args.max_cv_threshold if args.max_cv_threshold > 0 else None
     )
