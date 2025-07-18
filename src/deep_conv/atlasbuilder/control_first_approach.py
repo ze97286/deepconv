@@ -20,8 +20,9 @@ def find_control_clean_regions(tumor_dir, control_dir, min_cpgs, max_control_sig
     
     for chr_num in range(1, 23):
         try:
-            tumor_mv = pd.read_parquet(f"{tumor_dir}/l{min_cpgs}_chr{chr_num}_marker_values.parquet")
-            control_mv = pd.read_parquet(f"{control_dir}/l{min_cpgs}_chr{chr_num}_marker_values.parquet")
+            # Use the filtered files that were created by the original script
+            tumor_mv = pd.read_parquet(f"{tumor_dir}/l{min_cpgs}_chr{chr_num}_filtered_marker_values.parquet")
+            control_mv = pd.read_parquet(f"{control_dir}/l{min_cpgs}_chr{chr_num}_filtered_marker_values.parquet")
             
             # Add chromosome info
             tumor_mv['chr'] = f"chr{chr_num}"
