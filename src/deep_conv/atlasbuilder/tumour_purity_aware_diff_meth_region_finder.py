@@ -5,6 +5,38 @@ import matplotlib.pyplot as plt
 import glob
 import re
 
+def apply_mixed_coverage_filter(mv_data, cov_data, tumor_min_cov=10, high_control_min_cov=5, low_control_min_cov=3):
+    """
+    Apply mixed coverage filtering based on sample types
+    """
+    all_sample_cols = [col for col in cov_data.columns if col not in ['name', 'direction']]
+    
+    # Classify samples
+    high_coverage_controls = [col for col in all_sample_cols if col.startswith('Control_') and 'GI' not in col]
+    low_coverage_controls = [col for col in all_sample_cols if col.startswith('Control_') and 'GI' in col]
+    tumor_samples = [col for col in all_sample_cols if not col.startswith('Control_')]
+    
+    print(f"  Sample classification:")
+    print(f"    High coverage controls: {len(high_coverage_controls)}")
+    print(f"    Low coverage controls: {len(low_coverage_controls)}")
+    print(f"    Tumor samples: {len(tumor_samples)}")
+    
+    # Create coverage masks
+    tumor_mask = (cov_data[tumor_samples] >= tumor_min_cov).all(axis=1) if tumor_samples else pd.Series(True, index=cov_data.index)
+    high_control_mask = (cov_data[high_coverage_controls] >= high_control_min_cov).all(axis=1) if high_coverage_controls else pd.Series(True, index=cov_data.index)
+    low_control_mask = (cov_data[low_coverage_controls] >= low_control_min_cov).all(axis=1) if low_coverage_controls else pd.Series(True, index=cov_data.index)
+    
+    # Combined mask
+    combined_mask = tumor_mask & high_control_mask & low_control_mask
+    
+    print(f"  Coverage filtering results:")
+    print(f"    Tumor ≥{tumor_min_cov}: {tumor_mask.sum()}/{len(tumor_mask)} ({100*tumor_mask.sum()/len(tumor_mask):.1f}%)")
+    print(f"    High controls ≥{high_control_min_cov}: {high_control_mask.sum()}/{len(high_control_mask)} ({100*high_control_mask.sum()/len(high_control_mask):.1f}%)")
+    print(f"    Low controls ≥{low_control_min_cov}: {low_control_mask.sum()}/{len(low_control_mask)} ({100*low_control_mask.sum()/len(low_control_mask):.1f}%)")
+    print(f"    Combined: {combined_mask.sum()}/{len(combined_mask)} ({100*combined_mask.sum()/len(combined_mask):.1f}%)")
+    
+    return mv_data[combined_mask].copy(), cov_data[combined_mask].copy()
+
 def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correlation=0.7,
                                     max_control_signal=0.01, check_controls=True):
       """
@@ -306,97 +338,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Load tumor data (exclude filtered files)
-    tumor_files = [f for f in glob.glob(f"{args.pat_dir}/l{args.min_cpgs}_chr*_marker_values.parquet") if 'filtered' not in f]
-    tumor_cov_files = [f for f in glob.glob(f"{args.pat_dir}/l{args.min_cpgs}_chr*_coverage.parquet") if 'filtered' not in f]
-    print(f"Loading {len(tumor_files)} tumor marker files...")
-    print(f"Loading {len(tumor_cov_files)} tumor coverage files...")
-    
-    tumor_mv = pd.read_parquet(tumor_files)
-    tumor_cov = pd.read_parquet(tumor_cov_files)
-    
-    # Load control data (exclude filtered files)
-    control_files = [f for f in glob.glob(f"{args.control_dir}/l{args.min_cpgs}_chr*_marker_values.parquet") if 'filtered' not in f]
-    control_cov_files = [f for f in glob.glob(f"{args.control_dir}/l{args.min_cpgs}_chr*_coverage.parquet") if 'filtered' not in f]
-    print(f"Loading {len(control_files)} control marker files...")
-    print(f"Loading {len(control_cov_files)} control coverage files...")
-    
-    control_mv = pd.read_parquet(control_files)
-    control_cov = pd.read_parquet(control_cov_files)
-    
-    # Merge tumor and control data
-    print("Merging tumor and control data...")
-    # Since alignment is confirmed to be correct, use indices directly
-    common_regions = tumor_mv.index.intersection(control_mv.index)
-    print(f"Found {len(common_regions)} common regions between tumor and control samples")
-    
-    # Create combined dataset
-    filtered_mv = tumor_mv.loc[common_regions].copy()
-    filtered_cov = tumor_cov.loc[common_regions].copy()
-    
-    # Add control columns
-    print("\nAdding control columns...")
-    control_sample_cols = [col for col in control_mv.columns if col not in ['name', 'direction']]
-    print(f"Control sample columns to add: {len(control_sample_cols)}")
-    if len(control_sample_cols) > 0:
-        print(f"First 5 control columns: {control_sample_cols[:5]}")
-    
-    for col in control_sample_cols:
-        filtered_mv[f"Control_{col}"] = control_mv.loc[common_regions, col].values
-        filtered_cov[f"Control_{col}"] = control_cov.loc[common_regions, col].values
-    
-    # Debug: Check if control values were added correctly
-    control_cols_added = [col for col in filtered_mv.columns if col.startswith('Control_')]
-    if control_cols_added:
-        print(f"\nDebug - First control column values:")
-        first_control = control_cols_added[0]
-        print(f"  Column: {first_control}")
-        print(f"  First 5 values: {filtered_mv[first_control].iloc[:5].values}")
-        print(f"  Value range: {filtered_mv[first_control].min():.4f} - {filtered_mv[first_control].max():.4f}")
-    
-    print(f"Combined dataset shape: {filtered_mv.shape}")
-    print(f"Control columns added: {len([col for col in filtered_mv.columns if col.startswith('Control_')])}")
-    
-    # Apply mixed coverage filtering
-    print("\nApplying mixed coverage filtering...")
-    all_sample_cols = [col for col in filtered_cov.columns if col not in ['name', 'direction']]
-    print(f"Total sample columns: {len(all_sample_cols)}")
-    
-    # Classify controls
-    high_coverage_controls = [col for col in all_sample_cols if col.startswith('Control_') and 'GI' not in col]
-    low_coverage_controls = [col for col in all_sample_cols if col.startswith('Control_') and 'GI' in col]
-    tumor_samples = [col for col in all_sample_cols if not col.startswith('Control_')]
-    
-    print(f"Sample classification:")
-    print(f"  High coverage controls: {len(high_coverage_controls)}")
-    print(f"  Low coverage controls: {len(low_coverage_controls)}")
-    print(f"  Tumor samples: {len(tumor_samples)}")
-    
-    if len(high_coverage_controls) > 0:
-        print(f"  First few high coverage: {high_coverage_controls[:3]}")
-    if len(low_coverage_controls) > 0:
-        print(f"  First few low coverage: {low_coverage_controls[:3]}")
-    
-    # Create coverage masks
-    tumor_coverage_mask = (filtered_cov[tumor_samples] >= 10).all(axis=1) if tumor_samples else pd.Series(True, index=filtered_cov.index)
-    high_cov_control_mask = (filtered_cov[high_coverage_controls] >= 5).all(axis=1) if high_coverage_controls else pd.Series(True, index=filtered_cov.index)
-    low_cov_control_mask = (filtered_cov[low_coverage_controls] >= 3).all(axis=1) if low_coverage_controls else pd.Series(True, index=filtered_cov.index)
-    
-    # Combined coverage mask
-    combined_mask = tumor_coverage_mask & high_cov_control_mask & low_cov_control_mask
-    
-    print(f"Coverage filtering results:")
-    print(f"  Tumor coverage ≥10: {tumor_coverage_mask.sum()}/{len(tumor_coverage_mask)} regions ({100*tumor_coverage_mask.sum()/len(tumor_coverage_mask):.1f}%)")
-    print(f"  High coverage controls ≥5: {high_cov_control_mask.sum()}/{len(high_cov_control_mask)} regions ({100*high_cov_control_mask.sum()/len(high_cov_control_mask):.1f}%)")
-    print(f"  Low coverage controls ≥3: {low_cov_control_mask.sum()}/{len(low_cov_control_mask)} regions ({100*low_cov_control_mask.sum()/len(low_cov_control_mask):.1f}%)")
-    print(f"  Combined filter: {combined_mask.sum()}/{len(combined_mask)} regions ({100*combined_mask.sum()/len(combined_mask):.1f}%)")
-    
-    # Apply the filter
-    filtered_mv = filtered_mv[combined_mask].copy()
-    filtered_cov = filtered_cov[combined_mask].copy()
-    
-    print(f"Final dataset shape after coverage filtering: {filtered_mv.shape}")
-
     tumor_purity_dict = {
         '069-009_ScrBsl_tumour_cna_corrected':0.5171,
         '071-011_ScrBsl_tumour_cna_corrected':0.2361,
@@ -408,28 +349,110 @@ def main():
         '129-001_ScrBsl_tumour_cna_corrected':0.6921
     }
 
-    results, sample_cols, purities = analyse_tumour_purity_correlation(
-        filtered_mv,
-        tumor_purity_dict,
-        min_correlation=args.min_correlation,
-        max_control_signal=args.max_control_signal,
-        check_controls=not args.no_control_filter
-    )
-
-    plot_top_correlations(filtered_mv, results, sample_cols, purities, args.pat_dir, args.min_cpgs)
-
-    # Save results
-    results.to_csv(f'{args.pat_dir}/l{args.min_cpgs}_tumor_purity_correlations.csv', index=False)
-
-    # Extract highly correlated regions for next stage
-    tumor_specific_regions = results[results['significant']]['name'].values
-    print(f"\nFound {len(tumor_specific_regions)} tumor-specific regions")
-
-    create_tumour_atlas_from_results(
-        results,  
-        min_cpgs=args.min_cpgs,
-        output_atlas_path=args.output_atlas_path,
-    )
+    all_results = []
+    
+    # Process chromosomes one by one
+    for chr_num in range(1, 23):
+        print(f"\n{'='*60}")
+        print(f"Processing chromosome {chr_num}")
+        print(f"{'='*60}")
+        
+        # Load tumor data for this chromosome
+        tumor_mv_file = f"{args.pat_dir}/l{args.min_cpgs}_chr{chr_num}_marker_values.parquet"
+        tumor_cov_file = f"{args.pat_dir}/l{args.min_cpgs}_chr{chr_num}_coverage.parquet"
+        
+        try:
+            tumor_mv = pd.read_parquet(tumor_mv_file)
+            tumor_cov = pd.read_parquet(tumor_cov_file)
+            print(f"Loaded tumor data: {tumor_mv.shape} regions")
+        except FileNotFoundError:
+            print(f"Tumor files not found for chr{chr_num}, skipping...")
+            continue
+        
+        # Load control data for this chromosome
+        control_mv_file = f"{args.control_dir}/l{args.min_cpgs}_chr{chr_num}_marker_values.parquet"
+        control_cov_file = f"{args.control_dir}/l{args.min_cpgs}_chr{chr_num}_coverage.parquet"
+        
+        try:
+            control_mv = pd.read_parquet(control_mv_file)
+            control_cov = pd.read_parquet(control_cov_file)
+            print(f"Loaded control data: {control_mv.shape} regions")
+        except FileNotFoundError:
+            print(f"Control files not found for chr{chr_num}, skipping...")
+            continue
+        
+        # Merge tumor and control data
+        print("Merging tumor and control data...")
+        common_regions = tumor_mv.index.intersection(control_mv.index)
+        print(f"Found {len(common_regions)} common regions")
+        
+        if len(common_regions) == 0:
+            print("No common regions found, skipping chromosome")
+            continue
+        
+        # Create combined dataset
+        combined_mv = tumor_mv.loc[common_regions].copy()
+        combined_cov = tumor_cov.loc[common_regions].copy()
+        
+        # Add control columns
+        control_sample_cols = [col for col in control_mv.columns if col not in ['name', 'direction']]
+        print(f"Adding {len(control_sample_cols)} control columns...")
+        
+        for col in control_sample_cols:
+            combined_mv[f"Control_{col}"] = control_mv.loc[common_regions, col].values
+            combined_cov[f"Control_{col}"] = control_cov.loc[common_regions, col].values
+        
+        # Apply mixed coverage filtering
+        print("Applying mixed coverage filtering...")
+        filtered_mv, filtered_cov = apply_mixed_coverage_filter(combined_mv, combined_cov)
+        
+        if len(filtered_mv) == 0:
+            print("No regions passed coverage filtering, skipping chromosome")
+            continue
+        
+        print(f"After filtering: {len(filtered_mv)} regions")
+        
+        # Run correlation analysis
+        print("Running tumor purity correlation analysis...")
+        results, sample_cols, purities = analyse_tumour_purity_correlation(
+            filtered_mv,
+            tumor_purity_dict,
+            min_correlation=args.min_correlation,
+            max_control_signal=args.max_control_signal,
+            check_controls=not args.no_control_filter
+        )
+        
+        # Add chromosome info
+        results['chromosome'] = chr_num
+        all_results.append(results)
+        
+        print(f"Chr {chr_num}: {results['significant'].sum()} significant regions found")
+        
+        # Clean up memory
+        del tumor_mv, tumor_cov, control_mv, control_cov, combined_mv, combined_cov, filtered_mv, filtered_cov
+    
+    # Combine results from all chromosomes
+    if all_results:
+        print(f"\n{'='*60}")
+        print("Combining results from all chromosomes...")
+        print(f"{'='*60}")
+        
+        final_results = pd.concat(all_results, ignore_index=True)
+        print(f"Total significant regions across all chromosomes: {final_results['significant'].sum()}")
+        
+        # Save combined results
+        output_csv = f'{args.pat_dir}/l{args.min_cpgs}_tumor_purity_correlations_all_chr.csv'
+        final_results.to_csv(output_csv, index=False)
+        print(f"Saved results to {output_csv}")
+        
+        # Create atlas
+        create_tumour_atlas_from_results(
+            final_results,
+            min_cpgs=args.min_cpgs,
+            output_atlas_path=args.output_atlas_path,
+        )
+    else:
+        print("No results found across any chromosomes!")
     
 if __name__ == '__main__':
     main()
