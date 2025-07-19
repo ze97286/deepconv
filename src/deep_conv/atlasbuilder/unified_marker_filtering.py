@@ -188,8 +188,13 @@ def calculate_weighted_cell_type_signals(signal_df: pd.DataFrame,
     for cell_type in cell_type_order:
         if cell_type == 'OAC':
             # For OAC, use the pre-calculated 100% tumour purity signal
-            result_df[cell_type] = signal_df['tumour_100']
-            variance_stats[f'{cell_type}_cv'] = 0  # No variance for single calculated value
+            if 'tumour_100' in signal_df.columns:
+                result_df[cell_type] = signal_df['tumour_100']
+                variance_stats[f'{cell_type}_cv'] = 0  # No variance for single calculated value
+            else:
+                print(f"ERROR: 'tumour_100' column not found! Available columns: {list(signal_df.columns)}")
+                result_df[cell_type] = np.nan
+                variance_stats[f'{cell_type}_cv'] = np.nan
         else:
             # Find all samples for this cell type
             cell_samples = [col for col in signal_df.columns 
@@ -595,7 +600,8 @@ def main():
             print(f"  Regions filtered due to high within-cell-type variance: {regions_with_high_variance}")
     
     # Save variance statistics for inspection
-    variance_output = args.output_file.replace('.tsv', '_variance_stats.tsv')
+    base_name = args.output_file.rsplit('.', 1)[0] if '.' in args.output_file else args.output_file
+    variance_output = f"{base_name}_variance_stats.tsv"
     variance_stats.to_csv(variance_output, sep='\t', index=False)
     print(f"\nSaved variance statistics to {variance_output}")
     
