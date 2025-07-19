@@ -3,26 +3,26 @@ import numpy as np
 from typing import Dict, List, Tuple
 import argparse
 
-def calculate_100_percent_tumor_signal(signal_df: pd.DataFrame, 
-                                     tumor_purity_dict: Dict[str, float],
-                                     tumor_prefix: str = 'OAC') -> pd.Series:
+def calculate_100_percent_tumour_signal(signal_df: pd.DataFrame, 
+                                     tumour_purity_dict: Dict[str, float],
+                                     tumour_prefix: str = 'OAC') -> pd.Series:
     """
-    Calculate expected signal for 100% tumor purity using linear regression
-    on tumor samples with known purity.
+    Calculate expected signal for 100% tumour purity using linear regression
+    on tumour samples with known purity.
     """
-    # Get tumor sample columns
-    tumor_cols = [col for col in signal_df.columns if col.startswith(tumor_prefix)]
-    # Extract tumor signals and purities
-    tumor_signals = signal_df[tumor_cols]
-    purities = [tumor_purity_dict[col] for col in tumor_cols]
-    # Calculate 100% tumor signal for each region
-    tumor_100_signals = []
+    # Get tumour sample columns
+    tumour_cols = [col for col in signal_df.columns if col.startswith(tumour_prefix)]
+    # Extract tumour signals and purities
+    tumour_signals = signal_df[tumour_cols]
+    purities = [tumour_purity_dict[col] for col in tumour_cols]
+    # Calculate 100% tumour signal for each region
+    tumour_100_signals = []
     for idx in signal_df.index:
-        signals = tumor_signals.loc[idx].values
+        signals = tumour_signals.loc[idx].values
         # Remove NaN values
         mask = ~np.isnan(signals)
         if mask.sum() < 3:  # Need at least 3 points for reliable estimation
-            tumor_100_signals.append(np.nan)
+            tumour_100_signals.append(np.nan)
             continue
         valid_signals = signals[mask]
         valid_purities = np.array(purities)[mask]
@@ -34,10 +34,10 @@ def calculate_100_percent_tumor_signal(signal_df: pd.DataFrame,
         signal_100 = slope * 1.0 + intercept
         # Only accept if slope is positive and signal is reasonable
         if slope > 0 and 0 < signal_100 <= 1:
-            tumor_100_signals.append(signal_100)
+            tumour_100_signals.append(signal_100)
         else:
-            tumor_100_signals.append(np.nan)
-    return pd.Series(tumor_100_signals, index=signal_df.index)
+            tumour_100_signals.append(np.nan)
+    return pd.Series(tumour_100_signals, index=signal_df.index)
 
 def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumour_purity_dict: Dict[str, float]):
     """
@@ -54,18 +54,18 @@ def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumou
     
     print(f"Analyzing sample of {sample_size} regions...")
     
-    # Calculate 100% tumor purity signal
-    print("Calculating 100% tumor purity signals...")
-    sample_df['tumor_100'] = calculate_100_percent_tumor_signal(
+    # Calculate 100% tumour purity signal
+    print("Calculating 100% tumour purity signals...")
+    sample_df['tumour_100'] = calculate_100_percent_tumour_signal(
         sample_df, tumour_purity_dict, 'OAC'
     )
     
-    # Get regions with valid tumor signal for analysis
-    valid_tumor = sample_df[~sample_df['tumor_100'].isna()].copy()
-    print(f"Found {len(valid_tumor)} regions with valid tumor signal")
+    # Get regions with valid tumour signal for analysis
+    valid_tumour = sample_df[~sample_df['tumour_100'].isna()].copy()
+    print(f"Found {len(valid_tumour)} regions with valid tumour signal")
     
-    if len(valid_tumor) == 0:
-        print("No regions with valid tumor signal found!")
+    if len(valid_tumour) == 0:
+        print("No regions with valid tumour signal found!")
         return
     
     # Calculate weighted cell type signals (the actual values used in filtering)
@@ -75,20 +75,20 @@ def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumou
                       "Monocytes", "NK-cells", "Small-intestine", "T-cells"]
     
     # Add target column for calculate_weighted_cell_type_signals
-    valid_tumor['target'] = 'OAC'
-    valid_coverage = sample_coverage.loc[valid_tumor.index]
+    valid_tumour['target'] = 'OAC'
+    valid_coverage = sample_coverage.loc[valid_tumour.index]
     
     merged_signals, _ = calculate_weighted_cell_type_signals(
-        valid_tumor, valid_coverage, cell_type_order
+        valid_tumour, valid_coverage, cell_type_order
     )
     
     # Skip control signal analysis - regions are pre-filtered
-    valid_tumor['median_control'] = 0
-    valid_tumor['max_control'] = 0
+    valid_tumour['median_control'] = 0
+    valid_tumour['max_control'] = 0
     
     # Calculate coverage
-    tumor_cols = [col for col in sample_df.columns if col.startswith('OAC')]
-    valid_tumor['tumor_coverage'] = sample_coverage[tumor_cols].mean(axis=1)
+    tumour_cols = [col for col in sample_df.columns if col.startswith('OAC')]
+    valid_tumour['tumour_coverage'] = sample_coverage[tumour_cols].mean(axis=1)
     
     # Calculate weighted blood/immune and GI signals
     blood_immune_types = ['Granulocytes', 'T-cells', 'B-cells', 'NK-cells', 
@@ -99,72 +99,72 @@ def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumou
     gi_cols = [col for col in gi_types if col in merged_signals.columns]
     
     if blood_cols:
-        valid_tumor['max_blood_immune'] = merged_signals[blood_cols].max(axis=1)
-        valid_tumor['median_blood_immune'] = merged_signals[blood_cols].median(axis=1)
+        valid_tumour['max_blood_immune'] = merged_signals[blood_cols].max(axis=1)
+        valid_tumour['median_blood_immune'] = merged_signals[blood_cols].median(axis=1)
     else:
-        valid_tumor['max_blood_immune'] = 0
-        valid_tumor['median_blood_immune'] = 0
+        valid_tumour['max_blood_immune'] = 0
+        valid_tumour['median_blood_immune'] = 0
         
     if gi_cols:
-        valid_tumor['max_gi'] = merged_signals[gi_cols].max(axis=1)
+        valid_tumour['max_gi'] = merged_signals[gi_cols].max(axis=1)
     else:
-        valid_tumor['max_gi'] = 0
+        valid_tumour['max_gi'] = 0
     
-    print(f"Analysis of {len(valid_tumor)} sampled regions with valid 100% tumor signal:")
+    print(f"Analysis of {len(valid_tumour)} sampled regions with valid 100% tumour signal:")
     print(f"Found {len(blood_cols)} blood/immune and {len(gi_cols)} GI cell types\n")
     
-    # Tumor signal analysis
-    print("100% Tumor Signal:")
-    print(f"  Min: {valid_tumor['tumor_100'].min():.3f}")
-    print(f"  25th percentile: {valid_tumor['tumor_100'].quantile(0.25):.3f}")
-    print(f"  Median: {valid_tumor['tumor_100'].median():.3f}")
-    print(f"  75th percentile: {valid_tumor['tumor_100'].quantile(0.75):.3f}")
-    print(f"  Max: {valid_tumor['tumor_100'].max():.3f}")
-    # More reasonable tumor signal threshold (50th percentile)
-    print(f"  Suggested min_tumor_signal: {valid_tumor['tumor_100'].quantile(0.50):.3f}")
+    # Tumour signal analysis
+    print("100% Tumour Signal:")
+    print(f"  Min: {valid_tumour['tumour_100'].min():.3f}")
+    print(f"  25th percentile: {valid_tumour['tumour_100'].quantile(0.25):.3f}")
+    print(f"  Median: {valid_tumour['tumour_100'].median():.3f}")
+    print(f"  75th percentile: {valid_tumour['tumour_100'].quantile(0.75):.3f}")
+    print(f"  Max: {valid_tumour['tumour_100'].max():.3f}")
+    # More reasonable tumour signal threshold (50th percentile)
+    print(f"  Suggested min_tumour_signal: {valid_tumour['tumour_100'].quantile(0.50):.3f}")
     
     # Blood/immune analysis (using weighted signals)
     print("\nWeighted Blood/Immune Signal:")
-    print(f"  Min: {valid_tumor['median_blood_immune'].min():.4f}")
-    print(f"  25th percentile: {valid_tumor['median_blood_immune'].quantile(0.25):.4f}")
-    print(f"  Median: {valid_tumor['median_blood_immune'].median():.4f}")
-    print(f"  75th percentile: {valid_tumor['median_blood_immune'].quantile(0.75):.4f}")
-    print(f"  Max: {valid_tumor['median_blood_immune'].max():.4f}")
+    print(f"  Min: {valid_tumour['median_blood_immune'].min():.4f}")
+    print(f"  25th percentile: {valid_tumour['median_blood_immune'].quantile(0.25):.4f}")
+    print(f"  Median: {valid_tumour['median_blood_immune'].median():.4f}")
+    print(f"  75th percentile: {valid_tumour['median_blood_immune'].quantile(0.75):.4f}")
+    print(f"  Max: {valid_tumour['median_blood_immune'].max():.4f}")
     # More reasonable blood signal threshold (10th percentile)
-    print(f"  Suggested max_blood_signal: {valid_tumor['median_blood_immune'].quantile(0.10):.4f}")
+    print(f"  Suggested max_blood_signal: {valid_tumour['median_blood_immune'].quantile(0.10):.4f}")
     
     # GI analysis (using weighted signals)
     print("\nWeighted GI Signal:")
-    print(f"  Min: {valid_tumor['max_gi'].min():.4f}")
-    print(f"  25th percentile: {valid_tumor['max_gi'].quantile(0.25):.4f}")
-    print(f"  Median: {valid_tumor['max_gi'].median():.4f}")
-    print(f"  75th percentile: {valid_tumor['max_gi'].quantile(0.75):.4f}")
-    print(f"  Max: {valid_tumor['max_gi'].max():.4f}")
+    print(f"  Min: {valid_tumour['max_gi'].min():.4f}")
+    print(f"  25th percentile: {valid_tumour['max_gi'].quantile(0.25):.4f}")
+    print(f"  Median: {valid_tumour['max_gi'].median():.4f}")
+    print(f"  75th percentile: {valid_tumour['max_gi'].quantile(0.75):.4f}")
+    print(f"  Max: {valid_tumour['max_gi'].max():.4f}")
     # More reasonable GI signal threshold (50th percentile)
-    print(f"  Suggested max_gi_signal: {valid_tumor['max_gi'].quantile(0.50):.4f}")
+    print(f"  Suggested max_gi_signal: {valid_tumour['max_gi'].quantile(0.50):.4f}")
     
     # Skip control analysis - regions are pre-filtered
     print("\nControl Signal:")
-    print("  Skipped - regions are pre-filtered for tumor-specificity")
+    print("  Skipped - regions are pre-filtered for tumour-specificity")
     
     # Coverage analysis
-    print("\nTumor Coverage:")
-    print(f"  Min: {valid_tumor['tumor_coverage'].min():.1f}")
-    print(f"  25th percentile: {valid_tumor['tumor_coverage'].quantile(0.25):.1f}")
-    print(f"  Median: {valid_tumor['tumor_coverage'].median():.1f}")
-    print(f"  75th percentile: {valid_tumor['tumor_coverage'].quantile(0.75):.1f}")
-    print(f"  Max: {valid_tumor['tumor_coverage'].max():.1f}")
-    print(f"  Suggested min_coverage: {valid_tumor['tumor_coverage'].quantile(0.25):.0f}")
+    print("\nTumour Coverage:")
+    print(f"  Min: {valid_tumour['tumour_coverage'].min():.1f}")
+    print(f"  25th percentile: {valid_tumour['tumour_coverage'].quantile(0.25):.1f}")
+    print(f"  Median: {valid_tumour['tumour_coverage'].median():.1f}")
+    print(f"  75th percentile: {valid_tumour['tumour_coverage'].quantile(0.75):.1f}")
+    print(f"  Max: {valid_tumour['tumour_coverage'].max():.1f}")
+    print(f"  Suggested min_coverage: {valid_tumour['tumour_coverage'].quantile(0.25):.0f}")
     
     # Realistic suggested command
     print("\n" + "="*60)
     print("REALISTIC SUGGESTED COMMAND:")
     print("="*60)
     print(f"python script.py \\")
-    print(f"  --min_tumor_signal {valid_tumor['tumor_100'].quantile(0.50):.3f} \\")
-    print(f"  --max_blood_signal {valid_tumor['median_blood_immune'].quantile(0.10):.4f} \\")
-    print(f"  --max_gi_signal {valid_tumor['max_gi'].quantile(0.50):.4f} \\")
-    print(f"  --min_coverage {valid_tumor['tumor_coverage'].quantile(0.25):.0f} \\")
+    print(f"  --min_tumour_signal {valid_tumour['tumour_100'].quantile(0.50):.3f} \\")
+    print(f"  --max_blood_signal {valid_tumour['median_blood_immune'].quantile(0.10):.4f} \\")
+    print(f"  --max_gi_signal {valid_tumour['max_gi'].quantile(0.50):.4f} \\")
+    print(f"  --min_coverage {valid_tumour['tumour_coverage'].quantile(0.25):.0f} \\")
     print(f"  --no_overlap")
 
 def calculate_weighted_cell_type_signals(signal_df: pd.DataFrame, 
@@ -187,8 +187,8 @@ def calculate_weighted_cell_type_signals(signal_df: pd.DataFrame,
     # Calculate weighted signals for each cell type
     for cell_type in cell_type_order:
         if cell_type == 'OAC':
-            # For OAC, use the pre-calculated 100% tumor purity signal
-            result_df[cell_type] = signal_df['tumor_100']
+            # For OAC, use the pre-calculated 100% tumour purity signal
+            result_df[cell_type] = signal_df['tumour_100']
             variance_stats[f'{cell_type}_cv'] = 0  # No variance for single calculated value
         else:
             # Find all samples for this cell type
@@ -242,9 +242,9 @@ def select_non_overlapping_regions(filtered_df: pd.DataFrame,
     """
     Select non-overlapping regions with highest quality scores.
     """
-    # Sort by quality score (tumor_100 signal * SNR)
+    # Sort by quality score (tumour_100 signal * SNR)
     filtered_df['quality_score'] = (
-        filtered_df['tumor_100'] * 
+        filtered_df['tumour_100'] * 
         np.sqrt(filtered_df['snr_vs_blood'] * filtered_df['snr_vs_gi'])
     )
     sorted_df = filtered_df.sort_values('quality_score', ascending=False).copy()
@@ -269,12 +269,12 @@ def select_non_overlapping_regions(filtered_df: pd.DataFrame,
 
 def unified_marker_filtering(signal_df: pd.DataFrame,
                            coverage_df: pd.DataFrame,
-                           tumor_purity_dict: Dict[str, float],
-                           min_tumor_signal: float = 0.6,
+                           tumour_purity_dict: Dict[str, float],
+                           min_tumour_signal: float = 0.6,
                            min_coverage: int = 10,
                            max_blood_signal: float = 0.001,
                            max_gi_signal: float = 0.2,
-                           max_gi_to_tumor_ratio: float = 0.25,
+                           max_gi_to_tumour_ratio: float = 0.25,
                            min_snr_blood: float = 10.0,
                            min_snr_gi: float = 3.0,
                            select_non_overlapping: bool = True,
@@ -287,10 +287,10 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     print("UNIFIED MARKER FILTERING")
     print("="*60)
     
-    # Step 1: Calculate 100% tumor purity signal
-    print("Calculating 100% tumor purity signals...")
-    signal_df['tumor_100'] = calculate_100_percent_tumor_signal(
-        signal_df, tumor_purity_dict, 'OAC'
+    # Step 1: Calculate 100% tumour purity signal
+    print("Calculating 100% tumour purity signals...")
+    signal_df['tumour_100'] = calculate_100_percent_tumour_signal(
+        signal_df, tumour_purity_dict, 'OAC'
     )
     
     # Step 2: Calculate merged cell type signals with variance filtering (excluding controls)
@@ -302,7 +302,7 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     # Add target column for calculate_weighted_cell_type_signals
     signal_df['target'] = 'OAC'
     
-    # IMPORTANT: signal_df now has tumor_100 column which will be used for OAC
+    # IMPORTANT: signal_df now has tumour_100 column which will be used for OAC
     merged_signals, variance_stats = calculate_weighted_cell_type_signals(
         signal_df, coverage_df, cell_type_order, max_cv_threshold
     )
@@ -310,23 +310,23 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     print(f"Merged signals shape: {merged_signals.shape}")
     print(f"Merged signals columns: {list(merged_signals.columns)}")
     
-    # Debug: check if OAC column exists and has the tumor_100 values
+    # Debug: check if OAC column exists and has the tumour_100 values
     if 'OAC' in merged_signals.columns:
-        print(f"\n  DEBUG - OAC in merged signals vs tumor_100:")
+        print(f"\n  DEBUG - OAC in merged signals vs tumour_100:")
         for i in range(min(5, len(signal_df))):
             idx = signal_df.index[i]
             if idx in merged_signals.index:
-                print(f"    Region {idx}: tumor_100={signal_df.loc[idx, 'tumor_100']:.6f}, merged OAC={merged_signals.loc[idx, 'OAC']:.6f}")
+                print(f"    Region {idx}: tumour_100={signal_df.loc[idx, 'tumour_100']:.6f}, merged OAC={merged_signals.loc[idx, 'OAC']:.6f}")
             else:
                 print(f"    Region {idx}: not found in merged_signals!")
     
     # Step 3: Calculate coverage requirements
-    tumor_cols = [col for col in signal_df.columns if col.startswith('OAC')]
-    signal_df['tumor_coverage'] = coverage_df[tumor_cols].mean(axis=1)
+    tumour_cols = [col for col in signal_df.columns if col.startswith('OAC')]
+    signal_df['tumour_coverage'] = coverage_df[tumour_cols].mean(axis=1)
     
-    # Step 4: Skip control signal check - regions are pre-filtered for tumor-specificity
+    # Step 4: Skip control signal check - regions are pre-filtered for tumour-specificity
     control_cols = []  # Force empty to skip control filtering
-    print("  Skipping control filtering - regions were pre-filtered in tumor-purity correlation step.")
+    print("  Skipping control filtering - regions were pre-filtered in tumour-purity correlation step.")
     signal_df['median_control'] = 0
     signal_df['max_control'] = 0
     
@@ -382,30 +382,30 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
         signal_df['max_gi'] = 0
     
     # Step 6: Calculate ratios and SNR using merged signals
-    signal_df['gi_to_tumor_ratio'] = signal_df['max_gi'] / (signal_df['tumor_100'] + 1e-10)
-    signal_df['snr_vs_blood'] = signal_df['tumor_100'] / (signal_df['max_blood_immune'] + 1e-10)
-    signal_df['snr_vs_gi'] = signal_df['tumor_100'] / (signal_df['max_gi'] + 1e-10)
+    signal_df['gi_to_tumour_ratio'] = signal_df['max_gi'] / (signal_df['tumour_100'] + 1e-10)
+    signal_df['snr_vs_blood'] = signal_df['tumour_100'] / (signal_df['max_blood_immune'] + 1e-10)
+    signal_df['snr_vs_gi'] = signal_df['tumour_100'] / (signal_df['max_gi'] + 1e-10)
     
     print(f"Found {len(blood_cols)} blood/immune cell types with valid signals")
     print(f"Found {len(gi_cols)} GI cell types with valid signals") 
-    print(f"Found {len(tumor_cols)} tumor samples")
+    print(f"Found {len(tumour_cols)} tumour samples")
     
     # Step 7: Apply unified filtering criteria with detailed breakdown
     print("\nApplying filters step by step:")
     
-    # Start with regions that have valid tumor signal
-    step1 = signal_df[~signal_df['tumor_100'].isna()]
-    print(f"  Regions with valid 100% tumor signal: {len(step1):,}")
+    # Start with regions that have valid tumour signal
+    step1 = signal_df[~signal_df['tumour_100'].isna()]
+    print(f"  Regions with valid 100% tumour signal: {len(step1):,}")
     
-    # Strong tumor signal
-    step2 = step1[step1['tumor_100'] >= min_tumor_signal]
-    print(f"  After tumor signal ≥ {min_tumor_signal}: {len(step2):,}")
+    # Strong tumour signal
+    step2 = step1[step1['tumour_100'] >= min_tumour_signal]
+    print(f"  After tumour signal ≥ {min_tumour_signal}: {len(step2):,}")
     
     # Sufficient coverage
-    step3 = step2[step2['tumor_coverage'] >= min_coverage]
+    step3 = step2[step2['tumour_coverage'] >= min_coverage]
     print(f"  After coverage ≥ {min_coverage}: {len(step3):,}")
     
-    # Skip control filtering - regions are pre-filtered for tumor-specificity
+    # Skip control filtering - regions are pre-filtered for tumour-specificity
     step4 = step3
     print(f"  Skipping control filtering (regions pre-filtered): {len(step4):,}")
     
@@ -429,7 +429,7 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     if len(step6) > 0:
         print(f"\n  DEBUG - GI signal distribution at step6:")
         print(f"    Max GI - value: {step6['max_gi'].iloc[0]:.6f}")
-        print(f"    GI/tumor ratio - value: {step6['gi_to_tumor_ratio'].iloc[0]:.6f}")
+        print(f"    GI/tumour ratio - value: {step6['gi_to_tumour_ratio'].iloc[0]:.6f}")
         print(f"    Individual GI signals for the remaining region:")
         for gi_type in gi_cols:
             if gi_type in merged_signals.columns:
@@ -441,8 +441,8 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     print(f"\n  After GI signal ≤ {max_gi_signal}: {len(step7):,}")
     
     # GI ratio filter
-    step8 = step7[step7['gi_to_tumor_ratio'] <= max_gi_to_tumor_ratio]
-    print(f"  After GI/tumor ratio ≤ {max_gi_to_tumor_ratio}: {len(step8):,}")
+    step8 = step7[step7['gi_to_tumour_ratio'] <= max_gi_to_tumour_ratio]
+    print(f"  After GI/tumour ratio ≤ {max_gi_to_tumour_ratio}: {len(step8):,}")
     
     # GI SNR filter
     filtered = step8[step8['snr_vs_gi'] >= min_snr_gi]
@@ -452,7 +452,7 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     
     print(f"\nFiltering results:")
     print(f"  Initial regions: {len(signal_df):,}")
-    print(f"  Regions with valid 100% tumor signal: {(~signal_df['tumor_100'].isna()).sum():,}")
+    print(f"  Regions with valid 100% tumour signal: {(~signal_df['tumour_100'].isna()).sum():,}")
     print(f"  Regions passing all filters: {len(filtered):,}")
     
     # Select non-overlapping regions if requested
@@ -463,14 +463,14 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     # Quality statistics
     if len(filtered) > 0:
         print(f"\nQuality distribution of filtered regions:")
-        print(f"  100% tumor signal: {filtered['tumor_100'].min():.3f} - {filtered['tumor_100'].max():.3f}")
+        print(f"  100% tumour signal: {filtered['tumour_100'].min():.3f} - {filtered['tumour_100'].max():.3f}")
         print(f"  Max blood/immune: {filtered['max_blood_immune'].min():.4f} - {filtered['max_blood_immune'].max():.4f}")
         print(f"  Max GI: {filtered['max_gi'].min():.3f} - {filtered['max_gi'].max():.3f}")
         if control_cols:
             print(f"  Median control: {filtered['median_control'].min():.4f} - {filtered['median_control'].max():.4f}")
             print(f"  Max control: {filtered['max_control'].min():.4f} - {filtered['max_control'].max():.4f}")
         else:
-            print(f"  Control signals: Not applicable (tumor-specific regions pre-filtered)")
+            print(f"  Control signals: Not applicable (tumour-specific regions pre-filtered)")
         print(f"  SNR vs blood: {filtered['snr_vs_blood'].min():.1f} - {filtered['snr_vs_blood'].max():.1f}")
         print(f"  SNR vs GI: {filtered['snr_vs_gi'].min():.1f} - {filtered['snr_vs_gi'].max():.1f}")
     
@@ -487,8 +487,8 @@ def main():
     parser.add_argument('--atlas', type=str, required=True, help='Input atlas file')
     
     # Filtering thresholds
-    parser.add_argument('--min_tumor_signal', type=float, default=0.6,
-                       help='Minimum tumor signal at 100% purity')
+    parser.add_argument('--min_tumour_signal', type=float, default=0.6,
+                       help='Minimum tumour signal at 100% purity')
     parser.add_argument('--min_coverage', type=int, default=10,
                        help='Minimum coverage required')
     parser.add_argument('--max_blood_signal', type=float, default=0.001,
@@ -514,7 +514,7 @@ def main():
     atlas = pd.read_csv(args.atlas, sep="\t")
     signal_df[atlas.columns[:8]] = atlas[atlas.columns[:8]]
     
-    # Load tumor purity
+    # Load tumour purity
     tumour_purity_dict = {
         'OAC_069-009_ScrBsl_tumour_cna_corrected':0.5171,
         'OAC_071-011_ScrBsl_tumour_cna_corrected':0.2361,
@@ -535,7 +535,7 @@ def main():
     # Apply filtering (without overlap selection first)
     filtered_df = unified_marker_filtering(
         signal_df, coverage_df, tumour_purity_dict,
-        min_tumor_signal=args.min_tumor_signal,
+        min_tumour_signal=args.min_tumour_signal,
         min_coverage=args.min_coverage,
         max_blood_signal=args.max_blood_signal,
         max_gi_signal=args.max_gi_signal,
@@ -543,6 +543,12 @@ def main():
         max_cv_threshold=args.max_cv_threshold if args.max_cv_threshold > 0 else None
     )
 
+    
+    # Apply non-overlapping selection if requested (do this BEFORE converting to atlas format)
+    if args.no_overlap and len(filtered_df) > 0:
+        print(f"\nApplying non-overlapping selection to {len(filtered_df)} regions...")
+        filtered_df = select_non_overlapping_regions(filtered_df)
+        print(f"Selected {len(filtered_df)} non-overlapping regions")
     
     # The filtered_df already has the target column and merged signals from unified_marker_filtering
     # Just need to get the final atlas format with all cell types
@@ -554,12 +560,6 @@ def main():
     atlas_df, variance_stats = calculate_weighted_cell_type_signals(
         filtered_df, coverage_df, cell_type_order, args.max_cv_threshold if args.max_cv_threshold > 0 else None
     )
-    
-    # Now apply non-overlapping selection if requested
-    if args.no_overlap and len(atlas_df) > 0:
-        print(f"Applying non-overlapping selection to {len(atlas_df)} regions...")
-        atlas_df = select_non_overlapping_regions(atlas_df)
-        print(f"Selected {len(atlas_df)} non-overlapping regions")
     
     # Ensure proper column order
     metadata_cols = ['chr', 'start', 'end', 'name', 'direction', 'startCpG', 'endCpG', 'target']
