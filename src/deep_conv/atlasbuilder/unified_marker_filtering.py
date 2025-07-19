@@ -566,8 +566,8 @@ def main():
         filtered_df, coverage_df, cell_type_order, args.max_cv_threshold if args.max_cv_threshold > 0 else None
     )
     
-    # Ensure proper column order
-    metadata_cols = ['chr', 'start', 'end', 'name', 'direction', 'startCpG', 'endCpG', 'target']
+    # Ensure proper column order (CORRECT ORDER for filter_OAC_pats.sh)
+    metadata_cols = ['chr', 'start', 'end', 'startCpG', 'endCpG', 'target', 'name', 'direction']
     output_cols = metadata_cols + cell_type_order
     atlas_df = atlas_df[output_cols]
     
