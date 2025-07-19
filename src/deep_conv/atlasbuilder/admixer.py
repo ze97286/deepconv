@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List
 import os
 import gzip
 from collections import defaultdict
@@ -9,9 +9,8 @@ from multiprocessing import Pool, cpu_count
 from functools import partial
 import logging
 from tqdm import tqdm
-import pickle
 import h5py
-from intervaltree import IntervalTree, Interval
+from intervaltree import IntervalTree
 import glob
 
 # Set up logging
@@ -24,23 +23,33 @@ class SyntheticMixtureGenerator:
     """
     
     def __init__(self, 
-                 tumor_pat_files: List[str],
+                 tumour_pat_files: List[str],
                  control_pat_files: List[str],
                  cna_profiles_file: str,
                  output_dir: str,
+                 tumour_purity_dict: Dict[str, float] = None,
                  n_workers: int = None,
                  batch_output: bool = True):
         """
         Initialize the mixture generator with optimizations.
         
         Args:
+            tumour_purity_dict: Dictionary mapping tumour sample filenames to their purity values
             batch_output: If True, save samples in batches to HDF5 instead of individual files
         """
-        self.tumor_pat_files = tumor_pat_files
+        self.tumour_pat_files = tumour_pat_files
         self.control_pat_files = control_pat_files
         self.output_dir = output_dir
         self.n_workers = n_workers or cpu_count()
         self.batch_output = batch_output
+        
+        # Store tumour purity information (default to 100% if not provided)
+        if tumour_purity_dict is None:
+            tumour_purity_dict = {}
+        self.tumour_purity = {}
+        for tumour_file in tumour_pat_files:
+            filename = os.path.basename(tumour_file).replace('.pat.gz', '')
+            self.tumour_purity[filename] = tumour_purity_dict.get(filename, 1.0)
         
         # Load and optimize CNA profiles
         logger.info(f"Loading and optimizing CNA profiles from {cna_profiles_file}")
@@ -52,7 +61,7 @@ class SyntheticMixtureGenerator:
         
         # Pre-load and optimize PAT data
         logger.info("Pre-loading and optimizing PAT files...")
-        self.tumor_data = [self._load_and_optimize_pat(f) for f in tumor_pat_files]
+        self.tumour_data = [self._load_and_optimize_pat(f) for f in tumour_pat_files]
         self.control_data = [self._load_and_optimize_pat(f) for f in control_pat_files]
         logger.info("PAT files loaded and optimized")
         
@@ -170,20 +179,31 @@ class SyntheticMixtureGenerator:
             np.random.seed(params['seed'])
             
             # Get data references
-            tumor_data = generator.tumor_data[params['tumor_idx']]
+            tumour_data = generator.tumour_data[params['tumour_idx']]
             control_data = generator.control_data[params['control_idx']]
             cna_profile_id = params['cna_profile_id']
-            tf = params['tumor_fraction']
+            tf = params['tumour_fraction']
             target_coverage = params['target_coverage']
             
             # Process by chromosome for cache efficiency
             merged = defaultdict(int)
-            tumor_read_count = 0
+            tumour_read_count = 0
             control_read_count = 0
             
-            # Process tumor data ONLY if tf > 0
+            # Process tumour data ONLY if tf > 0
             if tf > 0:
-                for chrom, chrom_data in tumor_data.items():
+                # Get tumour sample purity for this sample
+                tumour_filename = os.path.basename(generator.tumour_pat_files[params['tumour_idx']]).replace('.pat.gz', '')
+                tumour_sample_purity = generator.tumour_purity[tumour_filename]
+                
+                if tumour_sample_purity > 0:
+                    adjusted_tf = tf / tumour_sample_purity
+                    adjusted_tf = min(adjusted_tf, 1.0)  # Can't use more than 100% of the sample
+                else:
+                    logger.warning(f"Tumour sample {tumour_filename} has 0% purity, skipping")
+                    adjusted_tf = 0.0
+                
+                for chrom, chrom_data in tumour_data.items():
                     if not chrom_data:
                         continue
                     
@@ -194,12 +214,12 @@ class SyntheticMixtureGenerator:
                     
                     # Get all CNAs for this chromosome at once
                     cnas = generator.get_cna_batch(cna_profile_id, chrom, positions)
-                    effective_tfs = np.minimum(tf * (cnas / 2.0), 1.0)
+                    effective_tfs = np.minimum(adjusted_tf * (cnas / 2.0), 1.0)
                     
                     # Vectorized sampling for all positions
                     mask = (counts > 0) & (effective_tfs > 0)
                     if np.any(mask):
-                        # Sample all at once WITH CNA effects
+                        # Sample all at once WITH CNA effects and purity correction
                         sampled = np.random.binomial(counts[mask], effective_tfs[mask])
                         
                         # Add to merged
@@ -209,12 +229,18 @@ class SyntheticMixtureGenerator:
                                 sampled)):
                             if sampled_count > 0:
                                 merged[(chrom, pos, pattern)] += sampled_count
-                                tumor_read_count += sampled_count
+                                tumour_read_count += sampled_count
             
-            # Process control data ONLY if tf < 1.0
-            if tf < 1.0:
-                control_fraction = 1.0 - tf
+            # Process control data
+            if tf > 0:
+                # Use the adjusted tumour fraction to calculate control fraction
+                control_fraction = 1.0 - adjusted_tf
+            else:
+                # Pure control sample (tf = 0)
+                control_fraction = 1.0
                 
+            # Add control reads if we need them
+            if control_fraction > 0:
                 # IMPORTANT: When tf=0, we should NOT use the CNA profile at all
                 # The sample should be purely diploid control
                 for chrom, chrom_data in control_data.items():
@@ -229,7 +255,7 @@ class SyntheticMixtureGenerator:
                     mask = counts > 0
                     if np.any(mask):
                         # Sample control reads - no CNA effects ever!
-                        # Control is always diploid regardless of tumor fraction
+                        # Control is always diploid regardless of tumour fraction
                         sampled = np.random.binomial(counts[mask], control_fraction)
                         
                         for i, (pos, pattern, sampled_count) in enumerate(
@@ -250,17 +276,17 @@ class SyntheticMixtureGenerator:
             
             if len(position_reads) == 0:
                 current_coverage = 0
-                final_tumor_reads = 0
+                final_tumour_reads = 0
                 final_total_reads = 0
-                tumor_fraction_actual = 0.0
+                tumour_fraction_actual = 0.0
             else:
                 current_coverage = np.mean(list(position_reads.values()))
                 
-                # For actual tumor fraction, we just use the intended TF
-                tumor_fraction_actual = tf
+                # For actual tumour fraction, we just use the intended TF
+                tumour_fraction_actual = tf
                 
                 # Downsample if needed
-                total_reads = tumor_read_count + control_read_count
+                total_reads = tumour_read_count + control_read_count
                 
                 if current_coverage > target_coverage and current_coverage > 0:
                     downsample_factor = target_coverage / current_coverage
@@ -280,30 +306,30 @@ class SyntheticMixtureGenerator:
                     # Calculate final reads
                     final_total_reads = sum(downsampled_counts)
                     if total_reads > 0:
-                        tumor_fraction_in_merged = tumor_read_count / total_reads
-                        final_tumor_reads = int(final_total_reads * tumor_fraction_in_merged)
+                        tumour_fraction_in_merged = tumour_read_count / total_reads
+                        final_tumour_reads = int(final_total_reads * tumour_fraction_in_merged)
                     else:
-                        final_tumor_reads = 0
+                        final_tumour_reads = 0
                 else:
-                    final_tumor_reads = tumor_read_count
+                    final_tumour_reads = tumour_read_count
                     final_total_reads = total_reads
             
-            # Calculate post-CNA tumor read fraction
-            tumor_read_fraction = final_tumor_reads / final_total_reads if final_total_reads > 0 else 0.0
+            # Calculate post-CNA tumour read fraction
+            tumour_read_fraction = final_tumour_reads / final_total_reads if final_total_reads > 0 else 0.0
             
             # Store results
             result = {
                 'sample_id': params['sample_id'],
-                'tumor_idx': params['tumor_idx'],
+                'tumour_idx': params['tumour_idx'],
                 'control_idx': params['control_idx'],
                 'cna_profile_id': params['cna_profile_id'] if tf > 0 else 'diploid',
-                'tumor_fraction_intended': params['tumor_fraction'],
-                'tumor_fraction_actual': tumor_fraction_actual,
-                'tumor_read_fraction': tumor_read_fraction,
+                'tumour_fraction_intended': params['tumour_fraction'],
+                'tumour_fraction_actual': tumour_fraction_actual,
+                'tumour_read_fraction': tumour_read_fraction,
                 'target_coverage': params['target_coverage'],
                 'final_coverage': target_coverage if current_coverage > target_coverage else current_coverage,
                 'n_patterns': len(merged),
-                'tumor_reads': final_tumor_reads,
+                'tumour_reads': final_tumour_reads,
                 'total_reads': final_total_reads,
                 'pat_data': merged
             }
@@ -353,7 +379,7 @@ class SyntheticMixtureGenerator:
                              "Monocytes", "NK-cells", "OAC", "Small-intestine", "T-cells"]
                 concentrations = np.zeros(len(cell_types))
                 oac_idx = cell_types.index("OAC")
-                concentrations[oac_idx] = result['tumor_fraction_actual']  # Use pre-CNA actual TF
+                concentrations[oac_idx] = result['tumour_fraction_actual']  # Use pre-CNA actual TF
                 
                 sample_group.create_dataset('cell_types', data=np.array(cell_types, dtype='S30'))
                 sample_group.create_dataset('concentrations', data=concentrations)
@@ -380,7 +406,7 @@ class SyntheticMixtureGenerator:
             
             with open(conc_file, 'w') as f:
                 for cell_type in cell_types:
-                    conc = result['tumor_fraction_actual'] if cell_type == "OAC" else 0.0  # Use pre-CNA actual TF
+                    conc = result['tumour_fraction_actual'] if cell_type == "OAC" else 0.0  # Use pre-CNA actual TF
                     f.write(f"{cell_type},{conc}\n")
     
     def generate_dataset(self, n_samples: int = 300000, seed: int = 42, 
@@ -451,7 +477,7 @@ class SyntheticMixtureGenerator:
         params = []
         sample_counter = 0
         
-        n_tumors = len(self.tumor_pat_files)
+        n_tumours = len(self.tumour_pat_files)
         n_controls = len(self.control_pat_files)
         n_cnas = len(self.cna_profiles)
         
@@ -459,7 +485,7 @@ class SyntheticMixtureGenerator:
             n_tf_samples = int(n_samples * tf_proportion)
             
             for i in range(n_tf_samples):
-                tumor_idx = np.random.randint(n_tumors)
+                tumour_idx = np.random.randint(n_tumours)
                 control_idx = np.random.randint(n_controls)
                 cna_idx = np.random.randint(n_cnas)
                 
@@ -473,10 +499,10 @@ class SyntheticMixtureGenerator:
                 
                 params.append({
                     'sample_id': f"sample_{sample_counter:06d}",
-                    'tumor_idx': tumor_idx,
+                    'tumour_idx': tumour_idx,
                     'control_idx': control_idx,
                     'cna_profile_id': self.cna_profiles[cna_idx],
-                    'tumor_fraction': tf,
+                    'tumour_fraction': tf,
                     'target_coverage': coverage,
                     'seed': seed + sample_counter
                 })
@@ -497,17 +523,40 @@ if __name__ == "__main__":
     parser.add_argument('--tissue_input_dir', type=str, required=True, help='Directory containing input tissue pat files')
     parser.add_argument('--control_input_dir', type=str, required=True, help='Directory containing input control pat files')
     parser.add_argument('--output_dir', type=str, required=True, help='Directory to save admixed pat files')
-    parser.add_argument('--cna_profiles_file', type=str, required=True, help="Directory to save admixed pat files")
+    parser.add_argument('--cna_profiles_file', type=str, required=True, help="CNA profiles file")
     parser.add_argument('--n_samples', type=int, required=True, help="Number of samples to generate")
     parser.add_argument('--n_workers', type=int, default=None, help="Number of workers to use for parallelization")
+    parser.add_argument('--tumour_purity_file', type=str, default=None, help="JSON file with tumour sample purities (optional)")
     args = parser.parse_args()
+
+    # Load tumour purity information if provided
+    tumour_purity_dict = None
+    if args.tumour_purity_file:
+        import json
+        with open(args.tumour_purity_file, 'r') as f:
+            tumour_purity_dict = json.load(f)
+        logger.info(f"Loaded tumour purity information for {len(tumour_purity_dict)} samples")
+    else:
+        # Use the known tumour purities from your analysis
+        tumour_purity_dict = {
+            '069-009_ScrBsl_tumour_cna_corrected': 0.5171,
+            '071-011_ScrBsl_tumour_cna_corrected': 0.2361,
+            '071-014_ScrBsl_tumour_cna_corrected': 0.07926,
+            '071-021_ScrBsl_tumour_cna_corrected': 0.4766,
+            '071-022_ScrBsl_tumour_cna_corrected': 0.4108,
+            '071-030_ScrBsl_tumour_cna_corrected': 0.0801,
+            '071-043_ScrBsl_tumour_cna_corrected': 0.4607,
+            '129-001_ScrBsl_tumour_cna_corrected': 0.6921
+        }
+        logger.info("Using hardcoded tumour purity values")
 
     # Initialize generator
     generator = SyntheticMixtureGenerator(
-        tumor_pat_files=glob.glob(args.tissue_input_dir + "/*.pat.gz"),
+        tumour_pat_files=glob.glob(args.tissue_input_dir + "/*.pat.gz"),
         control_pat_files=glob.glob(args.control_input_dir + "/*.pat.gz"),
         cna_profiles_file=args.cna_profiles_file,
         output_dir=args.output_dir,
+        tumour_purity_dict=tumour_purity_dict,
         n_workers=args.n_workers,
     )
 
