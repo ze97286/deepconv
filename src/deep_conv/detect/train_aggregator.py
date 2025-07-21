@@ -24,7 +24,7 @@ from sklearn.metrics import confusion_matrix
 from plotly.subplots import make_subplots
 
 from deep_conv.detect.preprocess import prepare_data_for_training, load_train_with_contrastive_data
-from deep_conv.detect.simplified_model import EnhancedCancerDetectionModel, MarkerImportanceAnalyser
+from deep_conv.detect.simplified_model import EnhancedCancerDetectionModel
 import torch.multiprocessing
 torch.multiprocessing.set_sharing_strategy('file_system')
 
