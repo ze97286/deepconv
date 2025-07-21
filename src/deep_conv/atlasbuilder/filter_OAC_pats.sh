@@ -16,7 +16,19 @@ mkdir -p "$TMPDIR"
 # Create regions file once since it's the same for all files
 echo "Creating regions file for tabix..."
 regions_file="$TMPDIR/regions.bed"
-tail -n+2 "$MARKERBED" | awk -v OFS="\t" '{start=$4-2; end=$5-4; if (start<0) start=0; print $1,start,end}' > "$regions_file"
+tail -n+2 "$MARKERBED" | awk -v OFS="\t" '{start=$4-10; end=$5+10; if (start<0) start=0; print $1,start,end}' > "$regions_file"
+
+# Re-index input files if needed
+echo "Checking and re-indexing input files if needed..."
+for pat_file in "$INPUT_DIR"/*.pat.gz; do
+    if [ ! -e "$pat_file.tbi" ] && [ ! -e "$pat_file.csi" ]; then
+        echo "Indexing $pat_file..."
+        tabix -s 1 -b 2 -e 2 -C "$pat_file"
+    elif [ "$pat_file.csi" -ot "$pat_file" ] || [ "$pat_file.tbi" -ot "$pat_file" ]; then
+        echo "Re-indexing stale index for $pat_file..."
+        tabix -s 1 -b 2 -e 2 -C "$pat_file"
+    fi
+done
 
 # Process each pat file in input directory
 for pat_file in "$INPUT_DIR"/*.pat.gz; do
