@@ -145,14 +145,8 @@ class EnhancedCancerDetectionModel(nn.Module):
         self.simple_projection = nn.Linear(3, feature_dim)  # [value, log_value, coverage] -> feature_dim
 
         
-        # Deep Sets marker processor
-        # φ: processes each marker individually to learn marker-specific patterns
-        # This will feed into attention aggregation for ρ (set-level aggregation)
-        self.marker_processor = DeepSetsMarkerProcessor(
-            feature_dim=feature_dim,
-            hidden_dim=64,
-            dropout_rate=dropout_rate
-        )
+        # MINIMAL marker processor - just one linear layer for φ function
+        self.marker_processor = nn.Linear(feature_dim, feature_dim)
 
         # the critical bridge between marker-level processing and sample-level representation.
         self.attention = nn.Linear(feature_dim, 1)
@@ -233,11 +227,13 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Single linear projection 
         features = self.simple_projection(features)  # [batch, markers, feature_dim]
         
-        # φ: Process each marker individually (Deep Sets φ function) - SIMPLIFIED
-        processed_features = self.marker_processor(
-            features, 
-            key_padding_mask=combined_mask
-        )
+        # φ: Process each marker individually (Deep Sets φ function) - MINIMAL
+        processed_features = self.marker_processor(features)  # Just linear transformation
+        
+        # Apply mask manually
+        if combined_mask is not None:
+            mask_expanded = combined_mask.unsqueeze(-1)
+            processed_features = processed_features.masked_fill(mask_expanded, 0.0)
         
         # Enhanced reliability weighting with stronger coverage dependence
         reliability = coverage_reliability.unsqueeze(-1)  
