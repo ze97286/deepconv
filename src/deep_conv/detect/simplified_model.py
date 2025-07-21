@@ -165,13 +165,13 @@ class EnhancedCancerDetectionModel(nn.Module):
         # the critical bridge between marker-level processing and sample-level representation.
         self.attention = nn.Linear(feature_dim, 1)
         
-        # Simplified single concentration head - remove mixture of experts complexity
+        # Simplified single concentration head with much smaller scale
         self.concentration_head = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 2),
+            nn.Linear(feature_dim, feature_dim // 4),  # Smaller hidden layer
             nn.GELU(),
-            nn.Dropout(dropout_rate * 0.5),  # Lighter dropout
-            nn.Linear(feature_dim // 2, 1),
-            nn.Sigmoid()  # Direct sigmoid output for 0-1 range
+            nn.Dropout(dropout_rate * 0.5),
+            nn.Linear(feature_dim // 4, 1),
+            # Remove sigmoid - let the model learn the scale naturally
         )
         
         # estimation of uncertainty
@@ -194,11 +194,11 @@ class EnhancedCancerDetectionModel(nn.Module):
         self._init_weights()
     
     def _init_weights(self):
-        """Conservative weight initialization for training stability"""
+        """Ultra-conservative weight initialization for training stability"""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                # Smaller initialization variance
-                nn.init.xavier_normal_(module.weight, gain=0.5)
+                # Much smaller initialization variance to prevent explosion
+                nn.init.xavier_normal_(module.weight, gain=0.1)  # Very small gain
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0.0)
             elif isinstance(module, nn.BatchNorm1d):
@@ -206,6 +206,10 @@ class EnhancedCancerDetectionModel(nn.Module):
                 nn.init.constant_(module.bias, 0.0)
     
     def forward(self, marker_values, coverage):
+        # Input validation and scaling to prevent explosions
+        marker_values = torch.clamp(marker_values, 0.0, 1.0)
+        coverage = torch.clamp(coverage, 0.0, 1000.0)
+        
         # Apply dynamic marker pruning
         marker_values_pruned = self.marker_pruning(marker_values, coverage)
         
@@ -264,8 +268,11 @@ class EnhancedCancerDetectionModel(nn.Module):
         # This is the Deep Sets aggregation: Σ φ(marker_i) weighted by learned attention
         aggregated = torch.sum(attention_weights.unsqueeze(-1) * processed_features, dim=1)
         
-        # Simplified single concentration prediction
-        concentration = self.concentration_head(aggregated)
+        # Simplified single concentration prediction with scaling
+        concentration_raw = self.concentration_head(aggregated)
+        
+        # Apply much gentler sigmoid with small scale factor
+        concentration = torch.sigmoid(concentration_raw) * 0.1  # Max 10% concentration
         
         # Simplified model - skip bias correction and zero anchoring for stability
         # concentration = self.bias_correction(aggregated, concentration)
@@ -282,8 +289,8 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Calculate uncertainty
         uncertainty = self.uncertainty_head(aggregated)
         
-        # Return None for zero_prob since we disabled zero anchoring
-        zero_prob = None
+        # Create dummy zero_prob to maintain compatibility
+        zero_prob = torch.zeros_like(concentration)
         
         return concentration, uncertainty, attention_weights, zero_prob
     
