@@ -164,24 +164,29 @@ def parse_excluded_markers(excluded_markers_str):
 
 def compute_loss(mu, uncertainty, y_true, control_mask=None, zero_prob=None):
     """
-    Ultra-simplified loss function for aggregator model - prevent gradient explosion
+    Balanced loss function for aggregator model - similar to transformer but simplified
     """
-    # Ensure inputs are reasonable
-    mu = torch.clamp(mu, 0.0, 1.0)
+    # Base MSE loss
+    mse_loss = F.mse_loss(mu, y_true, reduction='none')
     
-    # Simple MSE loss with very small scale
-    mse_loss = F.mse_loss(mu, y_true, reduction='mean')
+    # Calculate relative error for non-zero targets
+    epsilon = 1e-6
+    non_zero_mask = (y_true > epsilon)
     
-    # Optional very light control penalty
+    if non_zero_mask.sum() > 0:
+        # Relative error
+        rel_error = torch.abs(mu[non_zero_mask] - y_true[non_zero_mask]) / (y_true[non_zero_mask] + epsilon)
+        rel_loss = rel_error.mean()
+    else:
+        rel_loss = torch.tensor(0.0, device=mu.device)
+    
+    # Control loss - balanced weight
     control_loss = torch.tensor(0.0, device=mu.device)
     if control_mask is not None and control_mask.sum() > 0:
-        control_loss = 0.1 * mu[control_mask].mean()  # Very light penalty
+        control_loss = 20.0 * mu[control_mask].mean()  # Similar to transformer
     
-    # Ultra-simple loss - just MSE + tiny control penalty
-    total_loss = mse_loss + control_loss
-    
-    # Clamp loss to prevent explosion
-    total_loss = torch.clamp(total_loss, 0.0, 10.0)
+    # Simple loss combination - closer to transformer loss
+    total_loss = mse_loss.mean() + 1.0 * rel_loss + control_loss
     
     return total_loss
 
@@ -211,16 +216,16 @@ def train_model(model, train_loader, val_loader, args, device):
         weight_decay=args.weight_decay
     )
 
-    # More conservative learning rate scheduler for aggregator stability
+    # Standard learning rate scheduler - similar to transformer
     total_steps = len(train_loader) * args.epochs
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=args.lr,
         total_steps=total_steps,
-        pct_start=0.3,  # Longer warmup
+        pct_start=0.1,
         anneal_strategy='cos',
-        div_factor=10.0,  # Less aggressive start
-        final_div_factor=1000.0  # Less aggressive end
+        div_factor=25.0,
+        final_div_factor=10000.0
     )
 
     # Initialise tracking variables
@@ -294,11 +299,11 @@ def train_model(model, train_loader, val_loader, args, device):
 
             # Gradient accumulation and optimizer step
             if (i + 1) % args.grad_accum_steps == 0 or (i + 1) == len(train_loader):
-                # Very aggressive gradient clipping
-                total_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
+                # Moderate gradient clipping (not too aggressive)
+                total_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
                 # Early warning for gradient issues
-                if total_grad_norm > 1.0:
+                if total_grad_norm > 5.0:
                     logger.warning(f"Large gradient norm detected: {total_grad_norm:.4f}")
                 elif torch.isnan(total_grad_norm) or torch.isinf(total_grad_norm):
                     logger.error(f"Invalid gradient norm: {total_grad_norm}")

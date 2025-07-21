@@ -254,7 +254,7 @@ class EnhancedCancerDetectionModel(nn.Module):
         low_conc_pred = self.low_concentration_head(aggregated)
         ultra_low_pred = self.ultra_low_concentration_head(aggregated)
         
-        standard_pred = F.softplus(standard_pred) * 0.1
+        standard_pred = F.softplus(standard_pred) * 0.2
         log_low_pred = F.softplus(low_conc_pred) * 0.01
         log_ultra_low_pred = F.softplus(ultra_low_pred) * 0.001
         

@@ -271,8 +271,8 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Simplified single concentration prediction with scaling
         concentration_raw = self.concentration_head(aggregated)
         
-        # Apply much gentler sigmoid with small scale factor
-        concentration = torch.sigmoid(concentration_raw) * 0.1  # Max 10% concentration
+        # Remove artificial cap - let model learn full range
+        concentration = torch.sigmoid(concentration_raw) * 0.2  # Max 20% concentration
         
         # Simplified model - skip bias correction and zero anchoring for stability
         # concentration = self.bias_correction(aggregated, concentration)
