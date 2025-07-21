@@ -165,42 +165,13 @@ class EnhancedCancerDetectionModel(nn.Module):
         # the critical bridge between marker-level processing and sample-level representation.
         self.attention = nn.Linear(feature_dim, 1)
         
-        # mixture of experts - 3 heads each specialising in a different concentration range
+        # Simplified single concentration head - remove mixture of experts complexity
         self.concentration_head = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim),
-            nn.GELU(),
-            nn.Dropout(dropout_rate),
             nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(feature_dim // 2, 1)
-        )
-        self.low_concentration_head = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim),
-            nn.GELU(),
-            nn.Dropout(dropout_rate * 0.5),
-            nn.Linear(feature_dim, feature_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout_rate * 0.5),
-            nn.Linear(feature_dim // 2, 1)
-        )
-        self.ultra_low_concentration_head = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim),
-            nn.GELU(),
-            nn.Dropout(dropout_rate * 0.5),
-            nn.Linear(feature_dim, feature_dim // 2),
-            nn.GELU(),
-            nn.Linear(feature_dim // 2, 1)
-        )
-        
-        # concentration gate is merging the outputs of the three heads and deciding which one to use for a given sample
-        self.concentration_gate = nn.Sequential(
-            nn.Linear(feature_dim, 32),
-            nn.GELU(),
-            nn.Linear(32, 16),
-            nn.GELU(),
-            nn.Linear(16, 2),
-            nn.Softmax(dim=1)
+            nn.Dropout(dropout_rate * 0.5),  # Lighter dropout
+            nn.Linear(feature_dim // 2, 1),
+            nn.Sigmoid()  # Direct sigmoid output for 0-1 range
         )
         
         # estimation of uncertainty
@@ -212,15 +183,27 @@ class EnhancedCancerDetectionModel(nn.Module):
             nn.Softplus()
         )
         
-        # Small factor for systematic bias correction
-        self.bias_correction = ResidualBiasCorrectionLayer(feature_dim)
-        
-        # Zero anchoring layer to distinguish between true zero and trace concentration
-        self.zero_anchoring = ZeroAnchoringLayer(feature_dim)
+        # Simplified model - removing complex bias correction and zero anchoring for stability
+        # self.bias_correction = ResidualBiasCorrectionLayer(feature_dim)
+        # self.zero_anchoring = ZeroAnchoringLayer(feature_dim)
         
         self.register_buffer('calibration', torch.ones(1))
         self.register_buffer('clinical_threshold', torch.tensor(0.001))
         
+        # Conservative weight initialization for stability
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Conservative weight initialization for training stability"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                # Smaller initialization variance
+                nn.init.xavier_normal_(module.weight, gain=0.5)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0.0)
+            elif isinstance(module, nn.BatchNorm1d):
+                nn.init.constant_(module.weight, 1.0)
+                nn.init.constant_(module.bias, 0.0)
     
     def forward(self, marker_values, coverage):
         # Apply dynamic marker pruning
@@ -281,39 +264,26 @@ class EnhancedCancerDetectionModel(nn.Module):
         # This is the Deep Sets aggregation: Σ φ(marker_i) weighted by learned attention
         aggregated = torch.sum(attention_weights.unsqueeze(-1) * processed_features, dim=1)
         
-        standard_pred = self.concentration_head(aggregated)
-        low_conc_pred = self.low_concentration_head(aggregated)
-        ultra_low_pred = self.ultra_low_concentration_head(aggregated)
+        # Simplified single concentration prediction
+        concentration = self.concentration_head(aggregated)
         
-        standard_pred = F.softplus(standard_pred) * 0.1
-        log_low_pred = F.softplus(low_conc_pred) * 0.01
-        log_ultra_low_pred = F.softplus(ultra_low_pred) * 0.001
+        # Simplified model - skip bias correction and zero anchoring for stability
+        # concentration = self.bias_correction(aggregated, concentration)
+        # concentration, zero_prob = self.zero_anchoring(aggregated, concentration)
         
-        gates = self.concentration_gate(aggregated)
-        ultra_low_gate = 1.0 - gates.sum(dim=1, keepdim=True)
-        
-        concentration = (
-            gates[:, 0:1] * standard_pred + 
-            gates[:, 1:2] * log_low_pred + 
-            ultra_low_gate * log_ultra_low_pred
-        )
-        
-        concentration = self.bias_correction(aggregated, concentration)
-        
-        # Apply zero anchoring with enhanced dampening
-        concentration, zero_prob = self.zero_anchoring(aggregated, concentration)
-        
-        # Apply additional coverage-based dampening at the final prediction stage
+        # Simplified coverage-based dampening
         mean_coverage = coverage.mean(dim=1, keepdim=True)
-        # Softer dampening - changed from 0.2-1.0 to 0.5-1.0 range
-        coverage_factor = torch.clamp(mean_coverage / (self.min_reliable_coverage * 1.5), 0.5, 1.0)
+        coverage_factor = torch.clamp(mean_coverage / (self.min_reliable_coverage * 2.0), 0.3, 1.0)
         
-        # Apply coverage-based dampening
+        # Apply dampening and clamp
         concentration = concentration * coverage_factor
         concentration = torch.clamp(concentration, 0.0, 1.0)
         
         # Calculate uncertainty
         uncertainty = self.uncertainty_head(aggregated)
+        
+        # Return None for zero_prob since we disabled zero anchoring
+        zero_prob = None
         
         return concentration, uncertainty, attention_weights, zero_prob
     
