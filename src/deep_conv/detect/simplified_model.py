@@ -259,14 +259,18 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Enhanced reliability weighting with stronger coverage dependence
         reliability = coverage_reliability.unsqueeze(-1)  
         
-        # ρ: Aggregate the set (Deep Sets ρ function via attention)
-        attention_scores = self.attention(processed_features).squeeze(-1)
-        attention_scores = attention_scores * reliability.squeeze(-1)
-        attention_scores = attention_scores.masked_fill(missing_mask, -1e9)
-        attention_weights = F.softmax(attention_scores, dim=1)
+        # ρ: Aggregate the set (Deep Sets ρ function via coverage-weighted averaging)
+        # Use coverage reliability as weights - more biologically meaningful than learned attention
+        weights = reliability.squeeze(-1)
+        weights = weights.masked_fill(missing_mask, 0.0)  # Zero out missing markers
         
-        # This is the Deep Sets aggregation: Σ φ(marker_i) weighted by learned attention
-        aggregated = torch.sum(attention_weights.unsqueeze(-1) * processed_features, dim=1)
+        # Normalize weights to sum to 1 (avoid division by zero)
+        weight_sum = weights.sum(dim=1, keepdim=True)
+        weight_sum = torch.clamp(weight_sum, min=1e-8)  # Prevent division by zero
+        normalized_weights = weights / weight_sum
+        
+        # This is the Deep Sets aggregation: Σ φ(marker_i) weighted by coverage reliability
+        aggregated = torch.sum(normalized_weights.unsqueeze(-1) * processed_features, dim=1)
         
         # Simplified single concentration prediction with scaling
         concentration_raw = self.concentration_head(aggregated)
