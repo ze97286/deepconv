@@ -26,7 +26,7 @@ for pat_file in "$INPUT_DIR"/*.pat.gz; do
         tabix -s 1 -b 2 -e 2 -C "$pat_file"
     elif [ "$pat_file.csi" -ot "$pat_file" ] || [ "$pat_file.tbi" -ot "$pat_file" ]; then
         echo "Re-indexing stale index for $pat_file..."
-        tabix -s 1 -b 2 -e 2 -C "$pat_file"
+        tabix -f -s 1 -b 2 -e 2 -C "$pat_file"
     fi
 done
 
