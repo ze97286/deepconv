@@ -128,7 +128,7 @@ def load_model(model_dir, device='cpu'):
 
     # Set defaults with fallbacks
     defaults = {
-        'num_markers': 400,
+        'num_markers': 328,
         'feature_dim': 128,
         'num_heads': 8,
         'num_layers': 3,
