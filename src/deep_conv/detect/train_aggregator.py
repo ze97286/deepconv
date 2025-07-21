@@ -164,29 +164,33 @@ def parse_excluded_markers(excluded_markers_str):
 
 def compute_loss(mu, uncertainty, y_true, control_mask=None, zero_prob=None):
     """
-    Balanced loss function for aggregator model - similar to transformer but simplified
+    Heavily simplified loss function for aggregator model - focus on core regression
     """
     # Base MSE loss
     mse_loss = F.mse_loss(mu, y_true, reduction='none')
     
-    # Calculate relative error for non-zero targets
+    # Very light relative error term for non-zero targets
     epsilon = 1e-6
     non_zero_mask = (y_true > epsilon)
     
     if non_zero_mask.sum() > 0:
-        # Relative error
+        # Relative error with lighter weight
         rel_error = torch.abs(mu[non_zero_mask] - y_true[non_zero_mask]) / (y_true[non_zero_mask] + epsilon)
         rel_loss = rel_error.mean()
     else:
         rel_loss = torch.tensor(0.0, device=mu.device)
     
-    # Control loss - balanced weight
+    # Very light control loss to avoid dominance
     control_loss = torch.tensor(0.0, device=mu.device)
     if control_mask is not None and control_mask.sum() > 0:
-        control_loss = 20.0 * mu[control_mask].mean()  # Similar to transformer
+        control_loss = 2.0 * mu[control_mask].mean()  # Further reduced from 10.0
     
-    # Simple loss combination - closer to transformer loss
-    total_loss = mse_loss.mean() + 1.0 * rel_loss + control_loss
+    # Skip zero probability and uncertainty losses for now - focus on core regression
+    # zero_loss = torch.tensor(0.0, device=mu.device)
+    # calibration_loss = torch.tensor(0.0, device=mu.device)
+    
+    # Simplified loss combination - focus on regression accuracy
+    total_loss = mse_loss.mean() + 0.5 * rel_loss + control_loss
     
     return total_loss
 
@@ -216,16 +220,16 @@ def train_model(model, train_loader, val_loader, args, device):
         weight_decay=args.weight_decay
     )
 
-    # Standard learning rate scheduler - similar to transformer
+    # More conservative learning rate scheduler for aggregator stability
     total_steps = len(train_loader) * args.epochs
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=args.lr,
         total_steps=total_steps,
-        pct_start=0.1,
+        pct_start=0.3,  # Longer warmup
         anneal_strategy='cos',
-        div_factor=25.0,
-        final_div_factor=10000.0
+        div_factor=10.0,  # Less aggressive start
+        final_div_factor=1000.0  # Less aggressive end
     )
 
     # Initialise tracking variables
@@ -299,11 +303,11 @@ def train_model(model, train_loader, val_loader, args, device):
 
             # Gradient accumulation and optimizer step
             if (i + 1) % args.grad_accum_steps == 0 or (i + 1) == len(train_loader):
-                # Moderate gradient clipping (not too aggressive)
+                # Check gradients for issues
                 total_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 
                 # Early warning for gradient issues
-                if total_grad_norm > 5.0:
+                if total_grad_norm > 10.0:
                     logger.warning(f"Large gradient norm detected: {total_grad_norm:.4f}")
                 elif torch.isnan(total_grad_norm) or torch.isinf(total_grad_norm):
                     logger.error(f"Invalid gradient norm: {total_grad_norm}")
