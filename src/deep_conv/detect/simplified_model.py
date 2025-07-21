@@ -141,23 +141,37 @@ class EnhancedCancerDetectionModel(nn.Module):
             low_coverage_threshold=min_reliable_coverage
         )
         
-        # Minimal stable embedding system - no BatchNorm
-        self.simple_projection = nn.Linear(3, feature_dim)  # [value, log_value, coverage] -> feature_dim
+        # Multi-modal feature embedding + batch normalisation
+        self.value_embedding = nn.Linear(1, feature_dim // 2)
+        self.coverage_embedding = nn.Linear(1, feature_dim // 2)
+        self.log_value_embedding = nn.Linear(1, feature_dim // 2)
+        self.value_bn = nn.BatchNorm1d(feature_dim // 2)
+        self.coverage_bn = nn.BatchNorm1d(feature_dim // 2)
+        self.log_value_bn = nn.BatchNorm1d(feature_dim // 2)
+        
+        # Feature projection and marker identity embedding
+        self.feature_projection = nn.Linear(feature_dim * 3 // 2, feature_dim)
 
         
-        # MINIMAL marker processor - just one linear layer for φ function
-        self.marker_processor = nn.Linear(feature_dim, feature_dim)
+        # Deep Sets marker processor
+        # φ: processes each marker individually to learn marker-specific patterns
+        # This will feed into attention aggregation for ρ (set-level aggregation)
+        self.marker_processor = DeepSetsMarkerProcessor(
+            feature_dim=feature_dim,
+            hidden_dim=64,
+            dropout_rate=dropout_rate
+        )
 
         # the critical bridge between marker-level processing and sample-level representation.
         self.attention = nn.Linear(feature_dim, 1)
         
-        # Simplified single concentration head with much smaller scale
+        # Simplified single concentration head - remove mixture of experts complexity
         self.concentration_head = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim // 4),  # Smaller hidden layer
+            nn.Linear(feature_dim, feature_dim // 2),
             nn.GELU(),
-            nn.Dropout(dropout_rate * 0.5),
-            nn.Linear(feature_dim // 4, 1),
-            # Remove sigmoid - let the model learn the scale naturally
+            nn.Dropout(dropout_rate * 0.5),  # Lighter dropout
+            nn.Linear(feature_dim // 2, 1),
+            nn.Sigmoid()  # Direct sigmoid output for 0-1 range
         )
         
         # estimation of uncertainty
@@ -180,11 +194,11 @@ class EnhancedCancerDetectionModel(nn.Module):
         self._init_weights()
     
     def _init_weights(self):
-        """Ultra-conservative weight initialization for training stability"""
+        """Conservative weight initialization for training stability"""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                # Ultra-small initialization variance to prevent explosion
-                nn.init.xavier_normal_(module.weight, gain=0.01)  # Extremely small gain
+                # Smaller initialization variance
+                nn.init.xavier_normal_(module.weight, gain=0.5)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0.0)
             elif isinstance(module, nn.BatchNorm1d):
@@ -192,10 +206,6 @@ class EnhancedCancerDetectionModel(nn.Module):
                 nn.init.constant_(module.bias, 0.0)
     
     def forward(self, marker_values, coverage):
-        # Input validation and scaling to prevent explosions
-        marker_values = torch.clamp(marker_values, 0.0, 1.0)
-        coverage = torch.clamp(coverage, 0.0, 1000.0)
-        
         # Apply dynamic marker pruning
         marker_values_pruned = self.marker_pruning(marker_values, coverage)
         
@@ -216,46 +226,46 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         batch_size, num_markers = marker_values_weighted.shape
         
-        # MINIMAL stable feature creation - no complex embeddings
-        # Simple concatenated features: [value, log_value, coverage]
-        features = torch.stack([
-            marker_values_weighted,
-            torch.log1p(marker_values_weighted),  
-            torch.log1p(coverage) / 10.0  # Scale coverage down
-        ], dim=-1)  # Shape: [batch, markers, 3]
+        value_features = self.value_embedding(marker_values_weighted.unsqueeze(-1))
+        value_features = value_features.reshape(batch_size * num_markers, -1)
+        value_features = self.value_bn(value_features)
+        value_features = value_features.reshape(batch_size, num_markers, -1)
         
-        # Single linear projection 
-        features = self.simple_projection(features)  # [batch, markers, feature_dim]
+        log_values = torch.log1p(marker_values_weighted * 100)
+        log_features = self.log_value_embedding(log_values.unsqueeze(-1))
+        log_features = log_features.reshape(batch_size * num_markers, -1)
+        log_features = self.log_value_bn(log_features)
+        log_features = log_features.reshape(batch_size, num_markers, -1)
         
-        # φ: Process each marker individually (Deep Sets φ function) - MINIMAL
-        processed_features = self.marker_processor(features)  # Just linear transformation
+        log_coverage = torch.log1p(coverage).unsqueeze(-1)
+        coverage_features = self.coverage_embedding(log_coverage)
+        coverage_features = coverage_features.reshape(batch_size * num_markers, -1)
+        coverage_features = self.coverage_bn(coverage_features)
+        coverage_features = coverage_features.reshape(batch_size, num_markers, -1)
         
-        # Apply mask manually
-        if combined_mask is not None:
-            mask_expanded = combined_mask.unsqueeze(-1)
-            processed_features = processed_features.masked_fill(mask_expanded, 0.0)
+        features = torch.cat([value_features, coverage_features, log_features], dim=-1)
+        features = self.feature_projection(features)
+        
+        # φ: Process each marker individually (Deep Sets φ function)
+        processed_features = self.marker_processor(
+            features, 
+            key_padding_mask=combined_mask
+        )
         
         # Enhanced reliability weighting with stronger coverage dependence
         reliability = coverage_reliability.unsqueeze(-1)  
         
-        # ρ: Aggregate the set (Deep Sets ρ function via coverage-weighted averaging)
-        # Use coverage reliability as weights - more biologically meaningful than learned attention
-        weights = reliability.squeeze(-1)
-        weights = weights.masked_fill(missing_mask, 0.0)  # Zero out missing markers
+        # ρ: Aggregate the set (Deep Sets ρ function via attention)
+        attention_scores = self.attention(processed_features).squeeze(-1)
+        attention_scores = attention_scores * reliability.squeeze(-1)
+        attention_scores = attention_scores.masked_fill(missing_mask, -1e9)
+        attention_weights = F.softmax(attention_scores, dim=1)
         
-        # Normalize weights to sum to 1 (avoid division by zero)
-        weight_sum = weights.sum(dim=1, keepdim=True)
-        weight_sum = torch.clamp(weight_sum, min=1e-8)  # Prevent division by zero
-        normalized_weights = weights / weight_sum
+        # This is the Deep Sets aggregation: Σ φ(marker_i) weighted by learned attention
+        aggregated = torch.sum(attention_weights.unsqueeze(-1) * processed_features, dim=1)
         
-        # This is the Deep Sets aggregation: Σ φ(marker_i) weighted by coverage reliability
-        aggregated = torch.sum(normalized_weights.unsqueeze(-1) * processed_features, dim=1)
-        
-        # Simplified single concentration prediction with scaling
-        concentration_raw = self.concentration_head(aggregated)
-        
-        # Remove artificial cap - let model learn full range
-        concentration = torch.sigmoid(concentration_raw) * 0.2  # Max 20% concentration
+        # Simplified single concentration prediction
+        concentration = self.concentration_head(aggregated)
         
         # Simplified model - skip bias correction and zero anchoring for stability
         # concentration = self.bias_correction(aggregated, concentration)
@@ -272,11 +282,10 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Calculate uncertainty
         uncertainty = self.uncertainty_head(aggregated)
         
-        # Create dummy zero_prob to maintain compatibility
-        zero_prob = torch.zeros_like(concentration)
+        # Return None for zero_prob since we disabled zero anchoring
+        zero_prob = None
         
-        # Return normalized_weights instead of attention_weights for compatibility
-        return concentration, uncertainty, normalized_weights, zero_prob
+        return concentration, uncertainty, attention_weights, zero_prob
     
     def get_estimate_and_ci(self, mu, uncertainty, ci_level=0.95):
         # Apply clinical threshold to force low values to zero
@@ -505,4 +514,3 @@ class EnhancedCancerDetectionModel(nn.Module):
         concentration_thresholded = torch.where(is_detected, concentration_adjusted, torch.zeros_like(concentration_adjusted))
         
         return concentration_thresholded, uncertainty, attention_weights, is_detected
-
