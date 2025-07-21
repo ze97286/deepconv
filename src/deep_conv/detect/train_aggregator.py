@@ -164,33 +164,24 @@ def parse_excluded_markers(excluded_markers_str):
 
 def compute_loss(mu, uncertainty, y_true, control_mask=None, zero_prob=None):
     """
-    Heavily simplified loss function for aggregator model - focus on core regression
+    Ultra-simplified loss function for aggregator model - prevent gradient explosion
     """
-    # Base MSE loss
-    mse_loss = F.mse_loss(mu, y_true, reduction='none')
+    # Ensure inputs are reasonable
+    mu = torch.clamp(mu, 0.0, 1.0)
     
-    # Very light relative error term for non-zero targets
-    epsilon = 1e-6
-    non_zero_mask = (y_true > epsilon)
+    # Simple MSE loss with very small scale
+    mse_loss = F.mse_loss(mu, y_true, reduction='mean')
     
-    if non_zero_mask.sum() > 0:
-        # Relative error with lighter weight
-        rel_error = torch.abs(mu[non_zero_mask] - y_true[non_zero_mask]) / (y_true[non_zero_mask] + epsilon)
-        rel_loss = rel_error.mean()
-    else:
-        rel_loss = torch.tensor(0.0, device=mu.device)
-    
-    # Very light control loss to avoid dominance
+    # Optional very light control penalty
     control_loss = torch.tensor(0.0, device=mu.device)
     if control_mask is not None and control_mask.sum() > 0:
-        control_loss = 2.0 * mu[control_mask].mean()  # Further reduced from 10.0
+        control_loss = 0.1 * mu[control_mask].mean()  # Very light penalty
     
-    # Skip zero probability and uncertainty losses for now - focus on core regression
-    # zero_loss = torch.tensor(0.0, device=mu.device)
-    # calibration_loss = torch.tensor(0.0, device=mu.device)
+    # Ultra-simple loss - just MSE + tiny control penalty
+    total_loss = mse_loss + control_loss
     
-    # Simplified loss combination - focus on regression accuracy
-    total_loss = mse_loss.mean() + 0.5 * rel_loss + control_loss
+    # Clamp loss to prevent explosion
+    total_loss = torch.clamp(total_loss, 0.0, 10.0)
     
     return total_loss
 
@@ -303,11 +294,11 @@ def train_model(model, train_loader, val_loader, args, device):
 
             # Gradient accumulation and optimizer step
             if (i + 1) % args.grad_accum_steps == 0 or (i + 1) == len(train_loader):
-                # Check gradients for issues
-                total_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                # Very aggressive gradient clipping
+                total_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
                 
                 # Early warning for gradient issues
-                if total_grad_norm > 10.0:
+                if total_grad_norm > 1.0:
                     logger.warning(f"Large gradient norm detected: {total_grad_norm:.4f}")
                 elif torch.isnan(total_grad_norm) or torch.isinf(total_grad_norm):
                     logger.error(f"Invalid gradient norm: {total_grad_norm}")
