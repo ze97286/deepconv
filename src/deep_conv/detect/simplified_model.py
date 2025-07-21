@@ -141,16 +141,8 @@ class EnhancedCancerDetectionModel(nn.Module):
             low_coverage_threshold=min_reliable_coverage
         )
         
-        # Multi-modal feature embedding + batch normalisation
-        self.value_embedding = nn.Linear(1, feature_dim // 2)
-        self.coverage_embedding = nn.Linear(1, feature_dim // 2)
-        self.log_value_embedding = nn.Linear(1, feature_dim // 2)
-        self.value_bn = nn.BatchNorm1d(feature_dim // 2)
-        self.coverage_bn = nn.BatchNorm1d(feature_dim // 2)
-        self.log_value_bn = nn.BatchNorm1d(feature_dim // 2)
-        
-        # Feature projection and marker identity embedding
-        self.feature_projection = nn.Linear(feature_dim * 3 // 2, feature_dim)
+        # Minimal stable embedding system - no BatchNorm
+        self.simple_projection = nn.Linear(3, feature_dim)  # [value, log_value, coverage] -> feature_dim
 
         
         # Deep Sets marker processor
@@ -197,8 +189,8 @@ class EnhancedCancerDetectionModel(nn.Module):
         """Ultra-conservative weight initialization for training stability"""
         for module in self.modules():
             if isinstance(module, nn.Linear):
-                # Much smaller initialization variance to prevent explosion
-                nn.init.xavier_normal_(module.weight, gain=0.1)  # Very small gain
+                # Ultra-small initialization variance to prevent explosion
+                nn.init.xavier_normal_(module.weight, gain=0.01)  # Extremely small gain
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0.0)
             elif isinstance(module, nn.BatchNorm1d):
@@ -230,27 +222,18 @@ class EnhancedCancerDetectionModel(nn.Module):
         
         batch_size, num_markers = marker_values_weighted.shape
         
-        value_features = self.value_embedding(marker_values_weighted.unsqueeze(-1))
-        value_features = value_features.reshape(batch_size * num_markers, -1)
-        value_features = self.value_bn(value_features)
-        value_features = value_features.reshape(batch_size, num_markers, -1)
+        # MINIMAL stable feature creation - no complex embeddings
+        # Simple concatenated features: [value, log_value, coverage]
+        features = torch.stack([
+            marker_values_weighted,
+            torch.log1p(marker_values_weighted),  
+            torch.log1p(coverage) / 10.0  # Scale coverage down
+        ], dim=-1)  # Shape: [batch, markers, 3]
         
-        log_values = torch.log1p(marker_values_weighted * 100)
-        log_features = self.log_value_embedding(log_values.unsqueeze(-1))
-        log_features = log_features.reshape(batch_size * num_markers, -1)
-        log_features = self.log_value_bn(log_features)
-        log_features = log_features.reshape(batch_size, num_markers, -1)
+        # Single linear projection 
+        features = self.simple_projection(features)  # [batch, markers, feature_dim]
         
-        log_coverage = torch.log1p(coverage).unsqueeze(-1)
-        coverage_features = self.coverage_embedding(log_coverage)
-        coverage_features = coverage_features.reshape(batch_size * num_markers, -1)
-        coverage_features = self.coverage_bn(coverage_features)
-        coverage_features = coverage_features.reshape(batch_size, num_markers, -1)
-        
-        features = torch.cat([value_features, coverage_features, log_features], dim=-1)
-        features = self.feature_projection(features)
-        
-        # φ: Process each marker individually (Deep Sets φ function)
+        # φ: Process each marker individually (Deep Sets φ function) - SIMPLIFIED
         processed_features = self.marker_processor(
             features, 
             key_padding_mask=combined_mask
