@@ -296,7 +296,8 @@ class EnhancedCancerDetectionModel(nn.Module):
         # Create dummy zero_prob to maintain compatibility
         zero_prob = torch.zeros_like(concentration)
         
-        return concentration, uncertainty, attention_weights, zero_prob
+        # Return normalized_weights instead of attention_weights for compatibility
+        return concentration, uncertainty, normalized_weights, zero_prob
     
     def get_estimate_and_ci(self, mu, uncertainty, ci_level=0.95):
         # Apply clinical threshold to force low values to zero
