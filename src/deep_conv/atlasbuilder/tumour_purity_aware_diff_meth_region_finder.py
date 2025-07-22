@@ -372,7 +372,7 @@ def main():
     parser = argparse.ArgumentParser(description='Process pat files for UXM analysis')
     parser.add_argument('--min_cpgs', type=int, required=True, help='Minimum CpGs required')
     parser.add_argument('--pat_dir', required=True, help='Directory containing tumor pat files')
-    parser.add_argument('--control_dir', required=True, help='Directory containing control pat files')
+    parser.add_argument('--control_dir', help='Directory containing control pat files (not needed for --step1_only)')
     parser.add_argument("--output_atlas_path", required=True, help="Path to save atlas")
     parser.add_argument('--min_correlation', type=float, default=0.7, help='Minimum correlation with tumor purity')
     parser.add_argument('--max_control_signal', type=float, default=0.01, help='Maximum median signal allowed in control samples')
@@ -380,6 +380,10 @@ def main():
     parser.add_argument('--step1_only', action='store_true', help='Step 1 only: tumor correlation + coverage filtering (skip control filtering)')
 
     args = parser.parse_args()
+    
+    # Validate arguments
+    if not args.step1_only and not args.control_dir:
+        parser.error("--control_dir is required unless using --step1_only")
 
     tumor_purity_dict = {
         '069-009_ScrBsl_tumour_cna_corrected':0.5171,
@@ -412,48 +416,67 @@ def main():
             print(f"Tumor files not found for chr{chr_num}, skipping...")
             continue
         
-        # Load control data for this chromosome
-        control_mv_file = f"{args.control_dir}/l{args.min_cpgs}_chr{chr_num}_marker_values.parquet"
-        control_cov_file = f"{args.control_dir}/l{args.min_cpgs}_chr{chr_num}_coverage.parquet"
+        # Load control data for this chromosome (skip if step1_only)
+        if not args.step1_only:
+            control_mv_file = f"{args.control_dir}/l{args.min_cpgs}_chr{chr_num}_marker_values.parquet"
+            control_cov_file = f"{args.control_dir}/l{args.min_cpgs}_chr{chr_num}_coverage.parquet"
+            
+            try:
+                control_mv = pd.read_parquet(control_mv_file)
+                control_cov = pd.read_parquet(control_cov_file)
+                print(f"Loaded control data: {control_mv.shape} regions")
+            except FileNotFoundError:
+                print(f"Control files not found for chr{chr_num}, skipping...")
+                continue
+        else:
+            print("Step 1 mode: Skipping control data loading")
+            control_mv = None
+            control_cov = None
         
-        try:
-            control_mv = pd.read_parquet(control_mv_file)
-            control_cov = pd.read_parquet(control_cov_file)
-            print(f"Loaded control data: {control_mv.shape} regions")
-        except FileNotFoundError:
-            print(f"Control files not found for chr{chr_num}, skipping...")
-            continue
+        # Merge tumor and control data (or use tumor only for step1)
+        if not args.step1_only:
+            print("Merging tumor and control data...")
+            common_regions = tumor_mv.index.intersection(control_mv.index)
+            print(f"Found {len(common_regions)} common regions")
+            
+            if len(common_regions) == 0:
+                print("No common regions found, skipping chromosome")
+                continue
+            
+            # Create combined dataset
+            combined_mv = tumor_mv.loc[common_regions].copy()
+            combined_cov = tumor_cov.loc[common_regions].copy()
+            
+            # Add control columns
+            control_sample_cols = [col for col in control_mv.columns if col not in ['name', 'direction']]
+            print(f"Adding {len(control_sample_cols)} control columns...")
+            
+            for col in control_sample_cols:
+                combined_mv[f"Control_{col}"] = control_mv.loc[common_regions, col].values
+                combined_cov[f"Control_{col}"] = control_cov.loc[common_regions, col].values
+        else:
+            print("Step 1 mode: Using tumor data only")
+            combined_mv = tumor_mv.copy()
+            combined_cov = tumor_cov.copy()
         
-        # Merge tumor and control data
-        print("Merging tumor and control data...")
-        common_regions = tumor_mv.index.intersection(control_mv.index)
-        print(f"Found {len(common_regions)} common regions")
-        
-        if len(common_regions) == 0:
-            print("No common regions found, skipping chromosome")
-            continue
-        
-        # Create combined dataset
-        combined_mv = tumor_mv.loc[common_regions].copy()
-        combined_cov = tumor_cov.loc[common_regions].copy()
-        
-        # Add control columns
-        control_sample_cols = [col for col in control_mv.columns if col not in ['name', 'direction']]
-        print(f"Adding {len(control_sample_cols)} control columns...")
-        
-        for col in control_sample_cols:
-            combined_mv[f"Control_{col}"] = control_mv.loc[common_regions, col].values
-            combined_cov[f"Control_{col}"] = control_cov.loc[common_regions, col].values
-        
-        # Apply mixed coverage filtering
-        print("Applying mixed coverage filtering...")
-        filtered_mv, filtered_cov = apply_mixed_coverage_filter(
-            combined_mv, combined_cov, 
-            tumor_min_cov=10, 
-            xtp_control_min_cov=10,  # X### and TP### controls need 10 reads
-            gi_control_min_cov=5,    # GI controls only need 5 reads
-            control_quorum=0.6
-        )
+        # Apply coverage filtering
+        if not args.step1_only:
+            print("Applying mixed coverage filtering...")
+            filtered_mv, filtered_cov = apply_mixed_coverage_filter(
+                combined_mv, combined_cov, 
+                tumor_min_cov=10, 
+                xtp_control_min_cov=10,  # X### and TP### controls need 10 reads
+                gi_control_min_cov=5,    # GI controls only need 5 reads
+                control_quorum=0.6
+            )
+        else:
+            print("Applying tumor-only coverage filtering...")
+            # Simple tumor coverage filter for step 1
+            tumor_samples = [col for col in combined_mv.columns if not col.startswith('Control_') and col not in ['name', 'direction']]
+            tumor_mask = (combined_cov[tumor_samples] >= 10).all(axis=1) if tumor_samples else pd.Series(True, index=combined_cov.index)
+            print(f"  Tumor coverage ≥10 (all samples): {tumor_mask.sum()}/{len(tumor_mask)} ({100*tumor_mask.sum()/len(tumor_mask):.1f}%)")
+            filtered_mv = combined_mv[tumor_mask].copy()
+            filtered_cov = combined_cov[tumor_mask].copy()
         
         if len(filtered_mv) == 0:
             print("No regions passed coverage filtering, skipping chromosome")
