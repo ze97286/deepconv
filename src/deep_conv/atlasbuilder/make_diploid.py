@@ -417,12 +417,12 @@ if __name__ == "__main__":
     sample_pairs = [
         ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/129-001_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/129-001:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
         ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-021_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-021:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
-        ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-011_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-011:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
+        # ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-011_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-011:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
         ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/069-009_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/069-009:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
         ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-043_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-043:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
         ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-022_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-022:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
-        ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-014_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-014:ScrBsl:oesophagus-ScrBsl/best.bbc.ucn"),
-        ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-030_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-030:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
+        # ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-014_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-014:ScrBsl:oesophagus-ScrBsl/best.bbc.ucn"),
+        # ("/mnt/lustre/users/bschuster/OAC_Trial_TAPS_Tissue/Results/1.6/pat/071-030_ScrBsl_tumour.pat.gz", "/mnt/lustre/users/bschuster/OAC_Trial_WGS_Tissue_CNA-Hatchet/Results/071-030:ScrBsl:duodenum-ScrBsl/best.bbc.ucn"),
     ]
     
     process_multiple_samples(
