@@ -5,52 +5,68 @@ import matplotlib.pyplot as plt
 import glob
 import re
 
-def apply_mixed_coverage_filter(mv_data, cov_data, tumor_min_cov=10, high_control_min_cov=5, low_control_min_cov=3, control_quorum=0.6):
+def apply_mixed_coverage_filter(mv_data, cov_data, tumor_min_cov=10, xtp_control_min_cov=10, gi_control_min_cov=5, control_quorum=0.6):
     """
     Apply mixed coverage filtering based on sample types
+    Uses stricter coverage for X### and TP### controls, more lenient for GI controls
     Uses quorum approach for controls (60% must have sufficient coverage)
     """
     all_sample_cols = [col for col in cov_data.columns if col not in ['name', 'direction']]
     
-    # Classify samples
-    high_coverage_controls = [col for col in all_sample_cols if col.startswith('Control_') and 'GI' not in col]
-    low_coverage_controls = [col for col in all_sample_cols if col.startswith('Control_') and 'GI' in col]
+    # Classify samples more specifically
+    # X### and TP### controls need higher coverage (10 reads)
+    xtp_controls = [col for col in all_sample_cols if col.startswith('Control_') and 
+                   (col.startswith('Control_X') or col.startswith('Control_TP'))]
+    # GI controls need lower coverage (5 reads)  
+    gi_controls = [col for col in all_sample_cols if col.startswith('Control_') and 'GI' in col]
+    # Any other controls (fallback)
+    other_controls = [col for col in all_sample_cols if col.startswith('Control_') and 
+                     col not in xtp_controls and col not in gi_controls]
     tumor_samples = [col for col in all_sample_cols if not col.startswith('Control_')]
     
     print(f"  Sample classification:")
-    print(f"    High coverage controls: {len(high_coverage_controls)}")
-    print(f"    Low coverage controls: {len(low_coverage_controls)}")
+    print(f"    X###/TP### controls (high coverage): {len(xtp_controls)}")
+    print(f"    GI controls (low coverage): {len(gi_controls)}")
+    print(f"    Other controls: {len(other_controls)}")
     print(f"    Tumor samples: {len(tumor_samples)}")
     
     # Create coverage masks - require ALL tumor samples but only quorum of controls
     tumor_mask = (cov_data[tumor_samples] >= tumor_min_cov).all(axis=1) if tumor_samples else pd.Series(True, index=cov_data.index)
     
     # For controls, use quorum approach (60% must have sufficient coverage)
-    if high_coverage_controls:
-        high_control_sufficient = (cov_data[high_coverage_controls] >= high_control_min_cov).sum(axis=1)
-        high_control_mask = high_control_sufficient >= (len(high_coverage_controls) * control_quorum)
+    if xtp_controls:
+        xtp_control_sufficient = (cov_data[xtp_controls] >= xtp_control_min_cov).sum(axis=1)
+        xtp_control_mask = xtp_control_sufficient >= (len(xtp_controls) * control_quorum)
     else:
-        high_control_mask = pd.Series(True, index=cov_data.index)
+        xtp_control_mask = pd.Series(True, index=cov_data.index)
     
-    if low_coverage_controls:
-        low_control_sufficient = (cov_data[low_coverage_controls] >= low_control_min_cov).sum(axis=1)
-        low_control_mask = low_control_sufficient >= (len(low_coverage_controls) * control_quorum)
+    if gi_controls:
+        gi_control_sufficient = (cov_data[gi_controls] >= gi_control_min_cov).sum(axis=1)
+        gi_control_mask = gi_control_sufficient >= (len(gi_controls) * control_quorum)
     else:
-        low_control_mask = pd.Series(True, index=cov_data.index)
+        gi_control_mask = pd.Series(True, index=cov_data.index)
+        
+    if other_controls:
+        other_control_sufficient = (cov_data[other_controls] >= gi_control_min_cov).sum(axis=1)  # Use GI threshold for other controls
+        other_control_mask = other_control_sufficient >= (len(other_controls) * control_quorum)
+    else:
+        other_control_mask = pd.Series(True, index=cov_data.index)
     
     # Combined mask
-    combined_mask = tumor_mask & high_control_mask & low_control_mask
+    combined_mask = tumor_mask & xtp_control_mask & gi_control_mask & other_control_mask
     
     print(f"  Coverage filtering results (quorum = {control_quorum:.0%}):")
     print(f"    Tumor ≥{tumor_min_cov} (all): {tumor_mask.sum()}/{len(tumor_mask)} ({100*tumor_mask.sum()/len(tumor_mask):.1f}%)")
-    print(f"    High controls ≥{high_control_min_cov} (≥{control_quorum:.0%}): {high_control_mask.sum()}/{len(high_control_mask)} ({100*high_control_mask.sum()/len(high_control_mask):.1f}%)")
-    print(f"    Low controls ≥{low_control_min_cov} (≥{control_quorum:.0%}): {low_control_mask.sum()}/{len(low_control_mask)} ({100*low_control_mask.sum()/len(low_control_mask):.1f}%)")
+    print(f"    X###/TP### controls ≥{xtp_control_min_cov} (≥{control_quorum:.0%}): {xtp_control_mask.sum()}/{len(xtp_control_mask)} ({100*xtp_control_mask.sum()/len(xtp_control_mask):.1f}%)")
+    print(f"    GI controls ≥{gi_control_min_cov} (≥{control_quorum:.0%}): {gi_control_mask.sum()}/{len(gi_control_mask)} ({100*gi_control_mask.sum()/len(gi_control_mask):.1f}%)")
+    if other_controls:
+        print(f"    Other controls ≥{gi_control_min_cov} (≥{control_quorum:.0%}): {other_control_mask.sum()}/{len(other_control_mask)} ({100*other_control_mask.sum()/len(other_control_mask):.1f}%)")
     print(f"    Combined: {combined_mask.sum()}/{len(combined_mask)} ({100*combined_mask.sum()/len(combined_mask):.1f}%)")
     
     return mv_data[combined_mask].copy(), cov_data[combined_mask].copy()
 
 def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correlation=0.7,
-                                    max_control_signal=0.01, check_controls=True):
+                                    max_control_signal=0.01, check_controls=True, step1_only=False):
       """
       Find regions where methylation signal correlates with tumor purity
       AND have low signal in control samples (tumor-specific)
@@ -115,8 +131,8 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
       # Add mean signal across samples
       results['mean_signal'] = np.nanmean(numeric_data, axis=1)
       
-      # Add control filtering if requested
-      if check_controls and control_cols:
+      # Add control filtering if requested and not in step1_only mode
+      if check_controls and control_cols and not step1_only:
           print(f"\nApplying control filtering (median signal <= {max_control_signal})...")
           control_data = filtered_mv[control_cols].values
           print(f"  Control data shape: {control_data.shape}")
@@ -164,6 +180,11 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
           for thresh in [0.01, 0.02, 0.05, 0.10, 0.15, 0.20]:
               passing = (control_median <= thresh).sum()
               print(f"  <= {thresh}: {passing} regions ({100*passing/len(control_median):.1f}%)")
+      elif step1_only:
+          print(f"\nStep 1 mode: Skipping control filtering")
+          # Add placeholder columns for consistency
+          results['control_max'] = np.nan
+          results['control_median'] = np.nan
           
       # Sort by correlation (descending) - we want positive correlations at the top
       results = results.reindex(results['correlation'].sort_values(ascending=False).index)
@@ -356,6 +377,7 @@ def main():
     parser.add_argument('--min_correlation', type=float, default=0.7, help='Minimum correlation with tumor purity')
     parser.add_argument('--max_control_signal', type=float, default=0.01, help='Maximum median signal allowed in control samples')
     parser.add_argument('--no_control_filter', action='store_true', help='Skip control filtering (not recommended)')
+    parser.add_argument('--step1_only', action='store_true', help='Step 1 only: tumor correlation + coverage filtering (skip control filtering)')
 
     args = parser.parse_args()
 
@@ -425,7 +447,13 @@ def main():
         
         # Apply mixed coverage filtering
         print("Applying mixed coverage filtering...")
-        filtered_mv, filtered_cov = apply_mixed_coverage_filter(combined_mv, combined_cov)
+        filtered_mv, filtered_cov = apply_mixed_coverage_filter(
+            combined_mv, combined_cov, 
+            tumor_min_cov=10, 
+            xtp_control_min_cov=10,  # X### and TP### controls need 10 reads
+            gi_control_min_cov=5,    # GI controls only need 5 reads
+            control_quorum=0.6
+        )
         
         if len(filtered_mv) == 0:
             print("No regions passed coverage filtering, skipping chromosome")
@@ -440,7 +468,8 @@ def main():
             tumor_purity_dict,
             min_correlation=args.min_correlation,
             max_control_signal=args.max_control_signal,
-            check_controls=not args.no_control_filter
+            check_controls=not args.no_control_filter,
+            step1_only=args.step1_only
         )
         
         # Add chromosome info
