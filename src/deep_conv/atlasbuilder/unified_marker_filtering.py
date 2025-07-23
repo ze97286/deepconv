@@ -14,29 +14,7 @@ def calculate_100_percent_tumour_signal(signal_df: pd.DataFrame,
     tumour_cols = [col for col in signal_df.columns if col.startswith(tumour_prefix)]
     # Extract tumour signals and purities
     tumour_signals = signal_df[tumour_cols]
-    purities = []
-    for col in tumour_cols:
-        if col in tumour_purity_dict:
-            purities.append(tumour_purity_dict[col])
-        else:
-            # Try without OAC_ prefix
-            col_without_prefix = col.replace('OAC_', '') if col.startswith('OAC_') else f'OAC_{col}'
-            if col_without_prefix in tumour_purity_dict:
-                purities.append(tumour_purity_dict[col_without_prefix])
-            else:
-                print(f"Warning: Could not find purity for column {col}")
-                purities.append(None)
-    
-    # Filter out None values
-    valid_cols = [col for col, purity in zip(tumour_cols, purities) if purity is not None]
-    valid_purities = [purity for purity in purities if purity is not None]
-    
-    if len(valid_cols) == 0:
-        print("Error: No valid tumor columns found with matching purities!")
-        return pd.Series([np.nan] * len(signal_df), index=signal_df.index)
-    
-    tumour_signals = signal_df[valid_cols]
-    purities = valid_purities
+    purities = [tumour_purity_dict[col] for col in tumour_cols]
     # Calculate 100% tumour signal for each region
     tumour_100_signals = []
     for idx in signal_df.index:
