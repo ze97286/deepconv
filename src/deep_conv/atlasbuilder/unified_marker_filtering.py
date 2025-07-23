@@ -544,14 +544,14 @@ def main():
     
     # Load tumour purity
     tumour_purity_dict = {
-        'OAC_069-009_ScrBsl_tumour_cna_corrected':0.5171,
-        'OAC_071-011_ScrBsl_tumour_cna_corrected':0.2361,
-        'OAC_071-014_ScrBsl_tumour_cna_corrected':0.07926,
-        'OAC_071-021_ScrBsl_tumour_cna_corrected':0.4766,
-        'OAC_071-022_ScrBsl_tumour_cna_corrected':0.4108,
-        'OAC_071-030_ScrBsl_tumour_cna_corrected':0.0801,
-        'OAC_071-043_ScrBsl_tumour_cna_corrected':0.4607,
-        'OAC_129-001_ScrBsl_tumour_cna_corrected':0.6921
+        'OAC_069-009_ScrBsl_tumour':0.5171,
+        'OAC_071-011_ScrBsl_tumour':0.2361,
+        'OAC_071-014_ScrBsl_tumour':0.07926,
+        'OAC_071-021_ScrBsl_tumour':0.4766,
+        'OAC_071-022_ScrBsl_tumour':0.4108,
+        'OAC_071-030_ScrBsl_tumour':0.0801,
+        'OAC_071-043_ScrBsl_tumour':0.4607,
+        'OAC_129-001_ScrBsl_tumour':0.6921
     }
     
     # If analyse_thresholds is requested, do that and exit
