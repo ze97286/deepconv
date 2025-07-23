@@ -14,14 +14,36 @@ def calculate_100_percent_tumour_signal(signal_df: pd.DataFrame,
     tumour_cols = [col for col in signal_df.columns if col.startswith(tumour_prefix)]
     # Extract tumour signals and purities
     tumour_signals = signal_df[tumour_cols]
-    purities = [tumour_purity_dict[col] for col in tumour_cols]
+    purities = []
+    for col in tumour_cols:
+        if col in tumour_purity_dict:
+            purities.append(tumour_purity_dict[col])
+        else:
+            # Try without OAC_ prefix
+            col_without_prefix = col.replace('OAC_', '') if col.startswith('OAC_') else f'OAC_{col}'
+            if col_without_prefix in tumour_purity_dict:
+                purities.append(tumour_purity_dict[col_without_prefix])
+            else:
+                print(f"Warning: Could not find purity for column {col}")
+                purities.append(None)
+    
+    # Filter out None values
+    valid_cols = [col for col, purity in zip(tumour_cols, purities) if purity is not None]
+    valid_purities = [purity for purity in purities if purity is not None]
+    
+    if len(valid_cols) == 0:
+        print("Error: No valid tumor columns found with matching purities!")
+        return pd.Series([np.nan] * len(signal_df), index=signal_df.index)
+    
+    tumour_signals = signal_df[valid_cols]
+    purities = valid_purities
     # Calculate 100% tumour signal for each region
     tumour_100_signals = []
     for idx in signal_df.index:
         signals = tumour_signals.loc[idx].values
         # Remove NaN values
         mask = ~np.isnan(signals)
-        if mask.sum() < 3:  # Need at least 3 points for reliable estimation
+        if mask.sum() < len(purities):  # Need ALL tumor samples to have valid data
             tumour_100_signals.append(np.nan)
             continue
         valid_signals = signals[mask]
@@ -341,6 +363,25 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
                          'Monocytes', 'CD34-erythroblasts', 'CD34-megakaryocytes']
     gi_types = ['Colon', 'Esophagus', 'Gastric', 'Small-intestine']
     
+    # Get the actual sample columns from coverage_df for each cell type
+    # We need to check coverage for ALL samples, not just the merged cell type columns
+    blood_sample_cols = []
+    gi_sample_cols = []
+    
+    for col in coverage_df.columns:
+        if any(col.startswith(cell_type) for cell_type in blood_immune_types):
+            blood_sample_cols.append(col)
+        elif any(col.startswith(cell_type) for cell_type in gi_types):
+            gi_sample_cols.append(col)
+    
+    print(f"\n  DEBUG - Found {len(blood_sample_cols)} blood/immune sample columns for coverage check")
+    print(f"  DEBUG - Found {len(gi_sample_cols)} GI sample columns for coverage check")
+    
+    # Calculate coverage for all relevant samples
+    signal_df['min_blood_coverage'] = coverage_df[blood_sample_cols].min(axis=1) if blood_sample_cols else 0
+    signal_df['min_gi_coverage'] = coverage_df[gi_sample_cols].min(axis=1) if gi_sample_cols else 0
+    signal_df['min_all_coverage'] = signal_df[['tumour_coverage', 'min_blood_coverage', 'min_gi_coverage']].min(axis=1)
+    
     # Calculate max signals from merged cell type signals
     blood_cols = [col for col in blood_immune_types if col in merged_signals.columns]
     gi_cols = [col for col in gi_types if col in merged_signals.columns]
@@ -406,9 +447,13 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     step2 = step1[step1['tumour_100'] >= min_tumour_signal]
     print(f"  After tumour signal ≥ {min_tumour_signal}: {len(step2):,}")
     
-    # Sufficient coverage
-    step3 = step2[step2['tumour_coverage'] >= min_coverage]
-    print(f"  After coverage ≥ {min_coverage}: {len(step3):,}")
+    # Sufficient coverage - check ALL cell types have minimum coverage
+    step3 = step2[step2['min_all_coverage'] >= min_coverage]
+    print(f"  After coverage ≥ {min_coverage} (all cell types): {len(step3):,}")
+    print(f"    Breakdown: tumor coverage OK: {(step2['tumour_coverage'] >= min_coverage).sum():,}")
+    print(f"    Blood coverage OK: {(step2['min_blood_coverage'] >= min_coverage).sum():,}")  
+    print(f"    GI coverage OK: {(step2['min_gi_coverage'] >= min_coverage).sum():,}")
+    print(f"    All coverage OK: {len(step3):,}")
     
     # Skip control filtering - regions are pre-filtered for tumour-specificity
     step4 = step3

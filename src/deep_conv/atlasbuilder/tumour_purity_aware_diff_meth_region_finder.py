@@ -98,7 +98,7 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
           valid_count = np.sum(valid_mask)
           valid_counts.append(valid_count)
           # Skip if too few valid values
-          if valid_count < 3:
+          if valid_count < len(purities):  # Need ALL tumor samples
               correlations.append(np.nan)
               pvalues.append(np.nan)
               continue
@@ -386,14 +386,14 @@ def main():
         parser.error("--control_dir is required unless using --step1_only")
 
     tumor_purity_dict = {
-        '069-009_ScrBsl_tumour_cna_corrected':0.5171,
-        '071-011_ScrBsl_tumour_cna_corrected':0.2361,
-        '071-014_ScrBsl_tumour_cna_corrected':0.07926,
-        '071-021_ScrBsl_tumour_cna_corrected':0.4766,
-        '071-022_ScrBsl_tumour_cna_corrected':0.4108,
-        '071-030_ScrBsl_tumour_cna_corrected':0.0801,
-        '071-043_ScrBsl_tumour_cna_corrected':0.4607,
-        '129-001_ScrBsl_tumour_cna_corrected':0.6921
+        '069-009_ScrBsl_tumour':0.5171,
+        '071-011_ScrBsl_tumour':0.2361,
+        '071-014_ScrBsl_tumour':0.07926,
+        '071-021_ScrBsl_tumour':0.4766,
+        '071-022_ScrBsl_tumour':0.4108,
+        '071-030_ScrBsl_tumour':0.0801,
+        '071-043_ScrBsl_tumour':0.4607,
+        '129-001_ScrBsl_tumour':0.6921
     }
 
     all_results = []
