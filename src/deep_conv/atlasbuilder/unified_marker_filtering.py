@@ -17,11 +17,18 @@ def calculate_100_percent_tumour_signal(signal_df: pd.DataFrame,
     purities = [tumour_purity_dict[col] for col in tumour_cols]
     # Calculate 100% tumour signal for each region
     tumour_100_signals = []
+    failed_insufficient_samples = 0
+    failed_negative_slope = 0
+    failed_impossible_signal = 0
+    total_processed = 0
+    
     for idx in signal_df.index:
+        total_processed += 1
         signals = tumour_signals.loc[idx].values
         # Remove NaN values
         mask = ~np.isnan(signals)
         if mask.sum() < len(purities):  # Need ALL tumor samples to have valid data
+            failed_insufficient_samples += 1
             tumour_100_signals.append(np.nan)
             continue
         valid_signals = signals[mask]
@@ -33,10 +40,22 @@ def calculate_100_percent_tumour_signal(signal_df: pd.DataFrame,
         # Calculate signal at 100% purity
         signal_100 = slope * 1.0 + intercept
         # Only accept if slope is positive and signal is reasonable
-        if slope > 0 and 0 < signal_100 <= 1:
-            tumour_100_signals.append(signal_100)
-        else:
+        if slope <= 0:
+            failed_negative_slope += 1
             tumour_100_signals.append(np.nan)
+        elif signal_100 <= 0 or signal_100 > 1:
+            failed_impossible_signal += 1
+            tumour_100_signals.append(np.nan)
+        else:
+            tumour_100_signals.append(signal_100)
+    
+    print(f"100% tumor signal calculation results:")
+    print(f"  Total regions processed: {total_processed:,}")
+    print(f"  Failed - insufficient samples: {failed_insufficient_samples:,} ({100*failed_insufficient_samples/total_processed:.1f}%)")
+    print(f"  Failed - negative slope: {failed_negative_slope:,} ({100*failed_negative_slope/total_processed:.1f}%)")
+    print(f"  Failed - impossible signal: {failed_impossible_signal:,} ({100*failed_impossible_signal/total_processed:.1f}%)")
+    print(f"  Successful: {total_processed - failed_insufficient_samples - failed_negative_slope - failed_impossible_signal:,}")
+    
     return pd.Series(tumour_100_signals, index=signal_df.index)
 
 def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumour_purity_dict: Dict[str, float]):
@@ -554,6 +573,8 @@ def main():
         'OAC_129-001_ScrBsl_tumour':0.6921
     }
     
+    print(tumour_purity_dict)
+
     # If analyse_thresholds is requested, do that and exit
     if args.analyse_thresholds:
         analyse_thresholds(signal_df, coverage_df, tumour_purity_dict)
