@@ -245,7 +245,7 @@ def calculate_weighted_cell_type_signals(signal_df: pd.DataFrame,
     return result_df, variance_stats
 
 def select_non_overlapping_regions(filtered_df: pd.DataFrame, 
-                                 min_distance: int = 100) -> pd.DataFrame:
+                                 min_distance: int = 20) -> pd.DataFrame:
     """
     Select non-overlapping regions with highest quality scores.
     """
