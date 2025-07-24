@@ -86,66 +86,76 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
       # Pre-extract numeric data for all samples
       numeric_data = filtered_mv[sample_cols].values  # This should be clean float64
       
-      # Linear regression parameters
-      from sklearn.linear_model import LinearRegression
-      from sklearn.metrics import r2_score, mean_squared_error
+      # Vectorized linear regression using numpy - MUCH faster than sklearn
+      print("Processing regions with vectorized linear regression...")
       
-      # Calculate linear regression metrics for each region
-      r2_scores = []
-      slopes = []
-      intercepts = []
-      rmses = []
-      valid_counts = []
-      print("Processing regions with linear regression...")
-      for i in range(len(filtered_mv)):
-          if i % 100000 == 0:
-              print(f"Processed {i}/{len(filtered_mv)} regions")
-          signals = numeric_data[i, :]  # Get row i
-          # Check for valid values
-          valid_mask = ~np.isnan(signals) & np.isfinite(signals)
-          valid_count = np.sum(valid_mask)
-          valid_counts.append(valid_count)
-          # Skip if too few valid values
-          if valid_count < len(purities):  # Need ALL tumor samples
-              r2_scores.append(np.nan)
-              slopes.append(np.nan)
-              intercepts.append(np.nan)
-              rmses.append(np.nan)
-              continue
-          # Use only valid values for regression
-          valid_signals = signals[valid_mask]
-          valid_purities = purities[valid_mask]
-          # Check for constant values (regression undefined)
-          if np.std(valid_signals) == 0 or np.std(valid_purities) == 0:
-              r2_scores.append(np.nan)
-              slopes.append(np.nan)
-              intercepts.append(np.nan)
-              rmses.append(np.nan)
-              continue
-          # Fit linear regression
-          try:
-              X = valid_purities.reshape(-1, 1)
-              y = valid_signals
-              model = LinearRegression()
-              model.fit(X, y)
-              
-              # Get metrics
-              y_pred = model.predict(X)
-              r2 = r2_score(y, y_pred)
-              slope = model.coef_[0]
-              intercept = model.intercept_
-              rmse = np.sqrt(mean_squared_error(y, y_pred))
-              
-              r2_scores.append(r2)
-              slopes.append(slope)
-              intercepts.append(intercept)
-              rmses.append(rmse)
-          except Exception as e:
-              print(f"Error at region {i}: {e}")
-              r2_scores.append(np.nan)
-              slopes.append(np.nan)
-              intercepts.append(np.nan)
-              rmses.append(np.nan)
+      # Pre-compute constants for all regions
+      n = len(purities)
+      sum_x = np.sum(purities)
+      sum_x2 = np.sum(purities**2)
+      mean_x = np.mean(purities)
+      
+      # Check if all samples have valid data (vectorized)
+      valid_counts = (~np.isnan(numeric_data)).sum(axis=1)
+      all_valid_mask = valid_counts == n
+      
+      # Initialize result arrays
+      num_regions = len(filtered_mv)
+      r2_scores = np.full(num_regions, np.nan)
+      slopes = np.full(num_regions, np.nan)
+      intercepts = np.full(num_regions, np.nan)
+      rmses = np.full(num_regions, np.nan)
+      
+      # Process only regions with all valid samples
+      valid_indices = np.where(all_valid_mask)[0]
+      print(f"Found {len(valid_indices)} regions with complete data out of {num_regions}")
+      
+      if len(valid_indices) > 0:
+          # Get signals for valid regions
+          valid_signals = numeric_data[valid_indices, :]
+          
+          # Check for non-constant signals (vectorized)
+          signal_stds = np.std(valid_signals, axis=1)
+          non_constant_mask = signal_stds > 0
+          valid_indices = valid_indices[non_constant_mask]
+          valid_signals = valid_signals[non_constant_mask, :]
+          
+          print(f"Processing {len(valid_indices)} regions with non-constant signals...")
+          
+          # Vectorized linear regression calculations
+          # For each region: slope = (n*sum(xy) - sum(x)*sum(y)) / (n*sum(x²) - (sum(x))²)
+          sum_y = np.sum(valid_signals, axis=1)
+          sum_xy = np.sum(valid_signals * purities, axis=1)
+          mean_y = np.mean(valid_signals, axis=1)
+          
+          # Calculate slopes and intercepts
+          denominator = n * sum_x2 - sum_x**2
+          slopes_valid = (n * sum_xy - sum_x * sum_y) / denominator
+          intercepts_valid = mean_y - slopes_valid * mean_x
+          
+          # Calculate predictions and residuals
+          predictions = slopes_valid[:, np.newaxis] * purities + intercepts_valid[:, np.newaxis]
+          residuals = valid_signals - predictions
+          
+          # Calculate R² and RMSE
+          ss_res = np.sum(residuals**2, axis=1)
+          ss_tot = np.sum((valid_signals - mean_y[:, np.newaxis])**2, axis=1)
+          r2_valid = 1 - (ss_res / (ss_tot + 1e-10))
+          rmse_valid = np.sqrt(ss_res / n)
+          
+          # Store results
+          r2_scores[valid_indices] = r2_valid
+          slopes[valid_indices] = slopes_valid
+          intercepts[valid_indices] = intercepts_valid
+          rmses[valid_indices] = rmse_valid
+      
+      print(f"Linear regression complete!")
+      
+      # Report processing stats
+      valid_r2 = ~np.isnan(r2_scores)
+      print(f"  Regions with valid regression: {valid_r2.sum()}")
+      print(f"  Regions with missing data: {(~all_valid_mask).sum()}")
+      print(f"  Regions with constant signal: {all_valid_mask.sum() - valid_r2.sum()}")
       # Create results dataframe
       results = pd.DataFrame({
           'region': filtered_mv.index,
