@@ -67,214 +67,248 @@ def apply_mixed_coverage_filter(mv_data, cov_data, tumor_min_cov=10, xtp_control
 
 def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correlation=0.8,
                                     max_control_signal=0.01, check_controls=True, step1_only=False):
-      """
-      Find regions where methylation signal has a strong LINEAR relationship with tumor purity
-      using proper linear regression validation (not just correlation)
-      AND have low signal in control samples (tumor-specific)
-      """
-      # Get sample columns that have purity info
-      sample_cols = [col for col in filtered_mv.columns if col in tumor_purity_dict]
-      purities = np.array([tumor_purity_dict[col] for col in sample_cols])
-      print(f"Analyzing {len(sample_cols)} samples with purity data")
-      print(f"Tumor purities: {purities}")
-      
-      # Get control columns if checking controls
-      control_cols = []
-      if check_controls:
-          control_cols = [col for col in filtered_mv.columns if col.startswith('Control_')]
-          print(f"Found {len(control_cols)} control samples for specificity check")
-      # Pre-extract numeric data for all samples
-      numeric_data = filtered_mv[sample_cols].values  # This should be clean float64
-      
-      # Vectorized linear regression using numpy - MUCH faster than sklearn
-      print("Processing regions with vectorized linear regression...")
-      
-      # Pre-compute constants for all regions
-      n = len(purities)
-      sum_x = np.sum(purities)
-      sum_x2 = np.sum(purities**2)
-      mean_x = np.mean(purities)
-      
-      # Check if all samples have valid data (vectorized)
-      valid_counts = (~np.isnan(numeric_data)).sum(axis=1)
-      all_valid_mask = valid_counts == n
-      
-      # Initialize result arrays
-      num_regions = len(filtered_mv)
-      r2_scores = np.full(num_regions, np.nan)
-      slopes = np.full(num_regions, np.nan)
-      intercepts = np.full(num_regions, np.nan)
-      rmses = np.full(num_regions, np.nan)
-      
-      # Process only regions with all valid samples
-      valid_indices = np.where(all_valid_mask)[0]
-      print(f"Found {len(valid_indices)} regions with complete data out of {num_regions}")
-      
-      if len(valid_indices) > 0:
-          # Get signals for valid regions
-          valid_signals = numeric_data[valid_indices, :]
-          
-          # Check for non-constant signals (vectorized)
-          signal_stds = np.std(valid_signals, axis=1)
-          non_constant_mask = signal_stds > 0
-          valid_indices = valid_indices[non_constant_mask]
-          valid_signals = valid_signals[non_constant_mask, :]
-          
-          print(f"Processing {len(valid_indices)} regions with non-constant signals...")
-          
-          # Vectorized linear regression calculations
-          # For each region: slope = (n*sum(xy) - sum(x)*sum(y)) / (n*sum(x²) - (sum(x))²)
-          sum_y = np.sum(valid_signals, axis=1)
-          sum_xy = np.sum(valid_signals * purities, axis=1)
-          mean_y = np.mean(valid_signals, axis=1)
-          
-          # Calculate slopes and intercepts
-          denominator = n * sum_x2 - sum_x**2
-          slopes_valid = (n * sum_xy - sum_x * sum_y) / denominator
-          intercepts_valid = mean_y - slopes_valid * mean_x
-          
-          # Calculate predictions and residuals
-          predictions = slopes_valid[:, np.newaxis] * purities + intercepts_valid[:, np.newaxis]
-          residuals = valid_signals - predictions
-          
-          # Calculate R² and RMSE
-          ss_res = np.sum(residuals**2, axis=1)
-          ss_tot = np.sum((valid_signals - mean_y[:, np.newaxis])**2, axis=1)
-          r2_valid = 1 - (ss_res / (ss_tot + 1e-10))
-          rmse_valid = np.sqrt(ss_res / n)
-          
-          # Store results
-          r2_scores[valid_indices] = r2_valid
-          slopes[valid_indices] = slopes_valid
-          intercepts[valid_indices] = intercepts_valid
-          rmses[valid_indices] = rmse_valid
-      
-      print(f"Linear regression complete!")
-      
-      # Report processing stats
-      valid_r2 = ~np.isnan(r2_scores)
-      print(f"  Regions with valid regression: {valid_r2.sum()}")
-      print(f"  Regions with missing data: {(~all_valid_mask).sum()}")
-      print(f"  Regions with constant signal: {all_valid_mask.sum() - valid_r2.sum()}")
-      # Create results dataframe
-      results = pd.DataFrame({
-          'region': filtered_mv.index,
-          'name': filtered_mv['name'],
-          'r2_score': r2_scores,
-          'slope': slopes,
-          'intercept': intercepts,
-          'rmse': rmses,
-          'valid_samples': valid_counts
-      })
-      
-      # Define criteria for good linear relationship
-      # 1. High R² (explains variance well)
-      # 2. Intercept near zero (signal should be low at 0% purity)
-      # 3. Positive reasonable slope (higher purity = higher signal)
-      # 4. Low RMSE relative to signal range
-      
-      # Add mean signal across samples
-      results['mean_signal'] = np.nanmean(numeric_data, axis=1)
-      
-      # Calculate max signal for RMSE normalization
-      max_signals = np.nanmax(numeric_data, axis=1)
-      results['normalized_rmse'] = results['rmse'] / (max_signals + 1e-10)
-      
-      # Define significance based on multiple criteria
-      results['significant'] = (
-          (results['r2_score'] >= min_correlation) &  # High R²
-          (np.abs(results['intercept']) <= 0.1) &     # Intercept near zero
-          (results['slope'] > 0.1) &                  # Positive meaningful slope
-          (results['slope'] < 2.0) &                  # Not unreasonably steep
-          (results['normalized_rmse'] < 0.2)          # Low residuals relative to signal
-      )
-      
-      # Add control filtering if requested and not in step1_only mode
-      if check_controls and control_cols and not step1_only:
-          print(f"\nApplying control filtering (median signal <= {max_control_signal})...")
-          control_data = filtered_mv[control_cols].values
-          print(f"  Control data shape: {control_data.shape}")
-          
-          # Debug: Check control data
-          print(f"  Control data range: {np.nanmin(control_data):.4f} - {np.nanmax(control_data):.4f}")
-          
-          control_max = np.nanmax(control_data, axis=1)
-          control_median = np.nanmedian(control_data, axis=1)
-          results['control_max'] = control_max
-          results['control_median'] = control_median
-          
-          # Debug: Show some examples
-          print(f"\n  Examples of control values:")
-          for i in range(min(5, len(control_max))):
-              print(f"    Region {i}: median = {control_median[i]:.4f}, max = {control_max[i]:.4f}")
-          
-          # Update significant regions to include control filter - use median as primary filter
-          control_filter = control_median <= max_control_signal
-          results['significant'] = results['significant'] & control_filter
-          
-          # Store the linearity-only results before applying control filter  
-          linearity_only = (
-              (results['r2_score'] >= min_correlation) &
-              (np.abs(results['intercept']) <= 0.1) &
-              (results['slope'] > 0.1) &
-              (results['slope'] < 2.0) &
-              (results['normalized_rmse'] < 0.2)
-          )
-          print(f"Regions passing tumor-purity linearity: {linearity_only.sum()}")
-          print(f"Regions passing control filter (median): {control_filter.sum()}")
-          print(f"Regions passing BOTH filters: {results['significant'].sum()}")
-          
-          # Show control signal distribution
-          print(f"\nControl signal distribution (MEDIAN):")
-          print(f"  Min: {np.nanmin(control_median):.4f}")
-          print(f"  25th percentile: {np.nanpercentile(control_median, 25):.4f}")
-          print(f"  50th percentile: {np.nanpercentile(control_median, 50):.4f}")
-          print(f"  75th percentile: {np.nanpercentile(control_median, 75):.4f}")
-          print(f"  Max: {np.nanmax(control_median):.4f}")
-          
-          print(f"\nControl signal distribution (MAX):")
-          print(f"  Min: {np.nanmin(control_max):.4f}")
-          print(f"  25th percentile: {np.nanpercentile(control_max, 25):.4f}")
-          print(f"  50th percentile: {np.nanpercentile(control_max, 50):.4f}")
-          print(f"  75th percentile: {np.nanpercentile(control_max, 75):.4f}")
-          print(f"  Max: {np.nanmax(control_max):.4f}")
-          
-          # Show what we'd get with different thresholds
-          print(f"\nRegions passing different control thresholds (MEDIAN):")
-          for thresh in [0.01, 0.02, 0.05, 0.10, 0.15, 0.20]:
-              passing = (control_median <= thresh).sum()
-              print(f"  <= {thresh}: {passing} regions ({100*passing/len(control_median):.1f}%)")
-      elif step1_only:
-          print(f"\nStep 1 mode: Skipping control filtering")
-          # Add placeholder columns for consistency
-          results['control_max'] = np.nan
-          results['control_median'] = np.nan
-          
-      # Sort by R² (descending) - we want best linear fits at the top
-      results = results.reindex(results['r2_score'].sort_values(ascending=False).index)
-      print(f"\nResults:")
-      print(f"Regions with R² ≥ {min_correlation}: {(results['r2_score'] >= min_correlation).sum()}")
-      print(f"Regions with intercept near zero (|b| ≤ 0.1): {(np.abs(results['intercept']) <= 0.1).sum()}")
-      print(f"Regions with positive meaningful slope (0.1 < m < 2.0): {((results['slope'] > 0.1) & (results['slope'] < 2.0)).sum()}")
-      print(f"Regions with low normalized RMSE (< 0.2): {(results['normalized_rmse'] < 0.2).sum()}")
-      print(f"Regions with valid data: {(results['valid_samples'] >= len(purities)).sum()}")
-      print(f"Final significant regions (tumor-specific with good linearity): {results['significant'].sum()}")
-      
-      # Report on problematic regions
-      negative_slope = results['slope'] < 0
-      high_intercept = np.abs(results['intercept']) > 0.2
-      print(f"\nProblematic regions:")
-      print(f"  Negative slope (biologically wrong): {negative_slope.sum()}")
-      print(f"  High intercept (|b| > 0.2): {high_intercept.sum()}")
-      
-      # Show distribution of key metrics
-      valid_results = results[results['r2_score'].notna()]
-      if len(valid_results) > 0:
-          print(f"\nLinear regression metrics distribution:")
-          print(f"  R² scores: min={valid_results['r2_score'].min():.3f}, median={valid_results['r2_score'].median():.3f}, max={valid_results['r2_score'].max():.3f}")
-          print(f"  Slopes: min={valid_results['slope'].min():.3f}, median={valid_results['slope'].median():.3f}, max={valid_results['slope'].max():.3f}")
-          print(f"  Intercepts: min={valid_results['intercept'].min():.3f}, median={valid_results['intercept'].median():.3f}, max={valid_results['intercept'].max():.3f}")
-      return results, sample_cols, purities
+    """
+    Find regions where methylation signal has a strong LINEAR relationship with tumor purity
+    using proper linear regression validation (not just correlation)
+    AND have low signal in control samples (tumor-specific)
+    """
+    # Get sample columns that have purity info
+    sample_cols = [col for col in filtered_mv.columns if col in tumor_purity_dict]
+    purities = np.array([tumor_purity_dict[col] for col in sample_cols])
+    print(f"Analyzing {len(sample_cols)} samples with purity data")
+    print(f"Tumor purities: {purities}")
+    
+    # Get control columns if checking controls
+    control_cols = []
+    if check_controls:
+        control_cols = [col for col in filtered_mv.columns if col.startswith('Control_')]
+        print(f"Found {len(control_cols)} control samples for specificity check")
+    # Pre-extract numeric data for all samples
+    numeric_data = filtered_mv[sample_cols].values  # This should be clean float64
+    
+    # Vectorized linear regression using numpy - MUCH faster than sklearn
+    print("Processing regions with vectorized linear regression...")
+    
+    # Pre-compute constants for all regions
+    n = len(purities)
+    sum_x = np.sum(purities)
+    sum_x2 = np.sum(purities**2)
+    mean_x = np.mean(purities)
+    
+    # Check if all samples have valid data (vectorized)
+    valid_counts = (~np.isnan(numeric_data)).sum(axis=1)
+    all_valid_mask = valid_counts == n
+    
+    # Initialize result arrays
+    num_regions = len(filtered_mv)
+    r2_scores = np.full(num_regions, np.nan)
+    slopes = np.full(num_regions, np.nan)
+    intercepts = np.full(num_regions, np.nan)
+    rmses = np.full(num_regions, np.nan)
+    
+    # Process only regions with all valid samples
+    valid_indices = np.where(all_valid_mask)[0]
+    print(f"Found {len(valid_indices)} regions with complete data out of {num_regions}")
+    
+    if len(valid_indices) > 0:
+        # Get signals for valid regions
+        valid_signals = numeric_data[valid_indices, :]
+        
+        # Check for non-constant signals (vectorized)
+        signal_stds = np.std(valid_signals, axis=1)
+        non_constant_mask = signal_stds > 0
+        valid_indices = valid_indices[non_constant_mask]
+        valid_signals = valid_signals[non_constant_mask, :]
+        
+        print(f"Processing {len(valid_indices)} regions with non-constant signals...")
+        
+        # Vectorized linear regression calculations
+        # For each region: slope = (n*sum(xy) - sum(x)*sum(y)) / (n*sum(x²) - (sum(x))²)
+        sum_y = np.sum(valid_signals, axis=1)
+        sum_xy = np.sum(valid_signals * purities, axis=1)
+        mean_y = np.mean(valid_signals, axis=1)
+        
+        # Calculate slopes and intercepts
+        denominator = n * sum_x2 - sum_x**2
+        slopes_valid = (n * sum_xy - sum_x * sum_y) / denominator
+        intercepts_valid = mean_y - slopes_valid * mean_x
+        
+        # Calculate predictions and residuals
+        predictions = slopes_valid[:, np.newaxis] * purities + intercepts_valid[:, np.newaxis]
+        residuals = valid_signals - predictions
+        
+        # Calculate R² and RMSE
+        ss_res = np.sum(residuals**2, axis=1)
+        ss_tot = np.sum((valid_signals - mean_y[:, np.newaxis])**2, axis=1)
+        r2_valid = 1 - (ss_res / (ss_tot + 1e-10))
+        rmse_valid = np.sqrt(ss_res / n)
+        
+        # Store results
+        r2_scores[valid_indices] = r2_valid
+        slopes[valid_indices] = slopes_valid
+        intercepts[valid_indices] = intercepts_valid
+        rmses[valid_indices] = rmse_valid
+    
+    print(f"Linear regression complete!")
+    
+    # Report processing stats
+    valid_r2 = ~np.isnan(r2_scores)
+    print(f"  Regions with valid regression: {valid_r2.sum()}")
+    print(f"  Regions with missing data: {(~all_valid_mask).sum()}")
+    print(f"  Regions with constant signal: {all_valid_mask.sum() - valid_r2.sum()}")
+    # Create results dataframe
+    results = pd.DataFrame({
+        'region': filtered_mv.index,
+        'name': filtered_mv['name'],
+        'r2_score': r2_scores,
+        'slope': slopes,
+        'intercept': intercepts,
+        'rmse': rmses,
+        'valid_samples': valid_counts
+    })
+    
+    # Define criteria for good linear relationship
+    # 1. High R² (explains variance well)
+    # 2. Intercept near zero (signal should be low at 0% purity)
+    # 3. Positive reasonable slope (higher purity = higher signal)
+    # 4. Low RMSE relative to signal range
+    
+    # Add mean signal across samples
+    results['mean_signal'] = np.nanmean(numeric_data, axis=1)
+    
+    # Calculate max signal for RMSE normalization
+    max_signals = np.nanmax(numeric_data, axis=1)
+    results['normalized_rmse'] = results['rmse'] / (max_signals + 1e-10)
+    
+    # Define significance based on multiple criteria
+    results['significant'] = (
+        (results['r2_score'] >= min_correlation) &  # High R²
+        (np.abs(results['intercept']) <= 0.1) &     # Intercept near zero
+        (results['slope'] > 0.1) &                  # Positive meaningful slope
+        (results['slope'] < 2.0) &                  # Not unreasonably steep
+        (results['normalized_rmse'] < 0.2)          # Low residuals relative to signal
+    )
+    
+    # CASCADE ANALYSIS - NEW CODE
+    print("\n=== FILTER CASCADE ANALYSIS ===")
+    total_valid = len(results[results['r2_score'].notna()])
+    print(f"Starting with valid regressions: {total_valid}")
+    
+    # Check each filter individually
+    print("\nIndividual filter impacts:")
+    print(f"  R² ≥ {min_correlation}: {(results['r2_score'] >= min_correlation).sum()} ({100*(results['r2_score'] >= min_correlation).sum()/total_valid:.1f}%)")
+    print(f"  |Intercept| ≤ 0.1: {(np.abs(results['intercept']) <= 0.1).sum()} ({100*(np.abs(results['intercept']) <= 0.1).sum()/total_valid:.1f}%)")
+    print(f"  Slope > 0.1: {(results['slope'] > 0.1).sum()} ({100*(results['slope'] > 0.1).sum()/total_valid:.1f}%)")
+    print(f"  Slope < 2.0: {(results['slope'] < 2.0).sum()} ({100*(results['slope'] < 2.0).sum()/total_valid:.1f}%)")
+    print(f"  Normalized RMSE < 0.2: {(results['normalized_rmse'] < 0.2).sum()} ({100*(results['normalized_rmse'] < 0.2).sum()/total_valid:.1f}%)")
+    
+    # Show cumulative impact
+    print("\nCumulative filtering:")
+    cumulative = results['r2_score'].notna()
+    print(f"  Start: {cumulative.sum()}")
+    
+    cumulative = cumulative & (results['r2_score'] >= min_correlation)
+    print(f"  After R²: {cumulative.sum()}")
+    
+    cumulative = cumulative & (np.abs(results['intercept']) <= 0.1)
+    print(f"  After intercept: {cumulative.sum()}")
+    
+    cumulative = cumulative & (results['slope'] > 0.1)
+    print(f"  After slope > 0.1: {cumulative.sum()}")
+    
+    cumulative = cumulative & (results['slope'] < 2.0)
+    print(f"  After slope < 2.0: {cumulative.sum()}")
+    
+    cumulative = cumulative & (results['normalized_rmse'] < 0.2)
+    print(f"  After RMSE: {cumulative.sum()}")
+    # END OF CASCADE ANALYSIS
+    
+    # Add control filtering if requested and not in step1_only mode
+    if check_controls and control_cols and not step1_only:
+        print(f"\nApplying control filtering (median signal <= {max_control_signal})...")
+        control_data = filtered_mv[control_cols].values
+        print(f"  Control data shape: {control_data.shape}")
+        
+        # Debug: Check control data
+        print(f"  Control data range: {np.nanmin(control_data):.4f} - {np.nanmax(control_data):.4f}")
+        
+        control_max = np.nanmax(control_data, axis=1)
+        control_median = np.nanmedian(control_data, axis=1)
+        results['control_max'] = control_max
+        results['control_median'] = control_median
+        
+        # Debug: Show some examples
+        print(f"\n  Examples of control values:")
+        for i in range(min(5, len(control_max))):
+            print(f"    Region {i}: median = {control_median[i]:.4f}, max = {control_max[i]:.4f}")
+        
+        # Update significant regions to include control filter - use median as primary filter
+        control_filter = control_median <= max_control_signal
+        results['significant'] = results['significant'] & control_filter
+        
+        # Store the linearity-only results before applying control filter  
+        linearity_only = (
+            (results['r2_score'] >= min_correlation) &
+            (np.abs(results['intercept']) <= 0.1) &
+            (results['slope'] > 0.1) &
+            (results['slope'] < 2.0) &
+            (results['normalized_rmse'] < 0.2)
+        )
+        print(f"Regions passing tumor-purity linearity: {linearity_only.sum()}")
+        print(f"Regions passing control filter (median): {control_filter.sum()}")
+        print(f"Regions passing BOTH filters: {results['significant'].sum()}")
+        
+        # Show control signal distribution
+        print(f"\nControl signal distribution (MEDIAN):")
+        print(f"  Min: {np.nanmin(control_median):.4f}")
+        print(f"  25th percentile: {np.nanpercentile(control_median, 25):.4f}")
+        print(f"  50th percentile: {np.nanpercentile(control_median, 50):.4f}")
+        print(f"  75th percentile: {np.nanpercentile(control_median, 75):.4f}")
+        print(f"  Max: {np.nanmax(control_median):.4f}")
+        
+        print(f"\nControl signal distribution (MAX):")
+        print(f"  Min: {np.nanmin(control_max):.4f}")
+        print(f"  25th percentile: {np.nanpercentile(control_max, 25):.4f}")
+        print(f"  50th percentile: {np.nanpercentile(control_max, 50):.4f}")
+        print(f"  75th percentile: {np.nanpercentile(control_max, 75):.4f}")
+        print(f"  Max: {np.nanmax(control_max):.4f}")
+        
+        # Show what we'd get with different thresholds
+        print(f"\nRegions passing different control thresholds (MEDIAN):")
+        for thresh in [0.01, 0.02, 0.05, 0.10, 0.15, 0.20]:
+            passing = (control_median <= thresh).sum()
+            print(f"  <= {thresh}: {passing} regions ({100*passing/len(control_median):.1f}%)")
+    elif step1_only:
+        print(f"\nStep 1 mode: Skipping control filtering")
+        # Add placeholder columns for consistency
+        results['control_max'] = np.nan
+        results['control_median'] = np.nan
+        
+    # Sort by R² (descending) - we want best linear fits at the top
+    results = results.reindex(results['r2_score'].sort_values(ascending=False).index)
+    print(f"\nResults:")
+    print(f"Regions with R² ≥ {min_correlation}: {(results['r2_score'] >= min_correlation).sum()}")
+    print(f"Regions with intercept near zero (|b| ≤ 0.1): {(np.abs(results['intercept']) <= 0.1).sum()}")
+    print(f"Regions with positive meaningful slope (0.1 < m < 2.0): {((results['slope'] > 0.1) & (results['slope'] < 2.0)).sum()}")
+    print(f"Regions with low normalized RMSE (< 0.2): {(results['normalized_rmse'] < 0.2).sum()}")
+    print(f"Regions with valid data: {(results['valid_samples'] >= len(purities)).sum()}")
+    print(f"Final significant regions (tumor-specific with good linearity): {results['significant'].sum()}")
+    
+    # Report on problematic regions
+    negative_slope = results['slope'] < 0
+    high_intercept = np.abs(results['intercept']) > 0.2
+    print(f"\nProblematic regions:")
+    print(f"  Negative slope (biologically wrong): {negative_slope.sum()}")
+    print(f"  High intercept (|b| > 0.2): {high_intercept.sum()}")
+    
+    # Show distribution of key metrics
+    valid_results = results[results['r2_score'].notna()]
+    if len(valid_results) > 0:
+        print(f"\nLinear regression metrics distribution:")
+        print(f"  R² scores: min={valid_results['r2_score'].min():.3f}, median={valid_results['r2_score'].median():.3f}, max={valid_results['r2_score'].max():.3f}")
+        print(f"  Slopes: min={valid_results['slope'].min():.3f}, median={valid_results['slope'].median():.3f}, max={valid_results['slope'].max():.3f}")
+        print(f"  Intercepts: min={valid_results['intercept'].min():.3f}, median={valid_results['intercept'].median():.3f}, max={valid_results['intercept'].max():.3f}")
+    return results, sample_cols, purities
 
 def plot_top_correlations(filtered_mv, results, sample_cols, purities, output_dir, min_cpgs, n_plots=30):
     """Plot signal vs tumor purity for top regions with best linear fit"""
@@ -542,9 +576,9 @@ def main():
             print("Applying mixed coverage filtering...")
             filtered_mv, filtered_cov = apply_mixed_coverage_filter(
                 combined_mv, combined_cov, 
-                tumor_min_cov=10, 
-                xtp_control_min_cov=10,  # X### and TP### controls need 10 reads
-                gi_control_min_cov=5,    # GI controls only need 5 reads
+                tumor_min_cov=8,
+                xtp_control_min_cov=10,
+                gi_control_min_cov=5,
                 control_quorum=0.6
             )
         else:
