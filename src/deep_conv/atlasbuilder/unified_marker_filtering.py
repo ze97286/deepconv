@@ -484,7 +484,7 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     
     print(f"\nFiltering results:")
     print(f"  Initial regions: {len(signal_df):,}")
-    print(f"  Regions with valid minimum tumour signal: {(~signal_df['tumour_min'].isna()).sum():,}")
+    print(f"  Regions with valid reference tumour signal: {(~signal_df['tumour_reference'].isna()).sum():,}")
     print(f"  Regions passing all filters: {len(filtered):,}")
     
     # Select non-overlapping regions if requested
@@ -495,7 +495,7 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     # Quality statistics
     if len(filtered) > 0:
         print(f"\nQuality distribution of filtered regions:")
-        print(f"  Min tumour signal: {filtered['tumour_min'].min():.3f} - {filtered['tumour_min'].max():.3f}")
+        print(f"  Reference tumour signal: {filtered['tumour_reference'].min():.3f} - {filtered['tumour_reference'].max():.3f}")
         print(f"  Max blood/immune: {filtered['max_blood_immune'].min():.4f} - {filtered['max_blood_immune'].max():.4f}")
         print(f"  Max GI: {filtered['max_gi'].min():.3f} - {filtered['max_gi'].max():.3f}")
         if control_cols:
