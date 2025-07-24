@@ -3,60 +3,41 @@ import numpy as np
 from typing import Dict, List, Tuple
 import argparse
 
-def calculate_100_percent_tumour_signal(signal_df: pd.DataFrame, 
-                                     tumour_purity_dict: Dict[str, float],
-                                     tumour_prefix: str = 'OAC') -> pd.Series:
+def calculate_reference_tumour_signal(signal_df: pd.DataFrame, 
+                                      tumour_purity_dict: Dict[str, float],
+                                      tumour_prefix: str = 'OAC') -> pd.Series:
     """
-    Calculate expected signal for 100% tumour purity using linear regression
-    on tumour samples with known purity.
+    Use signal from the reference tumor sample (071-021 at 47.6% purity, ~diploid).
+    This avoids artifacts from copy number losses and provides a realistic
+    detection reference at moderate purity.
     """
-    # Get tumour sample columns
-    tumour_cols = [col for col in signal_df.columns if col.startswith(tumour_prefix)]
-    # Extract tumour signals and purities
-    tumour_signals = signal_df[tumour_cols]
-    purities = [tumour_purity_dict[col] for col in tumour_cols]
-    # Calculate 100% tumour signal for each region
-    tumour_100_signals = []
-    failed_insufficient_samples = 0
-    failed_negative_slope = 0
-    failed_impossible_signal = 0
-    total_processed = 0
+    # Reference sample: 071-021_ScrBsl_tumour (47.6% purity, 1.968 ploidy)
+    reference_sample = '071-021_ScrBsl_tumour'
     
-    for idx in signal_df.index:
-        total_processed += 1
-        signals = tumour_signals.loc[idx].values
-        # Remove NaN values
-        mask = ~np.isnan(signals)
-        if mask.sum() < len(purities):  # Need ALL tumor samples to have valid data
-            failed_insufficient_samples += 1
-            tumour_100_signals.append(np.nan)
-            continue
-        valid_signals = signals[mask]
-        valid_purities = np.array(purities)[mask]
-        # Linear regression: signal = slope * purity + intercept
-        # For 100% purity, signal = slope * 1.0 + intercept
-        A = np.vstack([valid_purities, np.ones(len(valid_purities))]).T
-        slope, intercept = np.linalg.lstsq(A, valid_signals, rcond=None)[0]
-        # Calculate signal at 100% purity
-        signal_100 = slope * 1.0 + intercept
-        # Only accept if slope is positive and signal is reasonable
-        if slope <= 0:
-            failed_negative_slope += 1
-            tumour_100_signals.append(np.nan)
-        elif signal_100 <= 0 or signal_100 > 1:
-            failed_impossible_signal += 1
-            tumour_100_signals.append(np.nan)
-        else:
-            tumour_100_signals.append(signal_100)
+    # Find the reference sample column
+    reference_col = None
+    for col in signal_df.columns:
+        if col.startswith(tumour_prefix) and reference_sample in col:
+            reference_col = col
+            break
     
-    print(f"100% tumor signal calculation results:")
-    print(f"  Total regions processed: {total_processed:,}")
-    print(f"  Failed - insufficient samples: {failed_insufficient_samples:,} ({100*failed_insufficient_samples/total_processed:.1f}%)")
-    print(f"  Failed - negative slope: {failed_negative_slope:,} ({100*failed_negative_slope/total_processed:.1f}%)")
-    print(f"  Failed - impossible signal: {failed_impossible_signal:,} ({100*failed_impossible_signal/total_processed:.1f}%)")
-    print(f"  Successful: {total_processed - failed_insufficient_samples - failed_negative_slope - failed_impossible_signal:,}")
+    if reference_col is None:
+        print(f"ERROR: Reference sample {reference_sample} not found!")
+        print(f"Available tumor columns: {[col for col in signal_df.columns if col.startswith(tumour_prefix)]}")
+        return pd.Series(np.nan, index=signal_df.index)
     
-    return pd.Series(tumour_100_signals, index=signal_df.index)
+    print(f"Using reference tumor sample: {reference_col}")
+    print(f"Reference purity: 47.6%, Reference ploidy: ~1.968 (near-diploid)")
+    
+    reference_signals = signal_df[reference_col].copy()
+    valid_count = (~reference_signals.isna()).sum()
+    
+    print(f"Reference tumor signal calculation results:")
+    print(f"  Total regions processed: {len(signal_df):,}")
+    print(f"  Regions with valid reference signal: {valid_count:,} ({100*valid_count/len(signal_df):.1f}%)")
+    print(f"  Regions with missing signal: {len(signal_df) - valid_count:,} ({100*(len(signal_df) - valid_count)/len(signal_df):.1f}%)")
+    
+    return reference_signals
 
 def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumour_purity_dict: Dict[str, float]):
     """
@@ -73,14 +54,14 @@ def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumou
     
     print(f"Analyzing sample of {sample_size} regions...")
     
-    # Calculate 100% tumour purity signal
-    print("Calculating 100% tumour purity signals...")
-    sample_df['tumour_100'] = calculate_100_percent_tumour_signal(
+    # Calculate reference tumour signal
+    print("Calculating reference tumour signals...")
+    sample_df['tumour_reference'] = calculate_reference_tumour_signal(
         sample_df, tumour_purity_dict, 'OAC'
     )
     
     # Get regions with valid tumour signal for analysis
-    valid_tumour = sample_df[~sample_df['tumour_100'].isna()].copy()
+    valid_tumour = sample_df[~sample_df['tumour_reference'].isna()].copy()
     print(f"Found {len(valid_tumour)} regions with valid tumour signal")
     
     if len(valid_tumour) == 0:
@@ -133,14 +114,14 @@ def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumou
     print(f"Found {len(blood_cols)} blood/immune and {len(gi_cols)} GI cell types\n")
     
     # Tumour signal analysis
-    print("100% Tumour Signal:")
-    print(f"  Min: {valid_tumour['tumour_100'].min():.3f}")
-    print(f"  25th percentile: {valid_tumour['tumour_100'].quantile(0.25):.3f}")
-    print(f"  Median: {valid_tumour['tumour_100'].median():.3f}")
-    print(f"  75th percentile: {valid_tumour['tumour_100'].quantile(0.75):.3f}")
-    print(f"  Max: {valid_tumour['tumour_100'].max():.3f}")
-    # More reasonable tumour signal threshold (50th percentile)
-    print(f"  Suggested min_tumour_signal: {valid_tumour['tumour_100'].quantile(0.50):.3f}")
+    print("Reference Tumour Signal (071-021, 47.6% purity, ~diploid):")
+    print(f"  Min: {valid_tumour['tumour_reference'].min():.3f}")
+    print(f"  25th percentile: {valid_tumour['tumour_reference'].quantile(0.25):.3f}")
+    print(f"  Median: {valid_tumour['tumour_reference'].median():.3f}")
+    print(f"  75th percentile: {valid_tumour['tumour_reference'].quantile(0.75):.3f}")
+    print(f"  Max: {valid_tumour['tumour_reference'].max():.3f}")
+    # More reasonable tumour signal threshold (25th percentile of reference)
+    print(f"  Suggested min_tumour_signal: {valid_tumour['tumour_reference'].quantile(0.25):.3f}")
     
     # Blood/immune analysis (using weighted signals)
     print("\nWeighted Blood/Immune Signal:")
@@ -180,7 +161,7 @@ def analyse_thresholds(signal_df: pd.DataFrame, coverage_df: pd.DataFrame, tumou
     print("REALISTIC SUGGESTED COMMAND:")
     print("="*60)
     print(f"python script.py \\")
-    print(f"  --min_tumour_signal {valid_tumour['tumour_100'].quantile(0.50):.3f} \\")
+    print(f"  --min_tumour_signal {valid_tumour['tumour_reference'].quantile(0.25):.3f} \\")
     print(f"  --max_blood_signal {valid_tumour['median_blood_immune'].quantile(0.10):.4f} \\")
     print(f"  --max_gi_signal {valid_tumour['max_gi'].quantile(0.50):.4f} \\")
     print(f"  --min_coverage {valid_tumour['tumour_coverage'].quantile(0.25):.0f} \\")
@@ -206,12 +187,14 @@ def calculate_weighted_cell_type_signals(signal_df: pd.DataFrame,
     # Calculate weighted signals for each cell type
     for cell_type in cell_type_order:
         if cell_type == 'OAC':
-            # For OAC, use the pre-calculated 100% tumour purity signal
-            if 'tumour_100' in signal_df.columns:
-                result_df[cell_type] = signal_df['tumour_100']
+            # For OAC, use the reference tumour signal extrapolated to 100% purity (capped at 1.0)
+            if 'tumour_reference' in signal_df.columns:
+                reference_purity = 0.476  # 47.6% purity for 071-021 sample
+                extrapolated_signal = signal_df['tumour_reference'] / reference_purity
+                result_df[cell_type] = np.minimum(extrapolated_signal, 1.0)  # Cap at 1.0
                 variance_stats[f'{cell_type}_cv'] = 0  # No variance for single calculated value
             else:
-                print(f"ERROR: 'tumour_100' column not found! Available columns: {list(signal_df.columns)}")
+                print(f"ERROR: 'tumour_reference' column not found! Available columns: {list(signal_df.columns)}")
                 result_df[cell_type] = np.nan
                 variance_stats[f'{cell_type}_cv'] = np.nan
         else:
@@ -266,9 +249,9 @@ def select_non_overlapping_regions(filtered_df: pd.DataFrame,
     """
     Select non-overlapping regions with highest quality scores.
     """
-    # Sort by quality score (tumour_100 signal * SNR)
+    # Sort by quality score (tumour_reference signal * SNR)
     filtered_df['quality_score'] = (
-        filtered_df['tumour_100'] * 
+        filtered_df['tumour_reference'] * 
         np.sqrt(filtered_df['snr_vs_blood'] * filtered_df['snr_vs_gi'])
     )
     sorted_df = filtered_df.sort_values('quality_score', ascending=False).copy()
@@ -311,9 +294,9 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     print("UNIFIED MARKER FILTERING")
     print("="*60)
     
-    # Step 1: Calculate 100% tumour purity signal
-    print("Calculating 100% tumour purity signals...")
-    signal_df['tumour_100'] = calculate_100_percent_tumour_signal(
+    # Step 1: Calculate reference tumour signal
+    print("Calculating reference tumour signals...")
+    signal_df['tumour_reference'] = calculate_reference_tumour_signal(
         signal_df, tumour_purity_dict, 'OAC'
     )
     
@@ -326,7 +309,7 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     # Add target column for calculate_weighted_cell_type_signals
     signal_df['target'] = 'OAC'
     
-    # IMPORTANT: signal_df now has tumour_100 column which will be used for OAC
+    # IMPORTANT: signal_df now has tumour_reference column which will be used for OAC
     merged_signals, variance_stats = calculate_weighted_cell_type_signals(
         signal_df, coverage_df, cell_type_order, max_cv_threshold
     )
@@ -334,13 +317,15 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     print(f"Merged signals shape: {merged_signals.shape}")
     print(f"Merged signals columns: {list(merged_signals.columns)}")
     
-    # Debug: check if OAC column exists and has the tumour_100 values
+    # Debug: check if OAC column exists and has the extrapolated tumour values
     if 'OAC' in merged_signals.columns:
-        print(f"\n  DEBUG - OAC in merged signals vs tumour_100:")
+        print(f"\n  DEBUG - OAC in merged signals (extrapolated to 100% purity):")
         for i in range(min(5, len(signal_df))):
             idx = signal_df.index[i]
             if idx in merged_signals.index:
-                print(f"    Region {idx}: tumour_100={signal_df.loc[idx, 'tumour_100']:.6f}, merged OAC={merged_signals.loc[idx, 'OAC']:.6f}")
+                raw_ref = signal_df.loc[idx, 'tumour_reference']
+                extrapolated = merged_signals.loc[idx, 'OAC']
+                print(f"    Region {idx}: raw_reference={raw_ref:.6f}, extrapolated_OAC={extrapolated:.6f} (ratio: {extrapolated/raw_ref:.2f})")
             else:
                 print(f"    Region {idx}: not found in merged_signals!")
     
@@ -424,10 +409,10 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     else:
         signal_df['max_gi'] = 0
     
-    # Step 6: Calculate ratios and SNR using merged signals
-    signal_df['gi_to_tumour_ratio'] = signal_df['max_gi'] / (signal_df['tumour_100'] + 1e-10)
-    signal_df['snr_vs_blood'] = signal_df['tumour_100'] / (signal_df['max_blood_immune'] + 1e-10)
-    signal_df['snr_vs_gi'] = signal_df['tumour_100'] / (signal_df['max_gi'] + 1e-10)
+    # Step 6: Calculate ratios and SNR using RAW reference signals (for realistic detection)
+    signal_df['gi_to_tumour_ratio'] = signal_df['max_gi'] / (signal_df['tumour_reference'] + 1e-10)
+    signal_df['snr_vs_blood'] = signal_df['tumour_reference'] / (signal_df['max_blood_immune'] + 1e-10)
+    signal_df['snr_vs_gi'] = signal_df['tumour_reference'] / (signal_df['max_gi'] + 1e-10)
     
     print(f"Found {len(blood_cols)} blood/immune cell types with valid signals")
     print(f"Found {len(gi_cols)} GI cell types with valid signals") 
@@ -437,12 +422,12 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     print("\nApplying filters step by step:")
     
     # Start with regions that have valid tumour signal
-    step1 = signal_df[~signal_df['tumour_100'].isna()]
-    print(f"  Regions with valid 100% tumour signal: {len(step1):,}")
+    step1 = signal_df[~signal_df['tumour_reference'].isna()]
+    print(f"  Regions with valid reference tumour signal: {len(step1):,}")
     
-    # Strong tumour signal
-    step2 = step1[step1['tumour_100'] >= min_tumour_signal]
-    print(f"  After tumour signal ≥ {min_tumour_signal}: {len(step2):,}")
+    # Strong tumour signal (reference case at 47.6% purity)
+    step2 = step1[step1['tumour_reference'] >= min_tumour_signal]
+    print(f"  After min tumour signal ≥ {min_tumour_signal}: {len(step2):,}")
     
     # Sufficient coverage - check ALL cell types have minimum coverage
     step3 = step2[step2['min_all_coverage'] >= min_coverage]
@@ -499,7 +484,7 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     
     print(f"\nFiltering results:")
     print(f"  Initial regions: {len(signal_df):,}")
-    print(f"  Regions with valid 100% tumour signal: {(~signal_df['tumour_100'].isna()).sum():,}")
+    print(f"  Regions with valid minimum tumour signal: {(~signal_df['tumour_min'].isna()).sum():,}")
     print(f"  Regions passing all filters: {len(filtered):,}")
     
     # Select non-overlapping regions if requested
@@ -510,7 +495,7 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
     # Quality statistics
     if len(filtered) > 0:
         print(f"\nQuality distribution of filtered regions:")
-        print(f"  100% tumour signal: {filtered['tumour_100'].min():.3f} - {filtered['tumour_100'].max():.3f}")
+        print(f"  Min tumour signal: {filtered['tumour_min'].min():.3f} - {filtered['tumour_min'].max():.3f}")
         print(f"  Max blood/immune: {filtered['max_blood_immune'].min():.4f} - {filtered['max_blood_immune'].max():.4f}")
         print(f"  Max GI: {filtered['max_gi'].min():.3f} - {filtered['max_gi'].max():.3f}")
         if control_cols:

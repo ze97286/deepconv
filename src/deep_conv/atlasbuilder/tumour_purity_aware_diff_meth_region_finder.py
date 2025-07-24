@@ -65,10 +65,11 @@ def apply_mixed_coverage_filter(mv_data, cov_data, tumor_min_cov=10, xtp_control
     
     return mv_data[combined_mask].copy(), cov_data[combined_mask].copy()
 
-def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correlation=0.7,
+def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correlation=0.8,
                                     max_control_signal=0.01, check_controls=True, step1_only=False):
       """
-      Find regions where methylation signal correlates with tumor purity
+      Find regions where methylation signal has a strong LINEAR relationship with tumor purity
+      using proper linear regression validation (not just correlation)
       AND have low signal in control samples (tumor-specific)
       """
       # Get sample columns that have purity info
@@ -84,11 +85,18 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
           print(f"Found {len(control_cols)} control samples for specificity check")
       # Pre-extract numeric data for all samples
       numeric_data = filtered_mv[sample_cols].values  # This should be clean float64
-      # Calculate correlation for each region
-      correlations = []
-      pvalues = []
+      
+      # Linear regression parameters
+      from sklearn.linear_model import LinearRegression
+      from sklearn.metrics import r2_score, mean_squared_error
+      
+      # Calculate linear regression metrics for each region
+      r2_scores = []
+      slopes = []
+      intercepts = []
+      rmses = []
       valid_counts = []
-      print("Processing regions...")
+      print("Processing regions with linear regression...")
       for i in range(len(filtered_mv)):
           if i % 100000 == 0:
               print(f"Processed {i}/{len(filtered_mv)} regions")
@@ -99,37 +107,77 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
           valid_counts.append(valid_count)
           # Skip if too few valid values
           if valid_count < len(purities):  # Need ALL tumor samples
-              correlations.append(np.nan)
-              pvalues.append(np.nan)
+              r2_scores.append(np.nan)
+              slopes.append(np.nan)
+              intercepts.append(np.nan)
+              rmses.append(np.nan)
               continue
-          # Use only valid values for correlation
+          # Use only valid values for regression
           valid_signals = signals[valid_mask]
           valid_purities = purities[valid_mask]
-          # Check for constant values (correlation undefined)
+          # Check for constant values (regression undefined)
           if np.std(valid_signals) == 0 or np.std(valid_purities) == 0:
-              correlations.append(np.nan)
-              pvalues.append(np.nan)
+              r2_scores.append(np.nan)
+              slopes.append(np.nan)
+              intercepts.append(np.nan)
+              rmses.append(np.nan)
               continue
-          # Calculate Pearson correlation
+          # Fit linear regression
           try:
-              r, p = stats.pearsonr(valid_purities, valid_signals)
-              correlations.append(r)
-              pvalues.append(p)
+              X = valid_purities.reshape(-1, 1)
+              y = valid_signals
+              model = LinearRegression()
+              model.fit(X, y)
+              
+              # Get metrics
+              y_pred = model.predict(X)
+              r2 = r2_score(y, y_pred)
+              slope = model.coef_[0]
+              intercept = model.intercept_
+              rmse = np.sqrt(mean_squared_error(y, y_pred))
+              
+              r2_scores.append(r2)
+              slopes.append(slope)
+              intercepts.append(intercept)
+              rmses.append(rmse)
           except Exception as e:
               print(f"Error at region {i}: {e}")
-              correlations.append(np.nan)
-              pvalues.append(np.nan)
+              r2_scores.append(np.nan)
+              slopes.append(np.nan)
+              intercepts.append(np.nan)
+              rmses.append(np.nan)
       # Create results dataframe
       results = pd.DataFrame({
           'region': filtered_mv.index,
           'name': filtered_mv['name'],
-          'correlation': correlations,
-          'pvalue': pvalues,
-          'valid_samples': valid_counts,
-          'significant': (np.array(pvalues) < 0.05) & (np.array(correlations) > min_correlation)  # Only positive correlations!
+          'r2_score': r2_scores,
+          'slope': slopes,
+          'intercept': intercepts,
+          'rmse': rmses,
+          'valid_samples': valid_counts
       })
+      
+      # Define criteria for good linear relationship
+      # 1. High R² (explains variance well)
+      # 2. Intercept near zero (signal should be low at 0% purity)
+      # 3. Positive reasonable slope (higher purity = higher signal)
+      # 4. Low RMSE relative to signal range
+      
       # Add mean signal across samples
       results['mean_signal'] = np.nanmean(numeric_data, axis=1)
+      
+      # Calculate max signal for RMSE normalization
+      max_signals = np.nanmax(numeric_data, axis=1)
+      results['normalized_rmse'] = results['rmse'] / (max_signals + 1e-10)
+      
+      # Define significance based on multiple criteria
+      results['significant'] = (
+          (results['r2_score'] >= min_correlation) &  # High R²
+          (np.abs(results['intercept']) <= 0.1) &     # Intercept near zero
+          (results['slope'] > 0.1) &                  # Positive meaningful slope
+          (results['slope'] < 2.0) &                  # Not unreasonably steep
+          (results['normalized_rmse'] < 0.2)          # Low residuals relative to signal
+      )
       
       # Add control filtering if requested and not in step1_only mode
       if check_controls and control_cols and not step1_only:
@@ -154,9 +202,15 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
           control_filter = control_median <= max_control_signal
           results['significant'] = results['significant'] & control_filter
           
-          # Store the correlation-only results before applying control filter  
-          correlation_only = (np.array(pvalues) < 0.05) & (np.array(correlations) > min_correlation)
-          print(f"Regions passing tumor-purity correlation: {correlation_only.sum()}")
+          # Store the linearity-only results before applying control filter  
+          linearity_only = (
+              (results['r2_score'] >= min_correlation) &
+              (np.abs(results['intercept']) <= 0.1) &
+              (results['slope'] > 0.1) &
+              (results['slope'] < 2.0) &
+              (results['normalized_rmse'] < 0.2)
+          )
+          print(f"Regions passing tumor-purity linearity: {linearity_only.sum()}")
           print(f"Regions passing control filter (median): {control_filter.sum()}")
           print(f"Regions passing BOTH filters: {results['significant'].sum()}")
           
@@ -186,27 +240,38 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
           results['control_max'] = np.nan
           results['control_median'] = np.nan
           
-      # Sort by correlation (descending) - we want positive correlations at the top
-      results = results.reindex(results['correlation'].sort_values(ascending=False).index)
+      # Sort by R² (descending) - we want best linear fits at the top
+      results = results.reindex(results['r2_score'].sort_values(ascending=False).index)
       print(f"\nResults:")
-      print(f"Regions with correlation > {min_correlation}: {((np.array(pvalues) < 0.05) & (np.array(correlations) > min_correlation)).sum()}")
-      print(f"Regions with valid data: {(results['valid_samples'] >= 3).sum()}")
-      print(f"Final significant regions (tumor-specific): {results['significant'].sum()}")
+      print(f"Regions with R² ≥ {min_correlation}: {(results['r2_score'] >= min_correlation).sum()}")
+      print(f"Regions with intercept near zero (|b| ≤ 0.1): {(np.abs(results['intercept']) <= 0.1).sum()}")
+      print(f"Regions with positive meaningful slope (0.1 < m < 2.0): {((results['slope'] > 0.1) & (results['slope'] < 2.0)).sum()}")
+      print(f"Regions with low normalized RMSE (< 0.2): {(results['normalized_rmse'] < 0.2).sum()}")
+      print(f"Regions with valid data: {(results['valid_samples'] >= len(purities)).sum()}")
+      print(f"Final significant regions (tumor-specific with good linearity): {results['significant'].sum()}")
       
-      # Report on negative correlations (biological nonsense for tumor markers)
-      negative_high_corr = (np.array(pvalues) < 0.05) & (np.array(correlations) < -min_correlation)
-      print(f"Regions with correlation < -{min_correlation} (negative - excluded): {negative_high_corr.sum()}")
+      # Report on problematic regions
+      negative_slope = results['slope'] < 0
+      high_intercept = np.abs(results['intercept']) > 0.2
+      print(f"\nProblematic regions:")
+      print(f"  Negative slope (biologically wrong): {negative_slope.sum()}")
+      print(f"  High intercept (|b| > 0.2): {high_intercept.sum()}")
       
-      print(f"Top positive correlations: {results['correlation'].head(10).values}")
-      print(f"Top negative correlations: {results['correlation'].tail(10).values}")
+      # Show distribution of key metrics
+      valid_results = results[results['r2_score'].notna()]
+      if len(valid_results) > 0:
+          print(f"\nLinear regression metrics distribution:")
+          print(f"  R² scores: min={valid_results['r2_score'].min():.3f}, median={valid_results['r2_score'].median():.3f}, max={valid_results['r2_score'].max():.3f}")
+          print(f"  Slopes: min={valid_results['slope'].min():.3f}, median={valid_results['slope'].median():.3f}, max={valid_results['slope'].max():.3f}")
+          print(f"  Intercepts: min={valid_results['intercept'].min():.3f}, median={valid_results['intercept'].median():.3f}, max={valid_results['intercept'].max():.3f}")
       return results, sample_cols, purities
 
 def plot_top_correlations(filtered_mv, results, sample_cols, purities, output_dir, min_cpgs, n_plots=30):
-    """Plot signal vs tumor purity for top positively correlated regions"""
-    fig, axes = plt.subplots(10, 3, figsize=(15, 10))
-    fig.suptitle('Top Tumor-Specific Regions (Positive Correlations Only)', fontsize=16)
+    """Plot signal vs tumor purity for top regions with best linear fit"""
+    fig, axes = plt.subplots(10, 3, figsize=(15, 12))
+    fig.suptitle('Top Tumor-Specific Regions (Best Linear Relationships)', fontsize=16)
     axes = axes.flatten()
-    # Get top significant regions (now only positive correlations)
+    # Get top significant regions (now based on R² and other criteria)
     top_regions = results[results['significant']].head(n_plots)
     if len(top_regions) == 0:
         print("No significant regions found to plot!")
@@ -230,21 +295,24 @@ def plot_top_correlations(filtered_mv, results, sample_cols, purities, output_di
         ax.scatter(valid_purities, valid_signals, alpha=0.7, s=50)
         ax.set_xlabel('Tumor Purity')
         ax.set_ylabel('Methylation Signal')
-        ax.set_title(f"{region['name']}\nr={region['correlation']:.3f}, p={region['pvalue']:.1e}")
-        # Add trend line if we have enough points
-        if len(valid_signals) >= 2:
-            try:
-                z = np.polyfit(valid_purities, valid_signals, 1)
-                p = np.poly1d(z)
-                x_trend = np.linspace(min(valid_purities), max(valid_purities), 100)
-                ax.plot(x_trend, p(x_trend), "r--", alpha=0.8)
-            except:
-                print(f"Could not fit trend line for {region['name']}")
+        
+        # Add regression line using the stored parameters
+        x_range = np.linspace(0, max(valid_purities)*1.1, 100)
+        y_pred = region['slope'] * x_range + region['intercept']
+        ax.plot(x_range, y_pred, "r--", alpha=0.8, label=f"y = {region['slope']:.2f}x + {region['intercept']:.3f}")
+        
+        # Add title with R² and RMSE
+        ax.set_title(f"{region['name']}\nR²={region['r2_score']:.3f}, RMSE={region['rmse']:.3f}")
+        ax.legend(fontsize=8, loc='lower right')
+        
+        # Set y-axis to start at 0 to show intercept
+        ax.set_ylim(bottom=0)
+        
     # Hide empty subplots
     for idx in range(len(top_regions), n_plots):
         axes[idx].set_visible(False)
     plt.tight_layout()
-    output_file = f'{output_dir}/l{min_cpgs}_tumour_purity_correlations.png'
+    output_file = f'{output_dir}/l{min_cpgs}_tumour_purity_linear_regression.png'
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     print(f"Saved plot to {output_file}")
 
@@ -374,7 +442,7 @@ def main():
     parser.add_argument('--pat_dir', required=True, help='Directory containing tumor pat files')
     parser.add_argument('--control_dir', help='Directory containing control pat files (not needed for --step1_only)')
     parser.add_argument("--output_atlas_path", required=True, help="Path to save atlas")
-    parser.add_argument('--min_correlation', type=float, default=0.7, help='Minimum correlation with tumor purity')
+    parser.add_argument('--min_correlation', type=float, default=0.8, help='Minimum correlation with tumor purity')
     parser.add_argument('--max_control_signal', type=float, default=0.01, help='Maximum median signal allowed in control samples')
     parser.add_argument('--no_control_filter', action='store_true', help='Skip control filtering (not recommended)')
     parser.add_argument('--step1_only', action='store_true', help='Step 1 only: tumor correlation + coverage filtering (skip control filtering)')
