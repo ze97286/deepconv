@@ -197,8 +197,8 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
     # Check each filter individually
     print("\nIndividual filter impacts:")
     print(f"  R² ≥ {min_correlation}: {(results['r2_score'] >= min_correlation).sum()} ({100*(results['r2_score'] >= min_correlation).sum()/total_valid:.1f}%)")
-    print(f"  |Intercept| ≤ 0.1: {(np.abs(results['intercept']) <= 0.1).sum()} ({100*(np.abs(results['intercept']) <= 0.1).sum()/total_valid:.1f}%)")
-    print(f"  Slope > 0.1: {(results['slope'] > 0.1).sum()} ({100*(results['slope'] > 0.1).sum()/total_valid:.1f}%)")
+    print(f"  |Intercept| ≤ 0.2: {(np.abs(results['intercept']) <= 0.2).sum()} ({100*(np.abs(results['intercept']) <= 0.2).sum()/total_valid:.1f}%)")
+    print(f"  Slope > 0.05: {(results['slope'] > 0.05).sum()} ({100*(results['slope'] > 0.1).sum()/total_valid:.1f}%)")
     print(f"  Slope < 2.0: {(results['slope'] < 2.0).sum()} ({100*(results['slope'] < 2.0).sum()/total_valid:.1f}%)")
     print(f"  Normalized RMSE < 0.2: {(results['normalized_rmse'] < 0.2).sum()} ({100*(results['normalized_rmse'] < 0.2).sum()/total_valid:.1f}%)")
     
@@ -571,12 +571,13 @@ def main():
             combined_mv = tumor_mv.copy()
             combined_cov = tumor_cov.copy()
         
+        tumour_min_cov = 8
         # Apply coverage filtering
         if not args.step1_only:
             print("Applying mixed coverage filtering...")
             filtered_mv, filtered_cov = apply_mixed_coverage_filter(
                 combined_mv, combined_cov, 
-                tumor_min_cov=8,
+                tumor_min_cov=tumour_min_cov,
                 xtp_control_min_cov=10,
                 gi_control_min_cov=5,
                 control_quorum=0.6
@@ -585,8 +586,8 @@ def main():
             print("Applying tumor-only coverage filtering...")
             # Simple tumor coverage filter for step 1
             tumor_samples = [col for col in combined_mv.columns if not col.startswith('Control_') and col not in ['name', 'direction']]
-            tumor_mask = (combined_cov[tumor_samples] >= 10).all(axis=1) if tumor_samples else pd.Series(True, index=combined_cov.index)
-            print(f"  Tumor coverage ≥10 (all samples): {tumor_mask.sum()}/{len(tumor_mask)} ({100*tumor_mask.sum()/len(tumor_mask):.1f}%)")
+            tumor_mask = (combined_cov[tumor_samples] >= tumour_min_cov).all(axis=1) if tumor_samples else pd.Series(True, index=combined_cov.index)
+            print(f"  Tumor coverage ≥{tumour_min_cov} (all samples): {tumor_mask.sum()}/{len(tumor_mask)} ({100*tumor_mask.sum()/len(tumor_mask):.1f}%)")
             filtered_mv = combined_mv[tumor_mask].copy()
             filtered_cov = combined_cov[tumor_mask].copy()
         
