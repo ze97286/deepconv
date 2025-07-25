@@ -183,8 +183,8 @@ def analyse_tumour_purity_correlation(filtered_mv, tumor_purity_dict, min_correl
     # Define significance based on multiple criteria
     results['significant'] = (
         (results['r2_score'] >= min_correlation) &  # High R²
-        (np.abs(results['intercept']) <= 0.1) &     # Intercept near zero
-        (results['slope'] > 0.1) &                  # Positive meaningful slope
+        (np.abs(results['intercept']) <= 0.2) &     # Intercept near zero
+        (results['slope'] > 0.05) &                  # Positive meaningful slope
         (results['slope'] < 2.0) &                  # Not unreasonably steep
         (results['normalized_rmse'] < 0.2)          # Low residuals relative to signal
     )
