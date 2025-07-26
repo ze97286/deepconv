@@ -625,7 +625,7 @@ def main():
         print(f"{'='*60}")
         
         final_results = pd.concat(all_results, ignore_index=True)
-        print(f"Total significant regions across all chromosomes: {final_results['significant'].sum()}")
+        # print(f"Total significant regions across all chromosomes: {final_results['significant'].sum()}")
         
         # Save combined results
         output_csv = f'{args.pat_dir}/l{args.min_cpgs}_tumor_purity_correlations_all_chr.csv'
