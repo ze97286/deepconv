@@ -649,7 +649,7 @@ def main():
     
     # Core filtering parameters
     parser.add_argument('--min_coverage', type=int, default=8, help='Minimum coverage required for cell type signals')
-    parser.add_argument('--min_tumour_signal', type=float, default=0.6, help='Minimum tumour signal at 100% purity')
+    parser.add_argument('--min_tumour_signal', type=float, default=0.8, help='Minimum tumour signal at 100% purity')
     parser.add_argument('--max_blood_signal', type=float, default=0.001, help='Maximum median blood/immune signal')
     parser.add_argument('--no_overlap', action='store_true', help='Select non-overlapping regions')
     parser.add_argument('--analyse_thresholds', action='store_true', help='Analyze data to suggest appropriate thresholds')
@@ -659,10 +659,10 @@ def main():
     parser.add_argument('--xtp_min_coverage', type=int, default=8, help='Minimum coverage for X###/TP### controls')
     parser.add_argument('--gi_min_coverage', type=int, default=4, help='Minimum coverage for GI controls')
     parser.add_argument('--coverage_quorum', type=float, default=0.6, help='Fraction of control samples that must pass coverage')
-    parser.add_argument('--mean_control_threshold', type=float, default=0.002, help='Maximum mean control signal (proven: 0.002)')
-    parser.add_argument('--max_control_threshold', type=float, default=0.01, help='Maximum control signal (proven: 0.01)')
-    parser.add_argument('--max_pct_with_signal', type=float, default=5.0, help='Maximum percent of controls with signal (proven: 5.0)')
-    parser.add_argument('--high_signal_threshold', type=float, default=0.01, help='High signal threshold for control filtering (proven: 0.01)')
+    parser.add_argument('--mean_control_threshold', type=float, default=0.01, help='Maximum mean control signal')
+    parser.add_argument('--max_control_threshold', type=float, default=0.05, help='Maximum control signal')
+    parser.add_argument('--max_pct_with_signal', type=float, default=20.0, help='Maximum percent of controls with signal')
+    parser.add_argument('--high_signal_threshold', type=float, default=0.1, help='High signal threshold for control filtering')
     parser.add_argument('--control_min_coverage', type=int, default=5, help='Minimum coverage for control samples in signal filtering (proven: 5)')
     parser.add_argument('--min_samples', type=int, default=3, help='Minimum number of valid control samples required (proven: 3)')
     parser.add_argument('--xtp_max_signal', type=float, default=0.001, help='Maximum signal allowed in X###/TP### controls (legacy parameter)')
