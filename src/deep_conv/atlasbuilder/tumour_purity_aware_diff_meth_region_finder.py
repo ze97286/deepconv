@@ -613,7 +613,7 @@ def main():
         results['chromosome'] = chr_num
         all_results.append(results)
         
-        print(f"Chr {chr_num}: {results['significant'].sum()} significant regions found")
+        # print(f"Chr {chr_num}: {results['significant'].sum()} significant regions found")
         
         # Clean up memory
         del tumor_mv, tumor_cov, control_mv, control_cov, combined_mv, combined_cov, filtered_mv, filtered_cov
