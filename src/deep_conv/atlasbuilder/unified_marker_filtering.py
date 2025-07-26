@@ -314,7 +314,8 @@ def apply_filters(signal_df: pd.DataFrame,
                   max_control_threshold: float = 0.01,
                   max_pct_with_signal: float = 5.0,
                   high_signal_threshold: float = 0.01,
-                  control_min_coverage: int = 5) -> pd.DataFrame:
+                  control_min_coverage: int = 5,
+                  min_samples: int = 3) -> pd.DataFrame:
     """
     Unified filtering combining tumour/blood/GI filtering with control filtering.
     Core principle: Strong tumour signal + clean controls, with relaxed blood/GI.
@@ -346,7 +347,8 @@ def apply_filters(signal_df: pd.DataFrame,
         max_control_threshold,
         max_pct_with_signal,
         high_signal_threshold,
-        control_min_coverage
+        control_min_coverage,
+        min_samples
     )
     step3 = step2[signal_mask].copy()
     print(f"  After control signal filter: {len(step3):,}")
@@ -432,7 +434,8 @@ def apply_control_signal_filter(signal_df: pd.DataFrame,
                               max_control_threshold: float = 0.01,
                               max_pct_with_signal: float = 5.0,
                               high_signal_threshold: float = 0.01,
-                              min_coverage: int = 5) -> pd.Series:
+                              min_coverage: int = 5,
+                              min_samples: int = 3) -> pd.Series:
     """
     Apply proven control signal filtering using exact same metrics as successful past approach.
     Matches calculate_control_metrics_vectorized from second_line_oac_regions_filter_with_controls.py
@@ -480,9 +483,9 @@ def apply_control_signal_filter(signal_df: pd.DataFrame,
     # Apply proven filters (matching apply_strict_control_filters exactly)
     print(f"\nApplying proven control filters:")
     
-    # Filter 1: Sufficient samples (minimum 3 like in proven approach)
-    sufficient_samples = n_valid_samples >= 3
-    print(f"  Sufficient samples ≥3: {sufficient_samples.sum()}/{len(sufficient_samples)} ({100*sufficient_samples.sum()/len(sufficient_samples):.1f}%)")
+    # Filter 1: Sufficient samples (minimum as specified)
+    sufficient_samples = n_valid_samples >= min_samples
+    print(f"  Sufficient samples ≥{min_samples}: {sufficient_samples.sum()}/{len(sufficient_samples)} ({100*sufficient_samples.sum()/len(sufficient_samples):.1f}%)")
     
     # Filter 2: Ultra low mean (≤0.2%)
     ultra_low_mean = mean_control_signal <= mean_control_threshold
@@ -522,7 +525,8 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
                            max_control_threshold: float = 0.01,
                            max_pct_with_signal: float = 5.0,
                            high_signal_threshold: float = 0.01,
-                           control_min_coverage: int = 5) -> pd.DataFrame:
+                           control_min_coverage: int = 5,
+                           min_samples: int = 3) -> pd.DataFrame:
     """
     Unified filtering combining all criteria in a single step.
     Now uses merged cell type signals for differential methylation filtering.
@@ -600,7 +604,8 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
         max_control_threshold,
         max_pct_with_signal,
         high_signal_threshold,
-        control_min_coverage
+        control_min_coverage,
+        min_samples
     )
     
     print(f"\nFiltering summary:")
@@ -659,6 +664,8 @@ def main():
     parser.add_argument('--max_pct_with_signal', type=float, default=5.0, help='Maximum percent of controls with signal (proven: 5.0)')
     parser.add_argument('--high_signal_threshold', type=float, default=0.01, help='High signal threshold for control filtering (proven: 0.01)')
     parser.add_argument('--control_min_coverage', type=int, default=5, help='Minimum coverage for control samples in signal filtering (proven: 5)')
+    parser.add_argument('--min_samples', type=int, default=3, help='Minimum number of valid control samples required (proven: 3)')
+    parser.add_argument('--xtp_max_signal', type=float, default=0.001, help='Maximum signal allowed in X###/TP### controls (legacy parameter)')
     
     args = parser.parse_args()
     
@@ -718,7 +725,8 @@ def main():
         max_control_threshold=args.max_control_threshold,
         max_pct_with_signal=args.max_pct_with_signal,
         high_signal_threshold=args.high_signal_threshold,
-        control_min_coverage=args.control_min_coverage
+        control_min_coverage=args.control_min_coverage,
+        min_samples=args.min_samples
     )
 
     # Apply non-overlapping selection if requested
