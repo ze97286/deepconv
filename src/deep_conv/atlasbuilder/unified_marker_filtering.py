@@ -431,20 +431,40 @@ def apply_control_signal_filter(signal_df: pd.DataFrame,
     # Classify control samples
     xtp_controls = [col for col in control_cols if 
                    re.match(r'Control_X\d+', col) or re.match(r'Control_TP\d+', col)]
+    gi_controls = [col for col in control_cols if 'GI' in col]
+    other_controls = [col for col in control_cols if col not in xtp_controls and col not in gi_controls]
     
-    # Calculate max signal for XTP controls
-    signal_mask = pd.Series(True, index=signal_df.index)
+    print(f"\nControl sample analysis:")
+    print(f"  X###/TP### controls: {len(xtp_controls)}")
+    print(f"  GI controls: {len(gi_controls)}")
+    print(f"  Other controls: {len(other_controls)}")
     
+    # Analyze signal distributions
     if xtp_controls:
-        xtp_max = signal_df[xtp_controls].max(axis=1)
-        
+        xtp_median = signal_df[xtp_controls].median(axis=1)
         print(f"\nX###/TP### control signal distribution:")
-        print(f"  Max signal - percentiles: 25th={xtp_max.quantile(0.25):.6f}, 50th={xtp_max.quantile(0.5):.6f}, 75th={xtp_max.quantile(0.75):.6f}")
-        
-        # Apply filter
-        xtp_pass = xtp_max <= xtp_max_signal
-        print(f"  Regions with all X###/TP### < {xtp_max_signal}: {xtp_pass.sum()}/{len(xtp_pass)} ({100*xtp_pass.sum()/len(xtp_pass):.1f}%)")
-        signal_mask &= xtp_pass
+        print(f"  Median signal - percentiles: 25th={xtp_median.quantile(0.25):.6f}, 50th={xtp_median.quantile(0.5):.6f}, 75th={xtp_median.quantile(0.75):.6f}")
+    
+    if gi_controls:
+        gi_median = signal_df[gi_controls].median(axis=1)
+        print(f"\nGI control signal distribution:")
+        print(f"  Median signal - percentiles: 25th={gi_median.quantile(0.25):.6f}, 50th={gi_median.quantile(0.5):.6f}, 75th={gi_median.quantile(0.75):.6f}")
+    
+    if other_controls:
+        other_median = signal_df[other_controls].median(axis=1)
+        print(f"\nOther control signal distribution:")
+        print(f"  Median signal - percentiles: 25th={other_median.quantile(0.25):.6f}, 50th={other_median.quantile(0.5):.6f}, 75th={other_median.quantile(0.75):.6f}")
+    
+    # Compare XTP vs GI if both exist
+    if xtp_controls and gi_controls:
+        print(f"\nXTP vs GI comparison:")
+        print(f"  XTP median of medians: {xtp_median.median():.6f}")
+        print(f"  GI median of medians: {gi_median.median():.6f}")
+        print(f"  Ratio (GI/XTP): {gi_median.median()/xtp_median.median():.2f}")
+    
+    # For now, just return all True to see the distributions
+    signal_mask = pd.Series(True, index=signal_df.index)
+    print(f"\nSkipping signal filtering to analyze distributions first")
     
     return signal_mask
 
@@ -553,22 +573,13 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
         print(f"  Tumour signal: {filtered['tumour_reference'].min():.3f} - {filtered['tumour_reference'].max():.3f}")
         print(f"  Median blood/immune: {filtered['median_blood_immune'].min():.4f} - {filtered['median_blood_immune'].max():.4f}")
         print(f"  Max blood/immune: {filtered['max_blood_immune'].min():.4f} - {filtered['max_blood_immune'].max():.4f}")
-        print(f"  Max GI: {filtered['max_gi'].min():.3f} - {filtered['max_gi'].max():.3f}")
-        print(f"  GI/tumour ratio: {filtered['gi_to_tumour_ratio'].min():.3f} - {filtered['gi_to_tumour_ratio'].max():.3f}")
-        print(f"  SNR vs blood: {filtered['snr_vs_blood'].min():.1f} - {filtered['snr_vs_blood'].max():.1f}")
-        print(f"  SNR vs GI: {filtered['snr_vs_gi'].min():.1f} - {filtered['snr_vs_gi'].max():.1f}")
+        print(f"  Max control: {filtered['max_control_signal'].min():.4f} - {filtered['max_control_signal'].max():.4f}")
         
         # Fragment characteristics (from previous work)
         print(f"\nFragment characteristics:")
         print(f"  Region length: {filtered['region_length'].min()} - {filtered['region_length'].max()} bp")
         print(f"  CpGs per region: {filtered['n_cpgs'].min()} - {filtered['n_cpgs'].max()}")
         
-        # Individual GI tissue distribution (from previous work)
-        print(f"\nIndividual GI tissue signals:")
-        for col in gi_types:
-            signal_col = f'signal_{col}'
-            if signal_col in filtered.columns:
-                print(f"  {col}: {filtered[signal_col].min():.3f} - {filtered[signal_col].max():.3f}")
         
         # Chromosome distribution
         print(f"\nChromosome distribution (top 10):")
