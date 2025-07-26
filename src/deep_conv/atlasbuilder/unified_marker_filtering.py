@@ -644,11 +644,11 @@ def main():
     parser.add_argument('--control_dir', type=str, help='Directory containing control parquet files (control_mv.parquet, control_cov.parquet)')
     parser.add_argument('--xtp_min_coverage', type=int, default=8, help='Minimum coverage for X###/TP### controls')
     parser.add_argument('--gi_min_coverage', type=int, default=4, help='Minimum coverage for GI controls')
-    parser.add_argument('--coverage_quorum', type=float, default=0.6, help='Fraction of control samples that must pass coverage')
-    parser.add_argument('--mean_control_threshold', type=float, default=0.01, help='Maximum mean control signal')
-    parser.add_argument('--max_control_threshold', type=float, default=0.05, help='Maximum control signal')
-    parser.add_argument('--max_pct_with_signal', type=float, default=20.0, help='Maximum percent of controls with signal')
-    parser.add_argument('--high_signal_threshold', type=float, default=0.1, help='High signal threshold for control filtering')
+    parser.add_argument('--coverage_quorum', type=float, default=0.3, help='Fraction of control samples that must pass coverage')
+    parser.add_argument('--mean_control_threshold', type=float, default=0.1, help='Maximum mean control signal')
+    parser.add_argument('--max_control_threshold', type=float, default=0.3, help='Maximum control signal')
+    parser.add_argument('--max_pct_with_signal', type=float, default=100.0, help='Maximum percent of controls with signal')
+    parser.add_argument('--high_signal_threshold', type=float, default=0.3, help='High signal threshold for control filtering')
     parser.add_argument('--min_samples', type=int, default=3, help='Minimum number of valid control samples required (proven: 3)')
     parser.add_argument('--xtp_max_signal', type=float, default=0.001, help='Maximum signal allowed in X###/TP### controls (legacy parameter)')
     
@@ -732,8 +732,9 @@ def main():
     
     # Ensure proper column order (CORRECT ORDER for filter_OAC_pats.sh)
     metadata_cols = ['chr', 'start', 'end', 'startCpG', 'endCpG', 'target', 'name', 'direction']
-    output_cols = metadata_cols + cell_type_order
-    atlas_df = atlas_df[output_cols]
+    # Only include columns that actually exist in the atlas
+    available_cols = [col for col in metadata_cols + cell_type_order if col in atlas_df.columns]
+    atlas_df = atlas_df[available_cols]
     
     # Sort atlas by chromosome and position
     def chromosome_sort_key(chr_str):
