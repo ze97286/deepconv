@@ -310,7 +310,11 @@ def apply_filters(signal_df: pd.DataFrame,
                   xtp_min_coverage: int = 8,
                   gi_min_coverage: int = 4,
                   coverage_quorum: float = 0.6,
-                  xtp_max_signal: float = 0.001) -> pd.DataFrame:
+                  mean_control_threshold: float = 0.002,
+                  max_control_threshold: float = 0.01,
+                  max_pct_with_signal: float = 5.0,
+                  high_signal_threshold: float = 0.01,
+                  control_min_coverage: int = 5) -> pd.DataFrame:
     """
     Unified filtering combining tumour/blood/GI filtering with control filtering.
     Core principle: Strong tumour signal + clean controls, with relaxed blood/GI.
@@ -336,8 +340,13 @@ def apply_filters(signal_df: pd.DataFrame,
     print("\n  Applying control signal filter:")
     signal_mask = apply_control_signal_filter(
         control_signal_df.loc[step2.index], 
-        control_cols, 
-        xtp_max_signal
+        control_cols,
+        control_coverage_df.loc[step2.index],
+        mean_control_threshold,
+        max_control_threshold,
+        max_pct_with_signal,
+        high_signal_threshold,
+        control_min_coverage
     )
     step3 = step2[signal_mask].copy()
     print(f"  After control signal filter: {len(step3):,}")
@@ -418,53 +427,82 @@ def apply_control_coverage_filter(signal_df: pd.DataFrame,
 
 def apply_control_signal_filter(signal_df: pd.DataFrame,
                               control_cols: List[str],
-                              xtp_max_signal: float = 0.001) -> pd.Series:
+                              control_coverage_df: pd.DataFrame,
+                              mean_control_threshold: float = 0.002,
+                              max_control_threshold: float = 0.01,
+                              max_pct_with_signal: float = 5.0,
+                              high_signal_threshold: float = 0.01,
+                              min_coverage: int = 5) -> pd.Series:
     """
-    Apply signal filtering to control samples.
-    Primary focus on X###/TP### controls being < threshold.
-    Returns signal mask.
+    Apply proven control signal filtering using exact same metrics as successful past approach.
+    Matches calculate_control_metrics_vectorized from second_line_oac_regions_filter_with_controls.py
     """
     if not control_cols:
         print("No control columns found!")
         return pd.Series(True, index=signal_df.index)
     
-    # Classify control samples
-    xtp_controls = [col for col in control_cols if 
-                   re.match(r'Control_X\d+', col) or re.match(r'Control_TP\d+', col)]
-    gi_controls = [col for col in control_cols if 'GI' in col]
-    other_controls = [col for col in control_cols if col not in xtp_controls and col not in gi_controls]
+    print(f"\nApplying proven control filtering to {len(control_cols)} control samples")
     
-    print(f"\nControl sample analysis:")
-    print(f"  X###/TP### controls: {len(xtp_controls)}")
-    print(f"  GI controls: {len(gi_controls)}")
-    print(f"  Other controls: {len(other_controls)}")
+    # Extract control data (matching proven approach exactly)
+    control_mv = signal_df[control_cols].copy()
+    control_cov = control_coverage_df[control_cols].copy()
     
-    # Analyze signal distributions
-    if xtp_controls:
-        xtp_median = signal_df[xtp_controls].median(axis=1)
-        print(f"\nX###/TP### control signal distribution:")
-        print(f"  Median signal - percentiles: 25th={xtp_median.quantile(0.25):.6f}, 50th={xtp_median.quantile(0.5):.6f}, 75th={xtp_median.quantile(0.75):.6f}")
+    # Step 1: Apply coverage filtering (key step from proven approach)
+    print(f"  Applying coverage filter (min_coverage={min_coverage})")
+    control_mv_filtered = control_mv.copy()
+    control_mv_filtered[control_cov < min_coverage] = np.nan
     
-    if gi_controls:
-        gi_median = signal_df[gi_controls].median(axis=1)
-        print(f"\nGI control signal distribution:")
-        print(f"  Median signal - percentiles: 25th={gi_median.quantile(0.25):.6f}, 50th={gi_median.quantile(0.5):.6f}, 75th={gi_median.quantile(0.75):.6f}")
+    # Step 2: Calculate metrics exactly as in proven approach
+    print("  Calculating control metrics...")
     
-    if other_controls:
-        other_median = signal_df[other_controls].median(axis=1)
-        print(f"\nOther control signal distribution:")
-        print(f"  Median signal - percentiles: 25th={other_median.quantile(0.25):.6f}, 50th={other_median.quantile(0.5):.6f}, 75th={other_median.quantile(0.75):.6f}")
+    # Basic statistics (vectorized, skipna=True)
+    n_valid_samples = (~control_mv_filtered.isna()).sum(axis=1)
+    mean_control_signal = control_mv_filtered.mean(axis=1, skipna=True)
+    max_control_signal = control_mv_filtered.max(axis=1, skipna=True)
     
-    # Compare XTP vs GI if both exist
-    if xtp_controls and gi_controls:
-        print(f"\nXTP vs GI comparison:")
-        print(f"  XTP median of medians: {xtp_median.median():.6f}")
-        print(f"  GI median of medians: {gi_median.median():.6f}")
-        print(f"  Ratio (GI/XTP): {gi_median.median()/xtp_median.median():.2f}")
+    # Contamination metrics (using 0.001 threshold like proven approach)
+    n_with_signal = (control_mv_filtered > 0.001).sum(axis=1)  # >0.1%
+    n_high_signal = (control_mv_filtered > high_signal_threshold).sum(axis=1)   # >1%
+    pct_with_signal = n_with_signal / n_valid_samples * 100
     
-    # For now, just return all True to see the distributions
-    signal_mask = pd.Series(True, index=signal_df.index)
-    print(f"\nSkipping signal filtering to analyze distributions first")
+    # Handle edge cases (matching proven approach)
+    mean_control_signal = mean_control_signal.fillna(0)
+    max_control_signal = max_control_signal.fillna(0)
+    pct_with_signal = pct_with_signal.fillna(0)
+    
+    print(f"\nControl signal distributions:")
+    print(f"  N valid samples - percentiles: 25th={n_valid_samples.quantile(0.25):.0f}, 50th={n_valid_samples.quantile(0.5):.0f}, 75th={n_valid_samples.quantile(0.75):.0f}")
+    print(f"  Mean control signal - percentiles: 25th={mean_control_signal.quantile(0.25):.6f}, 50th={mean_control_signal.quantile(0.5):.6f}, 75th={mean_control_signal.quantile(0.75):.6f}")
+    print(f"  Max control signal - percentiles: 25th={max_control_signal.quantile(0.25):.6f}, 50th={max_control_signal.quantile(0.5):.6f}, 75th={max_control_signal.quantile(0.75):.6f}")
+    print(f"  Pct with signal (>0.1%) - percentiles: 25th={pct_with_signal.quantile(0.25):.1f}%, 50th={pct_with_signal.quantile(0.5):.1f}%, 75th={pct_with_signal.quantile(0.75):.1f}%")
+    print(f"  N high signal (>1%) - percentiles: 25th={n_high_signal.quantile(0.25):.0f}, 50th={n_high_signal.quantile(0.5):.0f}, 75th={n_high_signal.quantile(0.75):.0f}")
+    
+    # Apply proven filters (matching apply_strict_control_filters exactly)
+    print(f"\nApplying proven control filters:")
+    
+    # Filter 1: Sufficient samples (minimum 3 like in proven approach)
+    sufficient_samples = n_valid_samples >= 3
+    print(f"  Sufficient samples ≥3: {sufficient_samples.sum()}/{len(sufficient_samples)} ({100*sufficient_samples.sum()/len(sufficient_samples):.1f}%)")
+    
+    # Filter 2: Ultra low mean (≤0.2%)
+    ultra_low_mean = mean_control_signal <= mean_control_threshold
+    print(f"  Ultra low mean ≤{mean_control_threshold}: {ultra_low_mean.sum()}/{len(ultra_low_mean)} ({100*ultra_low_mean.sum()/len(ultra_low_mean):.1f}%)")
+    
+    # Filter 3: Low max signal (≤1%)
+    low_max_signal = max_control_signal <= max_control_threshold
+    print(f"  Low max signal ≤{max_control_threshold}: {low_max_signal.sum()}/{len(low_max_signal)} ({100*low_max_signal.sum()/len(low_max_signal):.1f}%)")
+    
+    # Filter 4: Minimal contamination (≤5% samples with signal >0.1%)
+    minimal_contamination = pct_with_signal <= max_pct_with_signal
+    print(f"  Minimal contamination ≤{max_pct_with_signal}%: {minimal_contamination.sum()}/{len(minimal_contamination)} ({100*minimal_contamination.sum()/len(minimal_contamination):.1f}%)")
+    
+    # Filter 5: No high signal (0 samples >1%)
+    no_high_signal = n_high_signal == 0
+    print(f"  No high signal (0 samples >{high_signal_threshold}): {no_high_signal.sum()}/{len(no_high_signal)} ({100*no_high_signal.sum()/len(no_high_signal):.1f}%)")
+    
+    # Combine all filters (matching proven approach order)
+    signal_mask = sufficient_samples & ultra_low_mean & low_max_signal & minimal_contamination & no_high_signal
+    print(f"  Combined control filters: {signal_mask.sum()}/{len(signal_mask)} ({100*signal_mask.sum()/len(signal_mask):.1f}%)")
     
     return signal_mask
 
@@ -480,7 +518,11 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
                            xtp_min_coverage: int = 8,
                            gi_min_coverage: int = 4,
                            coverage_quorum: float = 0.8,
-                           xtp_max_signal: float = 0.001) -> pd.DataFrame:
+                           mean_control_threshold: float = 0.002,
+                           max_control_threshold: float = 0.01,
+                           max_pct_with_signal: float = 5.0,
+                           high_signal_threshold: float = 0.01,
+                           control_min_coverage: int = 5) -> pd.DataFrame:
     """
     Unified filtering combining all criteria in a single step.
     Now uses merged cell type signals for differential methylation filtering.
@@ -554,7 +596,11 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
         xtp_min_coverage,
         gi_min_coverage,
         coverage_quorum,
-        xtp_max_signal
+        mean_control_threshold,
+        max_control_threshold,
+        max_pct_with_signal,
+        high_signal_threshold,
+        control_min_coverage
     )
     
     print(f"\nFiltering summary:")
@@ -608,7 +654,11 @@ def main():
     parser.add_argument('--xtp_min_coverage', type=int, default=8, help='Minimum coverage for X###/TP### controls')
     parser.add_argument('--gi_min_coverage', type=int, default=4, help='Minimum coverage for GI controls')
     parser.add_argument('--coverage_quorum', type=float, default=0.6, help='Fraction of control samples that must pass coverage')
-    parser.add_argument('--xtp_max_signal', type=float, default=0.001, help='Maximum signal allowed in X###/TP### controls')
+    parser.add_argument('--mean_control_threshold', type=float, default=0.002, help='Maximum mean control signal (proven: 0.002)')
+    parser.add_argument('--max_control_threshold', type=float, default=0.01, help='Maximum control signal (proven: 0.01)')
+    parser.add_argument('--max_pct_with_signal', type=float, default=5.0, help='Maximum percent of controls with signal (proven: 5.0)')
+    parser.add_argument('--high_signal_threshold', type=float, default=0.01, help='High signal threshold for control filtering (proven: 0.01)')
+    parser.add_argument('--control_min_coverage', type=int, default=5, help='Minimum coverage for control samples in signal filtering (proven: 5)')
     
     args = parser.parse_args()
     
@@ -664,7 +714,11 @@ def main():
         xtp_min_coverage=args.xtp_min_coverage,
         gi_min_coverage=args.gi_min_coverage,
         coverage_quorum=args.coverage_quorum,
-        xtp_max_signal=args.xtp_max_signal
+        mean_control_threshold=args.mean_control_threshold,
+        max_control_threshold=args.max_control_threshold,
+        max_pct_with_signal=args.max_pct_with_signal,
+        high_signal_threshold=args.high_signal_threshold,
+        control_min_coverage=args.control_min_coverage
     )
 
     # Apply non-overlapping selection if requested
