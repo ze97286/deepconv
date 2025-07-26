@@ -599,14 +599,15 @@ def main():
         
         # Run correlation analysis
         print("Running tumor purity correlation analysis...")
-        results, sample_cols, purities = analyse_tumour_purity_correlation(
-            filtered_mv,
-            tumor_purity_dict,
-            min_correlation=args.min_correlation,
-            max_control_signal=args.max_control_signal,
-            check_controls=not args.no_control_filter,
-            step1_only=args.step1_only
-        )
+        # results, sample_cols, purities = analyse_tumour_purity_correlation(
+        #     filtered_mv,
+        #     tumor_purity_dict,
+        #     min_correlation=args.min_correlation,
+        #     max_control_signal=args.max_control_signal,
+        #     check_controls=not args.no_control_filter,
+        #     step1_only=args.step1_only
+        # )
+        results = filtered_mv
         
         # Add chromosome info
         results['chromosome'] = chr_num
