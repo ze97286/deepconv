@@ -314,7 +314,6 @@ def apply_filters(signal_df: pd.DataFrame,
                   max_control_threshold: float = 0.01,
                   max_pct_with_signal: float = 5.0,
                   high_signal_threshold: float = 0.01,
-                  control_min_coverage: int = 5,
                   min_samples: int = 3) -> pd.DataFrame:
     """
     Unified filtering combining tumour/blood/GI filtering with control filtering.
@@ -342,12 +341,10 @@ def apply_filters(signal_df: pd.DataFrame,
     signal_mask = apply_control_signal_filter(
         control_signal_df.loc[step2.index], 
         control_cols,
-        control_coverage_df.loc[step2.index],
         mean_control_threshold,
         max_control_threshold,
         max_pct_with_signal,
         high_signal_threshold,
-        control_min_coverage,
         min_samples
     )
     step3 = step2[signal_mask].copy()
@@ -429,12 +426,10 @@ def apply_control_coverage_filter(signal_df: pd.DataFrame,
 
 def apply_control_signal_filter(signal_df: pd.DataFrame,
                               control_cols: List[str],
-                              control_coverage_df: pd.DataFrame,
                               mean_control_threshold: float = 0.002,
                               max_control_threshold: float = 0.01,
                               max_pct_with_signal: float = 5.0,
                               high_signal_threshold: float = 0.01,
-                              min_coverage: int = 5,
                               min_samples: int = 3) -> pd.Series:
     """
     Apply proven control signal filtering using exact same metrics as successful past approach.
@@ -446,26 +441,20 @@ def apply_control_signal_filter(signal_df: pd.DataFrame,
     
     print(f"\nApplying proven control filtering to {len(control_cols)} control samples")
     
-    # Extract control data (matching proven approach exactly)
+    # Extract control data  
     control_mv = signal_df[control_cols].copy()
-    control_cov = control_coverage_df[control_cols].copy()
     
-    # Step 1: Apply coverage filtering (key step from proven approach)
-    print(f"  Applying coverage filter (min_coverage={min_coverage})")
-    control_mv_filtered = control_mv.copy()
-    control_mv_filtered[control_cov < min_coverage] = np.nan
-    
-    # Step 2: Calculate metrics exactly as in proven approach
+    # Calculate metrics directly from signal data (coverage already filtered earlier)
     print("  Calculating control metrics...")
     
-    # Basic statistics (vectorized, skipna=True)
-    n_valid_samples = (~control_mv_filtered.isna()).sum(axis=1)
-    mean_control_signal = control_mv_filtered.mean(axis=1, skipna=True)
-    max_control_signal = control_mv_filtered.max(axis=1, skipna=True)
+    # Basic statistics (vectorized, skipna=True for any existing NaNs)
+    n_valid_samples = (~control_mv.isna()).sum(axis=1)
+    mean_control_signal = control_mv.mean(axis=1, skipna=True)
+    max_control_signal = control_mv.max(axis=1, skipna=True)
     
     # Contamination metrics (using 0.001 threshold like proven approach)
-    n_with_signal = (control_mv_filtered > 0.001).sum(axis=1)  # >0.1%
-    n_high_signal = (control_mv_filtered > high_signal_threshold).sum(axis=1)   # >1%
+    n_with_signal = (control_mv > 0.001).sum(axis=1)  # >0.1%
+    n_high_signal = (control_mv > high_signal_threshold).sum(axis=1)   # >1%
     pct_with_signal = n_with_signal / n_valid_samples * 100
     
     # Handle edge cases (matching proven approach)
@@ -525,7 +514,6 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
                            max_control_threshold: float = 0.01,
                            max_pct_with_signal: float = 5.0,
                            high_signal_threshold: float = 0.01,
-                           control_min_coverage: int = 5,
                            min_samples: int = 3) -> pd.DataFrame:
     """
     Unified filtering combining all criteria in a single step.
@@ -604,7 +592,6 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
         max_control_threshold,
         max_pct_with_signal,
         high_signal_threshold,
-        control_min_coverage,
         min_samples
     )
     
@@ -624,7 +611,6 @@ def unified_marker_filtering(signal_df: pd.DataFrame,
         print(f"  Tumour signal: {filtered['tumour_reference'].min():.3f} - {filtered['tumour_reference'].max():.3f}")
         print(f"  Median blood/immune: {filtered['median_blood_immune'].min():.4f} - {filtered['median_blood_immune'].max():.4f}")
         print(f"  Max blood/immune: {filtered['max_blood_immune'].min():.4f} - {filtered['max_blood_immune'].max():.4f}")
-        print(f"  Max control: {filtered['max_control_signal'].min():.4f} - {filtered['max_control_signal'].max():.4f}")
         
         # Fragment characteristics (from previous work)
         print(f"\nFragment characteristics:")
@@ -663,7 +649,6 @@ def main():
     parser.add_argument('--max_control_threshold', type=float, default=0.05, help='Maximum control signal')
     parser.add_argument('--max_pct_with_signal', type=float, default=20.0, help='Maximum percent of controls with signal')
     parser.add_argument('--high_signal_threshold', type=float, default=0.1, help='High signal threshold for control filtering')
-    parser.add_argument('--control_min_coverage', type=int, default=5, help='Minimum coverage for control samples in signal filtering (proven: 5)')
     parser.add_argument('--min_samples', type=int, default=3, help='Minimum number of valid control samples required (proven: 3)')
     parser.add_argument('--xtp_max_signal', type=float, default=0.001, help='Maximum signal allowed in X###/TP### controls (legacy parameter)')
     
@@ -725,7 +710,6 @@ def main():
         max_control_threshold=args.max_control_threshold,
         max_pct_with_signal=args.max_pct_with_signal,
         high_signal_threshold=args.high_signal_threshold,
-        control_min_coverage=args.control_min_coverage,
         min_samples=args.min_samples
     )
 
