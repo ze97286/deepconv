@@ -616,8 +616,8 @@ def main():
     signal_df[atlas.columns[:8]] = atlas[atlas.columns[:8]]
 
     # Load control data 
-    control_signal_path = os.path.join(args.control_dir, "control_mv.parquet")
-    control_coverage_path = os.path.join(args.control_dir, "control_cov.parquet")
+    control_signal_path = os.path.join(args.control_dir, "marker_values.parquet")
+    control_coverage_path = os.path.join(args.control_dir, "coverage.parquet")
     print(f"Loading control signal matrix from {control_signal_path}...")
     control_signal_df = pd.read_parquet(control_signal_path)
     print(f"Loading control coverage matrix from {control_coverage_path}...")
