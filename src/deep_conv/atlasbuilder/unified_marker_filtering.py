@@ -276,11 +276,8 @@ def select_non_overlapping_regions(filtered_df: pd.DataFrame,
     """
     Select non-overlapping regions with highest quality scores.
     """
-    # Sort by quality score (tumour_reference signal * SNR)
-    filtered_df['quality_score'] = (
-        filtered_df['tumour_reference'] * 
-        np.sqrt(filtered_df['snr_vs_blood'] * filtered_df['snr_vs_gi'])
-    )
+    # Sort by quality score (tumour_reference signal)
+    filtered_df['quality_score'] = filtered_df['tumour_reference']
     sorted_df = filtered_df.sort_values('quality_score', ascending=False).copy()
     selected_indices = []
     selected_regions = []
@@ -488,12 +485,12 @@ def apply_control_signal_filter(signal_df: pd.DataFrame,
     minimal_contamination = pct_with_signal <= max_pct_with_signal
     print(f"  Minimal contamination ≤{max_pct_with_signal}%: {minimal_contamination.sum()}/{len(minimal_contamination)} ({100*minimal_contamination.sum()/len(minimal_contamination):.1f}%)")
     
-    # Filter 5: No high signal (0 samples >1%)
-    no_high_signal = n_high_signal == 0
-    print(f"  No high signal (0 samples >{high_signal_threshold}): {no_high_signal.sum()}/{len(no_high_signal)} ({100*no_high_signal.sum()/len(no_high_signal):.1f}%)")
+    # Filter 5: Limited high signal (<=50% of samples above threshold)
+    limited_high_signal = n_high_signal <= (n_valid_samples * 0.5)
+    print(f"  Limited high signal (≤50% samples >{high_signal_threshold}): {limited_high_signal.sum()}/{len(limited_high_signal)} ({100*limited_high_signal.sum()/len(limited_high_signal):.1f}%)")
     
     # Combine all filters (matching proven approach order)
-    signal_mask = sufficient_samples & ultra_low_mean & low_max_signal & minimal_contamination & no_high_signal
+    signal_mask = sufficient_samples & ultra_low_mean & low_max_signal & minimal_contamination & limited_high_signal
     print(f"  Combined control filters: {signal_mask.sum()}/{len(signal_mask)} ({100*signal_mask.sum()/len(signal_mask):.1f}%)")
     
     return signal_mask
