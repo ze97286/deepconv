@@ -158,8 +158,19 @@ def process_pat_file_optimized(regions_df: pd.DataFrame, pat_file: str, min_cpgs
     pat_file = str(pat_file)
     cell_type = Path(pat_file).stem.replace('.pat', '')
     
-    # Process in larger chunks for better performance
-    chunk_size = 50_000_000  # 50M rows at a time
+    # Adaptive chunk size based on available memory and file size
+    try:
+        import psutil
+        available_memory_gb = psutil.virtual_memory().available / (1024**3)
+        # Use smaller chunks if memory is limited
+        if available_memory_gb < 50:
+            chunk_size = 10_000_000  # 10M rows
+        elif available_memory_gb < 100:
+            chunk_size = 25_000_000  # 25M rows
+        else:
+            chunk_size = 50_000_000  # 50M rows
+    except ImportError:
+        chunk_size = 25_000_000  # Conservative default
     
     with tqdm(desc=f"Processing {cell_type}") as pbar:
         file_handle = gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file)
@@ -260,17 +271,86 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
     pat_files = sorted(list(Path(pat_dir).glob('*.pat.gz')))
     print(f"Found {len(pat_files)} pat files in {pat_dir}")
     
-    # Process files in parallel
-    with mp.Pool(threads) as pool:
-        process_func = partial(process_pat_file_optimized, markers_df, min_cpgs=min_cpgs)
-        results = list(tqdm(
-            pool.imap(process_func, pat_files),
-            total=len(pat_files),
-            desc="Processing pat files"
-        ))
+    # Intelligent thread adjustment based on dataset characteristics
+    file_size_mb = sum(f.stat().st_size for f in pat_files) / (1024**2)
+    avg_file_size_mb = file_size_mb / len(pat_files)
+    
+    # Conservative threading for very large datasets
+    if len(pat_files) > 50 or avg_file_size_mb > 1000:  # Very large files
+        effective_threads = min(threads, 8)
+        print(f"Very large dataset detected ({len(pat_files)} files, {avg_file_size_mb:.0f}MB avg), using {effective_threads} threads")
+    elif len(pat_files) > 20 or avg_file_size_mb > 500:  # Large files  
+        effective_threads = min(threads, 12)
+        print(f"Large dataset detected ({len(pat_files)} files, {avg_file_size_mb:.0f}MB avg), using {effective_threads} threads")
+    else:
+        effective_threads = threads
+        print(f"Using {effective_threads} threads for {len(pat_files)} files ({avg_file_size_mb:.0f}MB avg)")
+    
+    # Process files in parallel with resource monitoring
+    print(f"Processing {len(pat_files)} files with {effective_threads} threads...")
+    start_time = time.time()
+    
+    # For very large datasets, process in smaller batches to prevent system overload
+    if len(pat_files) > 30:
+        batch_size = max(4, effective_threads)  # Process in batches
+        print(f"Processing in batches of {batch_size} files to prevent system overload")
+        
+        results = []
+        for i in range(0, len(pat_files), batch_size):
+            batch_files = pat_files[i:i + batch_size]
+            print(f"\nProcessing batch {i//batch_size + 1}/{(len(pat_files) + batch_size - 1)//batch_size} ({len(batch_files)} files)")
+            
+            with mp.Pool(min(effective_threads, len(batch_files))) as pool:
+                process_func = partial(process_pat_file_optimized, markers_df, min_cpgs=min_cpgs)
+                
+                batch_results = list(tqdm(
+                    pool.imap(process_func, batch_files),
+                    total=len(batch_files),
+                    desc=f"Batch {i//batch_size + 1}",
+                    unit="file"
+                ))
+                results.extend(batch_results)
+            
+            # Aggressive memory cleanup between batches
+            gc.collect()
+            
+            elapsed = time.time() - start_time
+            rate = len(results) / elapsed
+            eta = (len(pat_files) - len(results)) / rate if rate > 0 else 0
+            print(f"Overall progress: {len(results)}/{len(pat_files)} files ({rate:.1f} files/min, ETA: {eta/60:.1f}min)")
+    
+    else:
+        # Standard processing for smaller datasets
+        with mp.Pool(effective_threads) as pool:
+            process_func = partial(process_pat_file_optimized, markers_df, min_cpgs=min_cpgs)
+            
+            # Use imap_unordered for better progress tracking and resource usage
+            results = []
+            completed = 0
+            
+            for result in tqdm(
+                pool.imap_unordered(process_func, pat_files),
+                total=len(pat_files),
+                desc="Processing pat files",
+                unit="file"
+            ):
+                results.append(result)
+                completed += 1
+                
+                # Memory cleanup every 10 files
+                if completed % 10 == 0:
+                    gc.collect()
+                    elapsed = time.time() - start_time
+                    rate = completed / elapsed
+                    eta = (len(pat_files) - completed) / rate if rate > 0 else 0
+                    print(f"Completed {completed}/{len(pat_files)} files ({rate:.1f} files/min, ETA: {eta/60:.1f}min)")
+    
+    processing_time = time.time() - start_time
+    print(f"File processing completed in {processing_time:.1f}s ({len(pat_files)/processing_time:.2f} files/s)")
     
     # Build final matrices efficiently
     print("Building final matrices...")
+    matrix_start = time.time()
     
     # Pre-allocate arrays
     n_regions = len(markers_df)
@@ -286,8 +366,8 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
         for idx, row in markers_df.iterrows()
     }
     
-    # Fill arrays efficiently
-    for sample_idx, (uxm_df, cov_df, cell_type) in enumerate(results):
+    # Fill arrays efficiently with progress tracking
+    for sample_idx, (uxm_df, cov_df, cell_type) in enumerate(tqdm(results, desc="Building matrices")):
         sample_names.append(cell_type)
         
         for _, row in uxm_df.iterrows():
@@ -310,6 +390,11 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
     
     marker_matrix = pd.DataFrame(marker_data)
     coverage_matrix = pd.DataFrame(coverage_data)
+    
+    matrix_time = time.time() - matrix_start
+    total_time = time.time() - start_time
+    print(f"Matrix construction completed in {matrix_time:.1f}s")
+    print(f"Total processing time: {total_time:.1f}s")
     
     gc.collect()
     
