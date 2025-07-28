@@ -172,8 +172,7 @@ def process_pat_file_optimized(regions_df: pd.DataFrame, pat_file: str, min_cpgs
     except ImportError:
         chunk_size = 25_000_000  # Conservative default
     
-    print(f"[{time.strftime('%H:%M:%S')}] Starting {cell_type} (chunk size: {chunk_size:,})")
-    
+    start_time = time.time()
     total_patterns = 0
     chunks_processed = 0
     file_handle = gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file)
@@ -188,7 +187,6 @@ def process_pat_file_optimized(regions_df: pd.DataFrame, pat_file: str, min_cpgs
         # Quick filter
         starts = chunk['start'].values.astype(np.int32)
         if starts.min() >= counter.last_cpg:
-            print(f"[{time.strftime('%H:%M:%S')}] {cell_type}: Reached end of relevant data at chunk {chunks_processed}")
             break
         
         # Convert patterns to byte arrays for numba
@@ -202,8 +200,6 @@ def process_pat_file_optimized(regions_df: pd.DataFrame, pat_file: str, min_cpgs
         if not mask.any():
             total_patterns += len(chunk)
             continue
-        
-        print(f"[{time.strftime('%H:%M:%S')}] {cell_type}: Chunk {chunks_processed} - {len(chunk):,} patterns, {relevant_patterns:,} relevant")
         
         # Process batch with numba - convert patterns to numpy array to avoid reflection
         filtered_indices = np.where(mask)[0]
@@ -224,23 +220,17 @@ def process_pat_file_optimized(regions_df: pd.DataFrame, pat_file: str, min_cpgs
         filtered_starts = starts[mask]
         filtered_counts = chunk['count'].values[mask].astype(np.int64)
         
-        numba_start = time.time()
         process_pattern_batch_numba(
             patterns_array, pattern_lengths, filtered_starts, filtered_counts,
             counter.region_starts, counter.region_ends, counter.region_indices,
             counter.min_cpgs, counter.th1, counter.th2,
             counter.u_counts, counter.x_counts, counter.m_counts
         )
-        numba_time = time.time() - numba_start
         
         total_patterns += len(chunk)
-        chunk_time = time.time() - chunk_start
-        
-        if chunks_processed % 5 == 0 or numba_time > 10:  # Report every 5 chunks or slow chunks
-            print(f"[{time.strftime('%H:%M:%S')}] {cell_type}: Chunk {chunks_processed} done - {chunk_time:.1f}s total ({numba_time:.1f}s numba)")
     
     file_handle.close()
-    print(f"[{time.strftime('%H:%M:%S')}] Completed {cell_type}: {chunks_processed} chunks, {total_patterns:,} total patterns")
+    processing_time = time.time() - start_time
     
     # Build results
     results_uxm = []
@@ -308,46 +298,36 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
     print(f"Processing {len(pat_files)} files with {effective_threads} threads...")
     start_time = time.time()
     
-    # For very large datasets, process in smaller batches to prevent system overload
+    # For large datasets, process sequentially with progress tracking
+    # This avoids multiprocessing overhead and resource contention
     if len(pat_files) > 30:
-        batch_size = max(4, effective_threads)  # Process in batches
-        print(f"Processing in batches of {batch_size} files to prevent system overload")
+        print(f"Processing {len(pat_files)} files sequentially to avoid resource contention")
         
         results = []
-        for i in range(0, len(pat_files), batch_size):
-            batch_files = pat_files[i:i + batch_size]
-            batch_num = i//batch_size + 1
-            total_batches = (len(pat_files) + batch_size - 1)//batch_size
+        process_func = partial(process_pat_file_optimized, markers_df, min_cpgs=min_cpgs)
+        
+        for i, pat_file in enumerate(pat_files):
+            file_start_time = time.time()
+            print(f"\n[{time.strftime('%H:%M:%S')}] Processing file {i+1}/{len(pat_files)}: {pat_file.name}")
             
-            print(f"\n[{time.strftime('%H:%M:%S')}] === BATCH {batch_num}/{total_batches} ===")
-            print(f"Files in this batch: {[f.name for f in batch_files]}")
+            result = process_func(pat_file)
+            results.append(result)
             
-            batch_start_time = time.time()
-            
-            with mp.Pool(min(effective_threads, len(batch_files))) as pool:
-                process_func = partial(process_pat_file_optimized, markers_df, min_cpgs=min_cpgs)
-                
-                # Process without tqdm to avoid overlapping progress bars
-                batch_results = []
-                for j, result in enumerate(pool.imap(process_func, batch_files)):
-                    batch_results.append(result)
-                    print(f"[{time.strftime('%H:%M:%S')}] Batch {batch_num}: Completed file {j+1}/{len(batch_files)} - {batch_files[j].name}")
-                
-                results.extend(batch_results)
-            
-            batch_time = time.time() - batch_start_time
-            print(f"[{time.strftime('%H:%M:%S')}] Batch {batch_num} completed in {batch_time:.1f}s ({batch_time/len(batch_files):.1f}s per file)")
-            
-            # Aggressive memory cleanup between batches
-            gc.collect()
-            
+            file_time = time.time() - file_start_time
             elapsed = time.time() - start_time
-            rate = len(results) / elapsed
-            eta = (len(pat_files) - len(results)) / rate if rate > 0 else 0
-            print(f"[{time.strftime('%H:%M:%S')}] Overall progress: {len(results)}/{len(pat_files)} files ({rate:.1f} files/min, ETA: {eta/60:.1f}min)")
+            rate = (i+1) / elapsed
+            eta = (len(pat_files) - (i+1)) / rate if rate > 0 else 0
+            
+            print(f"[{time.strftime('%H:%M:%S')}] Completed {pat_file.name} in {file_time:.1f}s")
+            print(f"[{time.strftime('%H:%M:%S')}] Progress: {i+1}/{len(pat_files)} files ({rate:.2f} files/min, ETA: {eta/60:.1f}min)")
+            
+            # Memory cleanup after each file
+            if (i+1) % 5 == 0:
+                gc.collect()
     
     else:
-        # Standard processing for smaller datasets
+        # Standard multiprocessing for smaller datasets
+        print(f"Processing {len(pat_files)} files with {effective_threads} threads")
         with mp.Pool(effective_threads) as pool:
             process_func = partial(process_pat_file_optimized, markers_df, min_cpgs=min_cpgs)
             
