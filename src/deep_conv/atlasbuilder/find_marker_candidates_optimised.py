@@ -159,79 +159,60 @@ def process_pat_file_optimized(regions_df: pd.DataFrame, pat_file: str, min_cpgs
     pat_file = str(pat_file)
     cell_type = Path(pat_file).stem.replace('.pat', '')
     
-    # Adaptive chunk size based on available memory and file size
-    try:
-        import psutil
-        available_memory_gb = psutil.virtual_memory().available / (1024**3)
-        # Use smaller chunks if memory is limited
-        if available_memory_gb < 50:
-            chunk_size = 10_000_000  # 10M rows
-        elif available_memory_gb < 100:
-            chunk_size = 25_000_000  # 25M rows
-        else:
-            chunk_size = 50_000_000  # 50M rows
-    except ImportError:
-        chunk_size = 25_000_000  # Conservative default
+    # Process in larger chunks for better performance
+    chunk_size = 50_000_000  # 50M rows at a time
     
-    start_time = time.time()
-    total_patterns = 0
-    chunks_processed = 0
-    file_handle = gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file)
-    
-    for chunk in pd.read_csv(file_handle, sep='\t', 
-                           names=['chr', 'start', 'pattern', 'count'], 
-                           chunksize=chunk_size):
+    with tqdm(desc=f"Processing {cell_type}") as pbar:
+        file_handle = gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file)
         
-        chunks_processed += 1
-        chunk_start = time.time()
+        for chunk in pd.read_csv(file_handle, sep='\t', 
+                               names=['chr', 'start', 'pattern', 'count'], 
+                               chunksize=chunk_size):
+            
+            # Quick filter
+            starts = chunk['start'].values.astype(np.int32)
+            if starts.min() >= counter.last_cpg:
+                break
+            
+            # Convert patterns to byte arrays for numba
+            patterns = [p.encode('ascii') for p in chunk['pattern'].values]
+            pattern_lens = np.array([len(p) for p in patterns], dtype=np.int32)
+            
+            # Filter relevant patterns
+            mask = fast_filter(starts, pattern_lens, counter.first_cpg, counter.last_cpg)
+            if not mask.any():
+                pbar.update(len(chunk))
+                continue
+            
+            # Process batch with numba - convert patterns to numpy array to avoid reflection
+            filtered_indices = np.where(mask)[0]
+            filtered_patterns_list = [patterns[i] for i in filtered_indices]
+            
+            # Find max pattern length for fixed-size array
+            max_len = max(len(p) for p in filtered_patterns_list) if filtered_patterns_list else 1
+            
+            # Create fixed-size numpy array for patterns
+            n_patterns = len(filtered_patterns_list)
+            patterns_array = np.zeros((n_patterns, max_len), dtype=np.uint8)
+            pattern_lengths = np.zeros(n_patterns, dtype=np.int32)
+            
+            for i, pattern in enumerate(filtered_patterns_list):
+                pattern_lengths[i] = len(pattern)
+                patterns_array[i, :len(pattern)] = np.frombuffer(pattern, dtype=np.uint8)
+            
+            filtered_starts = starts[mask]
+            filtered_counts = chunk['count'].values[mask].astype(np.int64)
+            
+            process_pattern_batch_numba(
+                patterns_array, pattern_lengths, filtered_starts, filtered_counts,
+                counter.region_starts, counter.region_ends, counter.region_indices,
+                counter.min_cpgs, counter.th1, counter.th2,
+                counter.u_counts, counter.x_counts, counter.m_counts
+            )
+            
+            pbar.update(len(chunk))
         
-        # Quick filter
-        starts = chunk['start'].values.astype(np.int32)
-        if starts.min() >= counter.last_cpg:
-            break
-        
-        # Convert patterns to byte arrays for numba
-        patterns = [p.encode('ascii') for p in chunk['pattern'].values]
-        pattern_lens = np.array([len(p) for p in patterns], dtype=np.int32)
-        
-        # Filter relevant patterns
-        mask = fast_filter(starts, pattern_lens, counter.first_cpg, counter.last_cpg)
-        relevant_patterns = mask.sum()
-        
-        if not mask.any():
-            total_patterns += len(chunk)
-            continue
-        
-        # Process batch with numba - convert patterns to numpy array to avoid reflection
-        filtered_indices = np.where(mask)[0]
-        filtered_patterns_list = [patterns[i] for i in filtered_indices]
-        
-        # Find max pattern length for fixed-size array
-        max_len = max(len(p) for p in filtered_patterns_list) if filtered_patterns_list else 1
-        
-        # Create fixed-size numpy array for patterns
-        n_patterns = len(filtered_patterns_list)
-        patterns_array = np.zeros((n_patterns, max_len), dtype=np.uint8)
-        pattern_lengths = np.zeros(n_patterns, dtype=np.int32)
-        
-        for i, pattern in enumerate(filtered_patterns_list):
-            pattern_lengths[i] = len(pattern)
-            patterns_array[i, :len(pattern)] = np.frombuffer(pattern, dtype=np.uint8)
-        
-        filtered_starts = starts[mask]
-        filtered_counts = chunk['count'].values[mask].astype(np.int64)
-        
-        process_pattern_batch_numba(
-            patterns_array, pattern_lengths, filtered_starts, filtered_counts,
-            counter.region_starts, counter.region_ends, counter.region_indices,
-            counter.min_cpgs, counter.th1, counter.th2,
-            counter.u_counts, counter.x_counts, counter.m_counts
-        )
-        
-        total_patterns += len(chunk)
-    
-    file_handle.close()
-    processing_time = time.time() - start_time
+        file_handle.close()
     
     # Build results
     results_uxm = []
@@ -280,12 +261,8 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
     pat_files = sorted(list(Path(pat_dir).glob('*.pat.gz')))
     print(f"Found {len(pat_files)} pat files in {pat_dir}")
     
-    # Use reasonable thread count - cap at 8 for large datasets
-    if len(pat_files) > 20:
-        effective_threads = min(threads, 8)
-        print(f"Large dataset detected, using {effective_threads} threads instead of {threads}")
-    else:
-        effective_threads = threads
+    # Just use fewer threads for large datasets to avoid overload
+    effective_threads = min(threads, 12) if len(pat_files) > 20 else threads
     
     # Process files in parallel
     with mp.Pool(effective_threads) as pool:
