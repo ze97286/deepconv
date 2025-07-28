@@ -293,37 +293,46 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
     
     print("All batches completed")
     
+    print("Building final matrices...")
+    
     # Pre-allocate arrays
     n_regions = len(markers_df)
     n_samples = len(results)
+    
+    print(f"Matrix dimensions: {n_regions} regions x {n_samples} samples")
     
     marker_values = np.full((n_regions, n_samples), np.nan, dtype=np.float32)
     coverage_values = np.zeros((n_regions, n_samples), dtype=np.int32)
     sample_names = []
     
-    # Create index mapping for fast lookup
-    name_direction_to_idx = {
-        (row['name'], row['direction']): idx 
-        for idx, row in markers_df.iterrows()
-    }
+    # Create a single key for faster lookup
+    markers_df['key'] = markers_df['name'] + '_' + markers_df['direction']
+    key_to_idx = {key: idx for idx, key in enumerate(markers_df['key'])}
     
-    # Fill arrays efficiently
-    for sample_idx, (uxm_df, cov_df, cell_type) in enumerate(results):
+    # Process results efficiently
+    print("Merging sample results...")
+    for sample_idx, (uxm_df, cov_df, cell_type) in enumerate(tqdm(results, desc="Building matrices")):
         sample_names.append(cell_type)
         
-        for _, row in uxm_df.iterrows():
-            region_idx = name_direction_to_idx.get((row['name'], row['direction']))
-            if region_idx is not None:
-                marker_values[region_idx, sample_idx] = row['value']
+        # Create keys for fast merging
+        uxm_df['key'] = uxm_df['name'] + '_' + uxm_df['direction']
+        cov_df['key'] = cov_df['name'] + '_' + cov_df['direction']
         
-        for _, row in cov_df.iterrows():
-            region_idx = name_direction_to_idx.get((row['name'], row['direction']))
-            if region_idx is not None:
-                coverage_values[region_idx, sample_idx] = row['value']
+        # Vectorized lookup using merge instead of iterrows
+        uxm_indices = uxm_df['key'].map(key_to_idx)
+        cov_indices = cov_df['key'].map(key_to_idx)
+        
+        # Direct numpy assignment - much faster than iterrows
+        valid_uxm = ~uxm_indices.isna()
+        marker_values[uxm_indices[valid_uxm].astype(int), sample_idx] = uxm_df.loc[valid_uxm, 'value'].values
+        
+        valid_cov = ~cov_indices.isna()
+        coverage_values[cov_indices[valid_cov].astype(int), sample_idx] = cov_df.loc[valid_cov, 'value'].values
     
     # Create final DataFrames
-    marker_data = {'name': markers_df['name'], 'direction': markers_df['direction']}
-    coverage_data = {'name': markers_df['name'], 'direction': markers_df['direction']}
+    print("Creating final DataFrames...")
+    marker_data = {'name': markers_df['name'].values, 'direction': markers_df['direction'].values}
+    coverage_data = {'name': markers_df['name'].values, 'direction': markers_df['direction'].values}
     
     for idx, sample_name in enumerate(sample_names):
         marker_data[sample_name] = marker_values[:, idx]
