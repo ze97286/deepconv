@@ -353,7 +353,7 @@ if __name__ == "__main__":
 
 def prepare_for_atlas_optimised(atlas_path, pat_dir, min_cpgs, prefix, threads=32):
     """
-    Optimized version of prepare_for_atlas with 10x+ speedup.
+    optimised version of prepare_for_atlas with 10x+ speedup.
     Uses memory-mapped files, vectorized operations, and parallel processing.
     """
     print(f"Loading atlas from {atlas_path}...")
@@ -379,10 +379,10 @@ def prepare_for_atlas_optimised(atlas_path, pat_dir, min_cpgs, prefix, threads=3
     pat_files = sorted(list(Path(pat_dir).glob('*.pat.gz')))
     print(f"Found {len(pat_files)} pat files to process")
     
-    # Process files in parallel with optimized processing
+    # Process files in parallel with optimised processing
     with mp.Pool(threads) as pool:
         process_func = partial(
-            process_pat_file_optimized, 
+            process_pat_file_optimised, 
             regions=regions, 
             region_starts=region_starts, 
             region_ends=region_ends,
@@ -434,11 +434,11 @@ def prepare_for_atlas_optimised(atlas_path, pat_dir, min_cpgs, prefix, threads=3
     marker_df.to_parquet(pat_dir / f"{prefix}_marker_values.parquet", index=False)
     coverage_df.to_parquet(pat_dir / f"{prefix}_coverage.parquet", index=False)
     
-    print(f"Saved optimized results to {pat_dir}")
+    print(f"Saved optimised results to {pat_dir}")
 
-def prepare_for_atlas_fast(atlas_path, pat_dir, min_cpgs, prefix, threads=32, optimization_level='auto'):
+def prepare_for_atlas_fast(atlas_path, pat_dir, min_cpgs, prefix, threads=32, optimisation_level='auto'):
     """
-    Fast version of prepare_for_atlas with automatic optimization selection.
+    Fast version of prepare_for_atlas with automatic optimisation selection.
     
     Args:
         atlas_path: Path to atlas file
@@ -446,26 +446,26 @@ def prepare_for_atlas_fast(atlas_path, pat_dir, min_cpgs, prefix, threads=32, op
         min_cpgs: Minimum CpGs required
         prefix: Output file prefix
         threads: Number of threads to use
-        optimization_level: 'auto', 'standard', 'optimized', or 'ultra'
+        optimisation_level: 'auto', 'standard', 'optimised', or 'ultra'
     """
-    if optimization_level == 'auto':
-        # Auto-detect best optimization level
+    if optimisation_level == 'auto':
+        # Auto-detect best optimisation level
         import psutil
         memory_gb = psutil.virtual_memory().total / (1024**3)
         cpu_count = psutil.cpu_count()
         
         if memory_gb >= 32 and cpu_count >= 16:
-            optimization_level = 'ultra'
+            optimisation_level = 'ultra'
         elif memory_gb >= 16 and cpu_count >= 8:
-            optimization_level = 'optimized'
+            optimisation_level = 'optimised'
         else:
-            optimization_level = 'standard'
+            optimisation_level = 'standard'
     
-    print(f"Using optimization level: {optimization_level}")
+    print(f"Using optimisation level: {optimisation_level}")
     
-    if optimization_level == 'ultra':
-        return prepare_for_atlas_ultra_optimized(atlas_path, pat_dir, min_cpgs, prefix, threads)
-    elif optimization_level == 'optimized':
+    if optimisation_level == 'ultra':
+        return prepare_for_atlas_ultra_optimised(atlas_path, pat_dir, min_cpgs, prefix, threads)
+    elif optimisation_level == 'optimised':
         return prepare_for_atlas_optimised(atlas_path, pat_dir, min_cpgs, prefix, threads)
     else:
         return prepare_for_atlas(atlas_path, pat_dir, min_cpgs, prefix, threads)
@@ -507,8 +507,8 @@ def find_overlapping_regions_fast(pat_start, pat_end, region_starts, region_ends
     
     return overlaps
 
-def process_pat_file_optimized(pat_file, regions, region_starts, region_ends, min_cpgs):
-    """Optimized pat file processing using memory mapping and vectorized operations"""
+def process_pat_file_optimised(pat_file, regions, region_starts, region_ends, min_cpgs):
+    """optimised pat file processing using memory mapping and vectorized operations"""
     cell_type = Path(pat_file).stem.replace('.pat', '')
     
     # Initialize results arrays
@@ -560,7 +560,7 @@ def process_pat_file_optimized(pat_file, regions, region_starts, region_ends, mi
                 
                 pat_end = start_cpg + len(pattern) - 1
                 
-                # Find overlapping regions using optimized search
+                # Find overlapping regions using optimised search
                 overlaps = find_overlapping_regions_fast(
                     start_cpg, pat_end, region_starts, region_ends, min_cpgs
                 )
@@ -654,9 +654,9 @@ def process_pat_file_optimized(pat_file, regions, region_starts, region_ends, mi
     
     return cell_type, marker_values, coverage_values
 
-def prepare_for_atlas_ultra_optimized(atlas_path, pat_dir, min_cpgs, prefix, threads=32):
+def prepare_for_atlas_ultra_optimised(atlas_path, pat_dir, min_cpgs, prefix, threads=32):
     """
-    Ultra-optimized version with 20x+ speedup.
+    Ultra-optimised version with 20x+ speedup.
     Uses memory mapping, SIMD operations, and advanced algorithms.
     """
     print(f"Loading atlas from {atlas_path}...")
@@ -682,10 +682,10 @@ def prepare_for_atlas_ultra_optimized(atlas_path, pat_dir, min_cpgs, prefix, thr
     pat_files = sorted(list(Path(pat_dir).glob('*.pat.gz')))
     print(f"Found {len(pat_files)} pat files to process")
     
-    # Process files in parallel with ultra-optimized processing
+    # Process files in parallel with ultra-optimised processing
     with mp.Pool(threads) as pool:
         process_func = partial(
-            process_pat_file_ultra_optimized, 
+            process_pat_file_ultra_optimised, 
             regions=regions, 
             region_starts=region_starts, 
             region_ends=region_ends,
@@ -737,7 +737,7 @@ def prepare_for_atlas_ultra_optimized(atlas_path, pat_dir, min_cpgs, prefix, thr
     marker_df.to_parquet(pat_dir / f"{prefix}_marker_values.parquet", index=False)
     coverage_df.to_parquet(pat_dir / f"{prefix}_coverage.parquet", index=False)
     
-    print(f"Saved ultra-optimized results to {pat_dir}")
+    print(f"Saved ultra-optimised results to {pat_dir}")
 
 @jit(nopython=True)
 def count_cpgs_fast(pattern):
@@ -778,8 +778,8 @@ def find_overlaps_ultra_fast(pat_start, pat_end, region_starts, region_ends):
     
     return overlaps
 
-def process_pat_file_ultra_optimized(pat_file, regions, region_starts, region_ends, min_cpgs):
-    """Ultra-optimized pat file processing with maximum performance"""
+def process_pat_file_ultra_optimised(pat_file, regions, region_starts, region_ends, min_cpgs):
+    """Ultra-optimised pat file processing with maximum performance"""
     cell_type = Path(pat_file).stem.replace('.pat', '')
     
     # Initialize results arrays
@@ -826,7 +826,7 @@ def process_pat_file_ultra_optimized(pat_file, regions, region_starts, region_en
         if len(pattern) < min_cpgs:
             continue
         
-        # Count valid CpGs using optimized function
+        # Count valid CpGs using optimised function
         valid_cpgs = count_cpgs_fast(pattern)
         if valid_cpgs < min_cpgs:
             continue
