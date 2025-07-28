@@ -51,27 +51,29 @@ def fast_filter(starts, pattern_lens, first_cpg, last_cpg):
 
 # NEW: Optimized pattern processing with pre-built index
 @numba.jit(nopython=True)
-def process_pattern_batch_numba(patterns, starts, counts, region_starts, region_ends, 
+def process_pattern_batch_numba(patterns, pattern_lengths, starts, counts, region_starts, region_ends, 
                                 region_indices, min_cpgs, th1, th2, 
                                 u_counts, x_counts, m_counts):
     """Process patterns in batch using numba for massive speedup"""
     n_regions = len(region_starts)
+    n_patterns = len(starts)
     
-    for p_idx in range(len(patterns)):
-        pattern = patterns[p_idx]
+    for p_idx in range(n_patterns):
         pat_start = starts[p_idx]
         count = counts[p_idx]
+        pat_len = pattern_lengths[p_idx]
         
         # Count valid CpGs
         valid_cpgs = 0
-        for c in pattern:
+        for i in range(pat_len):
+            c = patterns[p_idx, i]
             if c == ord('C') or c == ord('T'):
                 valid_cpgs += 1
         
         if valid_cpgs < min_cpgs:
             continue
             
-        pat_end = pat_start + len(pattern) - 1
+        pat_end = pat_start + pat_len - 1
         
         # Binary search for first overlapping region
         left = 0
@@ -100,8 +102,8 @@ def process_pattern_batch_numba(patterns, starts, counts, region_starts, region_
             
             # Count valid CpGs in overlap
             valid_overlap_cpgs = 0
-            for i in range(pattern_offset, min(pattern_offset + overlap_len, len(pattern))):
-                if pattern[i] == ord('C') or pattern[i] == ord('T'):
+            for i in range(pattern_offset, min(pattern_offset + overlap_len, pat_len)):
+                if patterns[p_idx, i] == ord('C') or patterns[p_idx, i] == ord('T'):
                     valid_overlap_cpgs += 1
             
             if valid_overlap_cpgs < min_cpgs:
@@ -109,8 +111,8 @@ def process_pattern_batch_numba(patterns, starts, counts, region_starts, region_
                 
             # Count methylated CpGs
             meth_count = 0
-            for i in range(pattern_offset, min(pattern_offset + overlap_len, len(pattern))):
-                if pattern[i] == ord('C'):
+            for i in range(pattern_offset, min(pattern_offset + overlap_len, pat_len)):
+                if patterns[p_idx, i] == ord('C'):
                     meth_count += 1
             
             # Calculate methylation ratio and update counts
@@ -181,13 +183,27 @@ def process_pat_file_optimized(regions_df: pd.DataFrame, pat_file: str, min_cpgs
                 pbar.update(len(chunk))
                 continue
             
-            # Process batch with numba
-            filtered_patterns = [patterns[i] for i in np.where(mask)[0]]
+            # Process batch with numba - convert patterns to numpy array to avoid reflection
+            filtered_indices = np.where(mask)[0]
+            filtered_patterns_list = [patterns[i] for i in filtered_indices]
+            
+            # Find max pattern length for fixed-size array
+            max_len = max(len(p) for p in filtered_patterns_list)
+            
+            # Create fixed-size numpy array for patterns
+            n_patterns = len(filtered_patterns_list)
+            patterns_array = np.zeros((n_patterns, max_len), dtype=np.uint8)
+            pattern_lengths = np.zeros(n_patterns, dtype=np.int32)
+            
+            for i, pattern in enumerate(filtered_patterns_list):
+                pattern_lengths[i] = len(pattern)
+                patterns_array[i, :len(pattern)] = np.frombuffer(pattern, dtype=np.uint8)
+            
             filtered_starts = starts[mask]
             filtered_counts = chunk['count'].values[mask].astype(np.int64)
             
             process_pattern_batch_numba(
-                filtered_patterns, filtered_starts, filtered_counts,
+                patterns_array, pattern_lengths, filtered_starts, filtered_counts,
                 counter.region_starts, counter.region_ends, counter.region_indices,
                 counter.min_cpgs, counter.th1, counter.th2,
                 counter.u_counts, counter.x_counts, counter.m_counts
