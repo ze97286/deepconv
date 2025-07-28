@@ -303,64 +303,19 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
         effective_threads = threads
         log_with_flush(f"[{time.strftime('%H:%M:%S')}] Using {effective_threads} threads for {len(pat_files)} files ({avg_file_size_mb:.0f}MB avg)")
     
-    # Process files in parallel with resource monitoring
+    # Process files with limited parallelism to avoid system overload
     log_with_flush(f"[{time.strftime('%H:%M:%S')}] Processing {len(pat_files)} files with {effective_threads} threads...")
     start_time = time.time()
     
-    # For large datasets, process sequentially with progress tracking
-    # This avoids multiprocessing overhead and resource contention
-    if len(pat_files) > 30:
-        log_with_flush(f"[{time.strftime('%H:%M:%S')}] Processing {len(pat_files)} files sequentially to avoid resource contention")
-        
-        results = []
+    with mp.Pool(effective_threads) as pool:
         process_func = partial(process_pat_file_optimized, markers_df, min_cpgs=min_cpgs)
         
-        for i, pat_file in enumerate(pat_files):
-            file_start_time = time.time()
-            log_with_flush(f"[{time.strftime('%H:%M:%S')}] Processing file {i+1}/{len(pat_files)}: {pat_file.name}")
-            
-            result = process_func(pat_file)
-            results.append(result)
-            
-            file_time = time.time() - file_start_time
-            elapsed = time.time() - start_time
-            rate = (i+1) / elapsed
-            eta = (len(pat_files) - (i+1)) / rate if rate > 0 else 0
-            
-            log_with_flush(f"[{time.strftime('%H:%M:%S')}] Completed {pat_file.name} in {file_time:.1f}s")
-            log_with_flush(f"[{time.strftime('%H:%M:%S')}] Progress: {i+1}/{len(pat_files)} files ({rate:.2f} files/min, ETA: {eta/60:.1f}min)")
-            
-            # Memory cleanup after each file
-            if (i+1) % 5 == 0:
-                gc.collect()
-                log_with_flush(f"[{time.strftime('%H:%M:%S')}] Memory cleanup performed")
-    
-    else:
-        # Standard multiprocessing for smaller datasets
-        print(f"Processing {len(pat_files)} files with {effective_threads} threads")
-        with mp.Pool(effective_threads) as pool:
-            process_func = partial(process_pat_file_optimized, markers_df, min_cpgs=min_cpgs)
-            
-            # Use imap_unordered for better progress tracking and resource usage
-            results = []
-            completed = 0
-            
-            for result in tqdm(
-                pool.imap_unordered(process_func, pat_files),
-                total=len(pat_files),
-                desc="Processing pat files",
-                unit="file"
-            ):
-                results.append(result)
-                completed += 1
-                
-                # Memory cleanup every 10 files
-                if completed % 10 == 0:
-                    gc.collect()
-                    elapsed = time.time() - start_time
-                    rate = completed / elapsed
-                    eta = (len(pat_files) - completed) / rate if rate > 0 else 0
-                    print(f"Completed {completed}/{len(pat_files)} files ({rate:.1f} files/min, ETA: {eta/60:.1f}min)")
+        results = list(tqdm(
+            pool.imap(process_func, pat_files),
+            total=len(pat_files),
+            desc="Processing pat files",
+            unit="file"
+        ))
     
     processing_time = time.time() - start_time
     log_with_flush(f"[{time.strftime('%H:%M:%S')}] File processing completed in {processing_time:.1f}s ({len(pat_files)/processing_time:.2f} files/s)")
