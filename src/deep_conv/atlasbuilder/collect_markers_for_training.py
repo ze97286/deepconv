@@ -351,7 +351,7 @@ if __name__ == "__main__":
     main()
 
 
-def prepare_for_atlas_optimized(atlas_path, pat_dir, min_cpgs, prefix, threads=32):
+def prepare_for_atlas_optimised(atlas_path, pat_dir, min_cpgs, prefix, threads=32):
     """
     Optimized version of prepare_for_atlas with 10x+ speedup.
     Uses memory-mapped files, vectorized operations, and parallel processing.
@@ -466,7 +466,7 @@ def prepare_for_atlas_fast(atlas_path, pat_dir, min_cpgs, prefix, threads=32, op
     if optimization_level == 'ultra':
         return prepare_for_atlas_ultra_optimized(atlas_path, pat_dir, min_cpgs, prefix, threads)
     elif optimization_level == 'optimized':
-        return prepare_for_atlas_optimized(atlas_path, pat_dir, min_cpgs, prefix, threads)
+        return prepare_for_atlas_optimised(atlas_path, pat_dir, min_cpgs, prefix, threads)
     else:
         return prepare_for_atlas(atlas_path, pat_dir, min_cpgs, prefix, threads)
 
