@@ -16,6 +16,7 @@ import h5py
 import glob
 import mmap
 import struct
+import sys
 
 @dataclass
 class Region:
@@ -260,6 +261,11 @@ def process_pat_file_optimized(regions_df: pd.DataFrame, pat_file: str, min_cpgs
     
     return pd.DataFrame(results_uxm), pd.DataFrame(results_coverage), cell_type
 
+def log_with_flush(message):
+    """Print message and flush immediately for cluster environments"""
+    print(message)
+    sys.stdout.flush()
+
 def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: int, threads=32) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Optimized version of create_marker_matrices with 100x speedup.
@@ -272,43 +278,46 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
     5. Optimized DataFrame construction
     """
     # Read atlas
-    print(f"Loading markers from {atlas_path}...")
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] Loading markers from {atlas_path}...")
     markers_df = pd.read_csv(atlas_path, sep='\t')
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] Loaded {len(markers_df)} marker regions")
     
     # Get pat files
     pat_files = sorted(list(Path(pat_dir).glob('*.pat.gz')))
-    print(f"Found {len(pat_files)} pat files in {pat_dir}")
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] Found {len(pat_files)} pat files in {pat_dir}")
     
     # Intelligent thread adjustment based on dataset characteristics
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] Calculating dataset characteristics...")
     file_size_mb = sum(f.stat().st_size for f in pat_files) / (1024**2)
     avg_file_size_mb = file_size_mb / len(pat_files)
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] Total data: {file_size_mb:.0f}MB, Average file size: {avg_file_size_mb:.0f}MB")
     
     # Conservative threading for very large datasets
     if len(pat_files) > 50 or avg_file_size_mb > 1000:  # Very large files
         effective_threads = min(threads, 8)
-        print(f"Very large dataset detected ({len(pat_files)} files, {avg_file_size_mb:.0f}MB avg), using {effective_threads} threads")
+        log_with_flush(f"[{time.strftime('%H:%M:%S')}] Very large dataset detected ({len(pat_files)} files, {avg_file_size_mb:.0f}MB avg), using {effective_threads} threads")
     elif len(pat_files) > 20 or avg_file_size_mb > 500:  # Large files  
         effective_threads = min(threads, 12)
-        print(f"Large dataset detected ({len(pat_files)} files, {avg_file_size_mb:.0f}MB avg), using {effective_threads} threads")
+        log_with_flush(f"[{time.strftime('%H:%M:%S')}] Large dataset detected ({len(pat_files)} files, {avg_file_size_mb:.0f}MB avg), using {effective_threads} threads")
     else:
         effective_threads = threads
-        print(f"Using {effective_threads} threads for {len(pat_files)} files ({avg_file_size_mb:.0f}MB avg)")
+        log_with_flush(f"[{time.strftime('%H:%M:%S')}] Using {effective_threads} threads for {len(pat_files)} files ({avg_file_size_mb:.0f}MB avg)")
     
     # Process files in parallel with resource monitoring
-    print(f"Processing {len(pat_files)} files with {effective_threads} threads...")
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] Processing {len(pat_files)} files with {effective_threads} threads...")
     start_time = time.time()
     
     # For large datasets, process sequentially with progress tracking
     # This avoids multiprocessing overhead and resource contention
     if len(pat_files) > 30:
-        print(f"Processing {len(pat_files)} files sequentially to avoid resource contention")
+        log_with_flush(f"[{time.strftime('%H:%M:%S')}] Processing {len(pat_files)} files sequentially to avoid resource contention")
         
         results = []
         process_func = partial(process_pat_file_optimized, markers_df, min_cpgs=min_cpgs)
         
         for i, pat_file in enumerate(pat_files):
             file_start_time = time.time()
-            print(f"\n[{time.strftime('%H:%M:%S')}] Processing file {i+1}/{len(pat_files)}: {pat_file.name}")
+            log_with_flush(f"[{time.strftime('%H:%M:%S')}] Processing file {i+1}/{len(pat_files)}: {pat_file.name}")
             
             result = process_func(pat_file)
             results.append(result)
@@ -318,12 +327,13 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
             rate = (i+1) / elapsed
             eta = (len(pat_files) - (i+1)) / rate if rate > 0 else 0
             
-            print(f"[{time.strftime('%H:%M:%S')}] Completed {pat_file.name} in {file_time:.1f}s")
-            print(f"[{time.strftime('%H:%M:%S')}] Progress: {i+1}/{len(pat_files)} files ({rate:.2f} files/min, ETA: {eta/60:.1f}min)")
+            log_with_flush(f"[{time.strftime('%H:%M:%S')}] Completed {pat_file.name} in {file_time:.1f}s")
+            log_with_flush(f"[{time.strftime('%H:%M:%S')}] Progress: {i+1}/{len(pat_files)} files ({rate:.2f} files/min, ETA: {eta/60:.1f}min)")
             
             # Memory cleanup after each file
             if (i+1) % 5 == 0:
                 gc.collect()
+                log_with_flush(f"[{time.strftime('%H:%M:%S')}] Memory cleanup performed")
     
     else:
         # Standard multiprocessing for smaller datasets
@@ -353,15 +363,16 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
                     print(f"Completed {completed}/{len(pat_files)} files ({rate:.1f} files/min, ETA: {eta/60:.1f}min)")
     
     processing_time = time.time() - start_time
-    print(f"File processing completed in {processing_time:.1f}s ({len(pat_files)/processing_time:.2f} files/s)")
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] File processing completed in {processing_time:.1f}s ({len(pat_files)/processing_time:.2f} files/s)")
     
     # Build final matrices efficiently
-    print("Building final matrices...")
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] Building final matrices...")
     matrix_start = time.time()
     
     # Pre-allocate arrays
     n_regions = len(markers_df)
     n_samples = len(results)
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] Creating matrices: {n_regions} regions x {n_samples} samples")
     
     marker_values = np.full((n_regions, n_samples), np.nan, dtype=np.float32)
     coverage_values = np.zeros((n_regions, n_samples), dtype=np.int32)
@@ -374,7 +385,8 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
     }
     
     # Fill arrays efficiently with progress tracking
-    for sample_idx, (uxm_df, cov_df, cell_type) in enumerate(tqdm(results, desc="Building matrices")):
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] Filling matrices with sample data...")
+    for sample_idx, (uxm_df, cov_df, cell_type) in enumerate(results):
         sample_names.append(cell_type)
         
         for _, row in uxm_df.iterrows():
@@ -386,8 +398,12 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
             region_idx = name_direction_to_idx.get((row['name'], row['direction']))
             if region_idx is not None:
                 coverage_values[region_idx, sample_idx] = row['value']
+        
+        if (sample_idx + 1) % 10 == 0:
+            log_with_flush(f"[{time.strftime('%H:%M:%S')}] Processed {sample_idx + 1}/{n_samples} samples")
     
     # Create final DataFrames
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] Creating final DataFrames...")
     marker_data = {'name': markers_df['name'], 'direction': markers_df['direction']}
     coverage_data = {'name': markers_df['name'], 'direction': markers_df['direction']}
     
@@ -400,8 +416,8 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
     
     matrix_time = time.time() - matrix_start
     total_time = time.time() - start_time
-    print(f"Matrix construction completed in {matrix_time:.1f}s")
-    print(f"Total processing time: {total_time:.1f}s")
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] Matrix construction completed in {matrix_time:.1f}s")
+    log_with_flush(f"[{time.strftime('%H:%M:%S')}] Total processing time: {total_time:.1f}s")
     
     gc.collect()
     
