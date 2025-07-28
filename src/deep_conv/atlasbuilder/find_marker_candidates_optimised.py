@@ -264,14 +264,34 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
     # Just use fewer threads for large datasets to avoid overload
     effective_threads = min(threads, 12) if len(pat_files) > 20 else threads
     
-    # Process files in parallel
-    with mp.Pool(effective_threads) as pool:
-        process_func = partial(process_pat_file_optimized, markers_df, min_cpgs=min_cpgs)
-        results = list(tqdm(
-            pool.imap(process_func, pat_files),
-            total=len(pat_files),
-            desc="Processing pat files"
-        ))
+    # Process files in batches to avoid system overload
+    batch_size = effective_threads
+    print(f"Processing in batches of {batch_size} files")
+    
+    results = []
+    for i in range(0, len(pat_files), batch_size):
+        batch_files = pat_files[i:i + batch_size]
+        batch_num = i//batch_size + 1
+        total_batches = (len(pat_files) + batch_size - 1)//batch_size
+        
+        print(f"\nProcessing batch {batch_num}/{total_batches} ({len(batch_files)} files)")
+        
+        with mp.Pool(min(effective_threads, len(batch_files))) as pool:
+            process_func = partial(process_pat_file_optimized, markers_df, min_cpgs=min_cpgs)
+            
+            batch_results = list(tqdm(
+                pool.imap(process_func, batch_files),
+                total=len(batch_files),
+                desc=f"Batch {batch_num}",
+                unit="file"
+            ))
+            results.extend(batch_results)
+        
+        # Memory cleanup between batches
+        gc.collect()
+        print(f"Batch {batch_num} completed")
+    
+    print("All batches completed")
     
     # Pre-allocate arrays
     n_regions = len(markers_df)
