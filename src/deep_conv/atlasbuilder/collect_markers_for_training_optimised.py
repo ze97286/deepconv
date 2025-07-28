@@ -19,6 +19,9 @@ def prepare_for_atlas(atlas_path, pat_dir, min_cpgs, prefix, threads=32):
     """
     start_time = time.time()
     
+    # Ensure pat_dir is a Path object
+    pat_dir = Path(pat_dir)
+    
     # Use optimized version
     X, coverage = create_marker_matrices_optimized(atlas_path, pat_dir, min_cpgs, threads)
     
@@ -28,10 +31,6 @@ def prepare_for_atlas(atlas_path, pat_dir, min_cpgs, prefix, threads=32):
     
     end_time = time.time()
     print(f"Total processing time: {end_time - start_time:.2f} seconds")
-
-def prepare_for_atlas(atlas_path, pat_dir, min_cpgs, prefix, threads=32):
-    """Wrapper that redirects to optimized version"""
-    return prepare_for_atlas(atlas_path, pat_dir, min_cpgs, prefix, threads)
 
 def main():
     parser = argparse.ArgumentParser(description="Optimized atlas preparation")
