@@ -172,57 +172,75 @@ def process_pat_file_optimized(regions_df: pd.DataFrame, pat_file: str, min_cpgs
     except ImportError:
         chunk_size = 25_000_000  # Conservative default
     
-    with tqdm(desc=f"Processing {cell_type}") as pbar:
-        file_handle = gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file)
+    print(f"[{time.strftime('%H:%M:%S')}] Starting {cell_type} (chunk size: {chunk_size:,})")
+    
+    total_patterns = 0
+    chunks_processed = 0
+    file_handle = gzip.open(pat_file, 'rt') if pat_file.endswith('.gz') else open(pat_file)
+    
+    for chunk in pd.read_csv(file_handle, sep='\t', 
+                           names=['chr', 'start', 'pattern', 'count'], 
+                           chunksize=chunk_size):
         
-        for chunk in pd.read_csv(file_handle, sep='\t', 
-                               names=['chr', 'start', 'pattern', 'count'], 
-                               chunksize=chunk_size):
-            
-            # Quick filter
-            starts = chunk['start'].values.astype(np.int32)
-            if starts.min() >= counter.last_cpg:
-                break
-            
-            # Convert patterns to byte arrays for numba
-            patterns = [p.encode('ascii') for p in chunk['pattern'].values]
-            pattern_lens = np.array([len(p) for p in patterns], dtype=np.int32)
-            
-            # Filter relevant patterns
-            mask = fast_filter(starts, pattern_lens, counter.first_cpg, counter.last_cpg)
-            if not mask.any():
-                pbar.update(len(chunk))
-                continue
-            
-            # Process batch with numba - convert patterns to numpy array to avoid reflection
-            filtered_indices = np.where(mask)[0]
-            filtered_patterns_list = [patterns[i] for i in filtered_indices]
-            
-            # Find max pattern length for fixed-size array
-            max_len = max(len(p) for p in filtered_patterns_list)
-            
-            # Create fixed-size numpy array for patterns
-            n_patterns = len(filtered_patterns_list)
-            patterns_array = np.zeros((n_patterns, max_len), dtype=np.uint8)
-            pattern_lengths = np.zeros(n_patterns, dtype=np.int32)
-            
-            for i, pattern in enumerate(filtered_patterns_list):
-                pattern_lengths[i] = len(pattern)
-                patterns_array[i, :len(pattern)] = np.frombuffer(pattern, dtype=np.uint8)
-            
-            filtered_starts = starts[mask]
-            filtered_counts = chunk['count'].values[mask].astype(np.int64)
-            
-            process_pattern_batch_numba(
-                patterns_array, pattern_lengths, filtered_starts, filtered_counts,
-                counter.region_starts, counter.region_ends, counter.region_indices,
-                counter.min_cpgs, counter.th1, counter.th2,
-                counter.u_counts, counter.x_counts, counter.m_counts
-            )
-            
-            pbar.update(len(chunk))
+        chunks_processed += 1
+        chunk_start = time.time()
         
-        file_handle.close()
+        # Quick filter
+        starts = chunk['start'].values.astype(np.int32)
+        if starts.min() >= counter.last_cpg:
+            print(f"[{time.strftime('%H:%M:%S')}] {cell_type}: Reached end of relevant data at chunk {chunks_processed}")
+            break
+        
+        # Convert patterns to byte arrays for numba
+        patterns = [p.encode('ascii') for p in chunk['pattern'].values]
+        pattern_lens = np.array([len(p) for p in patterns], dtype=np.int32)
+        
+        # Filter relevant patterns
+        mask = fast_filter(starts, pattern_lens, counter.first_cpg, counter.last_cpg)
+        relevant_patterns = mask.sum()
+        
+        if not mask.any():
+            total_patterns += len(chunk)
+            continue
+        
+        print(f"[{time.strftime('%H:%M:%S')}] {cell_type}: Chunk {chunks_processed} - {len(chunk):,} patterns, {relevant_patterns:,} relevant")
+        
+        # Process batch with numba - convert patterns to numpy array to avoid reflection
+        filtered_indices = np.where(mask)[0]
+        filtered_patterns_list = [patterns[i] for i in filtered_indices]
+        
+        # Find max pattern length for fixed-size array
+        max_len = max(len(p) for p in filtered_patterns_list) if filtered_patterns_list else 1
+        
+        # Create fixed-size numpy array for patterns
+        n_patterns = len(filtered_patterns_list)
+        patterns_array = np.zeros((n_patterns, max_len), dtype=np.uint8)
+        pattern_lengths = np.zeros(n_patterns, dtype=np.int32)
+        
+        for i, pattern in enumerate(filtered_patterns_list):
+            pattern_lengths[i] = len(pattern)
+            patterns_array[i, :len(pattern)] = np.frombuffer(pattern, dtype=np.uint8)
+        
+        filtered_starts = starts[mask]
+        filtered_counts = chunk['count'].values[mask].astype(np.int64)
+        
+        numba_start = time.time()
+        process_pattern_batch_numba(
+            patterns_array, pattern_lengths, filtered_starts, filtered_counts,
+            counter.region_starts, counter.region_ends, counter.region_indices,
+            counter.min_cpgs, counter.th1, counter.th2,
+            counter.u_counts, counter.x_counts, counter.m_counts
+        )
+        numba_time = time.time() - numba_start
+        
+        total_patterns += len(chunk)
+        chunk_time = time.time() - chunk_start
+        
+        if chunks_processed % 5 == 0 or numba_time > 10:  # Report every 5 chunks or slow chunks
+            print(f"[{time.strftime('%H:%M:%S')}] {cell_type}: Chunk {chunks_processed} done - {chunk_time:.1f}s total ({numba_time:.1f}s numba)")
+    
+    file_handle.close()
+    print(f"[{time.strftime('%H:%M:%S')}] Completed {cell_type}: {chunks_processed} chunks, {total_patterns:,} total patterns")
     
     # Build results
     results_uxm = []
@@ -298,18 +316,27 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
         results = []
         for i in range(0, len(pat_files), batch_size):
             batch_files = pat_files[i:i + batch_size]
-            print(f"\nProcessing batch {i//batch_size + 1}/{(len(pat_files) + batch_size - 1)//batch_size} ({len(batch_files)} files)")
+            batch_num = i//batch_size + 1
+            total_batches = (len(pat_files) + batch_size - 1)//batch_size
+            
+            print(f"\n[{time.strftime('%H:%M:%S')}] === BATCH {batch_num}/{total_batches} ===")
+            print(f"Files in this batch: {[f.name for f in batch_files]}")
+            
+            batch_start_time = time.time()
             
             with mp.Pool(min(effective_threads, len(batch_files))) as pool:
                 process_func = partial(process_pat_file_optimized, markers_df, min_cpgs=min_cpgs)
                 
-                batch_results = list(tqdm(
-                    pool.imap(process_func, batch_files),
-                    total=len(batch_files),
-                    desc=f"Batch {i//batch_size + 1}",
-                    unit="file"
-                ))
+                # Process without tqdm to avoid overlapping progress bars
+                batch_results = []
+                for j, result in enumerate(pool.imap(process_func, batch_files)):
+                    batch_results.append(result)
+                    print(f"[{time.strftime('%H:%M:%S')}] Batch {batch_num}: Completed file {j+1}/{len(batch_files)} - {batch_files[j].name}")
+                
                 results.extend(batch_results)
+            
+            batch_time = time.time() - batch_start_time
+            print(f"[{time.strftime('%H:%M:%S')}] Batch {batch_num} completed in {batch_time:.1f}s ({batch_time/len(batch_files):.1f}s per file)")
             
             # Aggressive memory cleanup between batches
             gc.collect()
@@ -317,7 +344,7 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
             elapsed = time.time() - start_time
             rate = len(results) / elapsed
             eta = (len(pat_files) - len(results)) / rate if rate > 0 else 0
-            print(f"Overall progress: {len(results)}/{len(pat_files)} files ({rate:.1f} files/min, ETA: {eta/60:.1f}min)")
+            print(f"[{time.strftime('%H:%M:%S')}] Overall progress: {len(results)}/{len(pat_files)} files ({rate:.1f} files/min, ETA: {eta/60:.1f}min)")
     
     else:
         # Standard processing for smaller datasets
