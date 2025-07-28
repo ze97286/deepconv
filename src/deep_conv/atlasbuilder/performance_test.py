@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Performance test script to compare original vs optimized prepare_for_atlas functions.
+Performance test script to compare original vs optimised prepare_for_atlas functions.
 """
 
 import time
@@ -13,14 +13,14 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from deep_conv.atlasbuilder.collect_markers_for_training import (
     prepare_for_atlas, 
-    prepare_for_atlas_optimized, 
-    prepare_for_atlas_ultra_optimized,
+    prepare_for_atlas_optimised, 
+    prepare_for_atlas_ultra_optimised,
     prepare_for_atlas_fast
 )
 
 def run_performance_test(atlas_path, pat_dir, min_cpgs=4, prefix="test", threads=8):
     """
-    Run performance comparison between original and optimized versions.
+    Run performance comparison between original and optimised versions.
     """
     print("=" * 60)
     print("PERFORMANCE COMPARISON TEST")
@@ -37,26 +37,26 @@ def run_performance_test(atlas_path, pat_dir, min_cpgs=4, prefix="test", threads
         print(f"   Original version failed: {e}")
         original_time = None
     
-    # Test 2: Optimized version
-    print("\n2. Testing OPTIMIZED version...")
+    # Test 2: Optimised version
+    print("\n2. Testing OPTIMISED version...")
     start_time = time.time()
     try:
-        prepare_for_atlas_optimized(atlas_path, pat_dir, min_cpgs, f"{prefix}_optimized", threads)
-        optimized_time = time.time() - start_time
-        print(f"   Optimized version completed in {optimized_time:.2f} seconds")
+        prepare_for_atlas_optimised(atlas_path, pat_dir, min_cpgs, f"{prefix}_optimised", threads)
+        optimised_time = time.time() - start_time
+        print(f"   Optimised version completed in {optimised_time:.2f} seconds")
     except Exception as e:
-        print(f"   Optimized version failed: {e}")
-        optimized_time = None
+        print(f"   Optimised version failed: {e}")
+        optimised_time = None
     
-    # Test 3: Ultra-optimized version
-    print("\n3. Testing ULTRA-OPTIMIZED version...")
+    # Test 3: Ultra-optimised version
+    print("\n3. Testing ULTRA-OPTIMISED version...")
     start_time = time.time()
     try:
-        prepare_for_atlas_ultra_optimized(atlas_path, pat_dir, min_cpgs, f"{prefix}_ultra", threads)
+        prepare_for_atlas_ultra_optimised(atlas_path, pat_dir, min_cpgs, f"{prefix}_ultra", threads)
         ultra_time = time.time() - start_time
-        print(f"   Ultra-optimized version completed in {ultra_time:.2f} seconds")
+        print(f"   Ultra-optimised version completed in {ultra_time:.2f} seconds")
     except Exception as e:
-        print(f"   Ultra-optimized version failed: {e}")
+        print(f"   Ultra-optimised version failed: {e}")
         ultra_time = None
     
     # Test 4: Auto-detection version
@@ -75,13 +75,13 @@ def run_performance_test(atlas_path, pat_dir, min_cpgs=4, prefix="test", threads
     print("PERFORMANCE RESULTS")
     print("=" * 60)
     
-    if original_time and optimized_time:
-        speedup = original_time / optimized_time
-        print(f"Optimized vs Original: {speedup:.1f}x speedup")
+    if original_time and optimised_time:
+        speedup = original_time / optimised_time
+        print(f"Optimised vs Original: {speedup:.1f}x speedup")
     
     if original_time and ultra_time:
         speedup = original_time / ultra_time
-        print(f"Ultra-optimized vs Original: {speedup:.1f}x speedup")
+        print(f"Ultra-optimised vs Original: {speedup:.1f}x speedup")
     
     if original_time and auto_time:
         speedup = original_time / auto_time
@@ -90,10 +90,10 @@ def run_performance_test(atlas_path, pat_dir, min_cpgs=4, prefix="test", threads
     print("\nDetailed timing:")
     if original_time:
         print(f"  Original: {original_time:.2f}s")
-    if optimized_time:
-        print(f"  Optimized: {optimized_time:.2f}s")
+    if optimised_time:
+        print(f"  Optimised: {optimised_time:.2f}s")
     if ultra_time:
-        print(f"  Ultra-optimized: {ultra_time:.2f}s")
+        print(f"  Ultra-optimised: {ultra_time:.2f}s")
     if auto_time:
         print(f"  Auto-detection: {auto_time:.2f}s")
 
