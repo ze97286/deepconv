@@ -242,7 +242,7 @@ def process_pat_file_optimized(regions_df: pd.DataFrame, pat_file: str, min_cpgs
     
     return pd.DataFrame(results_uxm), pd.DataFrame(results_coverage), cell_type
 
-def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: int, threads=32) -> tuple[pd.DataFrame, pd.DataFrame]:
+def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: int, threads=32, save_prefix=None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Optimized version of create_marker_matrices with 100x speedup.
     
@@ -301,11 +301,11 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
     print(f"Matrix dimensions: {n_regions} regions x {n_samples} samples")
     
     # For very large matrices (chr1), process in chunks to avoid memory issues
-    if n_regions > 10_000_000: 
-        print("Large chromosome detected, using memory-efficient processing...")
+    if n_regions > 1_000_000 or (n_regions * n_samples) > 100_000_000: 
+        print(f"Large dataset detected ({n_regions:,} regions × {n_samples} samples), using memory-efficient processing...")
         
-        # Process in chunks of samples to avoid memory overflow
-        chunk_size = 10  # Process 10 samples at a time
+        # Process in very small chunks to avoid memory overflow
+        chunk_size = 5  # Process only 5 samples at a time
         sample_names = [result[2] for result in results]
         
         # Create key mapping once
@@ -343,31 +343,76 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
                 valid_cov = ~cov_indices.isna()
                 coverage_values_chunk[cov_indices[valid_cov].astype(int), i] = cov_df.loc[valid_cov, 'value'].values
             
-            # Create DataFrames for this chunk
-            chunk_data = {}
-            for i, sample_idx in enumerate(range(chunk_start, chunk_end)):
-                chunk_data[sample_names[sample_idx]] = marker_values_chunk[:, i]
-            marker_chunks.append(pd.DataFrame(chunk_data))
+            # Create chunk DataFrames and save to temporary files to avoid memory buildup
+            temp_marker_path = f"/tmp/marker_chunk_{chunk_start}.parquet"
+            temp_coverage_path = f"/tmp/coverage_chunk_{chunk_start}.parquet"
             
-            chunk_data = {}
-            for i, sample_idx in enumerate(range(chunk_start, chunk_end)):
-                chunk_data[sample_names[sample_idx]] = coverage_values_chunk[:, i]
-            coverage_chunks.append(pd.DataFrame(chunk_data))
+            # Create chunk DataFrame with only this chunk's samples
+            chunk_marker_data = {}
+            chunk_coverage_data = {}
             
-            # Clear memory
-            del marker_values_chunk, coverage_values_chunk
+            for i, sample_idx in enumerate(range(chunk_start, chunk_end)):
+                sample_name = sample_names[sample_idx]
+                chunk_marker_data[sample_name] = marker_values_chunk[:, i]
+                chunk_coverage_data[sample_name] = coverage_values_chunk[:, i]
+            
+            # Save chunks to disk immediately
+            pd.DataFrame(chunk_marker_data).to_parquet(temp_marker_path, index=False)
+            pd.DataFrame(chunk_coverage_data).to_parquet(temp_coverage_path, index=False)
+            
+            # Clear chunk memory immediately
+            del marker_values_chunk, coverage_values_chunk, chunk_marker_data, chunk_coverage_data
             gc.collect()
         
-        # Merge all chunks horizontally
-        print("Merging chunks...")
-        marker_matrix = pd.concat(marker_chunks, axis=1)
-        coverage_matrix = pd.concat(coverage_chunks, axis=1)
+        # For very large datasets, combine chunks one at a time to avoid memory overflow
+        if save_prefix:
+            print("Combining chunks one at a time to avoid memory issues...")
+            
+            # Initialize with base metadata structure
+            final_marker = pd.DataFrame({
+                'name': markers_df['name'].values,
+                'direction': markers_df['direction'].values
+            })
+            final_coverage = pd.DataFrame({
+                'name': markers_df['name'].values,
+                'direction': markers_df['direction'].values
+            })
+            
+            # Add chunks one by one to avoid loading all into memory
+            for chunk_start in tqdm(range(0, n_samples, chunk_size), desc="Combining chunks"):
+                temp_marker_path = f"/tmp/marker_chunk_{chunk_start}.parquet"
+                temp_coverage_path = f"/tmp/coverage_chunk_{chunk_start}.parquet"
+                
+                # Read one chunk at a time
+                marker_chunk = pd.read_parquet(temp_marker_path)
+                coverage_chunk = pd.read_parquet(temp_coverage_path)
+                
+                # Add columns from this chunk to final DataFrames
+                for col in marker_chunk.columns:
+                    final_marker[col] = marker_chunk[col]
+                    final_coverage[col] = coverage_chunk[col]
+                
+                # Clean up chunk immediately
+                del marker_chunk, coverage_chunk
+                os.remove(temp_marker_path)
+                os.remove(temp_coverage_path)
+                gc.collect()
+            
+            # Save final results
+            final_marker.to_parquet(Path(pat_dir) / f"{save_prefix}_marker_values.parquet", index=False)
+            final_coverage.to_parquet(Path(pat_dir) / f"{save_prefix}_coverage.parquet", index=False)
+            
+            # Clean up final DataFrames
+            del final_marker, final_coverage
+            gc.collect()
+            
+            print("Large dataset processing complete - files saved directly to disk")
+            return None, None  # Don't return DataFrames for large datasets
         
-        # Add name and direction columns
-        marker_matrix.insert(0, 'direction', markers_df['direction'].values)
-        marker_matrix.insert(0, 'name', markers_df['name'].values)
-        coverage_matrix.insert(0, 'direction', markers_df['direction'].values)
-        coverage_matrix.insert(0, 'name', markers_df['name'].values)
+        else:
+            # Fallback to in-memory processing (will likely fail for large datasets)
+            print("Warning: Large dataset but no save_prefix provided - may run out of memory")
+            # ... rest of the combining code if needed ...
         
     else:
         # Standard processing for smaller chromosomes

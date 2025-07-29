@@ -22,12 +22,15 @@ def prepare_for_atlas(atlas_path, pat_dir, min_cpgs, prefix, threads=32):
     # Ensure pat_dir is a Path object
     pat_dir = Path(pat_dir)
     
-    # Use optimized version
-    X, coverage = create_marker_matrices_optimized(atlas_path, pat_dir, min_cpgs, threads)
+    # Use optimized version with save_prefix for large datasets
+    X, coverage = create_marker_matrices_optimized(atlas_path, pat_dir, min_cpgs, threads, save_prefix=prefix)
     
-    # Save results
-    X.to_parquet(pat_dir / f"{prefix}_marker_values.parquet", index=False)
-    coverage.to_parquet(pat_dir / f"{prefix}_coverage.parquet", index=False)
+    # Save results only if not already saved by chunked processing
+    if X is not None and coverage is not None:
+        X.to_parquet(pat_dir / f"{prefix}_marker_values.parquet", index=False)
+        coverage.to_parquet(pat_dir / f"{prefix}_coverage.parquet", index=False)
+    else:
+        print(f"Results already saved to {prefix}_marker_values.parquet and {prefix}_coverage.parquet")
     
     end_time = time.time()
     print(f"Total processing time: {end_time - start_time:.2f} seconds")
