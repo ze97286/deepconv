@@ -295,51 +295,121 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
     
     print("Building final matrices...")
     
-    # Pre-allocate arrays
     n_regions = len(markers_df)
     n_samples = len(results)
     
     print(f"Matrix dimensions: {n_regions} regions x {n_samples} samples")
     
-    marker_values = np.full((n_regions, n_samples), np.nan, dtype=np.float32)
-    coverage_values = np.zeros((n_regions, n_samples), dtype=np.int32)
-    sample_names = []
-    
-    # Create a single key for faster lookup
-    markers_df['key'] = markers_df['name'] + '_' + markers_df['direction']
-    key_to_idx = {key: idx for idx, key in enumerate(markers_df['key'])}
-    
-    # Process results efficiently
-    print("Merging sample results...")
-    for sample_idx, (uxm_df, cov_df, cell_type) in enumerate(tqdm(results, desc="Building matrices")):
-        sample_names.append(cell_type)
+    # For very large matrices (chr1), process in chunks to avoid memory issues
+    if n_regions > 10_000_000: 
+        print("Large chromosome detected, using memory-efficient processing...")
         
-        # Create keys for fast merging
-        uxm_df['key'] = uxm_df['name'] + '_' + uxm_df['direction']
-        cov_df['key'] = cov_df['name'] + '_' + cov_df['direction']
+        # Process in chunks of samples to avoid memory overflow
+        chunk_size = 10  # Process 10 samples at a time
+        sample_names = [result[2] for result in results]
         
-        # Vectorized lookup using merge instead of iterrows
-        uxm_indices = uxm_df['key'].map(key_to_idx)
-        cov_indices = cov_df['key'].map(key_to_idx)
+        # Create key mapping once
+        markers_df['key'] = markers_df['name'] + '_' + markers_df['direction']
+        key_to_idx = {key: idx for idx, key in enumerate(markers_df['key'])}
         
-        # Direct numpy assignment - much faster than iterrows
-        valid_uxm = ~uxm_indices.isna()
-        marker_values[uxm_indices[valid_uxm].astype(int), sample_idx] = uxm_df.loc[valid_uxm, 'value'].values
+        # Initialize with first chunk
+        marker_chunks = []
+        coverage_chunks = []
         
-        valid_cov = ~cov_indices.isna()
-        coverage_values[cov_indices[valid_cov].astype(int), sample_idx] = cov_df.loc[valid_cov, 'value'].values
-    
-    # Create final DataFrames
-    print("Creating final DataFrames...")
-    marker_data = {'name': markers_df['name'].values, 'direction': markers_df['direction'].values}
-    coverage_data = {'name': markers_df['name'].values, 'direction': markers_df['direction'].values}
-    
-    for idx, sample_name in enumerate(sample_names):
-        marker_data[sample_name] = marker_values[:, idx]
-        coverage_data[sample_name] = coverage_values[:, idx]
-    
-    marker_matrix = pd.DataFrame(marker_data)
-    coverage_matrix = pd.DataFrame(coverage_data)
+        for chunk_start in tqdm(range(0, n_samples, chunk_size), desc="Processing sample chunks"):
+            chunk_end = min(chunk_start + chunk_size, n_samples)
+            chunk_samples = chunk_end - chunk_start
+            
+            # Allocate arrays for this chunk only
+            marker_values_chunk = np.full((n_regions, chunk_samples), np.nan, dtype=np.float32)
+            coverage_values_chunk = np.zeros((n_regions, chunk_samples), dtype=np.int32)
+            
+            # Process this chunk of samples
+            for i, sample_idx in enumerate(range(chunk_start, chunk_end)):
+                uxm_df, cov_df, cell_type = results[sample_idx]
+                
+                # Create keys for fast merging
+                uxm_df['key'] = uxm_df['name'] + '_' + uxm_df['direction']
+                cov_df['key'] = cov_df['name'] + '_' + cov_df['direction']
+                
+                # Vectorized lookup
+                uxm_indices = uxm_df['key'].map(key_to_idx)
+                cov_indices = cov_df['key'].map(key_to_idx)
+                
+                # Direct numpy assignment
+                valid_uxm = ~uxm_indices.isna()
+                marker_values_chunk[uxm_indices[valid_uxm].astype(int), i] = uxm_df.loc[valid_uxm, 'value'].values
+                
+                valid_cov = ~cov_indices.isna()
+                coverage_values_chunk[cov_indices[valid_cov].astype(int), i] = cov_df.loc[valid_cov, 'value'].values
+            
+            # Create DataFrames for this chunk
+            chunk_data = {}
+            for i, sample_idx in enumerate(range(chunk_start, chunk_end)):
+                chunk_data[sample_names[sample_idx]] = marker_values_chunk[:, i]
+            marker_chunks.append(pd.DataFrame(chunk_data))
+            
+            chunk_data = {}
+            for i, sample_idx in enumerate(range(chunk_start, chunk_end)):
+                chunk_data[sample_names[sample_idx]] = coverage_values_chunk[:, i]
+            coverage_chunks.append(pd.DataFrame(chunk_data))
+            
+            # Clear memory
+            del marker_values_chunk, coverage_values_chunk
+            gc.collect()
+        
+        # Merge all chunks horizontally
+        print("Merging chunks...")
+        marker_matrix = pd.concat(marker_chunks, axis=1)
+        coverage_matrix = pd.concat(coverage_chunks, axis=1)
+        
+        # Add name and direction columns
+        marker_matrix.insert(0, 'direction', markers_df['direction'].values)
+        marker_matrix.insert(0, 'name', markers_df['name'].values)
+        coverage_matrix.insert(0, 'direction', markers_df['direction'].values)
+        coverage_matrix.insert(0, 'name', markers_df['name'].values)
+        
+    else:
+        # Standard processing for smaller chromosomes
+        marker_values = np.full((n_regions, n_samples), np.nan, dtype=np.float32)
+        coverage_values = np.zeros((n_regions, n_samples), dtype=np.int32)
+        sample_names = []
+        
+        # Create a single key for faster lookup
+        markers_df['key'] = markers_df['name'] + '_' + markers_df['direction']
+        key_to_idx = {key: idx for idx, key in enumerate(markers_df['key'])}
+        
+        # Process results efficiently
+        print("Merging sample results...")
+        for sample_idx, (uxm_df, cov_df, cell_type) in enumerate(tqdm(results, desc="Building matrices")):
+            sample_names.append(cell_type)
+            
+            # Create keys for fast merging
+            uxm_df['key'] = uxm_df['name'] + '_' + uxm_df['direction']
+            cov_df['key'] = cov_df['name'] + '_' + cov_df['direction']
+            
+            # Vectorized lookup using merge instead of iterrows
+            uxm_indices = uxm_df['key'].map(key_to_idx)
+            cov_indices = cov_df['key'].map(key_to_idx)
+            
+            # Direct numpy assignment - much faster than iterrows
+            valid_uxm = ~uxm_indices.isna()
+            marker_values[uxm_indices[valid_uxm].astype(int), sample_idx] = uxm_df.loc[valid_uxm, 'value'].values
+            
+            valid_cov = ~cov_indices.isna()
+            coverage_values[cov_indices[valid_cov].astype(int), sample_idx] = cov_df.loc[valid_cov, 'value'].values
+        
+        # Create final DataFrames
+        print("Creating final DataFrames...")
+        marker_data = {'name': markers_df['name'].values, 'direction': markers_df['direction'].values}
+        coverage_data = {'name': markers_df['name'].values, 'direction': markers_df['direction'].values}
+        
+        for idx, sample_name in enumerate(sample_names):
+            marker_data[sample_name] = marker_values[:, idx]
+            coverage_data[sample_name] = coverage_values[:, idx]
+        
+        marker_matrix = pd.DataFrame(marker_data)
+        coverage_matrix = pd.DataFrame(coverage_data)
     
     gc.collect()
     
