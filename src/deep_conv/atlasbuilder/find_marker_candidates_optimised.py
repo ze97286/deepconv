@@ -306,11 +306,13 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
         
         # Process in very small chunks to avoid memory overflow
         chunk_size = 5  # Process only 5 samples at a time
-        sample_names = [result[2] for result in results]
         
         # Create key mapping once
         markers_df['key'] = markers_df['name'] + '_' + markers_df['direction']
         key_to_idx = {key: idx for idx, key in enumerate(markers_df['key'])}
+        
+        # Collect sample names from results first
+        sample_names = [result[2] for result in results]
         
         # Initialize with first chunk
         marker_chunks = []
@@ -328,20 +330,36 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
             for i, sample_idx in enumerate(range(chunk_start, chunk_end)):
                 uxm_df, cov_df, cell_type = results[sample_idx]
                 
-                # Create keys for fast merging
-                uxm_df['key'] = uxm_df['name'] + '_' + uxm_df['direction']
-                cov_df['key'] = cov_df['name'] + '_' + cov_df['direction']
+                # Use direct numpy-based key lookup to avoid string concatenation memory issues
+                # Convert to numpy arrays for memory efficiency
+                uxm_names = uxm_df['name'].values
+                uxm_directions = uxm_df['direction'].values
+                cov_names = cov_df['name'].values  
+                cov_directions = cov_df['direction'].values
                 
-                # Vectorized lookup
-                uxm_indices = uxm_df['key'].map(key_to_idx)
-                cov_indices = cov_df['key'].map(key_to_idx)
+                # Create indices arrays directly without string concatenation
+                uxm_indices = np.full(len(uxm_df), -1, dtype=np.int32)
+                cov_indices = np.full(len(cov_df), -1, dtype=np.int32)
                 
-                # Direct numpy assignment
-                valid_uxm = ~uxm_indices.isna()
-                marker_values_chunk[uxm_indices[valid_uxm].astype(int), i] = uxm_df.loc[valid_uxm, 'value'].values
+                # Manual lookup to avoid memory-intensive string operations
+                for j in range(len(uxm_df)):
+                    key = uxm_names[j] + '_' + uxm_directions[j]
+                    if key in key_to_idx:
+                        uxm_indices[j] = key_to_idx[key]
                 
-                valid_cov = ~cov_indices.isna()
-                coverage_values_chunk[cov_indices[valid_cov].astype(int), i] = cov_df.loc[valid_cov, 'value'].values
+                for j in range(len(cov_df)):
+                    key = cov_names[j] + '_' + cov_directions[j]
+                    if key in key_to_idx:
+                        cov_indices[j] = key_to_idx[key]
+                
+                # Direct numpy assignment using valid indices
+                valid_uxm = uxm_indices >= 0
+                if valid_uxm.any():
+                    marker_values_chunk[uxm_indices[valid_uxm], i] = uxm_df.loc[valid_uxm, 'value'].values
+                
+                valid_cov = cov_indices >= 0
+                if valid_cov.any():
+                    coverage_values_chunk[cov_indices[valid_cov], i] = cov_df.loc[valid_cov, 'value'].values
             
             # Create chunk DataFrames and save to temporary files to avoid memory buildup
             temp_marker_path = f"/tmp/marker_chunk_{chunk_start}.parquet"
@@ -364,47 +382,103 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
             del marker_values_chunk, coverage_values_chunk, chunk_marker_data, chunk_coverage_data
             gc.collect()
         
-        # For very large datasets, combine chunks one at a time to avoid memory overflow
+        # For very large datasets, use pyarrow to write parquet files incrementally
         if save_prefix:
-            print("Combining chunks one at a time to avoid memory issues...")
+            print("Using streaming approach to save large dataset without loading into memory...")
             
-            # Initialize with base metadata structure
-            final_marker = pd.DataFrame({
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+            
+            # Prepare metadata columns
+            metadata_cols = {
                 'name': markers_df['name'].values,
                 'direction': markers_df['direction'].values
-            })
-            final_coverage = pd.DataFrame({
-                'name': markers_df['name'].values,
-                'direction': markers_df['direction'].values
-            })
+            }
             
-            # Add chunks one by one to avoid loading all into memory
-            for chunk_start in tqdm(range(0, n_samples, chunk_size), desc="Combining chunks"):
+            # Define schema for both files
+            marker_schema_fields = [
+                pa.field('name', pa.string()),
+                pa.field('direction', pa.string())
+            ]
+            coverage_schema_fields = [
+                pa.field('name', pa.string()),
+                pa.field('direction', pa.string())
+            ]
+            
+            # Add sample columns to schema
+            for i in range(n_samples):
+                sample_name = sample_names[i]
+                marker_schema_fields.append(pa.field(sample_name, pa.float32()))
+                coverage_schema_fields.append(pa.field(sample_name, pa.int32()))
+            
+            marker_schema = pa.schema(marker_schema_fields)
+            coverage_schema = pa.schema(coverage_schema_fields)
+            
+            # Create parquet writers
+            marker_path = Path(pat_dir) / f"{save_prefix}_marker_values.parquet"
+            coverage_path = Path(pat_dir) / f"{save_prefix}_coverage.parquet"
+            
+            marker_writer = pq.ParquetWriter(str(marker_path), marker_schema, compression='snappy')
+            coverage_writer = pq.ParquetWriter(str(coverage_path), coverage_schema, compression='snappy')
+            
+            # Process in row batches to avoid memory issues
+            row_batch_size = 100000  # Process 100k rows at a time
+            
+            try:
+                for row_start in tqdm(range(0, n_regions, row_batch_size), desc="Writing row batches"):
+                    row_end = min(row_start + row_batch_size, n_regions)
+                    batch_size = row_end - row_start
+                    
+                    # Initialize batch data
+                    marker_batch_data = {
+                        'name': metadata_cols['name'][row_start:row_end],
+                        'direction': metadata_cols['direction'][row_start:row_end]
+                    }
+                    coverage_batch_data = {
+                        'name': metadata_cols['name'][row_start:row_end],
+                        'direction': metadata_cols['direction'][row_start:row_end]
+                    }
+                    
+                    # Process each sample chunk
+                    for chunk_idx, chunk_start in enumerate(range(0, n_samples, chunk_size)):
+                        temp_marker_path = f"/tmp/marker_chunk_{chunk_start}.parquet"
+                        temp_coverage_path = f"/tmp/coverage_chunk_{chunk_start}.parquet"
+                        
+                        # Read only the rows we need from this chunk
+                        marker_chunk = pd.read_parquet(temp_marker_path).iloc[row_start:row_end]
+                        coverage_chunk = pd.read_parquet(temp_coverage_path).iloc[row_start:row_end]
+                        
+                        # Add columns to batch data
+                        for col in marker_chunk.columns:
+                            marker_batch_data[col] = marker_chunk[col].values
+                            coverage_batch_data[col] = coverage_chunk[col].values
+                        
+                        del marker_chunk, coverage_chunk
+                        gc.collect()
+                    
+                    # Convert batch to pyarrow and write
+                    marker_batch_table = pa.Table.from_pydict(marker_batch_data)
+                    coverage_batch_table = pa.Table.from_pydict(coverage_batch_data)
+                    
+                    marker_writer.write_table(marker_batch_table)
+                    coverage_writer.write_table(coverage_batch_table)
+                    
+                    del marker_batch_data, coverage_batch_data, marker_batch_table, coverage_batch_table
+                    gc.collect()
+                
+            finally:
+                # Close writers
+                marker_writer.close()
+                coverage_writer.close()
+            
+            # Clean up temporary files
+            for chunk_start in range(0, n_samples, chunk_size):
                 temp_marker_path = f"/tmp/marker_chunk_{chunk_start}.parquet"
                 temp_coverage_path = f"/tmp/coverage_chunk_{chunk_start}.parquet"
-                
-                # Read one chunk at a time
-                marker_chunk = pd.read_parquet(temp_marker_path)
-                coverage_chunk = pd.read_parquet(temp_coverage_path)
-                
-                # Add columns from this chunk to final DataFrames
-                for col in marker_chunk.columns:
-                    final_marker[col] = marker_chunk[col]
-                    final_coverage[col] = coverage_chunk[col]
-                
-                # Clean up chunk immediately
-                del marker_chunk, coverage_chunk
-                os.remove(temp_marker_path)
-                os.remove(temp_coverage_path)
-                gc.collect()
-            
-            # Save final results
-            final_marker.to_parquet(Path(pat_dir) / f"{save_prefix}_marker_values.parquet", index=False)
-            final_coverage.to_parquet(Path(pat_dir) / f"{save_prefix}_coverage.parquet", index=False)
-            
-            # Clean up final DataFrames
-            del final_marker, final_coverage
-            gc.collect()
+                if os.path.exists(temp_marker_path):
+                    os.remove(temp_marker_path)
+                if os.path.exists(temp_coverage_path):
+                    os.remove(temp_coverage_path)
             
             print("Large dataset processing complete - files saved directly to disk")
             return None, None  # Don't return DataFrames for large datasets
@@ -429,20 +503,35 @@ def create_marker_matrices_optimized(atlas_path: str, pat_dir: str, min_cpgs: in
         for sample_idx, (uxm_df, cov_df, cell_type) in enumerate(tqdm(results, desc="Building matrices")):
             sample_names.append(cell_type)
             
-            # Create keys for fast merging
-            uxm_df['key'] = uxm_df['name'] + '_' + uxm_df['direction']
-            cov_df['key'] = cov_df['name'] + '_' + cov_df['direction']
+            # Use direct numpy-based key lookup to avoid string concatenation memory issues
+            uxm_names = uxm_df['name'].values
+            uxm_directions = uxm_df['direction'].values
+            cov_names = cov_df['name'].values  
+            cov_directions = cov_df['direction'].values
             
-            # Vectorized lookup using merge instead of iterrows
-            uxm_indices = uxm_df['key'].map(key_to_idx)
-            cov_indices = cov_df['key'].map(key_to_idx)
+            # Create indices arrays directly without string concatenation
+            uxm_indices = np.full(len(uxm_df), -1, dtype=np.int32)
+            cov_indices = np.full(len(cov_df), -1, dtype=np.int32)
             
-            # Direct numpy assignment - much faster than iterrows
-            valid_uxm = ~uxm_indices.isna()
-            marker_values[uxm_indices[valid_uxm].astype(int), sample_idx] = uxm_df.loc[valid_uxm, 'value'].values
+            # Manual lookup to avoid memory-intensive string operations
+            for j in range(len(uxm_df)):
+                key = uxm_names[j] + '_' + uxm_directions[j]
+                if key in key_to_idx:
+                    uxm_indices[j] = key_to_idx[key]
             
-            valid_cov = ~cov_indices.isna()
-            coverage_values[cov_indices[valid_cov].astype(int), sample_idx] = cov_df.loc[valid_cov, 'value'].values
+            for j in range(len(cov_df)):
+                key = cov_names[j] + '_' + cov_directions[j]
+                if key in key_to_idx:
+                    cov_indices[j] = key_to_idx[key]
+            
+            # Direct numpy assignment using valid indices
+            valid_uxm = uxm_indices >= 0
+            if valid_uxm.any():
+                marker_values[uxm_indices[valid_uxm], sample_idx] = uxm_df.loc[valid_uxm, 'value'].values
+            
+            valid_cov = cov_indices >= 0
+            if valid_cov.any():
+                coverage_values[cov_indices[valid_cov], sample_idx] = cov_df.loc[valid_cov, 'value'].values
         
         # Create final DataFrames
         print("Creating final DataFrames...")
