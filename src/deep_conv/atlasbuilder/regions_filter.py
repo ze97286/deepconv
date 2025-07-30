@@ -651,7 +651,7 @@ def main():
     parser.add_argument('--pat_dir', required=True, help='Directory containing tumor pat files')
     parser.add_argument('--control_dir', required=True, help='Directory containing control pat files')
     parser.add_argument('--marker_regions_dir', required=True, help='Directory containing regions mapping files')
-    parser.add_argument('--min_cpgs', required=True, type=int, required=True, help='Minimum CpGs required')
+    parser.add_argument('--min_cpgs', required=True, type=int, help='Minimum CpGs required')
     parser.add_argument('--out_atlas_name', required=True, help='Output atlas file name')
     args = parser.parse_args()
 
