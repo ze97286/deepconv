@@ -264,23 +264,15 @@ def calculate_region_scores_vectorized(mv_df, cov_df, control_mv_df, control_cov
                                                              'CD34-erythroblasts', 'CD34-megakaryocytes'],
                                            tissue_types=['Esophagus', 'Gastric', 'Colon', 'Small-intestine'],
                                            batch_size=10000, n_jobs=-1):
-    """
-    FIXED version with all corrections applied
-    """
     print(f"Processing {len(mv_df):,} regions with full feature set...")
-    
     # Get sample groups
     tumor_samples = [col for col in mv_df.columns if 'OAC' in col or 'tumour' in col]
     control_samples = [col for col in control_mv_df.columns if col not in ['name', 'direction']]
     high_cov_controls = [col for col in control_samples if not col.startswith('GI')]
-    
-    # FIX 1: Don't divide by 100 if purities are already in 0-1 scale
     tumor_purities = np.array([tumor_purity_dict[sample.split('_', 1)[1]] 
                               for sample in tumor_samples])  # No /100.0!
-    
     # 1. PARALLELIZED TUMOR-PURITY CORRELATION
     print("Step 1: Calculating tumor correlations with heterogeneity detection...")
-    
     # Create batches
     n_batches = (len(mv_df) + batch_size - 1) // batch_size
     batches = []
@@ -294,7 +286,6 @@ def calculate_region_scores_vectorized(mv_df, cov_df, control_mv_df, control_cov
             tumor_samples,
             tumor_purities
         ))
-    
     # Process in parallel
     if n_jobs == 1:
         results = [process_region_batch(batch) for batch in tqdm(batches)]
@@ -303,17 +294,13 @@ def calculate_region_scores_vectorized(mv_df, cov_df, control_mv_df, control_cov
             delayed(process_region_batch)(batch) 
             for batch in tqdm(batches, desc="Processing batches")
         )
-    
     # Sort and combine results
     results.sort(key=lambda x: x[0])
-    
     # Initialize scores DataFrame
     scores = pd.DataFrame(index=mv_df.index)
-    
     # Combine batch results
     for key in results[0][1].keys():
         scores[key] = np.concatenate([r[1][key] for r in results])
-    
     # Calculate heterogeneity-adjusted R²
     print("Step 2: Calculating heterogeneity-adjusted metrics...")
     tumor_coverage_cv = cov_df[tumor_samples].std(axis=1) / (cov_df[tumor_samples].mean(axis=1) + 1)
@@ -322,10 +309,8 @@ def calculate_region_scores_vectorized(mv_df, cov_df, control_mv_df, control_cov
         (1 / (1 + tumor_coverage_cv)) * 
         (1 / (1 + scores['heterogeneity_score']))
     )
-    
     # 2. CELL TYPE SPECIFIC SIGNALS
     print("Step 3: Calculating cell type signals with variance weighting...")
-    
     # Group samples by cell type
     cell_type_groups = {}
     for col in mv_df.columns:
@@ -334,12 +319,10 @@ def calculate_region_scores_vectorized(mv_df, cov_df, control_mv_df, control_cov
             if cell_type not in cell_type_groups:
                 cell_type_groups[cell_type] = []
             cell_type_groups[cell_type].append(col)
-    
     # Calculate weighted signals for each cell type
     blood_immune_signals = []
     tissue_signals = []
     all_normal_samples = []
-    
     for cell_type, samples in tqdm(cell_type_groups.items(), desc="Processing cell types"):
         if len(samples) >= 1:
             if len(samples) == 1:
@@ -348,72 +331,52 @@ def calculate_region_scores_vectorized(mv_df, cov_df, control_mv_df, control_cov
                 weighted_signal, eff_n = calculate_weighted_cell_type_signals(
                     mv_df, cov_df, samples
                 )
-            
             all_normal_samples.extend(samples)
-            
             if cell_type in blood_immune_types:
                 blood_immune_signals.append(weighted_signal)
             elif cell_type in tissue_types:
                 tissue_signals.append(weighted_signal)
-    
-    # FIX 2: Use MAXIMUM of all normal samples, not percentiles
+    # Use MAXIMUM of all normal samples, not percentiles
     print("Step 4: Calculating differential methylation (using maximum)...")
-    
     # Get maximum signal across ALL normal samples
     normal_max = mv_df[all_normal_samples].max(axis=1)
-    
     # Simple differential: tumor - max(normal)
     scores['differential'] = np.log2(
         (scores['tumor_100_signal'] + 0.01) / (normal_max + 0.01)
     )
-    
     # Also calculate log-ratio for regions where normal_max > 0
     scores['log_ratio_vs_normal_max'] = np.log2(
         (scores['tumor_100_signal'] + 0.01) / (normal_max + 0.01)
     )
-    
     # 4. CONTROL BACKGROUND
     print("Step 5: Analyzing control signals...")
-    
     high_cov_signal = control_mv_df[high_cov_controls].fillna(0)
     high_cov_coverage = control_cov_df[high_cov_controls]
-    
-    # FIX 3: Use maximum control signal, not average
+    # Use maximum control signal, not average
     scores['control_signal_max'] = control_mv_df[high_cov_controls].max(axis=1)
     scores['control_signal_avg'] = (high_cov_signal * high_cov_coverage).sum(axis=1) / (high_cov_coverage.sum(axis=1) + 1)
-    
     control_cv = high_cov_signal.std(axis=1) / (high_cov_signal.mean(axis=1) + 0.01)
     scores['control_consistency'] = 1 / (1 + control_cv)
-    
     # 5. COVERAGE QUALITY SCORES
     print("Step 6: Calculating coverage metrics...")
-    
     min_tumor_coverage = cov_df[tumor_samples].min(axis=1)
     scores['min_tumor_coverage'] = np.log10(min_tumor_coverage + 1)
-    
     coverage_balance = cov_df[tumor_samples].min(axis=1) / (cov_df[tumor_samples].max(axis=1) + 1)
     scores['coverage_balance'] = coverage_balance
-    
     # 6. WITHIN CELL TYPE CONSISTENCY
     print("Step 7: Calculating cell type consistency...")
-    
     consistency_scores = []
     for cell_type, samples in cell_type_groups.items():
         if len(samples) >= 2:
             ct_cv = mv_df[samples].std(axis=1) / (mv_df[samples].mean(axis=1) + 0.01)
             consistency_scores.append(1 / (1 + ct_cv))
-    
     if consistency_scores:
         scores['cell_type_consistency'] = pd.concat(consistency_scores, axis=1).mean(axis=1)
     else:
         scores['cell_type_consistency'] = 1
-    
-    # FIX 4: Add sanity checks
     scores['extrapolation_valid'] = scores['tumor_100_signal'] <= 1.0
-    
     # 7. REVISED COMBINED SCORE
     print("Step 8: Calculating combined scores...")
-    
     scores['combined'] = (
         scores['heterogeneity_adjusted_r2'] * 3.0 +
         scores['differential'] * 10.0 +  # Much higher weight on differential
@@ -427,7 +390,6 @@ def calculate_region_scores_vectorized(mv_df, cov_df, control_mv_df, control_cov
         scores['n_outliers'] * 0.5 -
         (~scores['extrapolation_valid']) * 100.0  # Huge penalty for invalid extrapolation
     )
-    
     # Revised quality flags
     scores['high_quality'] = (
         (scores['r2'] > 0.5) & 
@@ -440,14 +402,12 @@ def calculate_region_scores_vectorized(mv_df, cov_df, control_mv_df, control_cov
         (scores['n_outliers'] <= 1) &
         (scores['extrapolation_valid'])  # Must have valid extrapolation
     )
-    
     # Summary statistics
     print(f"\nCompleted!")
     print(f"  Total regions: {len(scores):,}")
     print(f"  High quality regions: {scores['high_quality'].sum():,}")
     print(f"  Regions with invalid extrapolation: {(~scores['extrapolation_valid']).sum():,}")
     print(f"  Mean control signal (max): {scores['control_signal_max'].mean():.3f}")
-    
     return scores
 
 def remove_overlapping_regions(scores_df, mv_df, max_overlap=0.5):
@@ -652,17 +612,50 @@ def process(pat_dir, control_dir, marker_regions_dir, min_cpgs, chr):
     final_output.to_parquet(f"{pat_dir}/l{min_cpgs}_chr{chr}_final_regions", index=False)
     return final_output
 
+def process_all(pat_dir, control_dir, marker_regions_dir, min_cpgs, out_atlas_name):
+    dfs = []
+    for chr in range (1,23):
+        print(f"processing chr {chr}")
+        dfs.append(process(pat_dir, control_dir, marker_regions_dir, min_cpgs, chr))
+
+    atlas_df = pd.concat(dfs)
+    def chromosome_sort_key(chr_str):
+        """Convert chromosome to sortable format"""
+        chr_clean = str(chr_str).replace('chr', '')
+        if chr_clean.isdigit():
+            return (0, int(chr_clean))
+        elif chr_clean == 'X':
+            return (1, 0)
+        elif chr_clean == 'Y':
+            return (1, 1)
+        else:
+            return (2, chr_clean)
+
+    atlas_df['chr_sort'] = atlas_df['chr'].apply(chromosome_sort_key)
+    atlas_df = atlas_df.sort_values(['chr_sort', 'start']).drop('chr_sort', axis=1)
+    atlas_df = atlas_df.reset_index(drop=True)
+
+    atlas_df = [
+            [
+                "chr", "start", "end", "startCpG", "endCpG", "target", "name", "direction",
+                "B-cells", "CD34-erythroblasts", "CD34-megakaryocytes", "Colon", 
+                "Esophagus", "Gastric", "Granulocytes", "Monocytes", "NK-cells", 
+                "OAC", "Small-intestine", "T-cells"
+            ]
+        ].to_csv(out_atlas_name, sep="\t", index=False)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Process pat files for UXM analysis')
     parser.add_argument('--pat_dir', required=True, help='Directory containing tumor pat files')
-    parser.add_argument('--control_dir', help='Directory containing control pat files')
-    parser.add_argument('--marker_regions_dir', help='Directory containing regions mapping files')
-    parser.add_argument('--min_cpgs', type=int, required=True, help='Minimum CpGs required')
-    parser.add_argument("--chr", type=int, required=True, help="Chromosome number (1-22)")
+    parser.add_argument('--control_dir', required=True, help='Directory containing control pat files')
+    parser.add_argument('--marker_regions_dir', required=True, help='Directory containing regions mapping files')
+    parser.add_argument('--min_cpgs', required=True, type=int, required=True, help='Minimum CpGs required')
+    parser.add_argument('--out_atlas_name', required=True, help='Output atlas file name')
     args = parser.parse_args()
 
-    process(args.pat_dir, args.control_dir, args.marker_regions_dir, args.min_cpgs, args.chr)
+    process_all(args.pat_dir, args.control_dir, args.marker_regions_dir, args.min_cpgs, args.out_atlas_name)
 
 if __name__ == "__main__":
     main()
