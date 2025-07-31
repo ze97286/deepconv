@@ -197,9 +197,17 @@ class AtlasQualityAnalyzer:
         tissue_types = [col.split('_')[0] for col in sample_cols]
         unique_tissues = list(set(tissue_types))
         
-        # Calculate silhouette score if we have multiple tissues
-        if len(unique_tissues) > 1:
-            silhouette = silhouette_score(scaled_data, tissue_types)
+        # Calculate silhouette score if we have multiple tissues and sufficient samples
+        if len(unique_tissues) > 1 and len(sample_cols) > len(unique_tissues):
+            # Check if each tissue has at least 1 sample and we have enough total samples
+            tissue_counts = pd.Series(tissue_types).value_counts()
+            if tissue_counts.min() >= 1 and len(sample_cols) >= 2 * len(unique_tissues):
+                silhouette = silhouette_score(scaled_data, tissue_types)
+            else:
+                print(f"Warning: Insufficient samples for silhouette score calculation")
+                print(f"  Samples per tissue: {tissue_counts.to_dict()}")
+                print(f"  Need at least 2 samples per tissue type")
+                silhouette = 0
         else:
             silhouette = 0
         
