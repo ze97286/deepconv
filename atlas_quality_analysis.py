@@ -61,20 +61,25 @@ class AtlasQualityAnalyzer:
         # Create chromosome distribution plot
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
         
-        # Chromosome distribution
+        # Chromosome distribution - use matplotlib directly
         chr_counts = atlas_df['chr'].value_counts()
         chr_order = [f'chr{i}' for i in range(1, 23)] + ['chrX', 'chrY']
         chr_counts = chr_counts.reindex([c for c in chr_order if c in chr_counts.index])
-        chr_counts.plot(kind='bar', ax=ax1)
+        
+        ax1.bar(range(len(chr_counts)), chr_counts.values)
+        ax1.set_xticks(range(len(chr_counts)))
+        ax1.set_xticklabels(chr_counts.index, rotation=45)
         ax1.set_title(f'Chromosome Distribution ({self.atlas_size} regions)')
         ax1.set_xlabel('Chromosome')
         ax1.set_ylabel('Number of Regions')
-        ax1.tick_params(axis='x', rotation=45)
         
-        # Feature type distribution
+        # Feature type distribution - use matplotlib directly
         if 'direction' in atlas_df:
-            atlas_df['direction'].value_counts().plot(kind='pie', ax=ax2, autopct='%1.1f%%')
+            direction_counts = atlas_df['direction'].value_counts()
+            ax2.pie(direction_counts.values, labels=direction_counts.index, autopct='%1.1f%%')
             ax2.set_title('Feature Type Distribution')
+        else:
+            ax2.text(0.5, 0.5, 'No feature type data', ha='center', va='center', transform=ax2.transAxes)
         
         plt.tight_layout()
         plt.savefig(self.output_dir / f'atlas_{self.atlas_size}_properties.png')
