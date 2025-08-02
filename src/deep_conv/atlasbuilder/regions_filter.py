@@ -609,16 +609,17 @@ def process(pat_dir, control_dir, marker_regions_dir, min_cpgs, chr):
     print(f"Kept {len(non_overlapping)} non-overlapping regions")
     print("\nFormatting for output...")
     final_output = format_regions_for_output(non_overlapping, mv_filtered, cov_filtered, regions_mapping)
-    final_output.to_parquet(f"{pat_dir}/l{min_cpgs}_chr{chr}_final_regions", index=False)
+    final_output.to_parquet(f"{pat_dir}/l{min_cpgs}_chr{chr}_final_regions.parquet", index=False)
     return final_output
 
-def process_all(pat_dir, control_dir, marker_regions_dir, min_cpgs, out_atlas_name):
+def process_all(pat_dir, control_dir, marker_regions_dir, min_cpgs, out_atlas_prefix):
     dfs = []
     for chr in range (1,23):
         print(f"processing chr {chr}")
         dfs.append(process(pat_dir, control_dir, marker_regions_dir, min_cpgs, chr))
 
-    atlas_df = pd.concat(dfs)
+    atlas_df = pd.concat(dfs, ignore_index=True)
+    atlas_df = atlas_df[atlas_df.combined>310]
     def chromosome_sort_key(chr_str):
         """Convert chromosome to sortable format"""
         chr_clean = str(chr_str).replace('chr', '')
@@ -634,15 +635,41 @@ def process_all(pat_dir, control_dir, marker_regions_dir, min_cpgs, out_atlas_na
     atlas_df['chr_sort'] = atlas_df['chr'].apply(chromosome_sort_key)
     atlas_df = atlas_df.sort_values(['chr_sort', 'start']).drop('chr_sort', axis=1)
     atlas_df = atlas_df.reset_index(drop=True)
+    atlas_df.to_csv(f"{pat_dir}/l{min_cpgs}_final_regions.bed", sep="\t", index=False)
 
-    atlas_df = [
-            [
+    atlas_top_100 = atlas_df.sort_values(['combined'])[atlas_df.OAC==1].iloc[-100:][[
+                 "chr", "start", "end", "startCpG", "endCpG", "target", "name", "direction",
+                 "B-cells", "CD34-erythroblasts", "CD34-megakaryocytes", "Colon", 
+                 "Esophagus", "Gastric", "Granulocytes", "Monocytes", "NK-cells", 
+                 "OAC", "Small-intestine", "T-cells"
+             ]]
+    atlas_top_100['chr_sort'] = atlas_top_100['chr'].apply(chromosome_sort_key)
+    atlas_top_100 = atlas_top_100.sort_values(['chr_sort', 'start']).drop('chr_sort', axis=1)
+    atlas_top_100 = atlas_top_100.reset_index(drop=True)
+    atlas_top_100.to_csv(f"{out_atlas_prefix}.100.bed", sep="\t", index=False)
+    
+    atlas_top_400 = atlas_df.sort_values(['combined'])[atlas_df.OAC==1].iloc[-400:][[
+                 "chr", "start", "end", "startCpG", "endCpG", "target", "name", "direction",
+                 "B-cells", "CD34-erythroblasts", "CD34-megakaryocytes", "Colon", 
+                 "Esophagus", "Gastric", "Granulocytes", "Monocytes", "NK-cells", 
+                 "OAC", "Small-intestine", "T-cells"
+             ]]
+    
+    atlas_top_400['chr_sort'] = atlas_top_400['chr'].apply(chromosome_sort_key)
+    atlas_top_400 = atlas_top_400.sort_values(['chr_sort', 'start']).drop('chr_sort', axis=1)
+    atlas_top_400 = atlas_top_400.reset_index(drop=True)
+    atlas_top_400.to_csv(f"{out_atlas_prefix}.400.bed", sep="\t", index=False)
+
+    atlas_top_1000 = atlas_df.sort_values(['combined']).iloc[-1000:][[
                 "chr", "start", "end", "startCpG", "endCpG", "target", "name", "direction",
                 "B-cells", "CD34-erythroblasts", "CD34-megakaryocytes", "Colon", 
                 "Esophagus", "Gastric", "Granulocytes", "Monocytes", "NK-cells", 
                 "OAC", "Small-intestine", "T-cells"
-            ]
-        ].to_csv(out_atlas_name, sep="\t", index=False)
+            ]]
+    atlas_top_1000['chr_sort'] = atlas_top_1000['chr'].apply(chromosome_sort_key)
+    atlas_top_1000 = atlas_top_1000.sort_values(['chr_sort', 'start']).drop('chr_sort', axis=1)
+    atlas_top_1000 = atlas_top_1000.reset_index(drop=True)
+    atlas_top_1000.to_csv(f"{out_atlas_prefix}.1000.bed", sep="\t", index=False)    
 
 
 def main():
