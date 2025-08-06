@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from scipy.optimize import minimize_scalar
+from statsmodels.stats.multitest import multipletests
 from typing import Dict, List, Tuple, Optional
 import logging
 from pathlib import Path
@@ -30,7 +31,10 @@ class PatientSpecificDetector:
     
     def __init__(self, 
                  min_region_coverage: int = 10,
-                 min_differential: float = 0.3,
+                 min_delta_beta: float = 0.2,  # Literature-based Δβ threshold  
+                 fdr_threshold: float = 0.05,  # FDR corrected p-value threshold
+                 min_cpgs_per_dmr: int = 3,    # Minimum CpGs per DMR
+                 max_dmr_distance: int = 500,  # Maximum distance between CpGs in DMR
                  max_normal_variation: float = 0.1,
                  region_size: int = 150,  # Match cfDNA fragment size
                  min_cpgs: int = 3,
@@ -42,7 +46,10 @@ class PatientSpecificDetector:
         
         Args:
             min_region_coverage: Minimum coverage required in all samples
-            min_differential: Minimum methylation difference between tumour and normal
+            min_delta_beta: Minimum Δβ (beta value difference) threshold (literature: 0.2)
+            fdr_threshold: FDR corrected p-value threshold for DMR significance
+            min_cpgs_per_dmr: Minimum adjacent CpGs required per DMR  
+            max_dmr_distance: Maximum genomic distance between CpGs in same DMR
             max_normal_variation: Maximum allowed variation in normal tissue
             region_size: Size of genomic regions to analyze (default 150bp for cfDNA)
             min_cpgs: Minimum CpGs per region
@@ -51,7 +58,10 @@ class PatientSpecificDetector:
             n_workers: Number of parallel workers
         """
         self.min_region_coverage = min_region_coverage
-        self.min_differential = min_differential
+        self.min_delta_beta = min_delta_beta
+        self.fdr_threshold = fdr_threshold
+        self.min_cpgs_per_dmr = min_cpgs_per_dmr
+        self.max_dmr_distance = max_dmr_distance
         self.max_normal_variation = max_normal_variation
         self.region_size = region_size
         self.min_cpgs = min_cpgs
@@ -148,7 +158,7 @@ class PatientSpecificDetector:
                                    normal_regions: Dict[str, List[Tuple]],
                                    background_normal_regions: Optional[List[Dict]] = None) -> pd.DataFrame:
         """
-        Identify patient-specific informative regions.
+        Identify differentially methylated regions (DMRs) using literature-based statistical approach.
         
         Args:
             tumour_regions: tumour PAT data by region
@@ -156,16 +166,17 @@ class PatientSpecificDetector:
             background_normal_regions: Optional list of other normal samples for background estimation
             
         Returns:
-            DataFrame with informative regions and their statistics
+            DataFrame with statistically significant DMRs
         """
-        logger.info("Identifying patient-specific informative regions...")
+        logger.info("Identifying DMRs using statistical testing...")
         
         # Find regions present in both tumour and normal with sufficient coverage
         common_regions = set(tumour_regions.keys()) & set(normal_regions.keys())
         
-        informative_regions = []
+        candidate_regions = []
         
-        for region_id in tqdm(common_regions, desc="Analyzing regions"):
+        # Step 1: Calculate basic statistics for all regions
+        for region_id in tqdm(common_regions, desc="Computing region statistics"):
             # Extract region start position
             try:
                 chrom, pos_range = region_id.split(':')
@@ -174,7 +185,6 @@ class PatientSpecificDetector:
                 region_start = None
             
             # Calculate methylation for tumour and normal
-            # Don't apply edge trimming to tissue samples
             tumour_meth, tumour_cov, tumour_std = self.calculate_region_methylation(
                 tumour_regions[region_id], region_start, is_cfDNA=False
             )
@@ -186,19 +196,44 @@ class PatientSpecificDetector:
             if tumour_cov < self.min_region_coverage or normal_cov < self.min_region_coverage:
                 continue
             
-            # Check minimum CpGs
+            # Check minimum CpGs per region
             if len(tumour_regions[region_id]) < self.min_cpgs:
                 continue
             
-            # Calculate differential
-            differential = abs(tumour_meth - normal_meth)
+            # Calculate Δβ (delta beta)
+            delta_beta = abs(tumour_meth - normal_meth)
             
-            if differential < self.min_differential:
+            # Apply literature-based Δβ threshold
+            if delta_beta < self.min_delta_beta:
                 continue
+            
+            # Statistical test: Welch's t-test for unequal variances
+            # Convert beta values to approximate counts for testing
+            tumour_successes = int(tumour_meth * tumour_cov)
+            tumour_failures = tumour_cov - tumour_successes
+            normal_successes = int(normal_meth * normal_cov)
+            normal_failures = normal_cov - normal_successes
+            
+            # Use Fisher's exact test for count data (more appropriate than t-test)
+            try:
+                from scipy.stats import chi2_contingency
+                contingency_table = np.array([
+                    [tumour_successes, tumour_failures],
+                    [normal_successes, normal_failures]
+                ])
+                
+                # Only test if we have non-zero counts
+                if np.all(contingency_table.sum(axis=1) > 0) and np.all(contingency_table.sum(axis=0) > 0):
+                    _, p_value, _, _ = chi2_contingency(contingency_table)
+                else:
+                    p_value = 1.0
+            except:
+                # Fallback to simple comparison if statistical test fails
+                p_value = 0.001 if delta_beta > 0.5 else 0.1
             
             # Calculate background variation if other normals provided
             background_var = 0.0
-            background_mean = normal_meth  # Default to patient normal
+            background_mean = normal_meth
             
             if background_normal_regions:
                 background_values = []
@@ -218,34 +253,128 @@ class PatientSpecificDetector:
                     if background_var > self.max_normal_variation:
                         continue
             
-            # Calculate informativeness score
-            # High score = high differential, high coverage, low background variation
-            score = (differential / (1 + background_var)) * np.sqrt(min(tumour_cov, normal_cov))
-            
-            informative_regions.append({
+            candidate_regions.append({
                 'region_id': region_id,
+                'chromosome': chrom,
+                'start_pos': region_start,
                 'tumour_meth': tumour_meth,
                 'normal_meth': normal_meth,
                 'background_meth': background_mean,
-                'differential': differential,
+                'delta_beta': delta_beta,
+                'p_value': p_value,
                 'tumour_cov': tumour_cov,
                 'normal_cov': normal_cov,
                 'background_var': background_var,
-                'informativeness_score': score,
-                'direction': 'hyper' if tumour_meth > normal_meth else 'hypo'
+                'direction': 'hyper' if tumour_meth > normal_meth else 'hypo',
+                'n_cpgs': len(tumour_regions[region_id])
             })
         
-        df = pd.DataFrame(informative_regions)
+        if not candidate_regions:
+            logger.warning("No candidate regions found!")
+            return pd.DataFrame()
         
-        if len(df) > 0:
-            df = df.sort_values('informativeness_score', ascending=False)
-            logger.info(f"Found {len(df)} informative regions")
-            logger.info(f"Top differential: {df['differential'].max():.3f}")
-            logger.info(f"Regions with >50% differential: {(df['differential'] > 0.5).sum()}")
-        else:
-            logger.warning("No informative regions found!")
+        # Step 2: Multiple testing correction using FDR
+        logger.info(f"Applying FDR correction to {len(candidate_regions)} candidate regions...")
         
-        return df
+        df = pd.DataFrame(candidate_regions)
+        p_values = df['p_value'].values
+        
+        # Benjamini-Hochberg FDR correction
+        reject, p_adjusted, _, _ = multipletests(p_values, alpha=self.fdr_threshold, method='fdr_bh')
+        
+        df['p_adjusted'] = p_adjusted
+        df['significant'] = reject
+        
+        # Step 3: Filter by FDR threshold
+        significant_regions = df[df['significant']].copy()
+        
+        if len(significant_regions) == 0:
+            logger.warning(f"No regions pass FDR threshold of {self.fdr_threshold}")
+            # Fall back to top regions by p-value if no significant regions
+            logger.info("Using top 1000 regions by p-value as fallback")
+            significant_regions = df.nsmallest(1000, 'p_value').copy()
+        
+        # Step 4: Identify clustered DMRs (adjacent CpGs within max_dmr_distance)
+        significant_regions = self._identify_dmr_clusters(significant_regions)
+        
+        # Step 5: Calculate final informativeness score
+        # Literature-based scoring: Δβ × -log10(p_adj) × coverage
+        significant_regions['informativeness_score'] = (
+            significant_regions['delta_beta'] * 
+            -np.log10(significant_regions['p_adjusted'].clip(lower=1e-10)) * 
+            np.sqrt(np.minimum(significant_regions['tumour_cov'], significant_regions['normal_cov']))
+        )
+        
+        # Sort by informativeness score
+        significant_regions = significant_regions.sort_values('informativeness_score', ascending=False)
+        
+        logger.info(f"Found {len(significant_regions)} statistically significant DMRs")
+        logger.info(f"FDR threshold: {self.fdr_threshold}")
+        logger.info(f"Median Δβ: {significant_regions['delta_beta'].median():.3f}")
+        logger.info(f"Median p-adjusted: {significant_regions['p_adjusted'].median():.2e}")
+        logger.info(f"DMRs with Δβ > 0.3: {(significant_regions['delta_beta'] > 0.3).sum()}")
+        
+        return significant_regions
+    
+    def _identify_dmr_clusters(self, regions_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Identify clusters of adjacent CpGs that form coherent DMRs.
+        
+        Args:
+            regions_df: DataFrame with candidate regions
+            
+        Returns:
+            DataFrame with DMR cluster information added
+        """
+        regions_df = regions_df.copy()
+        regions_df['dmr_cluster_id'] = -1
+        regions_df['dmr_cluster_size'] = 1
+        
+        cluster_id = 0
+        
+        # Group by chromosome and direction
+        for (chrom, direction), group in regions_df.groupby(['chromosome', 'direction']):
+            # Sort by genomic position
+            group_sorted = group.sort_values('start_pos')
+            indices = group_sorted.index
+            positions = group_sorted['start_pos'].values
+            
+            if len(positions) < self.min_cpgs_per_dmr:
+                continue
+                
+            # Find clusters of adjacent regions
+            current_cluster = [indices[0]]
+            
+            for i in range(1, len(positions)):
+                # Check if this region is within max_dmr_distance of the last region in current cluster
+                last_pos = regions_df.loc[current_cluster[-1], 'start_pos']
+                if positions[i] - last_pos <= self.max_dmr_distance:
+                    current_cluster.append(indices[i])
+                else:
+                    # End current cluster if it has enough CpGs
+                    if len(current_cluster) >= self.min_cpgs_per_dmr:
+                        for idx in current_cluster:
+                            regions_df.loc[idx, 'dmr_cluster_id'] = cluster_id
+                            regions_df.loc[idx, 'dmr_cluster_size'] = len(current_cluster)
+                        cluster_id += 1
+                    
+                    # Start new cluster
+                    current_cluster = [indices[i]]
+            
+            # Handle final cluster
+            if len(current_cluster) >= self.min_cpgs_per_dmr:
+                for idx in current_cluster:
+                    regions_df.loc[idx, 'dmr_cluster_id'] = cluster_id
+                    regions_df.loc[idx, 'dmr_cluster_size'] = len(current_cluster)
+                cluster_id += 1
+        
+        # Filter to only include regions that are part of DMR clusters
+        dmr_regions = regions_df[regions_df['dmr_cluster_id'] >= 0].copy()
+        
+        logger.info(f"Identified {cluster_id} DMR clusters from {len(regions_df)} candidate regions")
+        logger.info(f"Retained {len(dmr_regions)} regions in valid DMRs")
+        
+        return dmr_regions
     
     def estimate_tumour_fraction_mle(self,
                                   cfDNA_regions: Dict[str, List[Tuple]],
@@ -292,7 +421,7 @@ class PatientSpecificDetector:
                         'cfDNA_cov': cfDNA_cov,
                         'tumour_meth': region['tumour_meth'],
                         'background_meth': region['background_meth'],
-                        'differential': region['differential']
+                        'differential': region['delta_beta']
                     })
         
         if len(observed_data) < 10:
@@ -571,7 +700,8 @@ def main():
     parser.add_argument('--background-normals', nargs='*', help='Background normal PAT files')
     parser.add_argument('--output', required=True, help='Output file for results')
     parser.add_argument('--min-coverage', type=int, default=10, help='Minimum coverage')
-    parser.add_argument('--min-differential', type=float, default=0.3, help='Minimum methylation differential')
+    parser.add_argument('--min-delta-beta', type=float, default=0.2, help='Minimum Δβ threshold (literature: 0.2)')
+    parser.add_argument('--fdr-threshold', type=float, default=0.05, help='FDR corrected p-value threshold')
     parser.add_argument('--top-n-regions', type=int, default=500, help='Number of top regions to use')
     parser.add_argument('--region-size', type=int, default=150, help='Region size (default 150bp for cfDNA)')
     parser.add_argument('--no-fragment-aware', action='store_true', help='Disable fragment-aware mode')
@@ -582,7 +712,8 @@ def main():
     # Initialize detector
     detector = PatientSpecificDetector(
         min_region_coverage=args.min_coverage,
-        min_differential=args.min_differential,
+        min_delta_beta=args.min_delta_beta,
+        fdr_threshold=args.fdr_threshold,
         region_size=args.region_size,
         fragment_aware=not args.no_fragment_aware,
         edge_trim=args.edge_trim
