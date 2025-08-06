@@ -62,6 +62,7 @@ class PatientSpecificDetector:
     def load_pat_file(self, pat_file: str) -> Dict[str, List[Tuple]]:
         """
         Load a PAT file and organize by genomic regions.
+        Format: chromosome    cpg_index    pattern    read_count
         
         Returns:
             Dictionary mapping region_id to list of (cpg_pos, methylation_pattern, count)
@@ -70,23 +71,23 @@ class PatientSpecificDetector:
         regions = defaultdict(list)
         
         with gzip.open(pat_file, 'rt') as f:
-            current_chr = None
-            
             for line in f:
-                if line.startswith('>'):
-                    current_chr = line.strip()[1:]
-                else:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 3:
-                        pos = int(parts[0])
-                        pattern = parts[1]
-                        count = int(parts[2])
-                        
-                        # Assign to region
-                        region_start = (pos // self.region_size) * self.region_size
-                        region_id = f"{current_chr}:{region_start}-{region_start + self.region_size}"
-                        
-                        regions[region_id].append((pos, pattern, count))
+                line = line.strip()
+                if not line:
+                    continue
+                    
+                parts = line.split('\t')
+                if len(parts) >= 4:
+                    chrom = parts[0]
+                    pos = int(parts[1])
+                    pattern = parts[2]
+                    count = int(parts[3])
+                    
+                    # Assign to region
+                    region_start = (pos // self.region_size) * self.region_size
+                    region_id = f"{chrom}:{region_start}-{region_start + self.region_size}"
+                    
+                    regions[region_id].append((pos, pattern, count))
         
         return dict(regions)
     
