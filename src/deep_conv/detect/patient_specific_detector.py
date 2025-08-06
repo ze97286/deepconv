@@ -301,6 +301,24 @@ class PatientSpecificDetector:
         
         logger.info(f"Using {len(observed_data)} regions for MLE")
         
+        # Debug output to understand what the model is seeing
+        logger.info("Sample of observed data (first 10 regions):")
+        for i, obs in enumerate(observed_data[:10]):
+            logger.info(f"  Region {i}: cfDNA={obs['cfDNA_meth']:.3f}, tumor={obs['tumour_meth']:.3f}, "
+                       f"bg={obs['background_meth']:.3f}, diff={obs['differential']:.3f}, "
+                       f"coverage={obs['cfDNA_cov']}")
+        
+        # Check if cfDNA is closer to tumor or background
+        closer_to_tumor = 0
+        for obs in observed_data:
+            dist_to_tumor = abs(obs['cfDNA_meth'] - obs['tumour_meth'])
+            dist_to_bg = abs(obs['cfDNA_meth'] - obs['background_meth'])
+            if dist_to_tumor < dist_to_bg:
+                closer_to_tumor += 1
+        
+        logger.info(f"cfDNA closer to tumor in {closer_to_tumor}/{len(observed_data)} regions "
+                   f"({100*closer_to_tumor/len(observed_data):.1f}%)")
+        
         # Define negative log-likelihood function
         def neg_log_likelihood(theta):
             if theta < 0 or theta > 1:
